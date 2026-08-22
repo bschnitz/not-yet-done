@@ -11191,6 +11191,40 @@ impl ContentView {
         }
     }
 
+    /// Switch to the subtab at `target`, the way clicking its label in the
+    /// tab bar should. Same contract as [`Self::cycle_subtab`] — including
+    /// the auto-load of a destination that has never been populated — only
+    /// addressed by index instead of by direction. `None` when the index is
+    /// out of range or already active.
+    pub fn activate_subtab(&mut self, target: usize) -> Option<SubViewMessage> {
+        if target >= self.view_defs.len() || target == self.active_subtab {
+            return None;
+        }
+        let needs_load = self.switch_to_view(target);
+        if needs_load && (!self.manual_connect || self.connected_once) {
+            let pane_id = self.active_pane_id();
+            Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                view_index: self.view_index,
+                pane_id,
+            }))
+        } else {
+            Some(SubViewMessage::SelectionChanged(None))
+        }
+    }
+
+    /// Move the focus to `pane_id` inside the active subtab's split tree.
+    /// Returns whether the focus actually moved — an unknown id (a pane of a
+    /// different subtab, a stale click) leaves everything alone.
+    pub fn focus_pane(&mut self, pane_id: PaneId) -> bool {
+        let tree = &mut self.pane_trees[self.active_subtab];
+        if tree.focus == pane_id || tree.root.find_leaf(pane_id).is_none() {
+            return false;
+        }
+        tree.focus = pane_id;
+        self.sync_action_bar_hints();
+        true
+    }
+
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
         match source {
             KeySource::YamlSubtab { view } => {
@@ -14631,6 +14665,39 @@ mod tests {
         // Backward from the first subtab wraps to the last.
         assert!(view.cycle_subtab(false).is_some());
         assert_eq!(view.active_subtab, 1);
+    }
+
+    #[test]
+    fn activate_subtab_addresses_by_index_and_refuses_the_rest() {
+        // Clicking a subtab label goes here; it has to land on exactly the
+        // same state `]` would, and stay quiet on the two cases a click can
+        // produce that a cycle cannot: the active label, and a stale index.
+        let mut config = test_config_with_children();
+        config.views[0].name = "issues".into();
+        let mut second = config.views[0].clone();
+        second.name = "condensed".into();
+        second.default = false;
+        config.views.push(second);
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(view.activate_subtab(0).is_none(), "already active");
+        assert!(view.activate_subtab(9).is_none(), "out of range");
+        assert_eq!(view.active_subtab, 0);
+
+        assert!(view.activate_subtab(1).is_some());
+        assert_eq!(view.active_subtab, 1);
+    }
+
+    #[test]
+    fn focus_pane_reports_whether_the_focus_moved() {
+        // A click on the already focused pane, or on a pane that is no longer
+        // in the tree, must not make the app resync for nothing.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let focused = view.active_pane_id();
+        assert!(!view.focus_pane(focused), "already focused");
+        assert!(!view.focus_pane(focused + 999), "unknown pane id");
+        assert_eq!(view.active_pane_id(), focused);
     }
 
     #[test]

@@ -11,7 +11,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Hierarchical task management** — organize tasks in a tree structure with unlimited nesting
 - **Time tracking** — start/stop tracking per task, with parallel tracking support
 - **Rich TUI** — keyboard-driven interface with fuzzy filter, text search, hop-style jump navigation, saved filters, favorites, and configurable columns
-- **Mouse support** — optional (`mouse` cargo feature): drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
+- **Mouse support** — optional (`mouse` cargo feature): click tabs and panes, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
 - **CLI** — full command-line interface for scripting and automation
 - **Waybar module** — CFFI module showing the active tracking in your status bar
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
@@ -185,13 +185,23 @@ Press `p` to enter jump mode:
 
 The TUI understands the mouse. What it does today:
 
-| Input           | Effect                                                    |
-| --------------- | --------------------------------------------------------- |
-| Drag with left  | Select text — **clipped to the window under the pointer** |
-| `Alt` + drag    | Select a rectangle instead of flowing text                |
-| Release         | Copy the selection to the clipboard                       |
-| Wheel up / down | Scroll, exactly as `↑` / `↓` would                        |
-| `Shift` + drag  | Bypass the app and use the terminal's own selection       |
+| Input                 | Effect                                                    |
+| --------------------- | --------------------------------------------------------- |
+| Click a tab / sub-tab | Switch to it, exactly as its number key would             |
+| Click a pane          | Focus it, exactly as the window chords would              |
+| Drag with left        | Select text — **clipped to the window under the pointer** |
+| `Alt` + drag          | Select a rectangle instead of flowing text                |
+| Release               | Copy the selection to the clipboard                       |
+| Wheel up / down       | Scroll the pane under the pointer, as `↑` / `↓` would     |
+| Wheel over the tabs   | Walk through the tabs, wrapping                           |
+| `Shift` + drag        | Bypass the app and use the terminal's own selection       |
+
+One button does both jobs: a press and release on the same cell is a click and
+means whatever is drawn there, anything that moved is a selection. The wheel
+takes the focus with it, so a scrolled pane is also the pane the arrow keys
+talk to — one scrolling path, not two. Nothing the mouse reaches is
+mouse-only; every one of these has a key, and while a popup has the input a
+click on the tab bar behind it is ignored just as the number key would be.
 
 **Why the app selects at all.** A popup is a box painted _inside_ the terminal
 grid; the terminal knows nothing about its border. Dragging across a popup

@@ -147,6 +147,11 @@ impl TabBarComponent {
 
     /// Render a bar (list of items) on a uniform background.
     /// Returns the x position after the last item.
+    ///
+    /// `region_of` names the mouse region each item stands for. Registering
+    /// it here rather than recomputing label widths later is the point: the
+    /// rectangle handed to the hit map is the one `set_stringn` just wrote
+    /// into, emoji, VS16 sequences and truncation included.
     fn render_bar(
         buf: &mut ratatui::buffer::Buffer,
         items: &[BarItem],
@@ -157,11 +162,13 @@ impl TabBarComponent {
         active_fg: ratatui::style::Color,
         active_bg: Option<ratatui::style::Color>,
         inactive_fg: ratatui::style::Color,
+        region_of: impl Fn(usize) -> crate::mouse::Region,
     ) -> u16 {
-        for item in items {
+        for (i, item) in items.iter().enumerate() {
             if x >= right {
                 break;
             }
+            let item_x = x;
             let body = format!("  {}  ", item.label);
             let mut style = if item.active {
                 Style::default()
@@ -183,6 +190,10 @@ impl TabBarComponent {
             // aligned. A naive `x += 1` per `char` would misplace them.
             let max = right.saturating_sub(x) as usize;
             let (nx, _) = buf.set_stringn(x, y, &body, max, style);
+            crate::mouse::push(
+                Rect::new(item_x, y, nx.saturating_sub(item_x), 1),
+                region_of(i),
+            );
             x = nx;
         }
         x
@@ -235,6 +246,11 @@ impl Component for TabBarComponent {
         let mut x = area.left();
         let mut y = area.top();
 
+        // The tab each main item stands for, pulled out before the borrow of
+        // `buf` so the closure below does not have to hold onto `self`.
+        let main_tabs: Vec<Tab> = self.main_tab_labels.iter().map(|mt| mt.tab).collect();
+        let fallback_tab = self.active_tab;
+
         // Main bar: dark olive bg, cream fg.
         x = Self::render_bar(
             buf,
@@ -246,6 +262,7 @@ impl Component for TabBarComponent {
             t.text_high(),
             Some(t.tab_active_bg()),
             t.text_dim(),
+            |i| crate::mouse::Region::Tab(main_tabs.get(i).copied().unwrap_or(fallback_tab)),
         );
 
         if fits_one_line {
@@ -302,6 +319,7 @@ impl Component for TabBarComponent {
             t.text_high(),
             Some(t.sub_tab_active_bg()),
             t.text_dim(),
+            crate::mouse::Region::SubTab,
         );
     }
 
@@ -375,5 +393,60 @@ mod tests {
             !text.contains("menu"),
             "tab bar must not show a menu hint: {text:?}"
         );
+    }
+
+    /// Column of the first cell of `needle` in a one-row render. The buffer
+    /// holds one symbol per cell, so counting characters — not bytes — gives
+    /// the x coordinate even after the multi-byte separator glyphs.
+    #[cfg(feature = "mouse")]
+    fn col_of(text: &str, needle: &str) -> u16 {
+        let byte = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in {text:?}"));
+        text[..byte].chars().count() as u16
+    }
+
+    /// The whole point of registering the rects while painting: whatever
+    /// `set_stringn` actually put on screen — key hint, icon, truncation —
+    /// is what the pointer hits, without anyone re-measuring a label.
+    #[cfg(feature = "mouse")]
+    #[test]
+    fn each_drawn_label_claims_the_cells_it_covers() {
+        use crate::mouse::{Region, begin_frame, hit};
+
+        let mut bar = TabBarComponent::new(theme(), &tabs(), false);
+        begin_frame();
+        // One row, so cell n of the flat symbol string sits at x = n.
+        let text = render(&mut bar, 80, 1);
+
+        let jira = col_of(&text, "Jira");
+        let tasks = col_of(&text, "Tasks");
+        let tickets = col_of(&text, "tickets");
+
+        assert_eq!(
+            hit(jira, 0).map(|(_, r)| r),
+            Some(Region::Tab(Tab::Content(0)))
+        );
+        assert_eq!(
+            hit(tasks, 0).map(|(_, r)| r),
+            Some(Region::Tab(Tab::Content(1)))
+        );
+        assert_eq!(hit(tickets, 0).map(|(_, r)| r), Some(Region::SubTab(0)));
+    }
+
+    /// The gap between the bars belongs to nobody. The component registers
+    /// labels only; the whole-bar fallback is pushed by the render pass
+    /// underneath, so a click that misses every label switches nothing.
+    #[cfg(feature = "mouse")]
+    #[test]
+    fn the_separator_between_the_bars_belongs_to_no_label() {
+        use crate::mouse::{begin_frame, hit};
+
+        let mut bar = TabBarComponent::new(theme(), &tabs(), false);
+        begin_frame();
+        let text = render(&mut bar, 80, 1);
+        assert_eq!(hit(col_of(&text, "🮇"), 0), None);
+        // …and so does the empty tail after the last sub tab.
+        assert_eq!(hit(79, 0), None);
     }
 }

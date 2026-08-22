@@ -484,6 +484,13 @@ border, in `PaneNode::render`) and one per popup, the last of these covered by
 a single line in `PanelChrome::render` because every popup draws on that
 chrome. The lookup walks the list backwards, so the topmost surface wins.
 
+Paint order is therefore also precedence, which is what lets a surface refine
+itself: the tab bar registers its whole rectangle first and then one rect per
+label as `set_stringn` writes it, so the label the pointer is over wins and a
+click in the gap between two labels falls through to the bar and does nothing.
+Nothing re-measures a label after the fact; the rect handed to the map is the
+one that was drawn, emoji and truncation included.
+
 ```mermaid
 flowchart LR
     DRAW["render pass<br/>paints a surface"] -- "push(rect, region)" --> MAP[(frame-scoped<br/>region map)]
@@ -493,12 +500,19 @@ flowchart LR
     DISP --> POST["after_render:<br/>snapshot + tint"]
 ```
 
-Phase 1 uses that for **window-local selection**: a drag is clipped to the
-rectangle it started in, so selecting inside a popup no longer grabs whole
-terminal rows. `Alt` makes it a block selection, release copies (system
-clipboard, else OSC 52). Why the map is recorded rather than recomputed, why it
-is ambient rather than threaded through, and why the reporting modes are
-written by hand instead of using `EnableMouseCapture`:
+The first use is **window-local selection**: a drag is clipped to the rectangle
+it started in, so selecting inside a popup no longer grabs whole terminal rows.
+`Alt` makes it a block selection, release copies (system clipboard, else
+OSC 52). A release on the press cell is not a drag at all but a **click**, and
+`mouse::click` routes it — tab, sub-tab, pane focus — through `pub(crate)`
+entry points on `App` that end in the same `sync_components()` the key paths do
+and decline the same way while an input popup owns the input. The mouse is a
+second way in, never a second implementation; the wheel makes that literal by
+feeding synthetic arrow keys through `App::handle_key`.
+
+Why the map is recorded rather than recomputed, why it is ambient rather than
+threaded through, and why the reporting modes are written by hand instead of
+using `EnableMouseCapture`:
 [ADR 0008](decisions/0008-mouse-hit-map-at-render-time.md).
 
 ### Message and request enums

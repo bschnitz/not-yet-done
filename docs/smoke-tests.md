@@ -5398,11 +5398,14 @@ worked. Test on any tab with a `fuzzy_filter` action.
       confirm the documented consequence: `x` fires instead of being typed into
       the query. Undo afterwards.
 
-## Mouse: window-local selection (`mouse` cargo feature)
+## Mouse: selection and clicking (`mouse` cargo feature)
 
-Phase 1 of mouse support. The point of the test is the **clipping**: a drag
-must never leave the box it started in. Build and install the default binary
-(the feature is on by default).
+Build and install the default binary — the feature is on by default.
+
+### Window-local selection
+
+The point of this part is the **clipping**: a drag must never leave the box it
+started in.
 
 - [ ] Open any popup with enough text in it (the shortcut overview on `o s`,
       the saved-filter picker on `q`, a script menu). Drag the mouse from
@@ -5428,6 +5431,36 @@ must never leave the box it started in. Build and install the default binary
       still lands in the clipboard of the machine you are sitting at, via
       OSC 52. If **no** path works at all, exactly one notification appears —
       `Could not reach the clipboard` — and nothing else.
+
+### Clicking tabs and panes
+
+One button does two jobs, so the first thing to check is that they stay apart.
+
+- [ ] Click a **main tab** label: the tab switches, exactly as its number key
+      would — same view, same focus, same bars.
+- [ ] Click the **active** tab: nothing happens, no reload, no flicker.
+- [ ] Click a **sub-tab** of the active view: it switches and, if that view has
+      not been loaded yet, it loads — the same thing its key does.
+- [ ] Click in the **gap between two tab labels** (and in the empty stretch
+      after the last one): nothing switches. The bar is not one big button.
+- [ ] A tab whose label carries an icon or an emoji: clicking the label's last
+      character still hits that tab and not its neighbour.
+- [ ] In a split layout, click into an **unfocused pane**: it takes the focus,
+      the focus border moves, and the action bar switches to that pane's
+      shortcuts. The keys then act on it.
+- [ ] Press the mouse inside a pane, drag a few cells, release: that is a
+      **selection**, not a click — the focus does not jump and no tab changes.
+- [ ] Open a popup (`o s`), then click a tab behind it: the popup keeps the
+      input and nothing switches — the same refusal the number key gets.
+
+### The wheel
+
+- [ ] Wheel over an **unfocused** pane in a split layout: that pane scrolls and
+      takes the focus with it, so the arrow keys carry on where the wheel
+      stopped.
+- [ ] Wheel over the **tab bar**: it walks through the tabs, down = next, and
+      wraps the way the tab keys do.
+- [ ] Wheel over a popup: the popup's list scrolls, not the table behind it.
 
 Regressions to rule out, because mouse reporting takes things away from the
 terminal:

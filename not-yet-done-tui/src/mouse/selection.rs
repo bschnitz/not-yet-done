@@ -45,6 +45,13 @@ impl Selection {
         }
     }
 
+    /// Nothing was ever dragged: the press and the release sit on the same
+    /// cell. That is a click, and a click means what the surface under it
+    /// says it means rather than "select one character".
+    pub fn is_click(&self) -> bool {
+        self.anchor == self.cursor
+    }
+
     /// Move the loose end. The pointer may be anywhere on the terminal —
     /// including over a different popup — but the selection is not.
     pub fn extend_to(&mut self, x: u16, y: u16) {
@@ -54,7 +61,11 @@ impl Selection {
     /// Anchor and cursor in reading order, whichever way the drag went.
     fn ordered(&self) -> ((u16, u16), (u16, u16)) {
         let (a, c) = (self.anchor, self.cursor);
-        if (a.1, a.0) <= (c.1, c.0) { (a, c) } else { (c, a) }
+        if (a.1, a.0) <= (c.1, c.0) {
+            (a, c)
+        } else {
+            (c, a)
+        }
     }
 
     /// The inclusive column range selected on row `y`, or `None` when the row
@@ -65,7 +76,10 @@ impl Selection {
             return None;
         }
         if self.block {
-            let (x0, x1) = (self.anchor.0.min(self.cursor.0), self.anchor.0.max(self.cursor.0));
+            let (x0, x1) = (
+                self.anchor.0.min(self.cursor.0),
+                self.anchor.0.max(self.cursor.0),
+            );
             return Some((x0, x1));
         }
         let left = if y == start.1 {
@@ -267,6 +281,33 @@ mod tests {
         assert_ne!(buf[(7, 5)].bg, bg);
         // …and so does the row below, which the block never reached.
         assert_ne!(buf[(5, 6)].bg, bg);
+    }
+
+    #[test]
+    fn a_press_and_release_without_movement_is_a_click() {
+        let (_, bounds) = scene();
+        let sel = Selection::new(bounds, 7, 6, false);
+        assert!(sel.is_click());
+    }
+
+    #[test]
+    fn one_cell_of_movement_already_makes_it_a_drag() {
+        // The threshold is deliberately a single cell: anything wider would
+        // swallow a short selection, and the user asked for text either way.
+        let (_, bounds) = scene();
+        let mut sel = Selection::new(bounds, 7, 6, false);
+        sel.extend_to(8, 6);
+        assert!(!sel.is_click());
+    }
+
+    #[test]
+    fn a_drag_that_left_the_region_is_not_a_click() {
+        // Clamping pulls the cursor back to the region's edge, not to the
+        // anchor, so leaving the window can never read as a press.
+        let (_, bounds) = scene();
+        let mut sel = Selection::new(bounds, 7, 6, false);
+        sel.extend_to(29, 9);
+        assert!(!sel.is_click());
     }
 
     #[test]
