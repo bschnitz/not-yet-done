@@ -5513,6 +5513,24 @@ here.
 - [ ] Click four times fast on the same cell: the run starts over at a single
       click instead of escalating further.
 
+Dragging out of a multi-click keeps the unit it picked:
+
+- [ ] **Double-click and hold**, then drag sideways: the selection grows word by
+      word — the word you pressed in stays whole, and so does the one under the
+      pointer, even with the pointer in the middle of it.
+- [ ] Keep dragging back past where you started: the selection shrinks the same
+      way and ends up exactly where it began, still whole words.
+- [ ] Drag onto a blank gap between two words: the selection ends at the last
+      word, without a trailing space.
+- [ ] **Triple-click and hold**, then drag down a few rows: whole lines are
+      taken, edge to edge of the pane, not a ragged block.
+- [ ] Release either drag: the text is on the clipboard, in the shape that was
+      highlighted.
+- [ ] Press once and drag as usual: still character by character — the plain
+      drag is unchanged.
+- [ ] Right after releasing a word drag, click once: it counts as a single
+      click again (it does not escalate to a line).
+
 ### The fold marker
 
 Only the run in front of a foldable row's label folds it: indentation, box

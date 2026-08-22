@@ -48,7 +48,7 @@ use {
     crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     ratatui::buffer::Buffer,
     ratatui::layout::Position,
-    selection::{Selection, Snapshot},
+    selection::{Grain, Selection, Snapshot},
     std::cell::RefCell,
     std::time::{Duration, Instant},
 };
@@ -268,7 +268,7 @@ impl MouseState {
     #[inline]
     pub fn clear_selection(&mut self) {}
 
-    /// Record a click and report how many it makes in a row: 1, 2 or 3.
+    /// Record a press and report how many it makes in a row: 1, 2 or 3.
     ///
     /// Three is where the ladder ends — a fourth click on the same cell starts
     /// over at one, the way a terminal's own word/line selection does, so
@@ -289,6 +289,13 @@ impl MouseState {
         self.clicks = clicks;
         self.last_click = Some((x, y, now));
         clicks
+    }
+
+    /// Forget the run of clicks, so the next press counts as the first.
+    #[cfg(feature = "mouse")]
+    fn end_click_run(&mut self) {
+        self.clicks = 0;
+        self.last_click = None;
     }
 
     /// Copy the region's cells out of the freshly drawn frame, then tint the
@@ -333,11 +340,18 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
     match ev.kind {
         // Press: anchor a selection inside whichever surface was hit. A press
         // outside every registered region just drops the old selection.
+        //
+        // The run of clicks is counted here rather than on release, which is
+        // also how desktops measure the interval — press to press. It has to
+        // be: a drag out of a double click must already know it is selecting
+        // words, and by the time the button comes back up the drag is over.
         MouseEventKind::Down(MouseButton::Left) => {
             match hit_surface(x, y) {
                 Some((bounds, _region)) => {
                     let block = ev.modifiers.contains(KeyModifiers::ALT);
-                    app.mouse.selection = Some(Selection::new(bounds, x, y, block));
+                    let clicks = app.mouse.register_click(x, y, Instant::now());
+                    app.mouse.selection =
+                        Some(Selection::new(bounds, x, y, block).with_grain(Grain::of(clicks)));
                     app.mouse.snapshot = None;
                 }
                 None => app.mouse.clear_selection(),
@@ -348,9 +362,14 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
         // Drag: extend to the cursor, clamped into the region the drag
         // started in. This is the whole point — the selection cannot leave
         // its window even when the pointer does.
+        //
+        // The snapshot rides along because a word or line drag has to read
+        // the boundaries out of what was drawn; the two are separate fields,
+        // so lending one out while the other is borrowed mutably is fine.
         MouseEventKind::Drag(MouseButton::Left) => {
+            let snap = app.mouse.snapshot.as_ref();
             if let Some(sel) = app.mouse.selection.as_mut() {
-                sel.extend_to(x, y);
+                sel.extend_to(x, y, snap);
             }
             EditorRequest::None
         }
@@ -374,6 +393,10 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
             if let Some(sel) = app.mouse.selection.as_mut() {
                 sel.dragging = false;
             }
+            // A drag ends the run: a press that follows it starts counting
+            // again instead of escalating a selection that has already been
+            // pulled out by hand.
+            app.mouse.end_click_run();
             // Success stays silent — the highlight is the receipt. Only a
             // clipboard that refused every path is worth a message.
             if finish_copy(app) == Some(false) {
@@ -415,7 +438,9 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
         app.mouse.clear_selection();
         return EditorRequest::None;
     };
-    let clicks = app.mouse.register_click(x, y, Instant::now());
+    // Counted when the button went down, so a drag out of the same press
+    // already knew what it was selecting by.
+    let clicks = app.mouse.clicks;
     let double = clicks == 2;
     // Behind a popup nothing acts, so every second click there is free for
     // the word under it.
@@ -771,6 +796,17 @@ mod tests {
         assert_eq!(state.register_click(4, 3, t0), 1);
     }
 
+    #[test]
+    fn a_drag_ends_the_run_of_clicks() {
+        // Otherwise a quick press right after pulling out a selection would
+        // count as the next click in the run and escalate to the whole line.
+        let mut state = MouseState::default();
+        let t = Instant::now();
+        assert_eq!(state.register_click(4, 2, t), 1);
+        state.end_click_run();
+        assert_eq!(state.register_click(4, 2, t + DOUBLE_CLICK / 2), 1);
+    }
+
     /// A press anchors a one-cell selection that the next event usually turns
     /// into a click. Tinting it in the meantime puts an orange block on screen
     /// for one frame, which is why it takes asking for.
@@ -799,7 +835,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut state = MouseState::default();
         let mut sel = Selection::new(area, 3, 0, false);
-        sel.extend_to(5, 0);
+        sel.extend_to(5, 0, None);
         state.selection = Some(sel);
 
         state.after_render(&mut buf, &theme, false);
