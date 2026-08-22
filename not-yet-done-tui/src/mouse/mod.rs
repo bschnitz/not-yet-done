@@ -69,6 +69,10 @@ const WHEEL_LINES: usize = 3;
 #[cfg(feature = "mouse")]
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// The longest run of clicks that still means something: word, then line.
+#[cfg(feature = "mouse")]
+const TRIPLE_CLICK: u8 = 3;
+
 /// A surface the render pass drew, in the terms a click cares about.
 ///
 /// Window-local selection needs only the rectangle; the payloads are what
@@ -210,6 +214,9 @@ pub struct MouseState {
     /// Cell and time of the last click, for pairing the next one with it.
     #[cfg(feature = "mouse")]
     last_click: Option<(u16, u16, Instant)>,
+    /// How many clicks that pairing has accumulated on that cell.
+    #[cfg(feature = "mouse")]
+    clicks: u8,
 }
 
 impl MouseState {
@@ -226,19 +233,27 @@ impl MouseState {
     #[inline]
     pub fn clear_selection(&mut self) {}
 
-    /// Record a click and report whether it completes a double click.
+    /// Record a click and report how many it makes in a row: 1, 2 or 3.
     ///
-    /// A double click consumes the pair, so a third click in a row starts a
-    /// new one instead of activating again on every further click. `now` is
+    /// Three is where the ladder ends — a fourth click on the same cell starts
+    /// over at one, the way a terminal's own word/line selection does, so
+    /// holding the button down in place does not keep escalating. `now` is
     /// passed in rather than read here so the timeout is testable without
     /// sleeping through it.
     #[cfg(feature = "mouse")]
-    fn register_click(&mut self, x: u16, y: u16, now: Instant) -> bool {
-        let double = self.last_click.is_some_and(|(px, py, at)| {
-            (px, py) == (x, y) && now.duration_since(at) < DOUBLE_CLICK
-        });
-        self.last_click = if double { None } else { Some((x, y, now)) };
-        double
+    fn register_click(&mut self, x: u16, y: u16, now: Instant) -> u8 {
+        let repeat = self
+            .last_click
+            .filter(|&(px, py, at)| (px, py) == (x, y) && now.duration_since(at) < DOUBLE_CLICK)
+            .map_or(0, |(_, _, _)| self.clicks);
+        let clicks = if repeat >= TRIPLE_CLICK {
+            1
+        } else {
+            repeat + 1
+        };
+        self.clicks = clicks;
+        self.last_click = Some((x, y, now));
+        clicks
     }
 
     /// Copy the region's cells out of the freshly drawn frame, then tint the
@@ -308,7 +323,6 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
                 .selection
                 .is_some_and(|sel| sel.is_click() && sel.bounds.contains(Position::new(x, y)));
             if clicked {
-                app.mouse.clear_selection();
                 return click(app, x, y);
             }
             if let Some(sel) = app.mouse.selection.as_mut() {
@@ -343,12 +357,26 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
 /// does *not* do is reach past a popup: while one is open it owns the input,
 /// so a stray click on the tab bar behind it must not switch tabs (the App
 /// guards that, in the same place the key path does).
+///
+/// Repeated clicks pick out text, the way they do in the terminal we took the
+/// mouse away from: the second click takes the word, the third the line. The
+/// second click yields where it already means something — a table row opens,
+/// a popup entry is picked — but the third does not, so there is always a way
+/// to grab a row's text without dragging across it.
 #[cfg(feature = "mouse")]
 fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
     let Some((_, region)) = hit(x, y) else {
+        app.mouse.clear_selection();
         return EditorRequest::None;
     };
-    let double = app.mouse.register_click(x, y, Instant::now());
+    let clicks = app.mouse.register_click(x, y, Instant::now());
+    let double = clicks == 2;
+    if clicks == TRIPLE_CLICK || (double && !acts_on_double(app, region, x, y)) {
+        return select_run(app, x, y, clicks == TRIPLE_CLICK);
+    }
+    // A single click is a press, not a selection: whatever the last one
+    // highlighted is stale the moment this one lands.
+    app.mouse.clear_selection();
     match region {
         Region::Tab(tab) => app.activate_tab(tab),
         Region::SubTab(idx) => return app.activate_subtab(idx),
@@ -365,6 +393,48 @@ fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
         }
         Region::PopupRow(delta) => return popup_row(app, delta, double),
         _ => {}
+    }
+    EditorRequest::None
+}
+
+/// Whether the second click on this cell already means something.
+///
+/// Yes for what a second click still acts on: a popup entry, a data row, a
+/// column header (which cycles its sort on every click). Everywhere else — the
+/// bars, a popup's chrome, the empty space under the last row, the editor —
+/// the second click is free, and text selection is what a user coming from the
+/// terminal expects of it.
+#[cfg(feature = "mouse")]
+fn acts_on_double(app: &crate::app::App, region: Region, x: u16, y: u16) -> bool {
+    match region {
+        Region::PopupRow(_) => true,
+        Region::ContentPane(id) => app.content_cell_acts(id, x, y),
+        _ => false,
+    }
+}
+
+/// Pick out the word or the line under the pointer and copy it.
+///
+/// Reshapes the selection the press already anchored, so it is clipped to the
+/// same region a drag would be, and reads the text back from the snapshot of
+/// the last frame — the same "copy what you see" the drag path uses.
+#[cfg(feature = "mouse")]
+fn select_run(app: &mut crate::app::App, x: u16, y: u16, line: bool) -> EditorRequest {
+    // Taken out and put back so the selection can be reshaped against it;
+    // both live on `app.mouse`.
+    let Some(snap) = app.mouse.snapshot.take() else {
+        return EditorRequest::None;
+    };
+    let picked = app.mouse.selection.as_mut().is_some_and(|sel| {
+        if line {
+            sel.select_line(&snap, y)
+        } else {
+            sel.select_word(&snap, x, y)
+        }
+    });
+    app.mouse.snapshot = Some(snap);
+    if picked && finish_copy(app) == Some(false) {
+        app.notify_error("Could not reach the clipboard".to_string());
     }
     EditorRequest::None
 }
@@ -579,26 +649,31 @@ mod tests {
     }
 
     #[test]
-    fn two_quick_clicks_on_one_cell_are_a_double_click() {
+    fn quick_clicks_on_one_cell_count_up_to_three_and_start_over() {
         let mut state = MouseState::default();
-        let t0 = Instant::now();
-        assert!(!state.register_click(4, 2, t0));
-        assert!(state.register_click(4, 2, t0 + DOUBLE_CLICK / 2));
-        // The pair is consumed: holding the button down and clicking on must
-        // not activate the row again on every further click.
-        assert!(!state.register_click(4, 2, t0 + DOUBLE_CLICK / 2));
+        let mut t = Instant::now();
+        let mut click = |state: &mut MouseState| {
+            t += DOUBLE_CLICK / 2;
+            state.register_click(4, 2, t)
+        };
+        assert_eq!(click(&mut state), 1);
+        assert_eq!(click(&mut state), 2, "word");
+        assert_eq!(click(&mut state), 3, "line");
+        // A fourth click starts over rather than escalating: holding the
+        // button down in place must not keep meaning something new.
+        assert_eq!(click(&mut state), 1);
     }
 
     #[test]
-    fn a_slow_second_click_or_one_on_another_cell_is_not_a_double_click() {
+    fn a_slow_second_click_or_one_on_another_cell_starts_over() {
         let mut state = MouseState::default();
         let t0 = Instant::now();
-        assert!(!state.register_click(4, 2, t0));
-        assert!(!state.register_click(4, 2, t0 + DOUBLE_CLICK * 2));
+        assert_eq!(state.register_click(4, 2, t0), 1);
+        assert_eq!(state.register_click(4, 2, t0 + DOUBLE_CLICK * 2), 1);
 
         let mut state = MouseState::default();
-        assert!(!state.register_click(4, 2, t0));
-        assert!(!state.register_click(4, 3, t0));
+        assert_eq!(state.register_click(4, 2, t0), 1);
+        assert_eq!(state.register_click(4, 3, t0), 1);
     }
 
     #[test]

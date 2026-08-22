@@ -5764,6 +5764,29 @@ impl App {
         }
     }
 
+    /// Whether a click on this cell of `pane_id` does something of its own —
+    /// it is a column header or a data row.
+    ///
+    /// The mouse asks before letting a *second* click pick out a word: on a
+    /// row it opens, on the empty space below the rows it may as well select
+    /// text. Same guards as the click paths themselves, so the two answers
+    /// cannot disagree.
+    pub(crate) fn content_cell_acts(
+        &self,
+        pane_id: crate::views::content_view::PaneId,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        if self.has_input_popup() {
+            return false;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let Some(view) = self.content_view(idx) else {
+            return false;
+        };
+        view.header_column_at(pane_id, x, y).is_some() || view.row_at(pane_id, y).is_some()
+    }
+
     /// Sort by the column whose header was clicked, cycling
     /// unsorted → ascending → descending → unsorted, as clicking a column
     /// header does everywhere else.

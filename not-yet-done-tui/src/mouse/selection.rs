@@ -58,6 +58,53 @@ impl Selection {
         self.cursor = clamp_into(self.bounds, x, y);
     }
 
+    /// Reshape into the word under `(x, y)`, as a double click does in a
+    /// terminal. Reports whether there was a word there at all — on a blank
+    /// cell or a tree glyph the selection is left alone.
+    ///
+    /// The word is read back from what was drawn, so it is the word the user
+    /// sees, and it stops at the region's edge like every other selection
+    /// here: a value clipped by its column ends where the column does.
+    pub fn select_word(&mut self, snap: &Snapshot, x: u16, y: u16) -> bool {
+        let (x, y) = clamp_into(self.bounds, x, y);
+        if !is_word_cell(snap, x, y) {
+            return false;
+        }
+        let mut left = x;
+        while left > self.bounds.left() && is_word_cell(snap, left - 1, y) {
+            left -= 1;
+        }
+        let mut right = x;
+        while right + 1 < self.bounds.right() && is_word_cell(snap, right + 1, y) {
+            right += 1;
+        }
+        self.reshape((left, y), (right, y));
+        true
+    }
+
+    /// Reshape into the whole line at `y`, blanks at either end left out — the
+    /// third click of a run. Reports whether the line held anything.
+    pub fn select_line(&mut self, snap: &Snapshot, y: u16) -> bool {
+        let (_, y) = clamp_into(self.bounds, self.bounds.left(), y);
+        let filled = |x: &u16| !snap.get(*x, y).trim().is_empty();
+        let range = self.bounds.left()..self.bounds.right();
+        let (Some(first), Some(last)) = (range.clone().find(filled), range.rev().find(filled))
+        else {
+            return false;
+        };
+        self.reshape((first, y), (last, y));
+        true
+    }
+
+    /// Put both ends somewhere else. Always a flow selection: `Alt` shapes a
+    /// drag, not the run a click picks out.
+    fn reshape(&mut self, anchor: (u16, u16), cursor: (u16, u16)) {
+        self.anchor = anchor;
+        self.cursor = cursor;
+        self.block = false;
+        self.dragging = false;
+    }
+
     /// Anchor and cursor in reading order, whichever way the drag went.
     fn ordered(&self) -> ((u16, u16), (u16, u16)) {
         let (a, c) = (self.anchor, self.cursor);
@@ -177,6 +224,20 @@ impl Snapshot {
             .map(String::as_str)
             .unwrap_or("")
     }
+}
+
+/// Whether a cell belongs to a word.
+///
+/// Letters and digits, plus the punctuation that holds an identifier together
+/// — a ticket key, a path, a URL, a `snake_case` name should each come out in
+/// one click. Everything else separates: spaces, the tree connectors, quotes
+/// and brackets, so double-clicking a value inside them does not drag them
+/// along.
+fn is_word_cell(snap: &Snapshot, x: u16, y: u16) -> bool {
+    snap.get(x, y)
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || "_-./:#@+~=?&%".contains(c))
 }
 
 /// Pull a coordinate inside `rect`.
@@ -308,6 +369,93 @@ mod tests {
         let mut sel = Selection::new(bounds, 7, 6, false);
         sel.extend_to(29, 9);
         assert!(!sel.is_click());
+    }
+
+    /// One line of realistic table text inside a region that starts at
+    /// column 5, so nothing here can pass by accident on `x == index`.
+    fn line(text: &str) -> (Snapshot, Selection) {
+        let bounds = Rect::new(5, 5, text.chars().count() as u16, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
+        buf.set_string(5, 5, text, Style::default());
+        let snap = Snapshot::capture(&buf, bounds);
+        (snap, Selection::new(bounds, 5, 5, false))
+    }
+
+    /// What a click on the character at `offset` of that line picks out.
+    fn word_at(text: &str, offset: u16) -> Option<String> {
+        let (snap, mut sel) = line(text);
+        sel.select_word(&snap, 5 + offset, 5)
+            .then(|| sel.text(&snap))
+    }
+
+    #[test]
+    fn a_double_click_takes_the_word_under_it() {
+        assert_eq!(word_at("hello world", 7).as_deref(), Some("world"));
+        assert_eq!(word_at("hello world", 0).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn an_identifier_comes_out_in_one_piece() {
+        // The punctuation that holds a key, a path or a URL together is part
+        // of the word — that is the whole point of clicking one.
+        assert_eq!(word_at("PROJ-1234 open", 3).as_deref(), Some("PROJ-1234"));
+        assert_eq!(
+            word_at("see https://example.test/a/b now", 12).as_deref(),
+            Some("https://example.test/a/b"),
+        );
+        assert_eq!(
+            word_at("a_snake_case value", 2).as_deref(),
+            Some("a_snake_case")
+        );
+    }
+
+    #[test]
+    fn brackets_and_quotes_stay_behind() {
+        assert_eq!(word_at("(inner)", 3).as_deref(), Some("inner"));
+        assert_eq!(word_at("say \"word\" here", 6).as_deref(), Some("word"));
+    }
+
+    #[test]
+    fn a_blank_or_a_tree_glyph_is_not_a_word() {
+        assert_eq!(word_at("a  b", 1), None, "the gap");
+        assert_eq!(word_at("├── Child", 1), None, "a connector cell");
+    }
+
+    #[test]
+    fn a_word_stops_at_the_region_edge() {
+        // The region cuts the text short; the click must not read on into the
+        // cells beyond it, which belong to another widget.
+        let bounds = Rect::new(5, 5, 4, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        buf.set_string(5, 5, "abcdefgh", Style::default());
+        let snap = Snapshot::capture(&buf, bounds);
+        let mut sel = Selection::new(bounds, 6, 5, false);
+        assert!(sel.select_word(&snap, 6, 5));
+        assert_eq!(sel.text(&snap), "abcd");
+    }
+
+    #[test]
+    fn a_triple_click_takes_the_line_without_its_padding() {
+        let (snap, mut sel) = line("   spaced out   ");
+        assert!(sel.select_line(&snap, 5));
+        assert_eq!(sel.text(&snap), "spaced out");
+    }
+
+    #[test]
+    fn a_blank_line_has_nothing_to_take() {
+        let (snap, mut sel) = line("      ");
+        assert!(!sel.select_line(&snap, 5));
+    }
+
+    #[test]
+    fn picking_a_run_drops_the_block_shape() {
+        // `Alt` shapes a drag; a click that picks out a word is flowing text
+        // either way, so a leftover block flag cannot narrow it.
+        let (snap, _) = line("one two");
+        let bounds = Rect::new(5, 5, 7, 1);
+        let mut sel = Selection::new(bounds, 5, 5, true);
+        assert!(sel.select_word(&snap, 9, 5));
+        assert_eq!(sel.text(&snap), "two");
     }
 
     #[test]

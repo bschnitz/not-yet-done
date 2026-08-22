@@ -5487,6 +5487,32 @@ one line tall or not flush with the top edge.
 - [ ] In **card mode** (no header row), click anywhere in a card: the card is
       selected, nothing tries to sort.
 
+### Word and line selection
+
+What the terminal used to do with a double and a triple click, now done by the
+app — and clipped to the window under the pointer like every other selection
+here.
+
+- [ ] Double-click a word in a preview or detail pane: the word is highlighted
+      and on the clipboard, ready to paste elsewhere.
+- [ ] Double-click a ticket key / a path / a URL: it comes out **whole**, not
+      cut at the `-`, the `/` or the `:`.
+- [ ] Double-click a word inside quotes or brackets: the quotes and brackets
+      stay behind.
+- [ ] Double-click a blank cell or a tree connector: nothing is selected and
+      nothing is copied.
+- [ ] Double-click a word near a popup's edge: the selection stops at the
+      edge — it does not read on into the table behind the popup.
+- [ ] **Triple-click** any line: the whole line is selected without the panel's
+      padding, and copied.
+- [ ] Triple-click a **table row**: the row's text is selected — the third
+      click selects even where the second one opens.
+- [ ] Double-click a table row: it still opens (`Enter`), it does not select a
+      word. Same for a popup entry: it is still picked.
+- [ ] Click once somewhere else afterwards: the highlight goes away.
+- [ ] Click four times fast on the same cell: the run starts over at a single
+      click instead of escalating further.
+
 ### The fold marker
 
 Only the run in front of a foldable row's label folds it: indentation, box
