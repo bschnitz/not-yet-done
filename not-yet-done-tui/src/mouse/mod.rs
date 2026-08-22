@@ -64,9 +64,16 @@ const WHEEL_LINES: usize = 3;
 /// A surface the render pass drew, in the terms a click cares about.
 ///
 /// Window-local selection needs only the rectangle; the payloads are what
-/// later routing (focus a pane, press a hint, pick a row) keys off.
+/// routing (switch to that tab, focus that pane) keys off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Region {
+    /// One main-tab label, carrying the tab it activates. Pushed by the tab
+    /// bar on top of [`Region::TabBar`], so a click between labels still
+    /// lands on the bar and does nothing.
+    Tab(crate::tabs::Tab),
+    /// One sub-tab label of the active view, by index into its `view_defs`.
+    SubTab(usize),
+    /// The tab bar's background — everything the labels do not cover.
     TabBar,
     /// The active view's action bar.
     ActionBar,
@@ -114,7 +121,7 @@ pub fn push(_rect: Rect, _region: Region) {}
 
 /// The topmost surface covering the cell, if any.
 #[cfg(feature = "mouse")]
-fn hit(x: u16, y: u16) -> Option<(Rect, Region)> {
+pub(crate) fn hit(x: u16, y: u16) -> Option<(Rect, Region)> {
     REGIONS.with_borrow(|regions| {
         regions
             .iter()
@@ -163,7 +170,11 @@ impl MouseState {
 
     #[cfg(not(feature = "mouse"))]
     #[inline]
-    pub fn after_render(&mut self, _buf: &mut ratatui::buffer::Buffer, _theme: &crate::ui::theme::Theme) {
+    pub fn after_render(
+        &mut self,
+        _buf: &mut ratatui::buffer::Buffer,
+        _theme: &crate::ui::theme::Theme,
+    ) {
     }
 }
 
@@ -200,9 +211,23 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
             EditorRequest::None
         }
 
-        // Release: hand what is highlighted to the clipboard. The selection
-        // stays visible so it is obvious what was taken.
+        // Release: a press and release on the same cell is a *click* and
+        // belongs to whatever was drawn there; anything that moved is a drag
+        // and belongs to the clipboard. Deciding it here is what lets one
+        // button both select text and press things.
         MouseEventKind::Up(MouseButton::Left) => {
+            // "Same cell" is not enough on its own: a drag that left the
+            // region is clamped back onto it and can land on the anchor
+            // again. Requiring the release to be inside the region too keeps
+            // that from pressing whatever the pointer wandered onto.
+            let clicked = app
+                .mouse
+                .selection
+                .is_some_and(|sel| sel.is_click() && sel.bounds.contains(Position::new(x, y)));
+            if clicked {
+                app.mouse.clear_selection();
+                return click(app, x, y);
+            }
             if let Some(sel) = app.mouse.selection.as_mut() {
                 sel.dragging = false;
             }
@@ -214,17 +239,62 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
             EditorRequest::None
         }
 
-        // Wheel: reproduce what the terminal did for us before mouse
-        // reporting took the wheel away — the same movement the arrow keys
-        // make in the focused surface. Routing it to the surface *under the
-        // pointer* instead needs per-widget scrolling and is deliberately
-        // left to the next step.
-        MouseEventKind::ScrollDown => wheel(app, "down"),
-        MouseEventKind::ScrollUp => wheel(app, "up"),
+        // Wheel: scroll whatever is under the pointer, not whatever happens
+        // to be focused. On a content pane that means focusing it first —
+        // the scroll would otherwise move a list the user is not looking at,
+        // and focus-follows-wheel keeps a single scrolling path (the arrow
+        // keys) instead of a second one per widget.
+        MouseEventKind::ScrollDown => scroll(app, x, y, "down", true),
+        MouseEventKind::ScrollUp => scroll(app, x, y, "up", false),
         MouseEventKind::ScrollRight => wheel(app, "right"),
         MouseEventKind::ScrollLeft => wheel(app, "left"),
 
         _ => EditorRequest::None,
+    }
+}
+
+/// Route a click to the surface it landed on.
+///
+/// Everything reachable this way is reachable by key as well — the mouse is a
+/// second way in, never a second implementation. What a click deliberately
+/// does *not* do is reach past a popup: while one is open it owns the input,
+/// so a stray click on the tab bar behind it must not switch tabs (the App
+/// guards that, in the same place the key path does).
+#[cfg(feature = "mouse")]
+fn click(app: &mut crate::app::App, x: u16, y: u16) -> EditorRequest {
+    let Some((_, region)) = hit(x, y) else {
+        return EditorRequest::None;
+    };
+    match region {
+        Region::Tab(tab) => app.activate_tab(tab),
+        Region::SubTab(idx) => return app.activate_subtab(idx),
+        // Clicking a pane focuses it. Which *row* was hit is a table
+        // question, and tables have their own geometry (folded rows, multi-
+        // line cells) — that is the next step, not this one.
+        Region::ContentPane(id) => app.focus_content_pane(id),
+        _ => {}
+    }
+    EditorRequest::None
+}
+
+/// Send the wheel where the pointer is, rather than where the focus is.
+#[cfg(feature = "mouse")]
+fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -> EditorRequest {
+    match hit(x, y).map(|(_, region)| region) {
+        // The bar has nothing to scroll, and walking the tabs is what a wheel
+        // does on a tab strip everywhere else.
+        Some(Region::Tab(_) | Region::SubTab(_) | Region::TabBar) => {
+            app.cycle_tab(forward);
+            EditorRequest::None
+        }
+        // Focus follows the wheel: scrolling a pane the keys would not reach
+        // leaves the two out of step, and the alternative is a second
+        // scrolling path per widget.
+        Some(Region::ContentPane(id)) => {
+            app.focus_content_pane(id);
+            wheel(app, key)
+        }
+        _ => wheel(app, key),
     }
 }
 
@@ -294,6 +364,28 @@ mod tests {
         push(Rect::new(0, 5, 80, 0), Region::NotificationBar);
         push(Rect::new(0, 5, 80, 1), Region::StatusBar);
         assert_eq!(hit(0, 5).map(|(_, r)| r), Some(Region::StatusBar));
+    }
+
+    #[test]
+    fn a_label_pushed_after_the_bar_wins_over_it() {
+        // The tab bar registers its background first and its labels while
+        // painting them, so a click between two labels falls through to the
+        // bar — which switches nothing — instead of the nearest tab.
+        begin_frame();
+        push(Rect::new(0, 0, 80, 1), Region::TabBar);
+        push(
+            Rect::new(0, 0, 8, 1),
+            Region::Tab(crate::tabs::Tab::Content(0)),
+        );
+        push(
+            Rect::new(8, 0, 9, 1),
+            Region::Tab(crate::tabs::Tab::Content(1)),
+        );
+        assert_eq!(
+            hit(3, 0).map(|(_, r)| r),
+            Some(Region::Tab(crate::tabs::Tab::Content(0)))
+        );
+        assert_eq!(hit(40, 0).map(|(_, r)| r), Some(Region::TabBar));
     }
 
     #[test]

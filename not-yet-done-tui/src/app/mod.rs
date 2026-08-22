@@ -5698,6 +5698,72 @@ impl App {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Mouse entry points
+    //
+    // Each one is the mouse's door to something the keyboard already does,
+    // and each ends where the key path ends — `sync_components` — so a click
+    // and its equivalent keystroke leave the app in the same state. They all
+    // decline while an input popup is open: the popup owns the input, and
+    // reaching past it to the chrome behind would be a way to lose whatever
+    // is half-typed in it.
+    // -----------------------------------------------------------------------
+
+    /// Switch to `tab`, as pressing its digit would.
+    pub(crate) fn activate_tab(&mut self, tab: Tab) {
+        if self.has_input_popup() || tab == self.active_tab {
+            return;
+        }
+        self.set_active_tab(tab);
+        self.sync_components();
+    }
+
+    /// Walk to the next/previous visible tab, as `tab.next`/`tab.prev` would.
+    pub(crate) fn cycle_tab(&mut self, forward: bool) {
+        if self.has_input_popup() {
+            return;
+        }
+        let target = if forward {
+            self.tab_layout.next(self.active_tab)
+        } else {
+            self.tab_layout.prev(self.active_tab)
+        };
+        self.activate_tab(target);
+    }
+
+    /// Switch the active tab's subtab by index, as its YAML switch key would
+    /// — including the auto-load of a subtab that has never been populated.
+    pub(crate) fn activate_subtab(&mut self, target: usize) -> EditorRequest {
+        if self.has_input_popup() {
+            return EditorRequest::None;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let msg = self
+            .content_view_mut(idx)
+            .and_then(|cv| cv.activate_subtab(target));
+        let req = match msg {
+            Some(m) => self.process_sub_view_message(m),
+            None => EditorRequest::None,
+        };
+        self.sync_components();
+        req
+    }
+
+    /// Move the focus to a pane of the active view's split layout, as the
+    /// window chord for its tag would.
+    pub(crate) fn focus_content_pane(&mut self, pane_id: crate::views::content_view::PaneId) {
+        if self.has_input_popup() {
+            return;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let changed = self
+            .content_view_mut(idx)
+            .is_some_and(|cv| cv.focus_pane(pane_id));
+        if changed {
+            self.sync_components();
+        }
+    }
+
     /// Open the shortcut menu (default `ctrl+y`).
     ///
     /// Collects two row sets: the *context* rows from the focused pane's

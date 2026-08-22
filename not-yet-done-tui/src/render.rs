@@ -86,8 +86,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     let mut idx = 0;
-    app.tab_bar.view(frame, chunks[idx]);
+    // The bar's background goes down first so the per-label rects the
+    // component pushes while painting land on top of it: a click between two
+    // labels then finds the bar and does nothing, instead of the nearest tab.
     mouse::push(chunks[idx], mouse::Region::TabBar);
+    app.tab_bar.view(frame, chunks[idx]);
     idx += 1;
 
     if action_bar_height > 0 {
