@@ -557,6 +557,18 @@ by the same path. The second click yields where it is already spoken for
 (`acts_on_double`: a popup entry, a data row or a column header), the third
 never does, so no surface is left without a way to grab its text.
 
+Dragging out of such a run keeps its unit, and that is why the run is counted on
+the **press**: by the time the button comes back up the drag is over, so a
+counter that only fired on release could never tell the drag what it was
+selecting by. `Grain::of(clicks)` rides along on the `Selection`, which keeps the
+press cell and the pointer cell and derives its two visible ends from them on
+every move — at word grain each end grows to its own word boundary, at line
+grain to the region's edges, and reading order decides which end grows which
+way. Deriving instead of accumulating is what makes a drag that reverses give
+back exactly what it took. The press itself deliberately does not snap yet: a
+double click on a table row still has to open the row, and `is_click()` asks
+whether the pointer ever moved.
+
 Breadcrumbs reuse the delta trick a third time, and for the same reason: while
 `render_breadcrumbs` paints the path the pane's depth is known, and a frame that
 is gone cannot be asked about it. Each crumb is pushed carrying **how many

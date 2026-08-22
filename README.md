@@ -199,6 +199,8 @@ The TUI understands the mouse. What it does today:
 | Drag with left        | Select text — **clipped to the window under the pointer** |
 | Double-click text     | Select the word under the pointer and copy it             |
 | Triple-click          | Select the whole line and copy it                         |
+| Double-click + drag   | Extend the selection by whole words                       |
+| Triple-click + drag   | Extend the selection by whole lines                       |
 | `Alt` + drag          | Select a rectangle instead of flowing text                |
 | Release               | Copy the selection to the clipboard                       |
 | Wheel up / down       | Scroll the pane under the pointer, as `↑` / `↓` would     |
@@ -247,6 +249,13 @@ click — while quotes, brackets and the tree connectors separate. Where the
 second click already means something it keeps its meaning: a table row opens, a
 popup entry is picked. The third click never does, so a row's text is always
 one triple-click away without dragging across it.
+
+Holding the button down after that keeps the unit: dragging out of a double
+click grows the selection word by word, out of a triple click line by line —
+the word the press landed in and the word under the pointer are both taken
+whole, and a drag that turns back gives up exactly what it took. Dragging
+straight off a single press stays character-precise, which is what the plain
+drag has always been.
 
 Popup lists work the same way and stay searchable while you click: the row you
 click carries how far the cursor has to travel to reach it, and the app walks
