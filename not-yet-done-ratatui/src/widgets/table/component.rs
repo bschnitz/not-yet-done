@@ -720,6 +720,18 @@ impl Table {
         self.geometry.header_y == Some(y)
     }
 
+    /// Where logical column `col` starts on screen and how wide it is, or
+    /// `None` when horizontal scrolling left it off the frame.
+    pub fn column_bounds(&self, col: usize) -> Option<(u16, u16)> {
+        self.geometry.col_span(col).map(|s| (s.x, s.width))
+    }
+
+    /// Whether `y` carries the first line of the row it belongs to — the one
+    /// line holding whatever a row prefixes itself with.
+    pub fn is_row_top(&self, y: u16) -> bool {
+        self.geometry.is_row_top(y)
+    }
+
     pub fn move_column_left(&mut self) {
         if let Some(c) = self.selected_column {
             if c > 0 {

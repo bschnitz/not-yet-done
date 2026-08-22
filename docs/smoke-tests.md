@@ -5487,6 +5487,35 @@ one line tall or not flush with the top edge.
 - [ ] In **card mode** (no header row), click anywhere in a card: the card is
       selected, nothing tries to sort.
 
+### The fold marker
+
+Only the run in front of a foldable row's label folds it: indentation, box
+connectors and the `▶` / `▼` arrow. A single click there is the same toggle
+`Enter` performs on that row.
+
+- [ ] Click the `▶` of a collapsed tree row: it unfolds, and the cursor is on
+      it afterwards — including when it was not the selected row before.
+- [ ] Click the `▼` of the row you just unfolded: it folds again.
+- [ ] Click the box connector (`└──`) or the indentation in front of a **child**
+      row's arrow: it toggles too — the whole run counts, not just the arrow.
+- [ ] Click the label **text** next to the arrow: the row is only selected, it
+      does not fold.
+- [ ] Click the indentation in front of a **leaf** (a row that cannot expand):
+      the row is selected, nothing folds and nothing flickers.
+- [ ] Fold a row whose subtree is long, so the rows below jump up, and click the
+      marker of the row now under the pointer: it toggles that row — the
+      geometry is the one of the frame you are looking at.
+- [ ] Scroll horizontally (`h` / `l` with a column cursor, or a narrow window)
+      so the label column moves: the marker still sits on the arrow you see,
+      not at the old x.
+- [ ] With **smooth scrolling** on, scroll so a tree row's top line is cut off
+      by the top edge: clicking where its arrow would be selects rather than
+      folds — no connector is visible there.
+- [ ] In a view with **multiline rows**, click the second line of a foldable
+      row at the marker's x: it selects, it does not fold.
+- [ ] Double-click a fold marker fast: the row toggles **once** and stays that
+      way — it does not spring back.
+
 ### Clicking popup entries
 
 The cursor is walked to the clicked row with the popup's own arrow keys, so

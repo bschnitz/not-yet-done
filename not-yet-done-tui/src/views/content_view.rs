@@ -509,6 +509,16 @@ pub struct ContentPane {
     built_table_width: u16,
     /// Column keys in display order from the most recent rebuild_table.
     last_column_keys: Vec<String>,
+    /// Index of the tree-label column in the most recent rebuild; `None`
+    /// outside tree mode.
+    last_tree_label_col: Option<usize>,
+    /// How many display columns the tree connector run (indent + box glyphs
+    /// + expand marker) takes up at the start of the label cell, per table
+    /// row — `None` for rows with nothing to fold. A click inside that run
+    /// is a click on the fold marker; see
+    /// [`ContentView::fold_marker_at`]. Written by the same rebuild that
+    /// produced the connector, so the two cannot drift apart.
+    last_fold_zones: Vec<Option<u16>>,
 
     /// Whether this pane has ever been loaded from the adapter — controls
     /// whether activating it triggers an automatic SpawnContentLoad.
@@ -1459,6 +1469,8 @@ impl ContentPane {
             last_col_widths: Vec::new(),
             built_table_width: 0,
             last_column_keys: Vec::new(),
+            last_tree_label_col: None,
+            last_fold_zones: Vec::new(),
             loaded: false,
             linked_child: None,
             detail_child: None,
@@ -5798,6 +5810,23 @@ impl ContentPane {
                 .collect(),
             _ => Default::default(),
         };
+        // Which rows can fold at all. The connector carries an expand marker
+        // exactly for these, and only they turn a click on the connector into
+        // a toggle — clicking a leaf's indentation must stay a plain
+        // selection.
+        let foldable_rows: Vec<bool> = match self.tree.as_ref() {
+            Some(tree) => self
+                .tree_visible_indices
+                .iter()
+                .map(|&eidx| {
+                    tree.entries
+                        .get(eidx)
+                        .is_some_and(|e| e.has_children && !e.is_more_placeholder)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut fold_zones: Vec<Option<u16>> = vec![None; computed.rows.len()];
         let col_widths = self.last_col_widths.clone();
         let widget_rows: Vec<TableWidgetRow> = computed
             .rows
@@ -5833,6 +5862,19 @@ impl ContentPane {
                                 .filter(|r| r.start > 0)
                                 .cloned()
                                 .collect();
+                            // Same run, measured in screen columns: the fold
+                            // zone. `conn` is a char count and the connector
+                            // may hold wide glyphs, so it is not the width.
+                            if conn > 0 && foldable_rows.get(ri).copied().unwrap_or(false) {
+                                let end = fitted
+                                    .char_indices()
+                                    .nth(conn)
+                                    .map(|(b, _)| b)
+                                    .unwrap_or(fitted.len());
+                                fold_zones[ri] =
+                                    Some(unicode_width::UnicodeWidthStr::width(&fitted[..end])
+                                        as u16);
+                            }
                             // Unread rows paint the label remainder (marker +
                             // name) in the unread slot; matched runs still win.
                             let base = if unread_rows.get(ri).copied().unwrap_or(false) {
@@ -5903,6 +5945,9 @@ impl ContentPane {
                 }
             })
             .collect();
+
+        self.last_tree_label_col = tree_label_col;
+        self.last_fold_zones = fold_zones;
 
         let tree_connector_col = self.tree_connector_color(view_defs, t);
         let unread_col = self.unread_color(view_defs, t);
@@ -11243,6 +11288,40 @@ impl ContentView {
         pane.last_column_keys.get(col).cloned()
     }
 
+    /// Whether terminal cell `(x, y)` of `pane_id` sits on a tree row's fold
+    /// marker — the connector run (indent + box glyphs + expand arrow) at the
+    /// start of its label cell.
+    ///
+    /// Only rows that can actually expand or collapse answer `true`: a leaf's
+    /// indentation stays plain surface, so clicking it selects rather than
+    /// doing nothing visible. The run's width comes from the rebuild that
+    /// produced the connector (already clamped to the column), its position
+    /// from the geometry the table painted, so horizontal scrolling needs no
+    /// arithmetic here. Continuation lines of a multiline row, and a row whose
+    /// top was cut off by smooth scrolling, carry no connector and answer
+    /// `false`.
+    pub fn fold_marker_at(&self, pane_id: PaneId, x: u16, y: u16) -> bool {
+        let Some(pane) = self.find_pane(pane_id) else {
+            return false;
+        };
+        if !pane.table.is_row_top(y) {
+            return false;
+        }
+        let Some(row) = pane.table.row_at(y) else {
+            return false;
+        };
+        let Some(Some(zone)) = pane.last_fold_zones.get(row).copied() else {
+            return false;
+        };
+        let Some(col) = pane.last_tree_label_col else {
+            return false;
+        };
+        let Some((cx, width)) = pane.table.column_bounds(col) else {
+            return false;
+        };
+        x >= cx && x < cx + zone.min(width)
+    }
+
     /// Put the cursor of `pane_id` on the row painted at terminal cell
     /// `(x, y)`, as a `j`/`k` walk to that row would.
     ///
@@ -16024,6 +16103,93 @@ mod tests {
             None,
             "a data row is not a header"
         );
+    }
+
+    /// Expanded root over two children: one that can still expand, one the
+    /// adapter reports as a genuine leaf. Painted, so the click geometry the
+    /// fold marker is resolved against exists.
+    fn foldable_tree_view() -> ContentView {
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "RV")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let mut leaf = tnode_val("leaf", "Leaf", "LV");
+            leaf.has_children = Some(false);
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("kid", "Kid", "KV"), leaf],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+        paint_pane_table(&mut view, 40, 10);
+        view
+    }
+
+    /// The x range of `y` that answers as a fold marker.
+    fn marker_cells(view: &ContentView, pane_id: PaneId, y: u16) -> Vec<u16> {
+        (0..40)
+            .filter(|&x| view.fold_marker_at(pane_id, x, y))
+            .collect()
+    }
+
+    #[test]
+    fn the_fold_marker_covers_the_connector_run_of_foldable_rows() {
+        let view = foldable_tree_view();
+        let pane_id = view.active_pane_id();
+
+        // Row 0 is the expanded root: its run is the `▼ ` marker alone.
+        let root = marker_cells(&view, pane_id, 1);
+        assert_eq!(root.len(), 2, "root marker cells: {root:?}");
+        let child = marker_cells(&view, pane_id, 2);
+        assert_eq!(
+            child.len(),
+            6,
+            "the child's run is box connector + marker: {child:?}",
+        );
+        assert_eq!(
+            child[0], root[0],
+            "both runs start at the label column: {root:?} / {child:?}",
+        );
+        assert!(
+            marker_cells(&view, pane_id, 3).is_empty(),
+            "a genuine leaf has no fold marker, only indentation",
+        );
+        assert!(
+            marker_cells(&view, pane_id, 0).is_empty(),
+            "the column header is not a row",
+        );
+        assert!(
+            marker_cells(&view, pane_id, 8).is_empty(),
+            "empty space below the last row",
+        );
+    }
+
+    #[test]
+    fn the_label_text_next_to_the_marker_is_not_part_of_it() {
+        // Clicking the row's text selects; only the run in front of it folds.
+        let view = foldable_tree_view();
+        let pane_id = view.active_pane_id();
+        let root = marker_cells(&view, pane_id, 1);
+        let after = root.last().copied().expect("a marker") + 1;
+        assert!(!view.fold_marker_at(pane_id, after, 1));
+    }
+
+    #[test]
+    fn a_fold_marker_of_a_pane_that_is_gone_answers_false() {
+        let view = foldable_tree_view();
+        assert!(!view.fold_marker_at(PaneId::MAX, 0, 1));
     }
 
     #[test]

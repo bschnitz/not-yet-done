@@ -191,6 +191,7 @@ The TUI understands the mouse. What it does today:
 | Click a pane          | Focus it, exactly as the window chords would              |
 | Click a row           | Put the cursor on it, exactly as `j` / `k` would          |
 | Double-click a row    | Do to it what `Enter` does                                |
+| Click a fold marker   | Fold or unfold that tree row                              |
 | Click a column header | Sort by it: ascending → descending → unsorted             |
 | Click a popup entry   | Move the popup's cursor onto it                           |
 | Double-click an entry | Pick it, exactly as `Enter` would                         |
@@ -215,6 +216,13 @@ A click on a group header lands on the nearest selectable row, the same place
 `j` would stop. Sorting by header click is additive over any sort already
 set — it is the very mechanism behind `S` and the sort menu (`c s`), so the
 three stay in step.
+
+In a tree, the run in front of a row's label — the indentation, the box
+connectors and the `▶` / `▼` arrow — folds and unfolds that row on a single
+click, because on a tree row `Enter` is that toggle. Only rows that can
+actually expand answer to it: a leaf's indentation is plain surface and
+selects like the rest of the row, and so does the label text next to the
+arrow. Double-clicking the marker is still one toggle, not two.
 
 Popup lists work the same way and stay searchable while you click: the row you
 click carries how far the cursor has to travel to reach it, and the app walks
