@@ -26,7 +26,9 @@ use super::attachment::{JiraAttachmentNode, download_summary, write_attachments}
 use super::cache::{JiraCache, fetch_comments, fetch_issue};
 use super::comment::JiraCommentNode;
 use super::types::{attachment_node_type, comment_node_type, issue_node_type};
-use super::util::{format_file_size, other_err, prepare_target_dir, truncate_body};
+use super::util::{
+    browse_issue, format_file_size, other_err, prepare_target_dir, truncate_body,
+};
 
 mod clone;
 mod edit_full;
@@ -734,18 +736,7 @@ impl JiraIssueNode {
     /// normalized REST root (see `client::normalize_base_url`), which
     /// already has any `/browse/`, `/rest/`, etc. suffix stripped.
     fn open_in_browser(&self) -> Result<ActionOutcome> {
-        let base = self.client.base_url.trim_end_matches('/');
-        let url = format!("{base}/browse/{}", self.key);
-        std::process::Command::new("xdg-open")
-            .arg(&url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| other_err(format!("spawn xdg-open: {e}")))?;
-        Ok(ActionOutcome::Done {
-            message: Some(format!("opened {url}")),
-        })
+        browse_issue(&self.client.base_url, &self.key)
     }
 
     /// Build the ticket body + comments as one Markdown buffer — the shared
@@ -1654,9 +1645,10 @@ mod tests {
         let adapter = crate::adapter::test_adapter().await;
         let node = test_node(sample_detail());
         let types = not_yet_done_content::children::child_types(&adapter, &node);
-        assert_eq!(types.len(), 2);
+        assert_eq!(types.len(), 3);
         assert_eq!(types[0].type_id, "jira:comment");
         assert_eq!(types[1].type_id, "jira:attachment");
+        assert_eq!(types[2].type_id, "jira:link");
     }
 
     #[test]

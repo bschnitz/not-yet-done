@@ -1,6 +1,6 @@
 //! Small, dependency-free helpers shared across the adapter submodules.
 
-use not_yet_done_content::ContentError;
+use not_yet_done_content::{ActionOutcome, ContentError, Result};
 
 // Path resolution + filename sanitisation for the `download all` batch action
 // are shared across adapters — re-export the canonical helpers from the
@@ -9,6 +9,24 @@ pub(super) use not_yet_done_content::download::{prepare_target_dir, safe_attachm
 
 pub(super) fn other_err(msg: String) -> ContentError {
     ContentError::Other(msg.into())
+}
+
+/// Open an issue's Jira web page in the user's browser: `{base}/browse/{key}`,
+/// handed to `xdg-open` detached (we don't wait for the browser to exit).
+/// Shared by the issue node's `open_in_browser` and the link node's, which
+/// points at the ticket on the other end of the link.
+pub(super) fn browse_issue(base_url: &str, key: &str) -> Result<ActionOutcome> {
+    let url = format!("{}/browse/{key}", base_url.trim_end_matches('/'));
+    std::process::Command::new("xdg-open")
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| other_err(format!("spawn xdg-open: {e}")))?;
+    Ok(ActionOutcome::Done {
+        message: Some(format!("opened {url}")),
+    })
 }
 
 /// Format a file size in bytes to a human-readable string.
