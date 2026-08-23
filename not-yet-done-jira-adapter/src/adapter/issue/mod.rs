@@ -175,6 +175,13 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
                 allowed_values: None,
             },
             MetadataField {
+                key: "labels".into(),
+                value: detail.labels.join(", "),
+                display_label: "Labels".into(),
+                editable: false,
+                allowed_values: None,
+            },
+            MetadataField {
                 key: "fix_versions".into(),
                 value: detail.fix_versions.clone(),
                 display_label: "Fix Versions".into(),
@@ -187,10 +194,12 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
 
 /// The **list-row** metadata projection — must mirror the field keys
 /// `JiraRoot::list_issues` emits (`key, type, status, priority, assignee,
-/// creator, fix_versions, updated`), so the post-edit row patch refreshes the
-/// same columns the list rendered. `attachments` is intentionally omitted: the
-/// detail fetch doesn't carry an attachment count, so the patch keeps the row's
-/// last-known value.
+/// creator, labels, fix_versions, updated`), so the post-edit row patch
+/// refreshes the same columns the list rendered. `labels` matters most here:
+/// it is the one list column the buffer can *change*, so without it the row
+/// would keep the pre-edit labels until a full reload. `attachments` is
+/// intentionally omitted: the detail fetch doesn't carry an attachment count,
+/// so the patch keeps the row's last-known value.
 fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
     let f = |key: &str, value: String, label: &str| MetadataField {
         key: key.into(),
@@ -207,6 +216,7 @@ fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
             f("priority", detail.priority.clone(), "Priority"),
             f("assignee", detail.assignee.clone(), "Assignee"),
             f("creator", detail.creator.clone(), "Creator"),
+            f("labels", detail.labels.join(", "), "Labels"),
             f("fix_versions", detail.fix_versions.clone(), "Fix Versions"),
             f("updated", detail.updated.clone(), "Updated"),
         ],
@@ -1096,13 +1106,15 @@ mod tests {
     /// The post-edit row patch overlays `row_summary()` onto the visible list
     /// row, merging by key. For that to refresh the right columns, the row
     /// projection's keys must mirror what `JiraRoot::list_issues` emits
-    /// (`key, type, status, priority, assignee, creator, fix_versions, updated`)
-    /// and carry the fresh detail values. `attachments` is deliberately absent —
-    /// the detail fetch has no count — so the patch keeps the row's last-known
-    /// value there.
+    /// (`key, type, status, priority, assignee, creator, labels, fix_versions,
+    /// updated`) and carry the fresh detail values. `attachments` is
+    /// deliberately absent — the detail fetch has no count — so the patch keeps
+    /// the row's last-known value there.
     #[test]
     fn row_summary_mirrors_list_row_keys_and_values() {
-        let node = test_node(sample_detail());
+        let mut detail = sample_detail();
+        detail.labels = vec!["backend".into(), "urgent".into()];
+        let node = test_node(detail);
         let row = node.row_summary();
 
         assert_eq!(row.id, "PROJ-42");
@@ -1118,6 +1130,7 @@ mod tests {
                 "priority",
                 "assignee",
                 "creator",
+                "labels",
                 "fix_versions",
                 "updated"
             ]
@@ -1141,6 +1154,8 @@ mod tests {
         assert_eq!(value("creator"), "bob");
         assert_eq!(value("fix_versions"), "1.2.0, 1.3.0");
         assert_eq!(value("type"), "Bug");
+        // The column the buffer can change: one cell, comma-separated.
+        assert_eq!(value("labels"), "backend, urgent");
     }
 
     /// A stub that never hydrated has no detail; `row_summary()` then yields an

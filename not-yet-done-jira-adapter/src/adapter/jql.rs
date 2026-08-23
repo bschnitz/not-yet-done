@@ -14,6 +14,9 @@ pub(super) fn jql_field_for_column(column: &str) -> Option<&'static str> {
         "priority" => Some("priority"),
         "assignee" => Some("assignee"),
         "creator" => Some("creator"),
+        // Ordering by `labels` compares the issue's label list as Jira renders
+        // it, so an unlabelled issue sorts as the empty value (first ascending).
+        "labels" => Some("labels"),
         // JQL names the field in the singular even though an issue can carry
         // several versions. Ordering follows the project's version *sequence*,
         // not the version name — so `1.9` sorts before `1.10` when the project
@@ -38,6 +41,7 @@ fn issue_row_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("priority", "Priority"),
         ColumnSchema::new("assignee", "Assignee"),
         ColumnSchema::new("creator", "Creator"),
+        ColumnSchema::new("labels", "Labels"),
         ColumnSchema::new("fix_versions", "Fix Versions"),
         ColumnSchema::new("updated", "Updated").typed("datetime"),
         ColumnSchema::new("attachments", "Attachm.").typed("number"),
@@ -294,6 +298,23 @@ mod tests {
         assert_eq!(order.clause, "ORDER BY fixVersion DESC");
         // Advertised as sortable, so the sort menu offers it at all.
         assert!(issue_columns().iter().any(|c| c.key == "fix_versions"));
+    }
+
+    /// The label column is the one Jira field a row carries as a *list*. It
+    /// keeps its own name in JQL, so sorting is server-side like every other
+    /// column — and the sort menu must offer it.
+    #[test]
+    fn labels_column_sorts_server_side() {
+        assert_eq!(jql_field_for_column("labels"), Some("labels"));
+        let order = build_order_by(&[key("labels", SortDirection::Asc)]);
+        assert_eq!(order.clause, "ORDER BY labels ASC");
+        assert!(
+            issue_columns()
+                .iter()
+                .any(|c| c.key == "labels" && c.sortable)
+        );
+        // The bookmarks list sorts locally, so it carries the column too.
+        assert!(bookmark_columns().iter().any(|c| c.key == "labels"));
     }
 
     #[test]
