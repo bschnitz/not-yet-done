@@ -16,7 +16,7 @@ views:
   # This tab has two subtabs: the normal ticket list (`key: i`) and the
   # bookmarks list (`key: m`, defined below). Switch between them with those
   # keys. Both render the same `jira:issue` rows, so drill-down, comments,
-  # attachments, edit and transitions behave identically — the bookmarks
+  # attachments, links, edit and transitions behave identically — the bookmarks
   # subtab only swaps the root listing (bookmarked issues) and drops the
   # query/JQL menu. They share one bookmark set (stored per Jira server).
   - name: tickets
@@ -193,6 +193,10 @@ views:
         key: a
         type: navigate
         navigate_to: "jira:attachment"
+      - name: links
+        key: l
+        type: navigate
+        navigate_to: "jira:link" # the issue's linked tickets, see below
       - name: transition
         key: t
         type: custom
@@ -313,6 +317,80 @@ views:
         shortcuts:
           d: delete
 
+      # The issue's linked tickets. A row is the *link*, not the ticket at its
+      # other end: `relation` is the phrase seen from this issue's side ("blocks
+      # PROJECT-2", "is blocked by PROJECT-3"), the remaining columns describe
+      # the ticket on the other end, whose key travels in the `key` field.
+      #
+      # That split is what makes `node_id_from: key` below work: the preview and
+      # the `open ticket` action retarget themselves at the *linked issue*
+      # (`jira:issue`), while `delete` stays on the row and only removes the
+      # link. Without `node_id_from` both would address the link node, which has
+      # no content of its own.
+      #
+      # Jira returns all links of an issue in one field and offers no server-
+      # side ordering for them, so every column here is sorted locally (`S`).
+      - name: Links
+        node_type: "jira:link"
+        columns:
+          - key: relation
+            label: Relation
+            style: secondary
+            sizing: max
+          - key: key
+            label: Key
+            style: accent
+            sizing: max
+          - key: type
+            label: Type
+            sizing: max
+          - key: status
+            label: Status
+            style: success
+            sizing: max
+          - key: priority
+            label: Priority
+            style: warning
+            sizing: max
+          - key: assignee
+            label: Assignee
+            sizing: "fixed(16)"
+          - key: summary
+            label: Summary
+            sizing: "flex(1)"
+
+        # `source: content` would preview the link node, which carries no body.
+        # `source: action` + `node_id_from: key` instead renders the same buffer
+        # the issue-level `edit + comments` action opens — for the linked ticket.
+        preview:
+          enabled: true
+          source: action
+          action: edit_with_comments
+          node_id_from: key
+          split: horizontal
+          ratio: 50
+          keybinding: p
+
+        actions:
+          - name: fuzzy filter
+            key: f
+            type: fuzzy_filter
+            fuzzy_filter:
+              fields: [key, summary, relation]
+          - name: open ticket
+            key: e
+            type: edit
+            id: edit_markdown
+            node_id_from: key # edits the linked issue, not the link
+          - name: open in browser
+            key: o
+            type: custom
+            id: open_in_browser # opens the *linked* ticket in the browser
+        # Like the attachment `delete` above: a shortcut, not an action, so the
+        # TUI can ask `(y/n)` first. It unlinks only — the ticket stays.
+        shortcuts:
+          d: delete
+
   # ── Bookmarks subtab ─────────────────────────────────────────────────────
   # Switch here from the tickets subtab with `m`; switch back with `i`. This
   # is the ordinary tickets view restricted to the issues you bookmarked
@@ -409,6 +487,10 @@ views:
         key: a
         type: navigate
         navigate_to: "jira:attachment"
+      - name: links
+        key: l
+        type: navigate
+        navigate_to: "jira:link"
       - name: transition
         key: t
         type: custom
@@ -486,5 +568,61 @@ views:
             key: D
             type: custom
             id: download_all
+        shortcuts:
+          d: delete
+
+      # Same level as in the tickets subtab above — see there for why the
+      # ticket-level bindings carry `node_id_from: key`.
+      - name: Links
+        node_type: "jira:link"
+        columns:
+          - key: relation
+            label: Relation
+            style: secondary
+            sizing: max
+          - key: key
+            label: Key
+            style: accent
+            sizing: max
+          - key: type
+            label: Type
+            sizing: max
+          - key: status
+            label: Status
+            style: success
+            sizing: max
+          - key: priority
+            label: Priority
+            style: warning
+            sizing: max
+          - key: assignee
+            label: Assignee
+            sizing: "fixed(16)"
+          - key: summary
+            label: Summary
+            sizing: "flex(1)"
+        preview:
+          enabled: true
+          source: action
+          action: edit_with_comments
+          node_id_from: key
+          split: horizontal
+          ratio: 50
+          keybinding: p
+        actions:
+          - name: fuzzy filter
+            key: f
+            type: fuzzy_filter
+            fuzzy_filter:
+              fields: [key, summary, relation]
+          - name: open ticket
+            key: e
+            type: edit
+            id: edit_markdown
+            node_id_from: key
+          - name: open in browser
+            key: o
+            type: custom
+            id: open_in_browser
         shortcuts:
           d: delete

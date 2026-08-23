@@ -2996,6 +2996,59 @@ views:
         }
     }
 
+    /// The shipped `docs/examples/views/jira.yaml` must stay loadable, and its
+    /// link level must keep the wiring that makes it useful: the row is the
+    /// *link*, so the preview and the ticket-level action retarget themselves
+    /// at the linked issue via `node_id_from: key`. Losing that field is a
+    /// silent downgrade (an empty preview, an edit on the wrong node), which no
+    /// other check would catch.
+    #[test]
+    fn example_jira_yaml_parses_and_validates_the_link_level() {
+        let yaml = include_str!("../../../docs/examples/views/jira.yaml");
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).expect("jira.yaml should deserialize");
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("jira.yaml should pass the semantic validator");
+
+        // Both subtabs (tickets, bookmarks) reach the level and carry it.
+        assert_eq!(cfg.views.len(), 2);
+        for view in &cfg.views {
+            assert!(
+                view.actions
+                    .iter()
+                    .any(|a| a.navigate_to.as_deref() == Some("jira:link")),
+                "{}: an action navigates to jira:link",
+                view.name
+            );
+            let links = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "jira:link")
+                .unwrap_or_else(|| panic!("{}: a jira:link child level", view.name));
+
+            let keys: Vec<&str> = links.columns.iter().map(|c| c.key.as_str()).collect();
+            assert!(keys.contains(&"relation") && keys.contains(&"key"));
+
+            let preview = links.preview.as_ref().expect("the link level previews");
+            assert_eq!(preview.node_id_from.as_deref(), Some("key"));
+            assert!(
+                links
+                    .actions
+                    .iter()
+                    .any(|a| a.id.as_deref() == Some("edit_markdown")
+                        && a.node_id_from.as_deref() == Some("key")),
+                "{}: the edit action addresses the linked ticket",
+                view.name
+            );
+            assert_eq!(
+                links.shortcuts.get(&'d').map(ShortcutDef::action),
+                Some("delete")
+            );
+        }
+    }
+
     /// Every shipped view example is something a user copies wholesale, so
     /// none may carry a key the schema drops — a dead `key:` on a child, a
     /// typo, a field that moved. This is the same check the loader runs at
