@@ -203,15 +203,34 @@ The TUI understands the mouse. What it does today:
 | Triple-click + drag   | Extend the selection by whole lines                       |
 | `Alt` + drag          | Select a rectangle instead of flowing text                |
 | Release               | Copy the selection to the clipboard                       |
-| Wheel up / down       | Scroll the pane under the pointer, as `↑` / `↓` would     |
+| Wheel up / down       | Scroll the pane under the pointer, cursor stays put       |
 | Wheel over the tabs   | Walk through the tabs, wrapping                           |
 | `Shift` + drag        | Bypass the app and use the terminal's own selection       |
 
 One button does both jobs: a press and release on the same cell is a click and
 means whatever is drawn there, anything that moved is a selection. The wheel
 takes the focus with it, so a scrolled pane is also the pane the arrow keys
-talk to — one scrolling path, not two. Nothing the mouse reaches is
-mouse-only; every one of these has a key.
+talk to. Nothing the mouse reaches is mouse-only; every one of these has a key.
+
+**The wheel pans the view, it does not move the cursor.** Over a table the
+content scrolls under a cursor that stays on its row — the way a wheel behaves
+everywhere else, and the one thing no key does here (`j`/`k`, `ctrl+d` and `G`
+all move the cursor and let the view follow). The cursor only comes along when
+the window would leave it behind, and then it rides the edge the content
+scrolls away from, so it never drops off-screen. Once the view sits at the top
+or bottom the notch falls back to the cursor, which keeps the very first and
+last row reachable with the wheel alone. Set `mouse.wheel: cursor` to get the
+old behaviour back (the wheel then walks the cursor like `j`/`k`), and
+`mouse.wheel_rows` for how far one notch goes:
+
+```yaml
+mouse:
+  wheel: view # or: cursor
+  wheel_rows: 3
+```
+
+In the chat view — the one that scrolls by physical line rather than by row —
+`wheel_rows` counts lines, matching what `j`/`k` do there.
 
 **A popup owns the input, for the mouse too.** While one is open, a click
 outside it acts on nothing: no tab switches, no cursor moves, no pane takes the

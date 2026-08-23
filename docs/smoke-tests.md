@@ -5715,12 +5715,45 @@ sits above the list.
       wraps the way the tab keys do.
 - [ ] Wheel over a popup: the popup's list scrolls, not the table behind it.
 
+The wheel pans the view (`mouse.wheel: view`, the default) — take a table
+longer than the pane for these:
+
+- [ ] Put the cursor on a row in the middle, wheel **down** one notch: the
+      content moves up by three rows and the **highlight stays on its row** —
+      it slides up the screen with the row, it does not walk down the list.
+- [ ] Keep wheeling down: once the row would leave the top edge the highlight
+      comes along and rides the **top** edge from then on. Wheel back up and it
+      rides the **bottom** edge the same way.
+- [ ] Wheel down until the last row rests on the bottom edge: scrolling stops
+      there (no empty space scrolled in). Keep wheeling: now the **cursor**
+      walks on and reaches the very last row. Same at the top.
+- [ ] After panning, press `j` once: it continues from the highlighted row, not
+      from wherever the cursor was before the wheel — pane focus and cursor
+      agree.
+- [ ] Pan, then let a reload happen (or hit the reload key): the view stays
+      where it was panned to instead of jumping back to the cursor's old
+      position.
+- [ ] Wheel over a table whose rows all fit in the pane: nothing scrolls, and
+      the cursor walks instead of standing still.
+- [ ] In a **tree** with group headers, pan so the top edge lands on a header
+      row: the highlight lands on the first selectable row below it, not on the
+      header.
+- [ ] In the **chat** view (smooth scrolling): a notch moves three _physical
+      lines_, so a long message glides rather than jumping, exactly as `j`/`k`
+      do there.
+- [ ] Set `mouse.wheel: cursor` in `tui.yaml`, restart: the wheel walks the
+      cursor again like `j`/`k` and the view only follows at the edge.
+- [ ] Set `mouse.wheel_rows: 1`, restart: one row (one line in the chat) per
+      notch, in both modes.
+
 Regressions to rule out, because mouse reporting takes things away from the
 terminal:
 
-- [ ] The **wheel** still scrolls the focused list, three lines per notch, up
-      and down. (Without reporting the terminal turned the wheel into arrow
-      keys; the app now has to do that itself.)
+- [ ] The wheel still scrolls the focused list, three rows per notch, up and
+      down. (Without reporting the terminal turned the wheel into arrow keys;
+      the app now has to do that itself.)
+- [ ] Wheel **sideways** (if the mouse has it) and wheel inside the editor
+      overlay: unchanged — those still go through the arrow keys.
 - [ ] `Shift` + drag still gives the **terminal's own** selection — spanning
       panes, whole rows, its own colours. This is the escape hatch and needs
       no configuration.

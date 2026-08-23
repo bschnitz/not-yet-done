@@ -5907,6 +5907,37 @@ impl App {
         self.handle_key("enter")
     }
 
+    /// Pan a pane of the active view by `delta` rows, as a scroll wheel does:
+    /// the content moves under a cursor that stays where it is.
+    ///
+    /// This is the one mouse gesture without a keyboard equivalent — every
+    /// key that scrolls a table moves the cursor and lets the viewport follow
+    /// (`j`/`k`, `ctrl+d`, `G`), which is why the wheel used to be wired to
+    /// synthetic arrows. It still is at the edges: `None` means the viewport
+    /// could not move (top or bottom reached, or everything fits), and the
+    /// caller then walks the cursor instead so the first and last row stay
+    /// reachable with the wheel alone.
+    pub(crate) fn wheel_content_pane(
+        &mut self,
+        pane_id: crate::views::content_view::PaneId,
+        delta: isize,
+    ) -> Option<EditorRequest> {
+        if self.has_input_popup() {
+            return None;
+        }
+        let Tab::Content(idx) = self.active_tab;
+        let (panned, msg) = self.content_view_mut(idx)?.scroll_pane_view(pane_id, delta);
+        if !panned {
+            return None;
+        }
+        let req = match msg {
+            Some(m) => self.process_sub_view_message(m),
+            None => EditorRequest::None,
+        };
+        self.sync_components();
+        Some(req)
+    }
+
     /// Open the shortcut menu (default `ctrl+y`).
     ///
     /// Collects two row sets: the *context* rows from the focused pane's
