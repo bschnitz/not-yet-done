@@ -537,6 +537,13 @@ fn issue_summary(
             allowed_values: None,
         },
         MetadataField {
+            key: "labels".into(),
+            value: t.labels,
+            display_label: "Labels".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
             key: "fix_versions".into(),
             value: t.fix_versions,
             display_label: "Fix Versions".into(),
@@ -835,6 +842,7 @@ mod bookmark_marker_tests {
             priority: "High".into(),
             assignee: "me".into(),
             creator: "someone else".into(),
+            labels: "backend, urgent".into(),
             fix_versions: "1.2.0".into(),
             issue_type: "Bug".into(),
             updated: "2026-06-30".into(),

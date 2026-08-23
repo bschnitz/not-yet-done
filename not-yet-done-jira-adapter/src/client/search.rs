@@ -19,6 +19,19 @@ fn version_names(versions: Option<Vec<NameField>>) -> String {
         .join(", ")
 }
 
+/// Join a `labels` array for display. Jira keeps labels as plain strings
+/// without spaces, several per issue, so the display value is the same
+/// comma-separated list [`version_names`] produces; blank entries are
+/// dropped rather than rendered as an empty slot.
+fn label_names(labels: Option<Vec<String>>) -> String {
+    labels
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A simplified Jira ticket for display.
 #[derive(Debug, Clone)]
 pub struct JiraTicket {
@@ -31,6 +44,10 @@ pub struct JiraTicket {
     /// Jira reports no creator — deleted accounts, or a deployment that
     /// strips the field.
     pub creator: String,
+    /// The issue's `labels`, comma-separated. Empty for unlabelled issues.
+    /// The detail path keeps them as a `Vec` because it edits them
+    /// ([`JiraIssueDetail::labels`]); a row only ever renders them.
+    pub labels: String,
     /// Names of the issue's `fixVersions`, comma-separated. Empty when the
     /// issue is unscheduled — which is the common case, so the column is
     /// expected to be blank on many rows.
@@ -105,6 +122,8 @@ struct IssueFields {
     #[serde(default)]
     creator: Option<Assignee>,
     issuetype: Option<NameField>,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
     #[serde(default, rename = "fixVersions")]
     fix_versions: Option<Vec<NameField>>,
     #[serde(default)]
@@ -152,7 +171,7 @@ impl JiraClient {
             "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
-            "fields": ["summary", "status", "priority", "assignee", "creator", "issuetype", "fixVersions", "updated", "attachment"]
+            "fields": ["summary", "status", "priority", "assignee", "creator", "issuetype", "labels", "fixVersions", "updated", "attachment"]
         });
 
         http_log::log_request("POST", &url);
@@ -200,6 +219,7 @@ impl JiraClient {
                     .issuetype
                     .and_then(|t| t.name)
                     .unwrap_or_default(),
+                labels: label_names(issue.fields.labels),
                 fix_versions: version_names(issue.fields.fix_versions),
                 updated: issue.fields.updated.unwrap_or_default(),
                 attachments_count: issue.fields.attachment.map(|v| v.len() as u64).unwrap_or(0),

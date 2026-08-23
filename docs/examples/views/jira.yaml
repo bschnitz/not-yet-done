@@ -71,6 +71,14 @@ views:
         label: Creator
         style: secondary
         sizing: "fixed(16)"
+      # The issue's labels, comma-separated when it carries several, blank
+      # when it has none. Sortable server-side (JQL `ORDER BY labels`), so the
+      # order is Jira's over the whole result — not just the page on screen.
+      # Editable, but not here: change them in the ticket buffer's `labels:`
+      # line (`e`), and the row picks the new value up on save.
+      - key: labels
+        label: Labels
+        sizing: max
       # The issue's `fixVersions`, comma-separated when it carries several.
       # Read-only, and blank for unscheduled issues. Sortable server-side —
       # note that JQL spells the field singular (`ORDER BY fixVersion`), which

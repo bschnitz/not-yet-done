@@ -60,10 +60,11 @@ impl Anonymizer for JiraAnonymizer {
             "status" => pseudo_status(value),
             // Free text (issue summary; the generic `label`, which is the
             // summary for issues and a person/filename for sub-nodes — all safe
-            // as free text). `fix_versions` belongs here rather than with the
-            // pass-through enums below: version names are project-authored and
-            // routinely embed a product or customer term.
-            "summary" | "label" | "fix_versions" => self.std.scrub_value(key, value),
+            // as free text). `fix_versions` and `labels` belong here rather than
+            // with the pass-through enums below: version and label names are
+            // authored inside the project and routinely embed a product or
+            // customer term.
+            "summary" | "label" | "labels" | "fix_versions" => self.std.scrub_value(key, value),
             // Structural / addressing — verbatim. (`type`/`priority` are standard
             // enums — "Bug", "Story", "High" — not customer-identifying.)
             "type" | "priority" | "updated" | "created" | "size" | "mime_type" | "attachments" => {

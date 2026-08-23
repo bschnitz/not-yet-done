@@ -4718,6 +4718,34 @@ the column has to be present in the private view YAML — in `jira.yaml` in
 - [ ] Anon mode: version names appear replaced (they can contain product or
       customer terms), not verbatim.
 
+## The labels column (Jira)
+
+The column key is `labels`; JQL knows the same name, so the sort goes to the
+server like every other Jira column. Same prerequisite as above: the column
+has to be listed in the private view YAML — in `jira.yaml` in **both** column
+lists (tickets and bookmarks) and, if used, in `card.fields`. Unlike the other
+read-only columns this one is **editable** — via the ticket buffer, not the
+cell — which is what the post-edit item below is about.
+
+- [ ] Ticket list: the column "Labels" is filled in on labelled tickets and
+      **empty** on the rest (no `[]`, no stray comma). A ticket with several
+      labels shows them comma-separated in one cell.
+- [ ] The bookmarks subtab (`m`) shows the column as well.
+- [ ] Sorting with `S` → `labels` is in the list; ascending, the unlabelled
+      tickets come first, descending they come last. No JQL error banner —
+      that would be the symptom of a deployment that refuses
+      `ORDER BY labels`; the fix is to drop the mapping in `jql.rs`, which
+      leaves the column as display-only. (Confirmed accepted against a live
+      Jira Server instance; the fallback is for deployments that differ.)
+- [ ] Open a ticket with `e`: the `labels:` line above the `---` marker lists
+      the same labels as the cell (as `ll-…` slugs). Add one, save → the row's
+      cell shows it **immediately**, without a reload (the post-edit row patch
+      carries `labels`).
+- [ ] Remove every label and save → the cell goes empty, not stale.
+- [ ] Card mode (`v c`): the field appears as "Labels" with a label.
+- [ ] Anon mode: label names appear replaced (they are project-authored and
+      can carry customer or product terms), not verbatim.
+
 ## Comment preview: truncating on characters, not bytes
 
 A regression: the preview in the comment list truncated at 80 **bytes**; if
