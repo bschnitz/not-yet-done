@@ -872,6 +872,90 @@ impl Table {
         self.adjust_scroll();
     }
 
+    /// Pan the **viewport** by `delta` steps (positive = towards the end)
+    /// without treating the selection as the anchor. Returns `true` if the
+    /// viewport actually moved; `false` means it was already clamped at an
+    /// edge (or everything fits), which callers use to fall back to moving
+    /// the cursor instead — that is what keeps the very first / last row
+    /// reachable by the same gesture.
+    ///
+    /// This is the mouse-wheel model, the opposite of
+    /// [`scroll_by`](Self::scroll_by): there the selection moves and the
+    /// viewport follows, here the viewport moves and the selection only comes
+    /// along when the window would leave it behind. The step unit follows the
+    /// scroll mode — physical lines in smooth mode (same unit as `j`/`k`
+    /// there), whole rows in discrete mode.
+    ///
+    /// The trailing clamp is not cosmetic: in discrete mode the viewport is
+    /// normally *derived* from the selection, and every rebuild re-derives it
+    /// via `restore_selected` → `adjust_scroll`. A pan that left the selection
+    /// off-screen would therefore be yanked back on the next frame, so the
+    /// selection is pulled onto the edge the content scrolls away from.
+    pub fn scroll_view(&mut self, delta: isize) -> bool {
+        if self.rows.is_empty() || delta == 0 {
+            return false;
+        }
+        if self.smooth_scroll {
+            // Smooth mode is already viewport-first and hands the focus off
+            // on its own (see `handoff_after_scroll`).
+            return self.scroll_lines(delta);
+        }
+        let line_budget = self.last_line_budget.max(1);
+        let before = self.scroll_offset;
+        let max = self.max_scroll_row(line_budget);
+        let next = (before as isize + delta).clamp(0, max as isize) as usize;
+        if next == before {
+            return false;
+        }
+        self.scroll_offset = next;
+        self.clamp_selection_into_view(line_budget);
+        true
+    }
+
+    /// Largest `scroll_offset` that still shows the last row: walk the rows
+    /// from the end while their heights fit into `line_budget`. Scrolling
+    /// stops there rather than running the content off the top edge.
+    fn max_scroll_row(&self, line_budget: usize) -> usize {
+        let mut used = 0usize;
+        let mut first = self.rows.len();
+        for (i, row) in self.rows.iter().enumerate().rev() {
+            let h = row.height();
+            if used + h > line_budget {
+                break;
+            }
+            used += h;
+            first = i;
+        }
+        // A single row taller than the whole viewport fits nowhere, which
+        // would leave `first` past the end and make the tail unreachable.
+        first.min(self.rows.len() - 1)
+    }
+
+    /// Move the selection to the nearest selectable row inside the current
+    /// viewport, entering from the side it fell off. A window that holds no
+    /// selectable row at all (nothing but group headers) leaves the selection
+    /// where it is — the next rebuild then scrolls it back into view, which is
+    /// preferable to dropping the cursor somewhere unrelated.
+    fn clamp_selection_into_view(&mut self, line_budget: usize) {
+        let visible = self.visible_row_count_from(self.scroll_offset, line_budget);
+        if visible == 0 {
+            return;
+        }
+        let top = self.scroll_offset;
+        let bottom = top + visible - 1;
+        if self.selected_row >= top && self.selected_row <= bottom {
+            return;
+        }
+        let target = if self.selected_row < top {
+            (top..=bottom).find(|&i| self.rows[i].selectable)
+        } else {
+            (top..=bottom).rev().find(|&i| self.rows[i].selectable)
+        };
+        if let Some(row) = target {
+            self.selected_row = row;
+        }
+    }
+
     /// Scroll by half a viewport towards (`down`) or away from the end.
     /// Smooth mode steps by physical lines; discrete mode by whole rows.
     pub fn scroll_half_page(&mut self, down: bool) {
@@ -1690,5 +1774,100 @@ mod tests {
         assert!(t.is_link_hop_active());
         t.link_hop_close();
         assert!(!t.is_link_hop_active());
+    }
+
+    // --- wheel panning (scroll_view) ---
+
+    /// Discrete table of `n` single-line rows with a viewport of `budget`
+    /// lines, as if it had just been painted.
+    fn panning_table(n: usize, budget: usize) -> Table {
+        let mut t = Table::default().with_rows(
+            (0..n)
+                .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+                .collect(),
+        );
+        t.last_line_budget = budget;
+        t.last_visible_data_rows = budget;
+        t
+    }
+
+    #[test]
+    fn panning_moves_the_viewport_and_leaves_the_selection_alone() {
+        let mut t = panning_table(20, 5);
+        t.set_selected(4);
+        assert!(t.scroll_view(3));
+        assert_eq!(t.scroll_offset, 3);
+        assert_eq!(t.selected_row, 4, "still inside the window, so untouched");
+    }
+
+    #[test]
+    fn the_selection_rides_the_edge_it_would_fall_off() {
+        let mut t = panning_table(20, 5);
+        t.set_selected(0);
+        // Window becomes rows 3..7 — row 0 is above it.
+        assert!(t.scroll_view(3));
+        assert_eq!(t.selected_row, 3, "entered from the top edge");
+        // Park it at the far end of the window and scroll back up: window
+        // 0..4, so the selection comes down onto the bottom edge.
+        t.set_selected(7);
+        assert!(t.scroll_view(-3));
+        assert_eq!(t.scroll_offset, 0);
+        assert_eq!(t.selected_row, 4, "entered from the bottom edge");
+    }
+
+    #[test]
+    fn panning_stops_at_both_edges_and_says_so() {
+        let mut t = panning_table(8, 5);
+        assert!(!t.scroll_view(-1), "already at the top");
+        assert!(t.scroll_view(99));
+        assert_eq!(t.scroll_offset, 3, "last row rests on the bottom edge");
+        assert!(!t.scroll_view(1), "bottom reached");
+    }
+
+    #[test]
+    fn a_table_that_fits_cannot_be_panned() {
+        let mut t = panning_table(4, 10);
+        assert!(!t.scroll_view(3));
+        assert_eq!(t.scroll_offset, 0);
+    }
+
+    #[test]
+    fn panning_counts_the_height_of_multiline_rows() {
+        // Three-line rows: a 9-line viewport holds exactly three of them, so
+        // the last valid top row of six is index 3.
+        let mut t = Table::default().with_rows((0..6).map(|i| chat_row(&i.to_string())).collect());
+        t.last_line_budget = 9;
+        t.last_visible_data_rows = 3;
+        assert!(t.scroll_view(99));
+        assert_eq!(t.scroll_offset, 3);
+        assert_eq!(t.selected_row, 3, "pulled onto the new top edge");
+    }
+
+    #[test]
+    fn a_pan_survives_the_next_rebuild() {
+        // The regression this guards: in discrete mode the viewport is derived
+        // from the selection on every rebuild, so a pan is only real if the
+        // selection came along.
+        let mut t = panning_table(20, 5);
+        t.set_selected(0);
+        t.scroll_view(6);
+        let after_pan = t.scroll_offset;
+        t.restore_selected(t.selected_row);
+        assert_eq!(t.scroll_offset, after_pan);
+    }
+
+    #[test]
+    fn group_headers_are_skipped_when_the_selection_enters_the_window() {
+        let mut rows: Vec<TableWidgetRow> = (0..12)
+            .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+            .collect();
+        rows[3].selectable = false;
+        let mut t = Table::default().with_rows(rows);
+        t.last_line_budget = 5;
+        t.last_visible_data_rows = 5;
+        t.set_selected(0);
+        // Window 3..7; row 3 is a header, so the cursor lands on row 4.
+        assert!(t.scroll_view(3));
+        assert_eq!(t.selected_row, 4);
     }
 }

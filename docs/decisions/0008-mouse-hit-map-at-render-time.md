@@ -104,3 +104,30 @@ copying work over SSH.
 - The map describes one frame. Anything that wants to answer a click has to be
   drawn, which is a limitation worth naming: an off-screen row cannot be
   clicked, and scrolling is what brings it into reach.
+
+## Amendment (2026-08-23) — the wheel pans, and that is a second path
+
+"The wheel feeds synthetic arrow keys, and no second scrolling implementation"
+held for exactly as long as nobody used it on a table. The keys all scroll by
+_moving the cursor_ and letting the viewport follow, so the wheel inherited
+that: three notches down walked the selection three rows and the view only
+budged at the edge. That is not what a wheel does anywhere else, and no
+keystroke can stand in for what it should do, because panning without moving
+the cursor is a gesture the keymap does not contain.
+
+So `Table::scroll_view` was added, and with it a genuinely second scrolling
+path — accepted deliberately, and kept as narrow as possible:
+
+- Smooth mode (the chat) already worked viewport-first, so it delegates to the
+  existing `scroll_lines`; only the discrete branch is new code.
+- The pan ends by pulling the selection onto the edge the content scrolls away
+  from. That is not cosmetic: in discrete mode the offset is derived from the
+  selection on every rebuild (`restore_selected` → `adjust_scroll`), so a pan
+  that left the cursor behind would be silently undone one frame later.
+- Everything the pan does not cover still goes through the keys: sideways
+  wheeling, wheeling behind a popup or in the editor, and both edges — where
+  the pan reports that it could not move and the cursor takes over, so the
+  first and last row stay reachable with the wheel alone.
+- `mouse.wheel: cursor` restores the original behaviour without a rebuild,
+  which is the honest form of "we changed a default": the old path is still
+  there and still exercised.

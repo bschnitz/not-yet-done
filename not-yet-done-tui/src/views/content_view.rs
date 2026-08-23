@@ -11433,6 +11433,35 @@ impl ContentView {
         Some(SubViewMessage::SelectionChanged(None))
     }
 
+    /// Pan `pane_id`'s viewport by `delta` steps (positive = towards the end
+    /// of the list) the way a scroll wheel does: the content moves, the cursor
+    /// stays on its row and only comes along when the window would leave it
+    /// behind.
+    ///
+    /// Returns `(panned, message)` — `panned` is `false` when the viewport was
+    /// already at an edge, which lets the caller fall back to moving the
+    /// cursor so the first / last row stays reachable by the same gesture. The
+    /// message is only produced when the cursor did move, because that is what
+    /// the preview, the detail pane and the action bar hang off.
+    pub fn scroll_pane_view(
+        &mut self,
+        pane_id: PaneId,
+        delta: isize,
+    ) -> (bool, Option<SubViewMessage>) {
+        let tree = &mut self.pane_trees[self.active_subtab];
+        let Some(leaf) = tree.root.find_leaf_mut(pane_id) else {
+            return (false, None);
+        };
+        let pane = &mut leaf.pane;
+        let before = pane.table.selected_row();
+        let panned = pane.table.scroll_view(delta);
+        let moved = pane.table.selected_row() != before;
+        (
+            panned,
+            moved.then_some(SubViewMessage::SelectionChanged(None)),
+        )
+    }
+
     fn dispatch_view_claim(&mut self, source: &KeySource) -> Option<SubViewMessage> {
         match source {
             KeySource::YamlSubtab { view } => {

@@ -141,17 +141,33 @@ impl Default for TuiConfig {
 // MouseConfig — pointer behaviour (colours live in ThemeConfig)
 // ---------------------------------------------------------------------------
 
+/// What one notch of the wheel does over a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelMode {
+    /// Pan the viewport and leave the cursor on its row — how a scroll wheel
+    /// behaves everywhere else. The cursor only comes along when the window
+    /// would otherwise leave it behind.
+    #[default]
+    View,
+    /// Move the cursor and let the viewport follow, exactly as holding `j` or
+    /// `k` does. This was the only behaviour before panning existed.
+    Cursor,
+}
+
 /// Behaviour of the pointer.
 ///
 /// ```yaml
 /// mouse:
 ///   highlight_press: false
+///   wheel: view # or: cursor
+///   wheel_rows: 3
 /// ```
 ///
 /// Kept out of the `mouse` cargo feature on purpose, like the matching colour
 /// block: a `tui.yaml` written against a build with mouse support must still
 /// parse against one without.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseConfig {
     /// Tint the cell the left button went down on while nothing has been
     /// dragged yet.
@@ -161,6 +177,30 @@ pub struct MouseConfig {
     /// than as a selection. Turn it on to see where a drag is anchored.
     #[serde(default)]
     pub highlight_press: bool,
+
+    /// Whether the wheel pans the view or walks the cursor. See [`WheelMode`].
+    #[serde(default)]
+    pub wheel: WheelMode,
+
+    /// How far one notch of the wheel goes: rows in a normal table, physical
+    /// lines in a smooth-scrolling one (the chat), cursor steps in
+    /// [`WheelMode::Cursor`].
+    #[serde(default = "default_wheel_rows")]
+    pub wheel_rows: usize,
+}
+
+fn default_wheel_rows() -> usize {
+    3
+}
+
+impl Default for MouseConfig {
+    fn default() -> Self {
+        Self {
+            highlight_press: false,
+            wheel: WheelMode::default(),
+            wheel_rows: default_wheel_rows(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +688,33 @@ which_key:
         assert_eq!(wk.groups[1].prefix, "g l");
         assert_eq!(wk.groups[1].title, None);
         assert!(!wk.groups[1].collapse_in_bars);
+    }
+
+    /// The wheel block from the docs, and the defaults a `tui.yaml` that says
+    /// nothing about the mouse has to keep: panning, three rows a notch.
+    #[test]
+    fn the_documented_mouse_block_parses_and_defaults_to_panning() {
+        let bare: TuiConfig = serde_yaml::from_str("images:\n  enabled: false\n").unwrap();
+        assert_eq!(bare.mouse.wheel, WheelMode::View);
+        assert_eq!(bare.mouse.wheel_rows, 3);
+        assert!(!bare.mouse.highlight_press);
+
+        let config: TuiConfig = serde_yaml::from_str(
+            "
+mouse:
+  highlight_press: false
+  wheel: cursor
+  wheel_rows: 5
+",
+        )
+        .expect("mouse block parses");
+        assert_eq!(config.mouse.wheel, WheelMode::Cursor);
+        assert_eq!(config.mouse.wheel_rows, 5);
+
+        // A block that names only one knob keeps the defaults for the rest.
+        let partial: TuiConfig = serde_yaml::from_str("mouse:\n  wheel_rows: 1\n").unwrap();
+        assert_eq!(partial.mouse.wheel, WheelMode::View);
+        assert_eq!(partial.mouse.wheel_rows, 1);
     }
 
     /// Same guard for the width options: the overview's two are optional (no

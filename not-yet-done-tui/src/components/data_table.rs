@@ -250,6 +250,15 @@ impl DataTable {
         self.table.scroll_by(n);
     }
 
+    /// Pan the viewport by `n` steps (positive = down) without dragging the
+    /// selection along — the mouse wheel's model, as opposed to
+    /// [`scroll_by`](Self::scroll_by) which moves the cursor. Returns whether
+    /// the viewport moved; `false` means an edge was reached and the caller
+    /// should move the cursor instead so the last row stays reachable.
+    pub fn scroll_view(&mut self, n: isize) -> bool {
+        self.table.scroll_view(n)
+    }
+
     /// Enable / disable smooth (line-wise) scrolling for this table. Driven
     /// by the active view's `smooth_scroll` config on every rebuild.
     pub fn set_smooth_scroll(&mut self, enabled: bool) {

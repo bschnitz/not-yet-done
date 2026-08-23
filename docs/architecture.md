@@ -520,7 +520,7 @@ flowchart LR
     DRAW["render pass<br/>paints a surface"] -- "push(rect, region)" --> MAP[(frame-scoped<br/>region map)]
     EV["MouseEvent<br/>(x, y)"] --> HIT["hit(x, y)<br/>topmost wins"]
     MAP --> HIT
-    HIT --> DISP["handle()<br/>drag → selection<br/>wheel → arrow keys"]
+    HIT --> DISP["handle()<br/>drag → selection<br/>wheel → pan, else arrow keys"]
     DISP --> POST["after_render:<br/>snapshot + tint"]
 ```
 
@@ -533,8 +533,22 @@ header, popup entry —
 through `pub(crate)`
 entry points on `App` that end in the same `sync_components()` the key paths do
 and decline the same way while an input popup owns the input. The mouse is a
-second way in, never a second implementation; the wheel makes that literal by
-feeding synthetic arrow keys through `App::handle_key`.
+second way in, never a second implementation — with one deliberate exception.
+
+**The wheel is that exception, because panning has no key.** Every key that
+scrolls a table moves the cursor and lets the viewport follow (`j`/`k`,
+`ctrl+d`, `G`), so feeding the wheel synthetic arrows — which is what it did
+first — could only ever drag the cursor along. `Table::scroll_view` inverts
+that: the viewport moves and the selection stays on its row. In smooth mode
+(the chat) this is already the model and it delegates to `scroll_lines`. In
+discrete mode the viewport is _derived_ from the selection and re-derived on
+every rebuild via `restore_selected` → `adjust_scroll`, so a pan that left the
+selection off-screen would be undone on the next frame; `scroll_view` therefore
+pulls the selection onto the edge the content scrolls away from. Everything
+else about the wheel still goes through the keys: sideways, behind a popup, in
+`mouse.wheel: cursor` mode, and at the top and bottom edge, where `scroll_view`
+reports that it could not move and the cursor takes over — which is what keeps
+the first and last row reachable with the wheel alone.
 
 Inside a pane the same principle repeats one level down, but the map stays out
 of it. A table knows where it put its rows; the mouse module does not, and

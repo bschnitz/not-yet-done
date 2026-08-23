@@ -44,6 +44,7 @@ use crate::views::content_view::PaneId;
 #[cfg(feature = "mouse")]
 use {
     crate::app::EditorRequest,
+    crate::config::tui_config::WheelMode,
     crate::ui::theme::Theme,
     crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     ratatui::buffer::Buffer,
@@ -52,15 +53,6 @@ use {
     std::cell::RefCell,
     std::time::{Duration, Instant},
 };
-
-/// How many lines one wheel notch moves.
-///
-/// Without mouse reporting the terminal translates the wheel into arrow keys
-/// on the alternate screen, so scrolling works today; turning reporting on
-/// takes that away, and we have to serve the wheel ourselves or we would make
-/// things worse than before the feature existed.
-#[cfg(feature = "mouse")]
-const WHEEL_LINES: usize = 3;
 
 /// How close together two clicks on the same cell make a double click.
 ///
@@ -421,10 +413,9 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
         }
 
         // Wheel: scroll whatever is under the pointer, not whatever happens
-        // to be focused. On a content pane that means focusing it first —
-        // the scroll would otherwise move a list the user is not looking at,
-        // and focus-follows-wheel keeps a single scrolling path (the arrow
-        // keys) instead of a second one per widget.
+        // to be focused. On a content pane that means focusing it first — the
+        // scroll would otherwise move a list the user is not looking at, and
+        // the cursor it leaves behind would belong to another pane.
         MouseEventKind::ScrollDown => scroll(app, x, y, "down", true),
         MouseEventKind::ScrollUp => scroll(app, x, y, "up", false),
         MouseEventKind::ScrollRight => wheel(app, "right"),
@@ -586,11 +577,22 @@ fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -
             EditorRequest::None
         }
         // Focus follows the wheel: scrolling a pane the keys would not reach
-        // leaves the two out of step, and the alternative is a second
-        // scrolling path per widget.
+        // leaves the two out of step, and the keys are still where the edges
+        // are served from.
         Some(Region::ContentPane(id)) => {
             app.focus_content_pane(id);
-            wheel(app, key)
+            if app.config.mouse.wheel == WheelMode::Cursor {
+                return wheel(app, key);
+            }
+            let rows = app.config.mouse.wheel_rows.max(1) as isize;
+            let delta = if forward { rows } else { -rows };
+            // At an edge the pan reports that it could not move, and the
+            // cursor takes over — that is what keeps the very first and last
+            // row reachable with the wheel alone.
+            match app.wheel_content_pane(id, delta) {
+                Some(req) => req,
+                None => wheel(app, key),
+            }
         }
         _ => wheel(app, key),
     }
@@ -613,10 +615,16 @@ fn finish_copy(app: &mut crate::app::App) -> Option<bool> {
 
 /// Feed synthetic arrow keys through the normal key pipeline, so the wheel
 /// does exactly what the key does — including every view-specific binding on
-/// it — with no second scrolling path to keep in sync.
+/// it.
+///
+/// Without mouse reporting the terminal itself translated the wheel into arrow
+/// keys on the alternate screen; turning reporting on takes that away, so this
+/// is the floor the wheel falls back to everywhere panning does not apply: over
+/// popups and editors, sideways, at the edges of a table, and whenever
+/// `mouse.wheel` is set to `cursor`.
 #[cfg(feature = "mouse")]
 fn wheel(app: &mut crate::app::App, key: &str) -> EditorRequest {
-    for _ in 0..WHEEL_LINES {
+    for _ in 0..app.config.mouse.wheel_rows.max(1) {
         let req = app.handle_key(key);
         // A scroll should never open an editor, but if a view binds one of
         // the arrows to something that does, honour it once rather than
