@@ -599,6 +599,13 @@ Behaviour / limits:
 - **Flat levels only.** Tree levels are excluded — a tree expands records
   inline anyway, and the detail split targets wide _flat_ rows (Postgres rows,
   script results). A follower does not offer `o` again itself.
+- **Every column of the level.** The columns currently visible in the row view
+  come first, in the order the column config (`c c`) gave them; the deselected
+  and `hidden: true` ones follow. Reading one record completely is the point of
+  the pane, so nothing is dropped — only the ordering tracks the row view.
+  Field labels and value formatting (`source: label`, typed columns) are the
+  row view's. Levels without configured columns (Postgres and other
+  dynamic-schema adapters) keep deriving one line per record field.
 - **Read-only (v1).** The detail view shows values, it does not edit them.
 - **No fetch of its own.** The follower is built purely synthetically from the
   already loaded source record; it triggers no additional query.
