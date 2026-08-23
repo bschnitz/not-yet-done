@@ -5784,6 +5784,51 @@ Colours, settings and the off switch:
       or a `tui.yaml` with a `mouse.highlight_press` in it — loads without a
       warning.
 
+## Jira: the linked tickets of an issue (`jira:link`, `o l`)
+
+A child level under `jira:issue`, built like the comment and attachment levels.
+A row is the **link**, not the ticket at its other end: `relation` is the phrase
+seen from the parent issue's side and the key of the other ticket travels in the
+`key` field, which is what lets the ticket-level bindings retarget themselves
+with `node_id_from: key` while `d` removes only the link. Jira delivers all
+links of an issue in one field and offers no server-side ordering for them, so
+the level sorts locally. Prerequisite: the action and the `Links` child are in
+the private `views/jira.yaml` (see `docs/examples/views/jira.yaml`); in the
+example they sit on a bare `l`, in a which-key setup on `o l`.
+
+- [ ] `o l` on a ticket with links opens the table: one row per link, columns
+      Relation / Key / Type / Status / Priority / Assignee / Summary. The
+      breadcrumb shows the level, `Esc` goes back to the ticket list.
+- [ ] The relation is phrased from **this** ticket's side: on the ticket that
+      blocks another one the row says "blocks …", and opening the level on that
+      other ticket says "is blocked by …". A wrong orientation would be the
+      symptom of the `outwardIssue`/`inwardIssue` inversion being dropped.
+- [ ] The Key column names the ticket at the other end (never the parent), and
+      Status/Priority/Assignee/Summary describe that same ticket.
+- [ ] `o l` on a ticket without links → an empty table with the usual
+      empty-level hint, no error banner.
+- [ ] `S` sorts by every one of the seven columns, ascending and descending,
+      without a JQL banner (the sort is local — nothing goes to the server).
+- [ ] `f` (fuzzy filter) matches on key, summary **and** relation phrase.
+- [ ] `p` opens the preview: the buffer of the **linked** ticket (body plus
+      comments), not an empty pane. An empty pane means the `preview:` block
+      lost its `node_id_from: key`.
+- [ ] `e` opens the linked ticket in the Markdown editor; save writes back to
+      **that** ticket (check its `updated`), not to the parent.
+- [ ] `o` (in the example config) opens the linked ticket in the browser.
+- [ ] `d` asks "Remove link '<relation>' from <KEY>? The ticket stays. (y/n)".
+      On "y" the row disappears after the reload; the linked **ticket** still
+      exists (look it up in the ticket list) and the link is gone on its side
+      too. On "n" nothing happens.
+- [ ] The bookmarks subtab (`m`) has the same level with the same bindings.
+- [ ] Headless: `nyd adapter jira <KEY> ls --type jira:link` lists the same
+      rows, and `nyd adapter jira <KEY>/link/<ID> show` resolves the composite
+      id. Note: `nyd adapter jira:issue:link <KEY> ls` does **not** work — the
+      `ls` path ignores the child-type segment and always lists comments (a
+      pre-existing quirk, not specific to this level).
+- [ ] Anon mode: keys, summaries and assignees appear replaced, the relation
+      phrases (Jira-defined, e.g. "relates to") verbatim.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
