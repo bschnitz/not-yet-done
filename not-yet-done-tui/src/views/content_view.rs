@@ -555,6 +555,11 @@ pub struct ContentPane {
     /// changes (preserving scroll otherwise). `None` for ordinary panes
     /// and for a detail pane whose source has no selection.
     detail_summary: Option<NodeSummary>,
+    /// Record-detail split: the source column keys the transposed rows were
+    /// built from, in order. Part of the same skip check as
+    /// `detail_summary`, so re-selecting or reordering columns in the source
+    /// repaints the follower even while it keeps pointing at one record.
+    detail_field_keys: Vec<String>,
     /// Record-detail split: whether long field values wrap onto
     /// continuation rows (`X` toggles it). Default `false` — long
     /// values are clipped to the value column. Meaningful only on a
@@ -1476,6 +1481,7 @@ impl ContentPane {
             detail_child: None,
             detail_source: None,
             detail_summary: None,
+            detail_field_keys: Vec::new(),
             detail_wrap: false,
             long_text: false,
             link_refs: std::collections::HashSet::new(),
@@ -2427,6 +2433,28 @@ impl ContentPane {
                 hidden: false,
             })
             .collect()
+    }
+
+    /// Every column of the pane's active level, ordered for the record-detail
+    /// follower: the visible ones first (the user's column selection and
+    /// order), then the remaining configured columns in YAML order. A
+    /// deselected or `hidden: true` column is still a field of the record, so
+    /// the transposed view lists it rather than dropping it — only its
+    /// position follows the row view. Auto-fallback levels (postgres and other
+    /// dynamic-schema adapters) have no configured columns and already derive
+    /// one per record field, so their set is returned as-is.
+    fn detail_field_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
+        let mut cols = self.current_columns(view_defs);
+        let Some((raw, _)) = self.column_config_source(view_defs) else {
+            return cols;
+        };
+        let mut rest: Vec<ColumnDef> = raw
+            .into_iter()
+            .filter(|c| !cols.iter().any(|shown| shown.key == c.key))
+            .collect();
+        self.merge_described_kinds(&mut rest);
+        cols.extend(rest);
+        cols
     }
 
     /// The `source: custom` columns configured for the pane's active level, as
@@ -8767,7 +8795,8 @@ impl ContentView {
     /// coupling: moving the source cursor changes its selected record, the
     /// diff below fires, and the follower repaints — no explicit wiring on
     /// the navigation path. Cheap on the common frame: with wrap off and an
-    /// unchanged selection the follower is skipped entirely. With wrap on it
+    /// unchanged selection and column set the follower is skipped entirely
+    /// (so a column re-selection still repaints it). With wrap on it
     /// always rebuilds so the value re-wraps once the post-draw pass learns
     /// the true render width. Called from [`Self::rebuild_table`], i.e. once
     /// per `sync_components`.
@@ -8795,24 +8824,28 @@ impl ContentView {
             let current = self
                 .find_pane(source_id)
                 .and_then(|p| p.selected_item().cloned());
-            // Mirror the source table's configured columns (selection, order,
-            // labels, `source: label`) so the detail follower matches the row
-            // view exactly. Postgres and other dynamic-schema views have no
-            // configured columns; `current_columns` then auto-derives one per
-            // record field, so the follower still shows the whole record as
-            // before this change.
+            // Every column of the source level, visible ones first in the
+            // user's order, then the deselected rest (see
+            // `detail_field_columns`): the transposed record is complete while
+            // its top still mirrors the row view's labels and `source: label`
+            // resolution. Postgres and other dynamic-schema views have no
+            // configured columns and auto-derive one per record field, so the
+            // follower shows the whole record there as it always did.
             let columns = self
                 .find_pane(source_id)
-                .map(|p| p.current_columns(&view_defs))
+                .map(|p| p.detail_field_columns(&view_defs))
                 .unwrap_or_default();
             let Some(follower) = self.find_pane_mut(follower_id) else {
                 continue;
             };
-            let unchanged = current == follower.detail_summary;
+            let field_keys: Vec<String> = columns.iter().map(|c| c.key.clone()).collect();
+            let unchanged =
+                current == follower.detail_summary && field_keys == follower.detail_field_keys;
             if unchanged && !follower.detail_wrap {
                 continue;
             }
             follower.detail_summary = current.clone();
+            follower.detail_field_keys = field_keys;
             let wrap = follower.detail_wrap;
             follower.items = match current {
                 Some(ref s) => {
@@ -19741,6 +19774,75 @@ mod tests {
         assert_eq!(
             follower_cell(&view, follower_id, 0, content_detail::VALUE_KEY),
             "a-status"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),
+            "Full name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::VALUE_KEY),
+            "a-name"
+        );
+    }
+
+    #[test]
+    fn sync_detail_panes_appends_deselected_columns() {
+        // The row view only shows Status (the columns menu deselected Name),
+        // but the record has both fields: the follower lists the selected
+        // column first, then the deselected one.
+        let config = record_detail_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        view.toggle_record_detail();
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+        assert!(view.apply_column_config(vec!["status".into()]));
+
+        view.rebuild_table();
+        // The row view really is down to one column…
+        let view_defs = view.view_defs.clone();
+        assert_eq!(
+            view.find_pane(source_id)
+                .unwrap()
+                .current_columns(&view_defs)
+                .len(),
+            1
+        );
+        // …while the follower still transposes the whole record.
+        assert_eq!(view.find_pane(follower_id).unwrap().items.len(), 2);
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY),
+            "Status"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),
+            "Name"
+        );
+        assert_eq!(
+            follower_cell(&view, follower_id, 1, content_detail::VALUE_KEY),
+            "a-name"
+        );
+    }
+
+    #[test]
+    fn sync_detail_panes_appends_hidden_columns() {
+        // `hidden: true` keeps a column out of the row view by default; the
+        // follower appends it after the visible ones, with its YAML label.
+        let mut config = record_detail_config();
+        let mut hidden = col("name", "Full name");
+        hidden.hidden = true;
+        config.views[0].columns = vec![hidden, col("status", "State")];
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(vec![record_item("a")], Vec::new(), None, Vec::new(), None);
+        let source_id = view.active_pane_id();
+        view.toggle_record_detail();
+        let follower_id = view.find_pane(source_id).unwrap().detail_child.unwrap();
+
+        view.rebuild_table();
+        assert_eq!(view.find_pane(follower_id).unwrap().items.len(), 2);
+        assert_eq!(
+            follower_cell(&view, follower_id, 0, content_detail::FIELD_KEY),
+            "State"
         );
         assert_eq!(
             follower_cell(&view, follower_id, 1, content_detail::FIELD_KEY),

@@ -5232,6 +5232,29 @@ chord leader for both table menus.
       at load time (prefix collision with `c c`/`c s`); `force: true` still
       suppresses it.
 
+## The record-detail pane shows every column (`o`)
+
+The transposed follower is for reading one record completely, so it is no
+longer limited to the columns the row view shows. Take any view with
+`record_detail: true` (SQLite/Postgres `Rows`) or a level that has one.
+
+- [ ] `o` opens the follower → the fields appear in the row view's order,
+      with the row view's labels and formatting (dates, durations,
+      `source: label`).
+- [ ] `c c` on the source, deselect a column, `Enter` → the column leaves the
+      table but the follower keeps it, **appended after** the still-selected
+      ones. No cursor move needed: the follower repaints on apply.
+- [ ] Re-order the selection in `c c` → the follower's leading block follows
+      the new order, the deselected tail stays behind it.
+- [ ] Select everything again → the follower is unchanged apart from the
+      ordering (no duplicated field lines).
+- [ ] A level with a `hidden: true` column (it is absent from the table by
+      default) → the follower lists it last, with its YAML label.
+- [ ] Postgres/SQLite `Rows` (no configured columns) behave as before: one
+      line per record field, nothing doubled.
+- [ ] `j`/`k` in the source still updates the follower; `X` still toggles
+      wrapping, now including the appended fields.
+
 ## Unknown keys in `views/*.yaml` (a warning instead of silence)
 
 Serde discards unknown keys without a word — the line sits in the file and
