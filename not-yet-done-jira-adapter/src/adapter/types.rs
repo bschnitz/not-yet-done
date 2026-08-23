@@ -34,6 +34,20 @@ pub(super) fn comment_node_type() -> NodeType {
     }
 }
 
+/// One of an issue's links — a row in the linked-tickets table under an
+/// issue. The node is the *link*, not the ticket at its other end; that
+/// ticket is reachable as an ordinary [`issue_node_type`] node via the row's
+/// `key` field (view config: `node_id_from: key`).
+pub(super) fn link_node_type() -> NodeType {
+    NodeType {
+        type_id: "jira:link".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Link".into(),
+    }
+}
+
 pub(super) fn attachment_node_type() -> NodeType {
     NodeType {
         type_id: "jira:attachment".into(),

@@ -24,7 +24,7 @@ mod watchers;
 pub use attachments::JiraAttachment;
 pub use comments::JiraComment;
 pub use create::CreateIssueFields;
-pub use links::JiraLinkType;
+pub use links::{JiraIssueLink, JiraLinkType};
 pub use search::{JiraIssueDetail, JiraTicket};
 pub use transitions::JiraTransition;
 pub use users::JiraUser;

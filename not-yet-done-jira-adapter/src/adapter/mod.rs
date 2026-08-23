@@ -26,6 +26,7 @@ mod create;
 mod factory;
 mod issue;
 mod jql;
+mod link;
 mod types;
 mod util;
 
@@ -36,6 +37,7 @@ use auth_bridge::AuthBridge;
 use cache::{JiraCache, fetch_comments, fetch_issue, hydrate_from_db};
 use comment::JiraCommentNode;
 use issue::JiraIssueNode;
+use link::JiraLinkNode;
 use types::{bookmark_node_type, issue_node_type, label_node_type, user_node_type};
 use util::other_err;
 
@@ -138,8 +140,9 @@ impl ContentAdapter for JiraAdapter {
 
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
         let client = self.auth.get_client().await.map_err(other_err)?;
-        // Composite IDs: "{issue_key}/comment/{comment_id}" or
-        //                "{issue_key}/attachment/{attachment_id}"
+        // Composite IDs: "{issue_key}/comment/{comment_id}",
+        //                "{issue_key}/attachment/{attachment_id}" or
+        //                "{issue_key}/link/{link_id}"
         if let Some((issue_key, rest)) = id.split_once('/') {
             if let Some(comment_id) = rest.strip_prefix("comment/") {
                 let comments = fetch_comments(&client, &self.cache, issue_key)
@@ -173,6 +176,18 @@ impl ContentAdapter for JiraAdapter {
                     issue_key.to_string(),
                 )));
             }
+            if let Some(link_id) = rest.strip_prefix("link/") {
+                let links = client.get_issue_links(issue_key).await.map_err(other_err)?;
+                let link = links
+                    .into_iter()
+                    .find(|l| l.id == link_id)
+                    .ok_or_else(|| other_err(format!("Link {link_id} not found on {issue_key}")))?;
+                return Ok(Box::new(JiraLinkNode::new(
+                    client,
+                    link,
+                    issue_key.to_string(),
+                )));
+            }
         }
         // Lazy: build the node with the key only. The full detail is
         // fetched on first `detail()` await — child operations like
@@ -192,8 +207,8 @@ impl ContentAdapter for JiraAdapter {
 
     /// The single source of truth about what lives under a Jira node: the
     /// root lists `jira:issue` / `jira:bookmark` / `jira:label` / `jira:user`
-    /// rows; an issue lists `jira:comment` / `jira:attachment` children;
-    /// comments and attachments are leaves. Each `list` callback fetches lazily
+    /// rows; an issue lists `jira:comment` / `jira:attachment` / `jira:link`
+    /// children; those three are leaves. Each `list` callback fetches lazily
     /// through the same free functions the legacy per-node `list` delegates to,
     /// reconstructing state from adapter fields (`auth`/`cache`/`bookmarks`/
     /// `bookmark_marker`) plus `node.id()` (the issue key for a `jira:issue`),
@@ -255,6 +270,7 @@ impl ContentAdapter for JiraAdapter {
                 // need only that plus the client (and, for comments, the cache).
                 let key = node.id().to_string();
                 let key2 = key.clone();
+                let key3 = key.clone();
                 vec![
                     Child {
                         node_type: types::comment_node_type(),
@@ -273,6 +289,16 @@ impl ContentAdapter for JiraAdapter {
                             Box::pin(async move {
                                 let client = self.auth.get_client().await.map_err(other_err)?;
                                 issue::list_attachments(&client, &key2).await
+                            })
+                        }),
+                    },
+                    Child {
+                        node_type: types::link_node_type(),
+                        columns: link::link_columns(),
+                        list: Box::new(move |params| {
+                            Box::pin(async move {
+                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                link::list_links(&client, &key3, params).await
                             })
                         }),
                     },
@@ -310,6 +336,7 @@ impl ContentAdapter for JiraAdapter {
             "jira:issue" => issue::issue_actions(),
             "jira:comment" => comment::comment_actions(),
             "jira:attachment" => attachment::attachment_actions(),
+            "jira:link" => link::link_actions(),
             _ => Vec::new(),
         }
     }
