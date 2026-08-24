@@ -312,7 +312,7 @@ fn navigate<'a>(root: &'a Node, path: &[PathStep]) -> EditResult<&'a Node> {
 
 /// The `(line, column)` (both 1-based) of `entry`'s key scalar within `map`,
 /// or `None` if absent. Unlike [`raw_loc`] this needs only the *key* span, so
-/// it locates keys whose value is null/empty (a bare `shortcuts:` block).
+/// it locates keys whose value is null/empty (a bare `actions:` block).
 fn key_pos(map: &MarkedMappingNode, entry: &str) -> Option<(usize, usize)> {
     for (k, _v) in map.iter() {
         if k.as_str() == entry {

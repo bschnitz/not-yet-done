@@ -23,10 +23,9 @@ grouped by which-key group; see "Shortcut overview" in the README.
 
 | Origin                                                                | Editable | Notes                                   |
 | --------------------------------------------------------------------- | -------- | --------------------------------------- |
-| View actions (`actions:` in a `views/*.yaml`)                         | yes      | written to that view file               |
+| View actions (`actions:` in a `views/*.yaml`, node actions included)  | yes      | written to that view file               |
 | Built-ins (`global` / `common` / `content` / `window` in `tui.yaml`)  | yes      |                                         |
 | Tab switches (`Switch to …`)                                          | yes      | written to that view's `tab.key`        |
-| Per-node `shortcuts:` (e.g. `s: toggle-tracking`)                     | yes      | the map key is the binding              |
 | Subtab keys (`views[*].key`)                                          | yes      | written to that view's `key`            |
 | Query menu key, `preview.keybinding`, child `keybindings`             | yes      | written to the owning block in the view |
 | `action_chains`, search-jump keys                                     | yes      | written to the owning block in the view |

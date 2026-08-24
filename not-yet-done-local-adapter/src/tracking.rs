@@ -1422,7 +1422,7 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
         // its duration and its own task — into the target row's *day*, directly
         // after the target, cascading to the day's end and then before the
         // day's first interval when there is no room. See [`invoke_paste_move`].
-        // Keys live in the YAML `shortcuts:` (`m`/`p`); `ActionBar` placement is
+        // Keys live in the YAML `actions:` (`m`/`p`); `ActionBar` placement is
         // what surfaces their hints.
         NodeAction::new("mark-move", "Mark for move", InputSpec::None),
         NodeAction::new("paste-move", "Move here", InputSpec::None),

@@ -2493,8 +2493,8 @@ pub trait ContentAdapter: Send + Sync {
     /// (for Postgres: the `database` to connect to). Multi-statement
     /// queries are allowed; only the last statement's output is
     /// returned in [`CustomQueryResult`]. Whether this is exposed to
-    /// the user at a given drill level is decided by the YAML
-    /// `shortcuts:` map binding a key to a [`NodeAction`] whose
+    /// the user at a given drill level is decided by a YAML
+    /// `actions:` entry binding a key to a [`NodeAction`] whose
     /// [`Node::invoke_action`] returns an
     /// [`ActionDispatch::OpenEditor`] for `session_kind == "query_editor"`.
     ///

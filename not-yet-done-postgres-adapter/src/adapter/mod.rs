@@ -391,16 +391,17 @@ fn field(key: &str, label: &str, value: &str) -> MetadataField {
 // ---------------------------------------------------------------------------
 
 fn table_actions() -> Vec<NodeAction> {
-    // YAML `shortcuts:` on the `postgres:tables` (Q on table row) or
-    // `postgres:rows` (Q: parent:edit_sql when drilled in) ChildDef.
+    // Bound from YAML `actions:` on the `postgres:tables` ChildDef
+    // (`{ key: Q, id: edit_sql }`) and on `postgres:rows`
+    // (`{ key: Q, id: edit_sql, target: parent }` when drilled in).
     vec![NodeAction::new("edit_sql", "sql", InputSpec::None)]
 }
 
 /// A view does everything a table does, plus edit its own definition.
 ///
 /// `InputSpec::Editor` has to be bound from YAML as
-/// `actions: [{type: edit, id: edit_view}]` — not as a `shortcuts:` entry,
-/// which routes through `invoke_action` and cannot open an editor.
+/// `actions: [{type: edit, id: edit_view}]` — the default `type: node`
+/// routes through `invoke_action` and cannot open an editor.
 fn view_actions() -> Vec<NodeAction> {
     let mut actions = table_actions();
     actions.push(NodeAction::new(
@@ -2616,7 +2617,7 @@ mod db_script_tree_tests {
                 .any(|id| id == EDIT_VIEW_ACTION)
         );
         // …and it has to be an editor action: bound from YAML as
-        // `type: edit`, never as a `shortcuts:` entry.
+        // `type: edit`, never as a default `type: node` entry.
         let editor = adapter
             .actions_for_type(&view_node_type())
             .into_iter()

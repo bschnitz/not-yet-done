@@ -135,8 +135,9 @@ impl ActionBarHint {
     }
 }
 
-/// A resolved adapter `shortcuts:` entry: key, label, and why it can light
-/// up. Built by `ContentPane::collect_shortcut_hints`; consumed by both bar
+/// A resolved adapter action bound from YAML `actions:`: key, label, and
+/// why it can light up. Built by
+/// `ContentPane::collect_node_action_hints`; consumed by both bar
 /// builders. Bar placement is *derived* from [`source`](Self::source), not
 /// declared by the adapter: `Some(_)` (activatable) → action bar,
 /// `None` (fire-and-forget) → status bar.
@@ -183,7 +184,7 @@ pub fn source_for_action_type(action_type: &str, label: &str) -> ActiveSurface {
     }
 }
 
-/// Map an adapter `shortcuts:` action that is placed in the action bar to its
+/// Map an adapter node action that is placed in the action bar to its
 /// active source, from its stable `id` and whether it opens an input. Returns
 /// `None` for a fire-and-forget action with no derivable active state — such
 /// an action must not live in the action bar, so the caller `debug_assert!`s

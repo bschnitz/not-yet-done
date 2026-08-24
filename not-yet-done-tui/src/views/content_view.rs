@@ -4445,8 +4445,8 @@ impl ContentPane {
     /// Child *names* from the root down to the current drilldown level (the
     /// root itself contributes nothing). Mirrors
     /// [`Self::view_path_node_types`] but keys on `ChildDef` names, matching
-    /// the identity that `KeySource::NodeShortcut` records — so the shortcut
-    /// menu can select the node shortcuts (`shortcuts:`) that apply here.
+    /// the identity that `KeySource::YamlAction` records — so the shortcut
+    /// menu can select the node actions that apply here.
     pub fn current_child_name_path(&self) -> Vec<String> {
         let mut path: Vec<String> = Vec::new();
         for frame in self.nav_stack.iter().skip(1) {
@@ -10618,12 +10618,12 @@ impl ContentView {
         // node being in focus — either the selected item (flat tables
         // subtab, or drilled into a schema) or the pane's parent
         // (drilled into a table; rows being displayed). The SQL editor
-        // (`Q sql`) lives in the new per-node-action shortcut path via
-        // YAML `shortcuts:` on the postgres view config.
+        // (`Q sql`) lives in the per-node-action path via a YAML
+        // `actions:` entry on the postgres view config.
         // Group-by menu (M3) — direct-jump counterpart of the pane-level
         // `cycle_grouping` claim, under the same gate (the active level
         // must declare a `group_by`), so the default `u` stays free for
-        // YAML shortcuts on ungroupable levels.
+        // YAML node actions on ungroupable levels.
         if self.active_pane().level_has_group_by(&self.view_defs) {
             if let Some(b) = self.content_kb.get(&ContentAction::GroupMenu) {
                 km.push(KeyClaim::handler(
