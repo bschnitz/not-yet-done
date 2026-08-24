@@ -81,7 +81,7 @@ pub fn locate_binding(source: &KeySource) -> Option<BindingLocation> {
                 path.push(PathStep::find("name", child.clone()));
             }
             path.push(PathStep::key("actions"));
-            path.push(PathStep::find("name", name.clone()));
+            path.push(PathStep::find_action(name.clone()));
             Some(BindingLocation {
                 target: EditTarget::ViewFile { view: view.clone() },
                 path,
@@ -159,27 +159,6 @@ pub fn locate_binding(source: &KeySource) -> Option<BindingLocation> {
                 entry: action.clone(),
             })
         }
-        // A per-node `shortcuts:` entry: the map key *is* the binding, so
-        // `entry` is that key char and the only supported edit is removing
-        // the whole line (there is no `key:` value to rewrite).
-        KeySource::NodeShortcut {
-            view,
-            child_path,
-            key,
-            ..
-        } => {
-            let mut path = vec![PathStep::key("views"), PathStep::find("name", view.clone())];
-            for child in child_path {
-                path.push(PathStep::key("children"));
-                path.push(PathStep::find("name", child.clone()));
-            }
-            path.push(PathStep::key("shortcuts"));
-            Some(BindingLocation {
-                target: EditTarget::ViewFile { view: view.clone() },
-                path,
-                entry: key.clone(),
-            })
-        }
         // An `action_chains:` entry. `scope_path` is empty for the global
         // `keybindings.action_chains` in tui.yaml, or `[view, child…]` for a
         // view/child-scoped map. The map key *is* the binding.
@@ -222,7 +201,7 @@ pub fn locate_binding(source: &KeySource) -> Option<BindingLocation> {
                 path.push(PathStep::find("name", child.clone()));
             }
             path.push(PathStep::key("actions"));
-            path.push(PathStep::find("name", action.clone()));
+            path.push(PathStep::find_action(action.clone()));
             path.push(PathStep::key("search"));
             let entry = match direction {
                 crate::keymap::SearchJump::Next => "next_key",
@@ -248,20 +227,42 @@ pub fn set_binding(
     source: &str,
     values: &[String],
 ) -> Result<String, String> {
-    yaml_edit::set_entry(source, &location.path, &location.entry, values)
+    match yaml_edit::set_entry(source, &location.path, &location.entry, values) {
+        Ok(out) => Ok(out),
+        // The shortcut menu lists every adapter action the focused level
+        // offers, bound or not, so the user can bind one the view file has
+        // never mentioned. There is no entry to rewrite then — write it.
+        Err(err) => match action_create_target(location) {
+            Some((level_path, id)) => yaml_edit::append_seq_item(
+                source,
+                level_path,
+                "actions",
+                &[
+                    ("key".to_string(), yaml_edit::render_value(values)),
+                    ("id".to_string(), id.to_string()),
+                ],
+            ),
+            None => Err(err),
+        },
+    }
 }
 
-/// Like [`set_binding`], but the located `path` names a mapping (its last
-/// step) that may be present-but-empty or entirely absent — the shape of a
-/// per-node `shortcuts:` block. Here `location.entry` is the **key chord** and
-/// `values` its single **action verb**, the reverse of a `key:`-valued
-/// binding. Creates the `shortcuts:` map / block as needed.
-pub fn set_binding_in_optional_map(
-    location: &BindingLocation,
-    source: &str,
-    values: &[String],
-) -> Result<String, String> {
-    yaml_edit::set_entry_in_optional_map(source, &location.path, &location.entry, values)
+/// Split a located `views[…].actions[<id>].key` binding into the path of the
+/// *level* that owns the `actions:` sequence plus the action id, for the case
+/// where that entry has to be created. `None` for any other location shape —
+/// only an action entry can be conjured from nothing; every other binding
+/// edits a key that already exists somewhere.
+fn action_create_target(location: &BindingLocation) -> Option<(&[PathStep], &str)> {
+    if location.entry != "key" {
+        return None;
+    }
+    match location.path.split_last() {
+        Some((PathStep::FindAction { value }, rest)) => match rest.split_last() {
+            Some((PathStep::Key(k), level)) if k == "actions" => Some((level, value.as_str())),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Remove the located binding *entry line* from `source` YAML text entirely.
@@ -322,7 +323,7 @@ mod tests {
                 PathStep::key("views"),
                 PathStep::find("name", "tickets"),
                 PathStep::key("actions"),
-                PathStep::find("name", "Edit"),
+                PathStep::find_action("Edit"),
             ]
         );
         assert_eq!(loc.entry, "key");
@@ -339,7 +340,7 @@ mod tests {
                 PathStep::key("children"),
                 PathStep::find("name", "Comments"),
                 PathStep::key("actions"),
-                PathStep::find("name", "Delete"),
+                PathStep::find_action("Delete"),
             ]
         );
     }
@@ -474,7 +475,7 @@ adapter:
                 PathStep::key("views"),
                 PathStep::find("name", "tickets"),
                 PathStep::key("actions"),
-                PathStep::find("name", "Search"),
+                PathStep::find_action("Search"),
                 PathStep::key("search"),
             ]
         );
@@ -633,5 +634,46 @@ views:
         assert!(!out.contains("key: e"), "key line should be gone: {out}");
         assert!(out.contains("- name: Edit"));
         assert!(out.contains("type: adapter"));
+    }
+
+    #[test]
+    fn binding_an_unmentioned_adapter_action_creates_the_actions_entry() {
+        // The shortcut menu lists every adapter action the level offers, so
+        // the user can bind one the view file never named. `set_entry` has
+        // nothing to rewrite there — the entry gets written instead.
+        let src = "\
+views:
+  - name: tickets
+    node_type: jira:issue
+    actions:
+      - { name: edit, key: e, type: edit }
+";
+        let loc = locate_binding(&yaml_action("tickets", &[], "delete")).unwrap();
+        let out = set_binding(&loc, src, &["d".to_string()]).unwrap();
+        assert!(
+            out.contains("      - { key: d, id: delete }"),
+            "got:\n{out}"
+        );
+        // Purely additive — the action that was already there is untouched.
+        assert!(out.contains("      - { name: edit, key: e, type: edit }"));
+    }
+
+    #[test]
+    fn rebinding_an_existing_node_action_rewrites_it_in_place() {
+        // Same source, but the action *is* in the file: found by its `id:`
+        // (it declares no `name:`), and only its `key:` changes.
+        let src = "\
+views:
+  - name: tickets
+    node_type: jira:issue
+    actions:
+      - { key: d, id: delete }  # asks (y/n) first
+";
+        let loc = locate_binding(&yaml_action("tickets", &[], "delete")).unwrap();
+        let out = set_binding(&loc, src, &["D".to_string()]).unwrap();
+        assert!(out.contains("id: delete"), "got:\n{out}");
+        assert!(out.contains("key: D"), "got:\n{out}");
+        assert_eq!(out.matches("id: delete").count(), 1, "rewritten, not added");
+        assert!(out.contains("# asks (y/n) first"), "comment survives");
     }
 }

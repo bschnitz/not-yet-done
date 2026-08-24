@@ -1,15 +1,17 @@
 //! Per-node-action shortcut dispatch (Phase CP-1c).
 //!
 //! The adapter declares actions per node-type via [`Node::actions`];
-//! the YAML view-config binds keys to action names via `shortcuts:` on
-//! [`ViewDef`] / [`ChildDef`]. This module is the TUI-side glue:
+//! the YAML view-config binds keys to them with `type: node` entries in
+//! an `actions:` list (the default type — `- { key: 'a d', id: delete }`).
+//! This module is the TUI-side glue:
 //!
-//! * [`resolve_shortcut`] walks the YAML tree using the selected
-//!   entry's `node_type_chain` (MT-1 chain-aware semantics) and finds
-//!   the action name bound to a single-char key, if any.
 //! * [`dispatch_to_view_request`] translates an [`ActionDispatch`]
 //!   returned by [`Node::invoke_action`] into the [`ViewRequest`] the
 //!   App should handle next.
+//!
+//! Which entries are *visible* at the cursor's position is resolved by
+//! `ContentPane::current_actions`, which walks the selected row's
+//! `node_type_chain` (MT-1 chain-aware semantics) for node actions.
 //!
 //! The dispatcher is plumbed through [`ContentPane::handle_key`] →
 //! [`ViewRequest::InvokeNodeAction`] → an async task on App that calls
@@ -21,53 +23,11 @@
 //! (`TableNode::edit_sql`). The path stays opt-in via YAML — adapters
 //! that don't override `actions()` keep the legacy `LevelAction`
 //! behaviour.
-//!
-//! **YAML shortcut value form (CP-1d):**
-//! * `q: edit_sql` — invoke `edit_sql` on the **selected** node.
-//! * `q: parent:edit_sql` — invoke `edit_sql` on the **immediate
-//!   parent** of the selected node. Use this when the shortcut sits at
-//!   a row-list level but the action lives on the parent (e.g. open the
-//!   SQL editor for the table whose rows are being viewed).
 
 use not_yet_done_content::ActionDispatch;
 
 use crate::config::view_config::{ChildDef, ViewDef};
-use crate::views::content_tree::child_def_for_type_chain;
 use crate::views::{ViewRequest, content_view::PaneId};
-
-/// Which node a YAML shortcut targets when its action fires. Decoded
-/// from the action-name prefix: bare action names default to
-/// [`Self::Selected`]; values prefixed with `parent:` are
-/// [`Self::Parent`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShortcutTarget {
-    /// The node under the cursor — usual case.
-    Selected,
-    /// The immediate parent of the selected node. In flat mode this is
-    /// `ContentPane::parent_node_id`; in tree mode it's the last entry
-    /// of the selected row's `parent_path`. Fires a notification when
-    /// the user is at root level (no parent).
-    Parent,
-}
-
-/// Parse a shortcut value. `"parent:foo"` → ([`ShortcutTarget::Parent`],
-/// `"foo"`); anything else → ([`ShortcutTarget::Selected`], full input).
-/// Empty bodies after the prefix are returned as-is — the validator
-/// rejects them.
-pub fn parse_shortcut_value(raw: &str) -> (ShortcutTarget, &str) {
-    match raw.strip_prefix("parent:") {
-        Some(rest) => (ShortcutTarget::Parent, rest),
-        None => (ShortcutTarget::Selected, raw),
-    }
-}
-
-/// Outcome of [`resolve_shortcut`]: the adapter-side action name plus
-/// the target node ([`ShortcutTarget`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolvedShortcut<'a> {
-    pub action_name: &'a str,
-    pub target: ShortcutTarget,
-}
 
 /// Build the `NodeRef`-style scope string under which a node's script
 /// shortcuts are stored in `query_shortcut.scope` (SQ-8): the app-wide
@@ -175,32 +135,6 @@ pub fn generic_mark_move_effect(action_name: &str, node_id: &str) -> MarkMoveEff
     }
 }
 
-/// Resolve `key` to an adapter action name using the YAML `shortcuts:`
-/// maps along `type_chain`. Most-specific wins:
-///
-/// 1. The [`ChildDef`] whose chain prefix matches `type_chain` (the
-///    deepest reachable level).
-/// 2. Each ancestor `ChildDef` walking up to the root.
-/// 3. The [`ViewDef`]'s view-level `shortcuts:` map.
-///
-/// An empty `type_chain` only consults the view-level map; chains that
-/// don't match any ChildDef path fall through to the view-level map.
-///
-/// Returns a borrowed reference to the action-name string (the adapter
-/// looks it up in [`Node::actions`] / [`Node::invoke_action`]).
-pub fn resolve_shortcut<'a>(
-    view_def: &'a ViewDef,
-    type_chain: &[String],
-    key: char,
-) -> Option<ResolvedShortcut<'a>> {
-    let raw = lookup_shortcut_raw(view_def, type_chain, key)?;
-    let (target, action_name) = parse_shortcut_value(raw);
-    Some(ResolvedShortcut {
-        action_name,
-        target,
-    })
-}
-
 /// Walk a [`ViewDef`]'s ChildDef tree and report whether any ChildDef
 /// matching one of the node-type segments encoded in `node_id` carries
 /// `editor_in_place: true`.
@@ -229,20 +163,6 @@ pub fn editor_in_place_for_node_id(view_def: &ViewDef, _node_id: &str) -> bool {
     walk(&view_def.children)
 }
 
-fn lookup_shortcut_raw<'a>(
-    view_def: &'a ViewDef,
-    type_chain: &[String],
-    key: char,
-) -> Option<&'a str> {
-    for end in (1..=type_chain.len()).rev() {
-        if let Some(child) = child_def_for_type_chain(view_def, &type_chain[..end]) {
-            if let Some(sc) = child.shortcuts.get(&key) {
-                return Some(sc.action());
-            }
-        }
-    }
-    view_def.shortcuts.get(&key).map(|sc| sc.action())
-}
 
 /// Translate an [`ActionDispatch`] into the [`ViewRequest`] the App
 /// should fire next. `view_index` / `pane_id` are the originating
@@ -395,219 +315,7 @@ pub fn dispatch_to_view_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::ActionChains;
-    use crate::config::view_config::{ChildDef, ShortcutDef, ViewDef};
     use std::collections::HashMap;
-
-    fn view(node_type: &str, shortcuts: &[(char, &str)]) -> ViewDef {
-        let mut sc = HashMap::new();
-        for (k, name) in shortcuts {
-            sc.insert(*k, ShortcutDef::Action((*name).to_string()));
-        }
-        ViewDef {
-            card: None,
-            row_layout: None,
-            smooth_scroll: false,
-            name: "v".into(),
-            node_type: node_type.into(),
-            default: false,
-            window_ops: false,
-            key: None,
-            query: None,
-            columns: Vec::new(),
-            preview: None,
-            actions: Vec::new(),
-            children: Vec::new(),
-            pagination: None,
-            action_chains: ActionChains::default(),
-            column_cursor: false,
-            record_detail: false,
-            node_scripts: false,
-            tree_label: None,
-            retries: 0,
-            script_template: None,
-            script_source: None,
-            shortcuts: sc,
-            leaf_glyph: None,
-            icon: None,
-            group_by: None,
-            aggregates: Vec::new(),
-            tree_connector_style: None,
-            unread_style: None,
-            unread_marker: None,
-            tree_lines: None,
-            tree_markers: None,
-            expand_depth: None,
-            group_headers: None,
-            event_actions: Vec::new(),
-        }
-    }
-
-    fn child(node_type: &str, shortcuts: &[(char, &str)]) -> ChildDef {
-        let mut sc = HashMap::new();
-        for (k, name) in shortcuts {
-            sc.insert(*k, ShortcutDef::Action((*name).to_string()));
-        }
-        ChildDef {
-            card: None,
-            row_layout: None,
-            smooth_scroll: false,
-            name: node_type.into(),
-            node_type: node_type.into(),
-            columns: Vec::new(),
-            preview: None,
-            actions: Vec::new(),
-            children: Vec::new(),
-            split: None,
-            pagination: None,
-            keybindings: HashMap::new(),
-            action_chains: ActionChains::default(),
-            column_cursor: false,
-            record_detail: false,
-            node_scripts: false,
-            tree_label: None,
-            shortcuts: sc,
-            enter_action: None,
-            recursive: false,
-            editor_in_place: false,
-            leaf_glyph: None,
-            icon: None,
-            group_by: None,
-            aggregates: Vec::new(),
-            mark_read_on_reach_end: None,
-            cursor_on_open: None,
-        }
-    }
-
-    fn selected(name: &str) -> ResolvedShortcut<'_> {
-        ResolvedShortcut {
-            action_name: name,
-            target: ShortcutTarget::Selected,
-        }
-    }
-
-    fn parent(name: &str) -> ResolvedShortcut<'_> {
-        ResolvedShortcut {
-            action_name: name,
-            target: ShortcutTarget::Parent,
-        }
-    }
-
-    #[test]
-    fn resolves_view_level_shortcut_for_empty_chain() {
-        let vd = view("mock:root", &[('x', "execute")]);
-        assert_eq!(resolve_shortcut(&vd, &[], 'x'), Some(selected("execute")));
-    }
-
-    #[test]
-    fn resolves_child_level_shortcut_when_chain_matches() {
-        let mut vd = view("mock:root", &[]);
-        vd.children.push(child("mock:row", &[('e', "edit")]));
-        let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
-        assert_eq!(resolve_shortcut(&vd, &chain, 'e'), Some(selected("edit")));
-    }
-
-    #[test]
-    fn child_level_shadows_view_level_for_same_key() {
-        let mut vd = view("mock:root", &[('x', "view-level")]);
-        vd.children.push(child("mock:row", &[('x', "child-level")]));
-        let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
-        assert_eq!(
-            resolve_shortcut(&vd, &chain, 'x'),
-            Some(selected("child-level"))
-        );
-    }
-
-    #[test]
-    fn falls_back_to_view_level_when_child_lacks_key() {
-        let mut vd = view("mock:root", &[('q', "query")]);
-        vd.children.push(child("mock:row", &[('e', "edit")]));
-        let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
-        assert_eq!(resolve_shortcut(&vd, &chain, 'q'), Some(selected("query")));
-    }
-
-    #[test]
-    fn walks_up_chain_to_intermediate_ancestor() {
-        // root → mid (has 'm') → leaf (no shortcuts)
-        let mut vd = view("mock:root", &[('r', "root-action")]);
-        let mut mid = child("mock:mid", &[('m', "mid-action")]);
-        mid.children.push(child("mock:leaf", &[]));
-        vd.children.push(mid);
-
-        let chain = vec![
-            "mock:root".to_string(),
-            "mock:mid".to_string(),
-            "mock:leaf".to_string(),
-        ];
-        // Leaf has no shortcut; mid's 'm' wins (closer than root).
-        assert_eq!(
-            resolve_shortcut(&vd, &chain, 'm'),
-            Some(selected("mid-action"))
-        );
-        // Root still reachable for 'r' (no closer ancestor binds it).
-        assert_eq!(
-            resolve_shortcut(&vd, &chain, 'r'),
-            Some(selected("root-action"))
-        );
-    }
-
-    #[test]
-    fn returns_none_when_key_unbound() {
-        let vd = view("mock:root", &[('x', "execute")]);
-        assert_eq!(resolve_shortcut(&vd, &[], 'q'), None);
-    }
-
-    #[test]
-    fn unknown_chain_falls_through_to_view_level() {
-        let mut vd = view("mock:root", &[('x', "execute")]);
-        vd.children.push(child("mock:row", &[('e', "edit")]));
-        // Chain references a type that doesn't exist under root.
-        let chain = vec!["mock:root".to_string(), "mock:nope".to_string()];
-        // 'x' from view-level still resolves.
-        assert_eq!(
-            resolve_shortcut(&vd, &chain, 'x'),
-            Some(selected("execute"))
-        );
-        // Child-only key doesn't.
-        assert_eq!(resolve_shortcut(&vd, &chain, 'e'), None);
-    }
-
-    #[test]
-    fn parent_prefix_yields_parent_target() {
-        let mut vd = view("mock:root", &[]);
-        vd.children
-            .push(child("mock:row", &[('q', "parent:edit_sql")]));
-        let chain = vec!["mock:root".to_string(), "mock:row".to_string()];
-        assert_eq!(resolve_shortcut(&vd, &chain, 'q'), Some(parent("edit_sql")));
-    }
-
-    #[test]
-    fn parent_prefix_on_view_level_works_too() {
-        let vd = view("mock:root", &[('q', "parent:edit_sql")]);
-        assert_eq!(resolve_shortcut(&vd, &[], 'q'), Some(parent("edit_sql")));
-    }
-
-    #[test]
-    fn parse_shortcut_value_strips_only_parent_prefix() {
-        assert_eq!(
-            parse_shortcut_value("foo"),
-            (ShortcutTarget::Selected, "foo")
-        );
-        assert_eq!(
-            parse_shortcut_value("parent:foo"),
-            (ShortcutTarget::Parent, "foo")
-        );
-        // Only the leading `parent:` is stripped — colons elsewhere stay.
-        assert_eq!(
-            parse_shortcut_value("foo:bar"),
-            (ShortcutTarget::Selected, "foo:bar")
-        );
-        // Other prefixes are not recognised.
-        assert_eq!(
-            parse_shortcut_value("self:foo"),
-            (ShortcutTarget::Selected, "self:foo")
-        );
-    }
 
     #[test]
     fn dispatch_noop_yields_no_request() {

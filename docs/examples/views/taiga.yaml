@@ -226,13 +226,12 @@ views:
             key: e
             type: edit
             id: edit_full
-        # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
-        # row-level `type: custom` action dispatches straight to `execute` and
-        # cannot ask for confirmation, whereas a shortcut routes through
-        # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
-        # `(y/n)` prompt before the irreversible REST delete.
-        shortcuts:
-          d: delete
+          # `delete` must stay a node action (the default `type:`) rather than
+          # `type: custom`: a custom action dispatches straight to `execute`
+          # and cannot ask for confirmation, whereas a node action routes
+          # through `invoke_action`, which returns `DeleteSelf` so the TUI
+          # shows a `(y/n)` prompt before the irreversible REST delete.
+          - { key: d, id: delete }
 
       - name: Attachments
         node_type: "taiga:attachment"
@@ -262,10 +261,9 @@ views:
             id: download_all # InputSpec::Form — prompts for a target directory,
             # then saves every attachment of the item there (dir created if
             # missing; errors on a non-directory path or no permission)
-        # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
-        # row-level `type: custom` action dispatches straight to `execute` and
-        # cannot ask for confirmation, whereas a shortcut routes through
-        # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
-        # `(y/n)` prompt before the irreversible REST delete.
-        shortcuts:
-          d: delete
+          # `delete` must stay a node action (the default `type:`) rather than
+          # `type: custom`: a custom action dispatches straight to `execute`
+          # and cannot ask for confirmation, whereas a node action routes
+          # through `invoke_action`, which returns `DeleteSelf` so the TUI
+          # shows a `(y/n)` prompt before the irreversible REST delete.
+          - { key: d, id: delete }

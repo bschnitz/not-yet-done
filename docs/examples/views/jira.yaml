@@ -309,13 +309,12 @@ views:
             id: download_all # InputSpec::Form — prompts for a target directory,
             # then saves every attachment of the issue there (dir created if
             # missing; errors on a non-directory path or no permission)
-        # `delete` must be a `shortcuts:` binding (not an `actions:` entry): a
-        # row-level `type: custom` action dispatches straight to `execute` and
-        # cannot ask for confirmation, whereas a shortcut routes through
-        # `invoke_action`, which returns `DeleteSelf` so the TUI shows a
-        # `(y/n)` prompt before the irreversible REST delete.
-        shortcuts:
-          d: delete
+          # `delete` must stay a node action (the default `type:`) rather than
+          # `type: custom`: a custom action dispatches straight to `execute`
+          # and cannot ask for confirmation, whereas a node action routes
+          # through `invoke_action`, which returns `DeleteSelf` so the TUI
+          # shows a `(y/n)` prompt before the irreversible REST delete.
+          - { key: d, id: delete }
 
       # The issue's linked tickets. A row is the *link*, not the ticket at its
       # other end: `relation` is the phrase seen from this issue's side ("blocks
@@ -386,10 +385,10 @@ views:
             key: o
             type: custom
             id: open_in_browser # opens the *linked* ticket in the browser
-        # Like the attachment `delete` above: a shortcut, not an action, so the
-        # TUI can ask `(y/n)` first. It unlinks only — the ticket stays.
-        shortcuts:
-          d: delete
+          # Like the attachment `delete` above: a node action, not
+          # `type: custom`, so the TUI can ask `(y/n)` first. It unlinks only
+          # — the ticket stays.
+          - { key: d, id: delete }
 
   # ── Bookmarks subtab ─────────────────────────────────────────────────────
   # Switch here from the tickets subtab with `m`; switch back with `i`. This
@@ -495,15 +494,13 @@ views:
         key: t
         type: custom
         id: transition
-
-    # Removing a bookmark here asks for confirmation. Like the attachment
-    # `delete` above, this must be a `shortcuts:` binding (not an `actions:`
-    # entry): a shortcut routes through `invoke_action`, which returns
-    # `Confirm` so the TUI shows a `(y/n)` prompt; on "y" the bookmark is
-    # dropped and the row disappears on reload. (The tickets subtab's `B`
-    # toggles without confirmation via `execute`.)
-    shortcuts:
-      b: remove-bookmark
+      # Removing a bookmark here asks for confirmation. Like the attachment
+      # `delete` above, this must stay a node action (not `type: custom`): it
+      # routes through `invoke_action`, which returns `Confirm`, so the TUI
+      # shows a `(y/n)` prompt; on "y" the bookmark is dropped and the row
+      # disappears on reload. (The tickets subtab's `B` toggles without
+      # confirmation via `execute`.)
+      - { key: b, id: remove-bookmark }
 
     children:
       - name: Comments
@@ -568,8 +565,7 @@ views:
             key: D
             type: custom
             id: download_all
-        shortcuts:
-          d: delete
+          - { key: d, id: delete }
 
       # Same level as in the tickets subtab above — see there for why the
       # ticket-level bindings carry `node_id_from: key`.
@@ -624,5 +620,4 @@ views:
             key: o
             type: custom
             id: open_in_browser
-        shortcuts:
-          d: delete
+          - { key: d, id: delete }

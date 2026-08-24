@@ -111,8 +111,12 @@ views:
                 # address this table. Nothing about Postgres is hardcoded in
                 # the host — this flag is what turns the keys on.
                 node_scripts: true
-                shortcuts:
-                  Q: edit_sql
+                actions:
+                  # `force: true`: `Q` is the host's own query editor. On a
+                  # table the adapter's `edit_sql` is what the key should
+                  # mean, so it takes the key over — without `force` the
+                  # validator reports the collision and refuses the file.
+                  - { key: Q, id: edit_sql, force: true }
                 columns:
                   - key: name
                     label: Name
@@ -131,8 +135,6 @@ views:
                   # window_ops on the view to focus into it).
                   - name: Rows
                     node_type: "postgres:row"
-                    shortcuts:
-                      Q: "parent:edit_sql"
                     split:
                       direction: right
                       ratio: 0.8
@@ -154,10 +156,10 @@ views:
                         key: x
                         type: script
                         scope: table
-                      # The row editor. Like the view definition below it has
-                      # to be an `actions:` entry with `type: edit` — a
-                      # `shortcuts:` line dispatches through `invoke_action`,
-                      # which cannot open an editor.
+                      # The row editor. Like the view definition below it
+                      # has to carry `type: edit` — the default `type: node`
+                      # dispatches through `invoke_action`, which cannot open
+                      # an editor.
                       #
                       # The buffer is the row as YAML, one `column: value`
                       # per cell; saving builds an UPDATE from the columns
@@ -181,6 +183,7 @@ views:
                         key: e
                         type: edit
                         id: edit_row
+                      - { key: Q, id: edit_sql, target: parent, force: true }
                     keybindings:
                       back: null
                     # `ctrl+n`/`ctrl+p`: step the parent table cursor and
@@ -208,14 +211,12 @@ views:
                     node_type: "postgres:view"
                     tree_label: name
                     node_scripts: true
-                    shortcuts:
-                      Q: edit_sql
-                    # The definition editor. It has to be an `actions:` entry
-                    # with `type: edit`, NOT a `shortcuts:` line: a shortcut
-                    # dispatches through `invoke_action`, which cannot open an
-                    # editor, and the host answers such a binding with an
-                    # error. `id:` names the adapter action; without it the
-                    # entry would mean `edit_full`.
+                    # The definition editor. It has to carry `type: edit`,
+                    # NOT the default `type: node`: a node action dispatches
+                    # through `invoke_action`, which cannot open an editor, and
+                    # the host answers such a binding with an error. `id:`
+                    # names the adapter action; without it the entry would mean
+                    # `edit_full`.
                     #
                     # Saving runs `CREATE OR REPLACE VIEW`, so nothing is
                     # dropped and dependent views and privileges survive —
@@ -231,6 +232,7 @@ views:
                         key: E
                         type: edit
                         id: edit_view
+                      - { key: Q, id: edit_sql, force: true }
                     columns:
                       - key: name
                         label: Name
@@ -245,8 +247,6 @@ views:
                       # as stable as the view's own `ORDER BY`.
                       - name: Rows
                         node_type: "postgres:row"
-                        shortcuts:
-                          Q: "parent:edit_sql"
                         split:
                           direction: right
                           ratio: 0.8
@@ -272,6 +272,7 @@ views:
                             key: x
                             type: script
                             scope: table
+                          - { key: Q, id: edit_sql, target: parent, force: true }
                         keybindings:
                           back: null
                         action_chains:
@@ -285,9 +286,9 @@ views:
       - name: Scripts
         node_type: "postgres:db_scripts"
         tree_label: name
-        shortcuts:
-          a: add-script
-          A: add-dir
+        actions:
+          - { key: a, id: add-script }
+          - { key: A, id: add-dir }
         columns:
           - key: name
             label: Name
@@ -301,12 +302,14 @@ views:
             node_type: "postgres:db_script_dir"
             tree_label: name
             recursive: true
-            shortcuts:
-              a: add-script
-              A: add-dir
-              r: rename
-              M: move       # adapter-executed move (prompts for target folder)
-              d: delete-dir
+            actions:
+              - { key: a, id: add-script }
+              - { key: A, id: add-dir }
+              - { key: r, id: rename }
+              - { key: M, id: move }  # adapter-executed move (prompts for target folder)
+              # `D`, not `d`: `d` switches to the databases subtab and that
+              # claim covers the whole tab, so a `d` here would never fire.
+              - { key: D, id: delete-dir }
             columns:
               - key: name
                 label: Name
@@ -322,16 +325,16 @@ views:
                 # server discovers sibling config by walking up from the
                 # buffer path — instead of editing in $TMPDIR with no context.
                 editor_in_place: true
-                shortcuts:
+                actions:
                   # `X`, not `x`: the row levels bind `x` to the view
                   # scripts (see `type: script` above), and that binding
                   # wins tab-wide. Enter runs the script as well
                   # (`enter_action`), so the shifted key is the rare path.
-                  X: execute
-                  e: edit
-                  r: rename
-                  M: move
-                  d: delete
+                  - { key: X, id: execute }
+                  - { key: e, id: edit }
+                  - { key: r, id: rename }
+                  - { key: M, id: move }
+                  - { key: D, id: delete }
                 columns:
                   - key: script
                     label: Script
@@ -358,12 +361,12 @@ views:
             tree_label: script
             enter_action: execute
             editor_in_place: true
-            shortcuts:
-              X: execute
-              e: edit
-              r: rename
-              M: move
-              d: delete
+            actions:
+              - { key: X, id: execute }
+              - { key: e, id: edit }
+              - { key: r, id: rename }
+              - { key: M, id: move }
+              - { key: D, id: delete }
             columns:
               - key: script
                 label: Script
@@ -397,8 +400,6 @@ views:
     # Flat table list — same per-node script ownership as the `Table`
     # level inside the `databases` tree. See `node_scripts:` there.
     node_scripts: true
-    shortcuts:
-      Q: edit_sql
 
     columns:
       - key: name
@@ -429,12 +430,11 @@ views:
         type: search
         search:
           fields: [name, database, schema]
+      - { key: Q, id: edit_sql, force: true }
 
     children:
       - name: Rows
         node_type: "postgres:row"
-        shortcuts:
-          Q: "parent:edit_sql"
         split:
           direction: right
           ratio: 0.8
@@ -451,6 +451,7 @@ views:
             key: e
             type: edit
             id: edit_row
+          - { key: Q, id: edit_sql, target: parent, force: true }
         keybindings:
           back: null
         action_chains:
@@ -466,8 +467,6 @@ views:
     window_ops: true
     retries: 2
     node_scripts: true
-    shortcuts:
-      Q: edit_sql
 
     columns:
       - key: name
@@ -502,12 +501,13 @@ views:
         type: search
         search:
           fields: [name, database, schema]
+      - { key: Q, id: edit_sql, force: true }
 
     children:
       - name: Rows
         node_type: "postgres:row"
-        shortcuts:
-          Q: "parent:edit_sql"
+        actions:
+          - { key: Q, id: edit_sql, target: parent, force: true }
         split:
           direction: right
           ratio: 0.8

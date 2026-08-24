@@ -50,7 +50,7 @@
 #         task: the engine resolves the absent parent to the adapter root,
 #         which maps `add`/`add-sibling` to a top-level create.
 #   * `d` delete (recursive, with confirm) / `u` undelete (restores the
-#     last deletion) — generic `shortcuts:` dispatched via `invoke_action`.
+#     last deletion) — generic node actions dispatched via `invoke_action`.
 #   * `s` toggle-tracking — start/stop time tracking for the selected task
 #     in one key. The `tracking` column shows a `⏱` glyph on running rows.
 #     Respects the host's exclusivity policy (`tracking.allow_parallel`).
@@ -59,11 +59,10 @@
 #   * `U` un-nest — move the selected task back to the top level. The
 #     target-free inverse of mark/paste-move.
 #
-# ## Action / shortcut inheritance down the tree
+# ## Action inheritance down the tree
 #
-# The recursive `subtasks` branch ships **no** `actions:` or `shortcuts:`
-# of its own. Every entry the root view marks `inherit: true` (the action
-# `inherit` flag; the `{ action: …, inherit: true }` shortcut form)
+# The recursive `subtasks` branch ships **no** `actions:` of its own. Every
+# entry the root view marks `inherit: true`
 # cascades down each tree-continuation level — analogous to column
 # inheritance — unless the child re-declares the same key (then the
 # child's wins, per field). The single-level search family
@@ -410,25 +409,24 @@ views:
         type: custom
         id: backup
         on_container: true
+      - { key: d, id: delete, inherit: true }
+      - { key: u, id: undelete, inherit: true }
+      - { key: s, id: toggle-tracking, inherit: true }
+      - { key: m, id: mark-move, inherit: true }
+      - { key: p, id: paste-move, inherit: true }
+      # Un-nest: move the selected task back to the top level (parent_id =
+      # None). The comfort inverse of mark/paste-move — no target needed.
+      # No-op (notification) when the task is already top-level.
+      - { key: U, id: unnest, inherit: true }
 
     # Fire-and-forget actions dispatched through the adapter's
     # `invoke_action`. `delete` routes through the confirm-then-delete flow;
     # `undelete` restores the last deletion; `mark-move`/`paste-move`
     # reparent a task. Keys must not collide with any `actions:` key above.
     #
-    # Each entry uses the `{ action: …, inherit: true }` form so it cascades
-    # down the recursive subtask branch (which declares no shortcuts of its
-    # own). A bare `key: action` would NOT be inherited.
-    shortcuts:
-      d: { action: delete, inherit: true }
-      u: { action: undelete, inherit: true }
-      s: { action: toggle-tracking, inherit: true }
-      m: { action: mark-move, inherit: true }
-      p: { action: paste-move, inherit: true }
-      # Un-nest: move the selected task back to the top level (parent_id =
-      # None). The comfort inverse of mark/paste-move — no target needed.
-      # No-op (notification) when the task is already top-level.
-      U: { action: unnest, inherit: true }
+    # Each entry carries `inherit: true` so it cascades down the recursive
+    # subtask branch (which declares no actions of its own). Without the flag
+    # an action stays on the level that declares it.
 
     children:
       # Recursive subtask branch — the same ChildDef serves every depth.
@@ -445,7 +443,7 @@ views:
         # identical columns at every level only invites drift. Declare
         # `columns:` here only to deliberately diverge from the root.
 
-        # No `actions:` or `shortcuts:` here either. Every entry the root
+        # No `actions:` here either. Every entry the root
         # view marks `inherit: true` (edit / edit node / add / script /
         # add-sibling / refresh; d/u/s/m/p/U) cascades down to this branch
         # at load time. Re-declare a key here only to override it at depth.
@@ -594,13 +592,12 @@ views:
       - name: refresh
         key: r
         type: reload
-
-    shortcuts:
       # Flat list: single-task delete (no subtree cascade) — see the
       # view comment above. The tree view's `d` stays recursive `delete`.
-      d: delete-single
-      u: undelete
-      s: toggle-tracking
-      m: mark-move
-      p: paste-move
-      U: unnest
+      - { key: d, id: delete-single }
+      - { key: u, id: undelete }
+      - { key: s, id: toggle-tracking }
+      - { key: m, id: mark-move }
+      - { key: p, id: paste-move }
+      - { key: U, id: unnest }
+

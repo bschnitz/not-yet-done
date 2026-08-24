@@ -39,6 +39,13 @@ pub enum PathStep {
     /// Within the current sequence, select the mapping whose scalar child
     /// `field` equals `value` (e.g. an action identified by its `name`).
     Find { field: String, value: String },
+    /// Within the current sequence, select the action whose identity equals
+    /// `value` — its `name:` when it declares one, otherwise its `id:`. This
+    /// mirrors [`ActionDef::name`](crate::config::view_config::ActionDef::name),
+    /// the identity every other layer addresses an action by, so an entry
+    /// that leaves the label to the adapter (`- {{ key: d, id: delete }}`) is
+    /// still reachable from the keybinding editor.
+    FindAction { value: String },
 }
 
 impl PathStep {
@@ -48,6 +55,11 @@ impl PathStep {
     pub fn find(field: impl Into<String>, value: impl Into<String>) -> Self {
         PathStep::Find {
             field: field.into(),
+            value: value.into(),
+        }
+    }
+    pub fn find_action(value: impl Into<String>) -> Self {
+        PathStep::FindAction {
             value: value.into(),
         }
     }
@@ -111,8 +123,8 @@ pub fn set_entry(
                 .ok_or_else(|| "key line out of range".to_string())?;
             let prefix = char_prefix(key_line, loc.key_col - 1);
             let new_line = if loc.single_line {
-                let comment = trailing_comment(key_line, loc.val_start_col - 1);
-                format!("{prefix}{entry}: {rendered}{comment}")
+                let suffix = value_suffix(key_line, loc.val_start_col - 1);
+                format!("{prefix}{entry}: {rendered}{suffix}")
             } else {
                 format!("{prefix}{entry}: {rendered}")
             };
@@ -134,62 +146,89 @@ pub fn set_entry(
     Ok(join_lines(lines, trailing_nl))
 }
 
-/// Set `entry: values` inside the mapping named by the **last** [`PathStep`]
-/// of `path` (which must be a [`PathStep::Key`]) — but, unlike [`set_entry`],
-/// that mapping need not already exist or be populated. This is what a
-/// per-node `shortcuts:` binding needs: the map is often present-but-empty
-/// (`shortcuts:` with nothing under it) or absent entirely.
+/// Append `- {{ <fields> }}` as a new item to the block sequence `seq_key`
+/// under the mapping reached by `path`, creating the `seq_key:` line when the
+/// mapping doesn't have it yet.
 ///
-/// * If the mapping already has entries, this delegates to [`set_entry`]
-///   (identical in-place / insert behaviour, comments preserved).
-/// * If the key exists with an empty/null value, `entry: values` is inserted
-///   as its first child, indented two spaces past the key.
-/// * If the key is absent from its parent, both the `key:` line and its child
-///   are inserted into the parent (after the parent's first entry).
-pub fn set_entry_in_optional_map(
+/// This is what binding a key to an adapter action the view file never
+/// mentions needs: there is no entry to rewrite, so one has to be written.
+/// The new item is a single-line flow mapping, which keeps the splice to a
+/// pure insertion — no existing line is touched, so every comment survives.
+///
+/// The insertion point is found textually rather than from the parsed spans:
+/// the last line belonging to the sequence is the last one indented at least
+/// as deep as its first item (blank lines in between are carried along), so
+/// the new item lands after the sequence's real end and before whatever key
+/// follows it.
+pub fn append_seq_item(
     source: &str,
     path: &[PathStep],
-    entry: &str,
-    values: &[String],
+    seq_key: &str,
+    fields: &[(String, String)],
 ) -> EditResult<String> {
-    let (map_key, parent_path) = match path.split_last() {
-        Some((PathStep::Key(k), rest)) => (k.clone(), rest),
-        _ => return Err("set_entry_in_optional_map: last path step must be a key".to_string()),
-    };
-    let rendered = render_value(values);
+    let rendered = format!(
+        "{{ {} }}",
+        fields
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let root = parse_yaml(0, source).map_err(|e| format!("YAML parse error: {e}"))?;
-    let parent = navigate(&root, parent_path)?;
-    let parent_map = parent
+    let target = navigate(&root, path)?;
+    let map = target
         .as_mapping()
-        .ok_or_else(|| "parent of target map is not a mapping".to_string())?;
-
-    // A populated mapping is exactly what the normal in-place editor handles.
-    if parent_map
-        .get_node(&map_key)
-        .and_then(|n| n.as_mapping().map(|m| m.iter().next().is_some()))
-        .unwrap_or(false)
-    {
-        return set_entry(source, path, entry, values);
-    }
-
+        .ok_or_else(|| "target of path is not a mapping".to_string())?;
     let (mut lines, trailing_nl) = split_lines(source);
-    match key_pos(parent_map, &map_key) {
-        // Key present but empty/null: insert the child two spaces deeper.
-        Some((key_line, key_col)) => {
-            let child_indent = " ".repeat(key_col - 1 + 2);
-            lines.insert(key_line, format!("{child_indent}{entry}: {rendered}"));
+
+    let existing = map
+        .get_node(seq_key)
+        .and_then(|n| n.as_sequence().map(|s| s.iter().next().is_some()))
+        .unwrap_or(false);
+    if existing {
+        let (key_line, _) =
+            key_pos(map, seq_key).ok_or_else(|| format!("key '{seq_key}' not found"))?;
+        // Indentation of the sequence's first item line (the one carrying `-`).
+        let first_item = (key_line..lines.len())
+            .find(|i| lines[*i].trim_start().starts_with('-'))
+            .ok_or_else(|| format!("no list item found under '{seq_key}'"))?;
+        let indent = indent_of(&lines[first_item]);
+        // The sequence ends at the last non-blank line still indented at
+        // least as deep as its items; anything shallower belongs to the
+        // enclosing mapping again.
+        let mut last = first_item;
+        for (i, line) in lines.iter().enumerate().skip(first_item + 1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if indent_of(line) < indent {
+                break;
+            }
+            last = i;
         }
-        // Key absent: insert the `map_key:` line and its first child.
-        None => {
-            let (after_line, key_col) = first_entry_anchor(parent_map)
-                .ok_or_else(|| "cannot insert into an empty mapping".to_string())?;
-            let indent = " ".repeat(key_col - 1);
-            let child_indent = " ".repeat(key_col - 1 + 2);
-            lines.insert(after_line, format!("{child_indent}{entry}: {rendered}"));
-            lines.insert(after_line, format!("{indent}{map_key}:"));
-        }
+        let insert_at = last + 1;
+        let pad = " ".repeat(indent);
+        lines.insert(insert_at, format!("{pad}- {rendered}"));
+    } else {
+        let (after_line, key_col) = match key_pos(map, seq_key) {
+            // `seq_key:` present but empty — insert the first item under it.
+            Some((line, col)) => (line, col),
+            None => {
+                let (after_line, key_col) = first_entry_anchor(map)
+                    .ok_or_else(|| "cannot insert into an empty mapping".to_string())?;
+                let indent = " ".repeat(key_col - 1);
+                lines.insert(after_line, format!("{indent}{seq_key}:"));
+                (after_line + 1, key_col)
+            }
+        };
+        let pad = " ".repeat(key_col - 1 + 2);
+        lines.insert(after_line, format!("{pad}- {rendered}"));
     }
     Ok(join_lines(lines, trailing_nl))
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
 }
 
 /// Remove the mapping entry `entry` (under the node reached by `path`)
@@ -256,6 +295,15 @@ fn navigate<'a>(root: &'a Node, path: &[PathStep]) -> EditResult<&'a Node> {
                             .unwrap_or(false)
                     })
                     .ok_or_else(|| format!("step {i}: no item with {field}={value}"))?;
+            }
+            PathStep::FindAction { value } => {
+                let s = cur.as_sequence().ok_or_else(|| {
+                    format!("step {i}: expected a sequence to find the action '{value}'")
+                })?;
+                cur = s
+                    .iter()
+                    .find(|item| action_identity(item).as_deref() == Some(value.as_str()))
+                    .ok_or_else(|| format!("step {i}: no action named '{value}'"))?;
             }
         }
     }
@@ -344,6 +392,15 @@ fn block_end_line(lines: &[String], val_start_line: usize, key_col: usize) -> us
 /// Returns `(end_line, key_col)` of the mapping's first entry: the 1-based
 /// line after which a new sibling entry should be inserted, and the column at
 /// which its key sits (the indentation to match).
+/// The identity of one `actions:` sequence item: its `name:` when present,
+/// otherwise its `id:`. Mirrors `ActionDef::name`.
+fn action_identity(item: &Node) -> Option<String> {
+    let m = item.as_mapping()?;
+    m.get_scalar("name")
+        .or_else(|| m.get_scalar("id"))
+        .map(|sc| sc.as_str().to_string())
+}
+
 fn first_entry_anchor(map: &MarkedMappingNode) -> Option<(usize, usize)> {
     let (k, v) = map.iter().next()?;
     let ks = k.span().start()?;
@@ -360,7 +417,7 @@ fn first_entry_anchor(map: &MarkedMappingNode) -> Option<(usize, usize)> {
 // Value rendering
 // ---------------------------------------------------------------------------
 
-fn render_value(values: &[String]) -> String {
+pub(crate) fn render_value(values: &[String]) -> String {
     match values.len() {
         0 => "[]".to_string(),
         1 => render_scalar(&values[0]),
@@ -443,6 +500,66 @@ fn splice(lines: &mut Vec<String>, start: usize, end: usize, new_line: String) {
 /// First `n` characters of `line` (char-based, not bytes).
 fn char_prefix(line: &str, n: usize) -> String {
     line.chars().take(n).collect()
+}
+
+/// Whether the value starting at char index `from` sits inside a flow
+/// collection opened earlier on the same line — the `- {{ key: d, id: delete }}`
+/// form the view files use for node actions.
+fn in_flow_context(line: &str, from: usize) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for (i, c) in line.chars().enumerate() {
+        if i >= from {
+            break;
+        }
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth -= 1,
+                '#' => break,
+                _ => {}
+            },
+        }
+    }
+    depth > 0
+}
+
+/// Everything that must survive after the value starting at char index
+/// `from`. In a flow mapping that is the rest of the item (`, id: delete }`);
+/// otherwise it is the trailing comment, if any. Without this a rewrite of
+/// one field inside `- {{ key: d, id: delete }}` would truncate the item at the
+/// replaced value.
+fn value_suffix(line: &str, from: usize) -> String {
+    if !in_flow_context(line, from) {
+        return trailing_comment(line, from);
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for i in from.min(chars.len())..chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '{' | '[' => depth += 1,
+                '}' | ']' if depth > 0 => depth -= 1,
+                ',' | '}' | ']' => return chars[i..].iter().collect(),
+                _ => {}
+            },
+        }
+    }
+    String::new()
 }
 
 /// The trailing comment on `line` (a `#` preceded by whitespace) at or after
@@ -681,103 +798,130 @@ actions:
     }
 
     #[test]
-    fn optional_map_delegates_when_map_is_populated() {
-        // `shortcuts:` already has an entry → in-place insert, comments kept.
-        let src = "\
-views:
-  - name: trackings
-    shortcuts:
-      d: delete  # soft-delete
-";
-        let vals = vec!["toggle-tracking".to_string()];
-        let out = set_entry_in_optional_map(
-            src,
-            &[
-                PathStep::key("views"),
-                PathStep::find("name", "trackings"),
-                PathStep::key("shortcuts"),
-            ],
-            "s",
-            &vals,
-        )
-        .unwrap();
-        let expected = "\
-views:
-  - name: trackings
-    shortcuts:
-      d: delete  # soft-delete
-      s: 'toggle-tracking'
-";
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn optional_map_inserts_into_empty_block() {
-        // `shortcuts:` present but null → first child inserted under it.
-        let src = "\
-views:
-  - name: condensed
-    shortcuts:
-  - name: tree
-    key: t
-";
-        let vals = vec!["toggle-tracking".to_string()];
-        let out = set_entry_in_optional_map(
-            src,
-            &[
-                PathStep::key("views"),
-                PathStep::find("name", "condensed"),
-                PathStep::key("shortcuts"),
-            ],
-            "s",
-            &vals,
-        )
-        .unwrap();
-        let expected = "\
-views:
-  - name: condensed
-    shortcuts:
-      s: 'toggle-tracking'
-  - name: tree
-    key: t
-";
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn optional_map_creates_absent_key() {
-        // No `shortcuts:` at all → key + child inserted after the first entry.
-        let src = "\
-views:
-  - name: trackings
-    node_type: x
-";
-        let vals = vec!["toggle-tracking".to_string()];
-        let out = set_entry_in_optional_map(
-            src,
-            &[
-                PathStep::key("views"),
-                PathStep::find("name", "trackings"),
-                PathStep::key("shortcuts"),
-            ],
-            "s",
-            &vals,
-        )
-        .unwrap();
-        let expected = "\
-views:
-  - name: trackings
-    shortcuts:
-      s: 'toggle-tracking'
-    node_type: x
-";
-        assert_eq!(out, expected);
-    }
-
-    #[test]
     fn missing_path_is_an_error() {
         let src = "global:\n  quit: ctrl+c\n";
         let err = set_entry(src, &[PathStep::key("nope")], "x", &[]).unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── append_seq_item ──────────────────────────────────────────────
+    //
+    // Binding a key to an adapter action the view file never mentions has
+    // to *create* the `actions:` entry. The three cases below are the three
+    // states a level can be in when that happens.
+
+    fn append(source: &str, path: &[PathStep], seq_key: &str, fields: &[(&str, &str)]) -> String {
+        let owned: Vec<(String, String)> = fields
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        append_seq_item(source, path, seq_key, &owned).expect("append_seq_item")
+    }
+
+    #[test]
+    fn append_seq_item_adds_to_a_populated_sequence() {
+        let src = "\
+views:
+  - name: tickets
+    actions:
+      - { name: edit, key: e, type: edit }
+      - name: search
+        key: /
+        type: search
+    node_type: t
+";
+        let out = append(
+            src,
+            &[PathStep::key("views"), PathStep::find("name", "tickets")],
+            "actions",
+            &[("key", "d"), ("id", "delete")],
+        );
+        // Appended after the *whole* last item, not after its first line.
+        assert!(
+            out.contains("        type: search\n      - { key: d, id: delete }\nnode_type")
+                || out.contains("        type: search\n      - { key: d, id: delete }\n    node_type"),
+            "got:\n{out}"
+        );
+        // Everything else is untouched, comments and block style included.
+        assert!(out.contains("      - { name: edit, key: e, type: edit }"));
+    }
+
+    #[test]
+    fn append_seq_item_fills_a_present_but_empty_key() {
+        let src = "views:\n  - name: tickets\n    actions:\n    node_type: t\n";
+        let out = append(
+            src,
+            &[PathStep::key("views"), PathStep::find("name", "tickets")],
+            "actions",
+            &[("key", "d"), ("id", "delete")],
+        );
+        assert_eq!(
+            out,
+            "views:\n  - name: tickets\n    actions:\n      - { key: d, id: delete }\n    node_type: t\n"
+        );
+    }
+
+    #[test]
+    fn append_seq_item_creates_an_absent_key() {
+        let src = "views:\n  - name: tickets\n    node_type: t\n";
+        let out = append(
+            src,
+            &[PathStep::key("views"), PathStep::find("name", "tickets")],
+            "actions",
+            &[("key", "d"), ("id", "delete")],
+        );
+        assert_eq!(
+            out,
+            "views:\n  - name: tickets\n    actions:\n      - { key: d, id: delete }\n    node_type: t\n"
+        );
+    }
+
+    #[test]
+    fn append_seq_item_keeps_a_trailing_comment_with_its_item() {
+        // A comment indented under the last item belongs to that item; the
+        // new entry goes after it, not between the item and its comment.
+        let src = "\
+views:
+  - name: tickets
+    actions:
+      - name: edit
+        key: e
+        # why `e`: the editor opens in place
+    node_type: t
+";
+        let out = append(
+            src,
+            &[PathStep::key("views"), PathStep::find("name", "tickets")],
+            "actions",
+            &[("key", "d"), ("id", "delete")],
+        );
+        assert!(
+            out.contains("        # why `e`: the editor opens in place\n      - { key: d, id: delete }"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn find_action_locates_an_entry_by_id_when_it_has_no_name() {
+        // A `type: node` action may omit `name:` — its `id` is then the
+        // identity the keybinding editor addresses it by.
+        let src = "\
+views:
+  - name: tickets
+    actions:
+      - { key: d, id: delete }
+";
+        let out = set(
+            src,
+            &[
+                PathStep::key("views"),
+                PathStep::find("name", "tickets"),
+                PathStep::key("actions"),
+                PathStep::find_action("delete"),
+            ],
+            "key",
+            &["D"],
+        );
+        assert!(out.contains("key: D"), "got:\n{out}");
     }
 }

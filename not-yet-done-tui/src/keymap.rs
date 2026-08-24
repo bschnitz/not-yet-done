@@ -211,18 +211,6 @@ pub enum KeySource {
     TabSwitch {
         tab: String,
     },
-    /// A per-node `shortcuts:` entry (a single key mapped to an adapter
-    /// action verb, e.g. `s: toggle-tracking`). Lives in the view file's
-    /// `shortcuts:` map at the view (`child_path` empty) or a drill-down
-    /// child. `key` is the single-character surface form; `action` is the
-    /// verb, kept for display. The map key *is* the binding, so the editor
-    /// can only drop the whole entry (not rebind it in place).
-    NodeShortcut {
-        view: String,
-        child_path: Vec<String>,
-        key: String,
-        action: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -302,21 +290,6 @@ impl KeySource {
                 }
             }
             Self::TabSwitch { tab } => format!("tab[{tab}].key"),
-            Self::NodeShortcut {
-                view,
-                child_path,
-                key,
-                ..
-            } => {
-                if child_path.is_empty() {
-                    format!("views.{view}.shortcuts[{key}]")
-                } else {
-                    format!(
-                        "views.{view}.children.{}.shortcuts[{key}]",
-                        child_path.join(".")
-                    )
-                }
-            }
         }
     }
 
@@ -355,8 +328,7 @@ impl KeySource {
             | Self::YamlMenuKey { view }
             | Self::YamlPreviewKey { view, .. }
             | Self::YamlChildKeybinding { view, .. }
-            | Self::PaneSearchJump { view, .. }
-            | Self::NodeShortcut { view, .. } => Some(view.as_str()),
+            | Self::PaneSearchJump { view, .. } => Some(view.as_str()),
             _ => None,
         }
     }
@@ -388,7 +360,6 @@ impl KeySource {
             },
             Self::AppActionChain { .. } => "Action chain".into(),
             Self::TabSwitch { tab } => format!("Switch to {tab}"),
-            Self::NodeShortcut { action, .. } => title_case(action),
         }
     }
 }
@@ -881,86 +852,17 @@ fn push_tab_wide(km: &mut KeyMap, tab: &TabRef, kb: &KeyBindingConfig, window_op
     }
 }
 
-/// Collect a `Handler` claim for every per-node `shortcuts:` entry (a single
-/// key → adapter action verb) across `views` and their drill-down children.
-///
-/// These are real, live bindings but they are deliberately **not** filed into
-/// the leaf maps that feed the load-time validator / saved-query check: a
-/// node shortcut legitimately overrides a content built-in or subtab key on
-/// its key (e.g. `Q` overriding `edit_query`), which the validator would
-/// otherwise flag as a hard error. Instead the interactive keybinding editor
-/// folds these claims into its own conflict check (via
-/// [`crate::app::App`]), so a newly-recorded binding that collides with a
-/// node shortcut is caught and offered for resolution.
-pub fn node_shortcut_claims(tab: &str, views: &[ViewDef]) -> Vec<KeyClaim> {
-    let tref = TabRef::new(tab);
-    let mut out = Vec::new();
-    for view in views {
-        collect_node_shortcuts(
-            &tref,
-            &view.name,
-            &[],
-            &view.shortcuts,
-            &view.children,
-            &mut out,
-        );
-    }
-    out
-}
-
-/// The [`KeyScope`] a per-node `shortcuts:` binding lives in, given the
-/// drilldown depth of the level that declares it. Mirrors the profile
-/// [`collect_node_shortcuts`] stamps on the claims it builds, so a
-/// synthesised (still-unbound) adapter-action row shares the exact scope a
-/// bound one would — the conflict check and the binding writer then treat
-/// the two identically.
-pub fn node_shortcut_scope(tab: &str, child_path: &[String]) -> KeyScope {
+/// The [`KeyScope`] a level's own `actions:` bindings live in, given the
+/// drilldown depth of that level. Lets a synthesised row for an adapter
+/// action nobody has bound yet share the exact scope a bound one carries,
+/// so the conflict check and the binding writer treat the two identically.
+pub fn pane_level_scope(tab: &str, child_path: &[String]) -> KeyScope {
     let profile = if child_path.is_empty() {
         root_profile()
     } else {
         drilled_profile()
     };
     KeyScope::Pane(TabRef::new(tab), profile)
-}
-
-fn collect_node_shortcuts(
-    tab: &TabRef,
-    view_name: &str,
-    child_path: &[String],
-    shortcuts: &std::collections::HashMap<char, crate::config::view_config::ShortcutDef>,
-    children: &[crate::config::view_config::ChildDef],
-    out: &mut Vec<KeyClaim>,
-) {
-    let profile = if child_path.is_empty() {
-        root_profile()
-    } else {
-        drilled_profile()
-    };
-    for (ch, def) in shortcuts {
-        let key = ch.to_string();
-        out.push(KeyClaim::handler(
-            KeyBinding::new(&key),
-            KeyScope::Pane(tab.clone(), profile.clone()),
-            KeySource::NodeShortcut {
-                view: view_name.to_string(),
-                child_path: child_path.to_vec(),
-                key,
-                action: def.action().to_string(),
-            },
-        ));
-    }
-    for child in children {
-        let mut path = child_path.to_vec();
-        path.push(child.name.clone());
-        collect_node_shortcuts(
-            tab,
-            view_name,
-            &path,
-            &child.shortcuts,
-            &child.children,
-            out,
-        );
-    }
 }
 
 /// Keys reserved by the optional column cursor when `column_cursor:
@@ -1184,7 +1086,11 @@ fn push_child_actions(
 /// Keys of every `force: true` action in `actions` — the built-in claims
 /// on these keys are stripped from the leaf (see
 /// [`KeyMap::force_override_keys`]).
-fn forced_keys(actions: &[crate::config::view_config::ActionDef]) -> Vec<String> {
+/// The keys of every action that opts into overriding a built-in
+/// (`force: true`). Fed to [`KeyMap::force_override_keys`] by both the
+/// validator's leaf maps and the pane's live dispatch keymap, so the two
+/// agree on who wins.
+pub(crate) fn forced_keys(actions: &[crate::config::view_config::ActionDef]) -> Vec<String> {
     actions
         .iter()
         .filter(|a| a.force)
@@ -1214,7 +1120,7 @@ fn push_action_claims(
         KeySource::YamlAction {
             view: view.to_string(),
             child_path: child_path.to_vec(),
-            name: action.name.clone(),
+            name: action.name().to_string(),
         },
     ));
     if let Some(search) = &action.search {
@@ -1225,7 +1131,7 @@ fn push_action_claims(
                 KeySource::PaneSearchJump {
                     view: view.to_string(),
                     child_path: child_path.to_vec(),
-                    action: action.name.clone(),
+                    action: action.name().to_string(),
                     direction: SearchJump::Next,
                 },
             ));
@@ -1237,7 +1143,7 @@ fn push_action_claims(
                 KeySource::PaneSearchJump {
                     view: view.to_string(),
                     child_path: child_path.to_vec(),
-                    action: action.name.clone(),
+                    action: action.name().to_string(),
                     direction: SearchJump::Prev,
                 },
             ));
@@ -1373,10 +1279,6 @@ pub fn saved_query_shortcut_conflict(
         }
     }
 
-    if let Some(hit) = node_shortcut_conflict(views, shortcut) {
-        return Some(hit);
-    }
-
     for (action, binding) in &kb.content.bindings {
         if binding.matches(shortcut) || binding.is_prefix(shortcut) {
             return Some(KeySource::Content(action.clone()).human());
@@ -1385,54 +1287,6 @@ pub fn saved_query_shortcut_conflict(
     None
 }
 
-/// Find a per-node YAML `shortcuts:` entry (view or any drill-down
-/// child) claiming `shortcut`. These maps are keyed by single chars,
-/// so modifier shortcuts can never collide here.
-fn node_shortcut_conflict(views: &[ViewDef], shortcut: &str) -> Option<String> {
-    let mut chars = shortcut.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
-    }
-    for view in views {
-        let mut path = Vec::new();
-        if let Some(hit) =
-            find_node_shortcut(&view.name, &mut path, &view.shortcuts, &view.children, ch)
-        {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-fn find_node_shortcut(
-    view_name: &str,
-    child_path: &mut Vec<String>,
-    shortcuts: &std::collections::HashMap<char, crate::config::view_config::ShortcutDef>,
-    children: &[ChildDef],
-    ch: char,
-) -> Option<String> {
-    if let Some(action) = shortcuts.get(&ch).map(|sc| sc.action()) {
-        return Some(if child_path.is_empty() {
-            format!("views.{view_name}.shortcuts[{action}]")
-        } else {
-            format!(
-                "views.{view_name}.children.{}.shortcuts[{action}]",
-                child_path.join(".")
-            )
-        });
-    }
-    for child in children {
-        child_path.push(child.name.clone());
-        if let Some(hit) =
-            find_node_shortcut(view_name, child_path, &child.shortcuts, &child.children, ch)
-        {
-            return Some(hit);
-        }
-        child_path.pop();
-    }
-    None
-}
 
 /// Run the validator on every leaf of `config` and collect a flat list
 /// of human-readable error strings. Each error names both colliding
@@ -1731,30 +1585,28 @@ mod tests {
     }
 
     #[test]
-    fn no_conflict_between_node_shortcuts_in_different_subtabs() {
+    fn no_conflict_between_node_actions_in_different_subtabs() {
         // The Trackings tab has sibling subtabs "trackings" and "condensed".
         // Only one is foregrounded at a time, so binding `s` to
         // toggle-tracking in one must NOT collide with the same key in the
         // other — even though both share the tab-level `Pane` scope.
         let existing = KeyClaim::handler(
             KeyBinding::new("s"),
-            node_shortcut_scope("Trackings", &[]),
-            KeySource::NodeShortcut {
+            pane_level_scope("Trackings", &[]),
+            KeySource::YamlAction {
                 view: "condensed".into(),
                 child_path: Vec::new(),
-                key: "s".into(),
-                action: "toggle-tracking".into(),
+                name: "toggle-tracking".into(),
             },
         );
-        let own = KeySource::NodeShortcut {
+        let own = KeySource::YamlAction {
             view: "trackings".into(),
             child_path: Vec::new(),
-            key: String::new(),
-            action: "toggle-tracking".into(),
+            name: "toggle-tracking".into(),
         };
         let cs = binding_conflicts(
             &KeyBinding::new("s"),
-            &node_shortcut_scope("Trackings", &[]),
+            &pane_level_scope("Trackings", &[]),
             std::slice::from_ref(&existing),
             Some(&own),
         );
@@ -1762,27 +1614,25 @@ mod tests {
     }
 
     #[test]
-    fn conflict_between_node_shortcuts_in_the_same_subtab() {
+    fn conflict_between_node_actions_in_the_same_subtab() {
         // Same subtab, same key, different action → a genuine conflict.
         let existing = KeyClaim::handler(
             KeyBinding::new("s"),
-            node_shortcut_scope("Trackings", &[]),
-            KeySource::NodeShortcut {
+            pane_level_scope("Trackings", &[]),
+            KeySource::YamlAction {
                 view: "trackings".into(),
                 child_path: Vec::new(),
-                key: "s".into(),
-                action: "start".into(),
+                name: "start".into(),
             },
         );
-        let own = KeySource::NodeShortcut {
+        let own = KeySource::YamlAction {
             view: "trackings".into(),
             child_path: Vec::new(),
-            key: String::new(),
-            action: "toggle-tracking".into(),
+            name: "toggle-tracking".into(),
         };
         let cs = binding_conflicts(
             &KeyBinding::new("s"),
-            &node_shortcut_scope("Trackings", &[]),
+            &pane_level_scope("Trackings", &[]),
             std::slice::from_ref(&existing),
             Some(&own),
         );
@@ -2368,8 +2218,8 @@ views:
     // ── saved_query_shortcut_conflict ────────────────────────────────
 
     /// Fixture tab for the saved-query shortcut checks: two subtabs
-    /// (keys a / v), a query menu key, YAML actions, per-node
-    /// `shortcuts:` at root and child level.
+    /// (keys a / v), a query menu key, and YAML actions — a typed one at
+    /// the root plus `type: node` actions at root and child level.
     fn sq_views() -> Vec<ViewDef> {
         let yaml = r#"
 tab: { name: T }
@@ -2385,13 +2235,12 @@ views:
       menu_key: q
     actions:
       - { name: fuzzy, key: f, type: fuzzy_filter }
-    shortcuts:
-      d: delete
+      - { key: d, id: delete }
     children:
       - name: Rows
         node_type: r
-        shortcuts:
-          R: restore
+        actions:
+          - { key: R, id: restore }
   - name: second
     node_type: t
     key: v
@@ -2453,14 +2302,11 @@ views:
     }
 
     #[test]
-    fn sq_conflict_flags_node_shortcut_at_root_and_child() {
-        let root = sq_conflict("d", &[]).expect("root node shortcut must conflict");
-        assert!(root.contains("views.main.shortcuts[delete]"), "got: {root}");
-        let child = sq_conflict("R", &[]).expect("child node shortcut must conflict");
-        assert!(
-            child.contains("views.main.children.Rows.shortcuts[restore]"),
-            "got: {child}"
-        );
+    fn sq_conflict_flags_node_action_at_root_and_child() {
+        let root = sq_conflict("d", &[]).expect("root node action must conflict");
+        assert!(root.contains("actions[delete]"), "got: {root}");
+        let child = sq_conflict("R", &[]).expect("child node action must conflict");
+        assert!(child.contains("actions[restore]"), "got: {child}");
     }
 
     #[test]
