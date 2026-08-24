@@ -121,13 +121,13 @@ impl ViewFileConfig {
         }
     }
 
-    /// Propagate inheritable per-row actions/shortcuts down the tree so a
-    /// recursive tree (e.g. the task forest) declares them once at the root
-    /// instead of repeating the identical block at every depth.
+    /// Propagate inheritable per-row actions down the tree so a recursive
+    /// tree (e.g. the task forest) declares them once at the root instead of
+    /// repeating the identical block at every depth.
     ///
-    /// Per-entry opt-in: only [`ActionDef::inherit`] actions and
-    /// [`ShortcutDef::inherit`] shortcuts propagate; everything else stays
-    /// local. The scope mirrors [`Self::inherit_tree_columns`]:
+    /// Per-entry opt-in: only [`ActionDef::inherit`] actions propagate;
+    /// everything else stays local. The scope mirrors
+    /// [`Self::inherit_tree_columns`]:
     /// - only tree-continuation levels inherit (gated on `tree_label`); a
     ///   plain drill child is left alone,
     /// - a child that binds the **same key** itself overrides the inherited
@@ -148,14 +148,8 @@ impl ViewFileConfig {
                 .filter(|a| a.inherit && is_inheritable_action_type(&a.action_type))
                 .cloned()
                 .collect();
-            let parent_shortcuts: HashMap<char, ShortcutDef> = view
-                .shortcuts
-                .iter()
-                .filter(|(_, sc)| sc.inherit())
-                .map(|(k, sc)| (*k, sc.clone()))
-                .collect();
             for child in &mut view.children {
-                inherit_actions_into(child, &parent_actions, &parent_shortcuts);
+                inherit_actions_into(child, &parent_actions);
             }
         }
     }
@@ -189,10 +183,8 @@ impl ViewFileConfig {
             for action in &view.actions {
                 check_action(view.name.as_str(), None, action, editors, &mut errors);
             }
-            check_shortcuts(
-                view.name.as_str(),
-                None,
-                &view.shortcuts,
+            check_action_identities(
+                &format!("views.{}.actions", view.name),
                 &view.actions,
                 &mut errors,
             );
@@ -251,7 +243,7 @@ impl ViewFileConfig {
                         view.name
                     ));
                 }
-                if !view.actions.iter().any(|a| a.name == binding.run) {
+                if !view.actions.iter().any(|a| a.name() == binding.run) {
                     errors.push(format!(
                         "views.{}: event_actions `run: {}` names no action in this view",
                         view.name, binding.run
@@ -283,10 +275,8 @@ fn check_child(
     for action in &child.actions {
         check_action(view, Some(child.name.as_str()), action, editors, errors);
     }
-    check_shortcuts(
-        view,
-        Some(child.name.as_str()),
-        &child.shortcuts,
+    check_action_identities(
+        &format!("views.{view}.children.{}.actions", child.name),
         &child.actions,
         errors,
     );
@@ -412,58 +402,6 @@ fn check_card(
     }
 }
 
-/// Validate a `shortcuts:` map against the surrounding `actions:` list.
-///
-/// We can't check whether the action `id` exists on the adapter at
-/// config-load time (the adapter isn't connected yet), so that check
-/// happens lazily in the dispatcher. What we *can* check up front:
-///
-/// 1. The action id is non-empty.
-/// 2. The shortcut key isn't already claimed by a YAML-defined
-///    `ActionDef` at the same scope — that would be an unresolvable
-///    collision at runtime.
-fn check_shortcuts(
-    view: &str,
-    child: Option<&str>,
-    shortcuts: &HashMap<char, ShortcutDef>,
-    actions: &[ActionDef],
-    errors: &mut Vec<String>,
-) {
-    let scope = match child {
-        Some(c) => format!("views.{view}.children.{c}.shortcuts"),
-        None => format!("views.{view}.shortcuts"),
-    };
-    for (key, shortcut) in shortcuts {
-        let action_id = shortcut.action();
-        // The `parent:` prefix selects the target node and is stripped
-        // here before checking emptiness. We don't validate the action
-        // name itself — adapters expose actions lazily.
-        let body = action_id.strip_prefix("parent:").unwrap_or(action_id);
-        if body.trim().is_empty() {
-            errors.push(format!(
-                "{scope}['{key}']: action id is empty — bind to an adapter action name \
-                 (e.g. \"execute\", \"edit\", or \"parent:edit_sql\" to target the parent)"
-            ));
-        }
-        for a in actions {
-            // ActionDef.key may hold several alternatives (each possibly
-            // modifier-prefixed like "ctrl+n"); a single-char shortcut
-            // conflicts only with an alternative that is exactly that char.
-            // Event-only actions (no key) never collide.
-            if a.key_strings()
-                .iter()
-                .any(|k| k.chars().count() == 1 && k.chars().next() == Some(*key))
-            {
-                errors.push(format!(
-                    "{scope}['{key}']: key already bound to view-level action '{}' \
-                     (type={}). Remove either the shortcut or the action's key.",
-                    a.name, a.action_type
-                ));
-            }
-        }
-    }
-}
-
 /// Validate `tree_label` references and detect misuse of `fuzzy_filter`
 /// / `search` / `tree_find` across a tree chain.
 ///
@@ -513,15 +451,10 @@ fn is_inheritable_action_type(action_type: &str) -> bool {
 }
 
 /// Recursive worker for [`ViewFileConfig::inherit_tree_actions`]. Copies the
-/// parent level's inheritable actions/shortcuts into a tree-continuation
-/// `child` (unless the child binds the same key itself), then recurses
-/// carrying the child's *effective* inheritable set so entries cascade to
-/// every depth.
-fn inherit_actions_into(
-    child: &mut ChildDef,
-    parent_actions: &[ActionDef],
-    parent_shortcuts: &HashMap<char, ShortcutDef>,
-) {
+/// parent level's inheritable actions into a tree-continuation `child`
+/// (unless the child binds the same key itself), then recurses carrying the
+/// child's *effective* inheritable set so entries cascade to every depth.
+fn inherit_actions_into(child: &mut ChildDef, parent_actions: &[ActionDef]) {
     if child.tree_label.is_some() {
         // A child's own binding on the same key overrides the inherited one.
         // Event-only actions (no key) are not deduped by key — they inherit
@@ -540,9 +473,6 @@ fn inherit_actions_into(
                 child.actions.push(action.clone());
             }
         }
-        for (key, sc) in parent_shortcuts {
-            child.shortcuts.entry(*key).or_insert_with(|| sc.clone());
-        }
     }
 
     // Carry the child's effective inheritable set further down. Inherited
@@ -553,14 +483,8 @@ fn inherit_actions_into(
         .filter(|a| a.inherit && is_inheritable_action_type(&a.action_type))
         .cloned()
         .collect();
-    let next_shortcuts: HashMap<char, ShortcutDef> = child
-        .shortcuts
-        .iter()
-        .filter(|(_, sc)| sc.inherit())
-        .map(|(k, sc)| (*k, sc.clone()))
-        .collect();
     for grandchild in &mut child.children {
-        inherit_actions_into(grandchild, &next_actions, &next_shortcuts);
+        inherit_actions_into(grandchild, &next_actions);
     }
 }
 
@@ -640,7 +564,7 @@ fn forbid_tree_find_off_tree(actions: &[ActionDef], scope: &str, errors: &mut Ve
             errors.push(format!(
                 "{scope}.actions[{}]: type='tree_find' requires the enclosing level \
                  to set `tree_label` — tree_find drives a tree-aware search.",
-                a.name
+                a.name()
             ));
         }
     }
@@ -745,6 +669,27 @@ fn collect_input_actions(
     }
 }
 
+/// Reject two actions at one level whose [`ActionDef::name`] collide.
+///
+/// `name()` is not just a label: the keybinding editor locates the entry to
+/// rewrite by it (`actions[<name>]`), so a duplicate would make "rebind this
+/// action" hit whichever entry the YAML walker reaches first. Duplicates are
+/// easy to create by accident now that the name may be implicit — two
+/// `- { key: …, id: delete }` entries at one level share the identity
+/// `delete`. Give one of them an explicit `name:`.
+fn check_action_identities(scope: &str, actions: &[ActionDef], errors: &mut Vec<String>) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for a in actions {
+        if !seen.insert(a.name()) {
+            errors.push(format!(
+                "{scope}: two actions share the name '{}' — the keybinding editor \
+                 addresses actions by name, so give one an explicit `name:`",
+                a.name()
+            ));
+        }
+    }
+}
+
 fn check_action(
     view: &str,
     child: Option<&str>,
@@ -753,8 +698,8 @@ fn check_action(
     errors: &mut Vec<String>,
 ) {
     let scope = match child {
-        Some(c) => format!("views.{view}.children.{c}.actions[{}]", a.name),
-        None => format!("views.{view}.actions[{}]", a.name),
+        Some(c) => format!("views.{view}.children.{c}.actions[{}]", a.name()),
+        None => format!("views.{view}.actions[{}]", a.name()),
     };
     // An `editor:` profile must resolve to a defined profile under
     // `editors:`. Caught here so a typo fails loudly at load instead of
@@ -769,6 +714,16 @@ fn check_action(
         }
     }
     match a.action_type.as_str() {
+        // The default type. Without an `id` there is nothing to invoke, and
+        // since `type:` may be omitted, a typo'd or forgotten field lands
+        // here — so name both possibilities in the message.
+        "node" if a.id.as_deref().unwrap_or("").trim().is_empty() => {
+            errors.push(format!(
+                "{scope}: type='node' requires a non-empty `id` naming an adapter \
+                 action (e.g. id: delete). If you meant a different action type, \
+                 spell it out — `type:` defaults to node."
+            ));
+        }
         // Adapter-driven actions: must reference a Node-side action by id.
         // `edit` may omit `id` and falls back to `"edit_full"` for legacy
         // configs; `create` and `custom` have no fallback.
@@ -787,6 +742,13 @@ fn check_action(
             ));
         }
         _ => {}
+    }
+    if a.target == ActionTarget::Parent && a.action_type != "node" {
+        errors.push(format!(
+            "{scope}: `target: parent` only applies to type='node' (this is \
+             type='{}') — other types resolve their target from the nav stack",
+            a.action_type
+        ));
     }
 }
 
@@ -928,38 +890,25 @@ impl TextModifier {
 /// field docs.
 pub use not_yet_done_host::AdapterInstance as AdapterConfig;
 
-/// A `shortcuts:` map value. Either a bare action name (`d: delete`) or a
-/// detailed form that also marks the shortcut inheritable
-/// (`s: { action: toggle-tracking, inherit: true }`). An inheritable shortcut
-/// propagates to tree-continuation child levels that don't bind the same key —
-/// the per-entry counterpart of [`ActionDef::inherit`] for the fire-and-forget
-/// `shortcuts:` map. See [`ViewFileConfig::inherit_tree_actions`].
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub enum ShortcutDef {
-    /// `key: action-name` — bound here only, not inherited.
-    Action(String),
-    /// `key: { action: ..., inherit: <bool> }`.
-    Detailed {
-        action: String,
-        #[serde(default)]
-        inherit: bool,
-    },
+/// Which node a [`type: node`](ActionDef::action_type) action fires on.
+/// See [`ActionDef::target`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionTarget {
+    /// The row under the cursor — the usual case.
+    #[default]
+    Selected,
+    /// The immediate parent of the selected row. In flat mode that is
+    /// `ContentPane::parent_node_id`; in tree mode the last entry of the
+    /// selected row's `parent_path`. Fires a notification at root level,
+    /// where there is no parent to address.
+    Parent,
 }
 
-impl ShortcutDef {
-    /// The adapter action id this key invokes.
-    pub fn action(&self) -> &str {
-        match self {
-            ShortcutDef::Action(a) => a,
-            ShortcutDef::Detailed { action, .. } => action,
-        }
-    }
-
-    /// Whether this shortcut propagates to tree-continuation child levels.
-    pub fn inherit(&self) -> bool {
-        matches!(self, ShortcutDef::Detailed { inherit: true, .. })
-    }
+/// Default for [`ActionDef::action_type`] — see its docs for why the thin
+/// adapter-dispatch case is the one that needs no `type:` line.
+fn default_action_type() -> String {
+    "node".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,14 +1053,6 @@ pub struct ViewDef {
     /// adapters.
     #[serde(default)]
     pub script_source: Option<String>,
-    /// Per-node-type shortcuts. Maps a key (single char) to an adapter-
-    /// declared action `id` (returned from `Node::actions`). At runtime
-    /// the TUI calls `Node::invoke_action(id)` and dispatches the
-    /// returned `ActionDispatch`. Action `id`s are validated lazily —
-    /// pressing a key bound to an unknown action surfaces an error in
-    /// the status bar.
-    #[serde(default)]
-    pub shortcuts: HashMap<char, ShortcutDef>,
     /// Glyph shown in the tree-mode label column when a row of this
     /// level is *not* expandable (no children). `None` falls back to
     /// the default `·`. Set this to a semantic glyph (e.g. `📄` on a
@@ -1958,7 +1899,14 @@ pub enum ScriptScope {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionDef {
-    pub name: String,
+    /// Display name. Optional for `type: node`, whose label the adapter
+    /// already declares in [`NodeAction::label`](not_yet_done_content::NodeAction)
+    /// — omitting it keeps the YAML from duplicating (and outdating) the
+    /// adapter's wording. Every other type has no adapter-side label, so
+    /// leaving it out there falls back to the action `id` (then the type).
+    /// Read through [`Self::name`], never directly.
+    #[serde(default, rename = "name")]
+    pub label: Option<String>,
     /// Keyboard binding(s). `None` for an **event-only** action: one that is
     /// never bound to a key and only runs when the rule engine matches a
     /// bus event to it via the view's `event_actions:`. A keyed action may
@@ -1970,13 +1918,28 @@ pub struct ActionDef {
     /// step separator for a chord sequence.
     #[serde(default)]
     pub key: Option<KeyBinding>,
-    #[serde(rename = "type")]
+    /// What the action *does*. Defaults to `node`: invoke the adapter action
+    /// named by `id` on the selected row through
+    /// [`Node::invoke_action`](not_yet_done_content::Node::invoke_action) —
+    /// the thin, adapter-driven case that makes up most per-row bindings, so
+    /// it costs no line in the YAML. Every other type names TUI-side
+    /// machinery (an editor, a drill-down, a search field, …) and must be
+    /// spelled out.
+    #[serde(rename = "type", default = "default_action_type")]
     pub action_type: String,
     /// Adapter-side action identifier (e.g. `"edit_full"`, `"transition"`,
     /// `"create_comment"`). Required for `edit`/`create`/`custom` action
     /// types that route through `Node::prepare`/`picker_options`/`execute`.
     #[serde(default)]
     pub id: Option<String>,
+    /// Which node a `type: node` action fires on: the selected row
+    /// (default) or its immediate parent. `parent` covers the case where
+    /// the binding sits on a row list but the action lives one level up —
+    /// e.g. opening the SQL editor for the table whose rows are shown.
+    /// Ignored by every other action type, which resolve their target from
+    /// `node_id_from` / the nav stack.
+    #[serde(default)]
+    pub target: ActionTarget,
     /// Optional metadata-field key whose value supplies the `node_id` for
     /// adapter-routed actions instead of the selected row's own id. Used
     /// when one row points at another node (e.g. a notification linking
@@ -2189,6 +2152,23 @@ pub enum SelectStyleConfig {
 }
 
 impl ActionDef {
+    /// Display name *and* identity: the YAML `name:` when given, else the
+    /// adapter action `id`, else the action type. Callers that can reach
+    /// the adapter should prefer its own label for a `type: node` action
+    /// (see `ContentPane::collect_action_hints`) and fall back to this;
+    /// everything that has to name the action without an adapter — error
+    /// messages, the shortcut menu, the YAML locator — uses it directly.
+    ///
+    /// Because it doubles as the identity the keybinding editor writes
+    /// back to, a level must not carry two actions whose `name()` collide;
+    /// [`check_action`] rejects that.
+    pub fn name(&self) -> &str {
+        self.label
+            .as_deref()
+            .or(self.id.as_deref())
+            .unwrap_or(&self.action_type)
+    }
+
     /// Every key string bound to this action (empty for an event-only
     /// action). Flattens the alternatives of the [`KeyBinding`] so callers
     /// that reason per-key (conflict/inheritance dedup, forced-key stripping)
@@ -2475,11 +2455,6 @@ pub struct ChildDef {
     /// (or in-place replace).
     #[serde(default)]
     pub tree_label: Option<String>,
-    /// Per-node-type shortcuts at this drill-down level. Same semantics
-    /// as `ViewDef::shortcuts` — maps single-char keys to adapter
-    /// `Node::actions` ids dispatched through `Node::invoke_action`.
-    #[serde(default)]
-    pub shortcuts: HashMap<char, ShortcutDef>,
     /// Override Enter (the `content.open` key) on a row of this
     /// ChildDef's node-type so it dispatches a `Node::invoke_action`
     /// instead of the default drill-down. Used for "synthetic" child
@@ -2635,6 +2610,14 @@ impl Default for SplitDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The adapter action a level binds to `key`, by its `id`.
+    fn action_id_for_key<'a>(actions: &'a [ActionDef], key: &str) -> Option<&'a str> {
+        actions
+            .iter()
+            .find(|a| a.primary_key() == Some(key))
+            .and_then(|a| a.id.as_deref())
+    }
 
     /// Parse just a `tab:` block (the rest of the file is the smallest
     /// thing that still deserializes).
@@ -3042,10 +3025,7 @@ views:
                 "{}: the edit action addresses the linked ticket",
                 view.name
             );
-            assert_eq!(
-                links.shortcuts.get(&'d').map(ShortcutDef::action),
-                Some("delete")
-            );
+            assert_eq!(action_id_for_key(&links.actions, "d"), Some("delete"));
         }
     }
 
@@ -3323,10 +3303,11 @@ views:
     #[test]
     fn shows_in_action_bar_defaults() {
         let make = |action_type: &str| ActionDef {
-            name: "test".into(),
+            label: Some("test".into()),
             key: Some("x".into()),
             action_type: action_type.into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -3370,10 +3351,11 @@ views:
     #[test]
     fn hide_from_bar_overrides_default() {
         let action = ActionDef {
-            name: "edit".into(),
+            label: Some("edit".into()),
             key: Some("e".into()),
             action_type: "edit".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -3529,33 +3511,30 @@ views: []
             .find(|a| a.action_type == "create")
             .unwrap();
         assert_eq!(add.id.as_deref(), Some("add"));
-        for (k, name) in [
-            ('d', "delete"),
-            ('u', "undelete"),
-            ('s', "toggle-tracking"),
-            ('m', "mark-move"),
-            ('p', "paste-move"),
+        for (k, id) in [
+            ("d", "delete"),
+            ("u", "undelete"),
+            ("s", "toggle-tracking"),
+            ("m", "mark-move"),
+            ("p", "paste-move"),
         ] {
-            assert_eq!(root.shortcuts.get(&k).map(|s| s.action()), Some(name));
+            assert_eq!(action_id_for_key(&root.actions, k), Some(id));
         }
         // A1c-1: the tracking marker column is declared on both levels.
         assert!(
             root.columns.iter().any(|c| c.key == "tracking"),
             "root view should declare the tracking marker column"
         );
-        // The subtask branch ships no actions/shortcuts of its own; the
+        // The subtask branch ships no `actions:` of its own; the
         // inheritable entries from the root view cascade in via
         // `inherit_tree_actions` (called above), so edit/create + the
-        // d/s shortcuts are present at this depth too.
+        // d/s node actions are present at this depth too.
         let child = &root.children[0];
         assert!(child.actions.iter().any(|a| a.action_type == "edit"));
         assert!(child.actions.iter().any(|a| a.action_type == "create"));
+        assert_eq!(action_id_for_key(&child.actions, "d"), Some("delete"));
         assert_eq!(
-            child.shortcuts.get(&'d').map(|s| s.action()),
-            Some("delete")
-        );
-        assert_eq!(
-            child.shortcuts.get(&'s').map(|s| s.action()),
+            action_id_for_key(&child.actions, "s"),
             Some("toggle-tracking")
         );
         // The subtask branch ships no `columns:` of its own — it inherits the
@@ -3657,7 +3636,7 @@ views: []
         assert_eq!(add_sibling.action_type, "create");
         assert_eq!(add_sibling.id.as_deref(), Some("add-sibling"));
         assert!(add_sibling.under_selection);
-        assert_eq!(root.shortcuts.get(&'U').map(|s| s.action()), Some("unnest"));
+        assert_eq!(action_id_for_key(&root.actions, "U"), Some("unnest"));
         let child_sibling = child
             .actions
             .iter()
@@ -3665,10 +3644,7 @@ views: []
             .unwrap();
         assert_eq!(child_sibling.id.as_deref(), Some("add-sibling"));
         assert!(child_sibling.under_selection);
-        assert_eq!(
-            child.shortcuts.get(&'U').map(|s| s.action()),
-            Some("unnest")
-        );
+        assert_eq!(action_id_for_key(&child.actions, "U"), Some("unnest"));
 
         cfg.validate(
             &KeyBindingConfig::default(),
@@ -3728,10 +3704,14 @@ views: []
             .expect("group_headers carries a total column");
         assert_eq!(total.key, "total");
         assert_eq!(total.source.as_deref(), Some("duration"));
-        // Group buckets are read-only aggregates — no shortcuts on the root
-        // level; `s: toggle-tracking` lives on the task (item) level, which
-        // also serves the root rows when grouping is cycled off.
-        assert!(tree.shortcuts.is_empty());
+        // Group buckets are read-only aggregates — no node actions on the
+        // root level; `s: toggle-tracking` lives on the task (item) level,
+        // which also serves the root rows when grouping is cycled off.
+        assert!(
+            tree.actions
+                .iter()
+                .all(|a| a.action_type != "node" || a.id.as_deref() != Some("toggle-tracking"))
+        );
         // The recursive subtask branch carries the same duration columns and
         // the track toggle.
         let sub = &tree.children[0];
@@ -3740,7 +3720,7 @@ views: []
         assert!(sub.columns.iter().any(|c| c.key == "duration"));
         assert!(sub.columns.iter().any(|c| c.key == "duration_cumulated"));
         assert_eq!(
-            sub.shortcuts.get(&'s').map(|s| s.action()),
+            action_id_for_key(&sub.actions, "s"),
             Some("toggle-tracking")
         );
 
@@ -3775,7 +3755,7 @@ views: []
         let notify = events
             .actions
             .iter()
-            .find(|a| a.name == "show auth number")
+            .find(|a| a.name() == "show auth number")
             .expect("calendar.yaml declares the show-auth-number action");
         assert_eq!(notify.action_type, "notify");
         assert!(notify.key.is_none());
@@ -5393,37 +5373,37 @@ views:
     }
 
     #[test]
-    fn parse_shortcuts_field_on_view_and_child() {
+    fn parse_node_actions_on_view_and_child() {
+        // `type:` defaults to node, so a level binds an adapter action with
+        // nothing but a key and an id.
         let yaml = r#"
 tab: { name: T }
 adapter: { type: x }
 views:
   - name: scripts
     node_type: s
-    shortcuts:
-      x: execute
-      e: edit
+    actions:
+      - { key: x, id: execute }
+      - { key: e, id: edit }
     children:
       - name: result
         node_type: s_row
-        shortcuts:
-          d: delete
+        actions:
+          - { key: d, id: delete }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let view = &cfg.views[0];
+        assert_eq!(action_id_for_key(&view.actions, "x"), Some("execute"));
+        assert_eq!(action_id_for_key(&view.actions, "e"), Some("edit"));
+        assert!(view.actions.iter().all(|a| a.action_type == "node"));
         assert_eq!(
-            view.shortcuts.get(&'x').map(|s| s.action()),
-            Some("execute")
-        );
-        assert_eq!(view.shortcuts.get(&'e').map(|s| s.action()), Some("edit"));
-        assert_eq!(
-            view.children[0].shortcuts.get(&'d').map(|s| s.action()),
+            action_id_for_key(&view.children[0].actions, "d"),
             Some("delete")
         );
     }
 
     #[test]
-    fn parse_shortcuts_field_defaults_to_empty() {
+    fn parse_actions_field_defaults_to_empty() {
         let yaml = r#"
 tab: { name: T }
 adapter: { type: x }
@@ -5432,19 +5412,21 @@ views:
     node_type: t
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(cfg.views[0].shortcuts.is_empty());
+        assert!(cfg.views[0].actions.is_empty());
     }
 
     #[test]
-    fn validate_rejects_empty_shortcut_action_id() {
+    fn validate_rejects_node_action_without_id() {
+        // A node action *is* the adapter action id — without one there is
+        // nothing to invoke, and the type cannot be guessed from the key.
         let yaml = r#"
 tab: { name: T }
 adapter: { type: x }
 views:
   - name: v
     node_type: t
-    shortcuts:
-      x: ""
+    actions:
+      - { name: nameless, key: x }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         let errs = cfg
@@ -5455,16 +5437,42 @@ views:
             .unwrap_err();
         assert!(
             errs.iter()
-                .any(|e| e.contains("views.v.shortcuts['x']") && e.contains("action id is empty")),
-            "expected an empty-id error for views.v shortcut 'x', got: {errs:?}"
+                .any(|e| e.contains("views.v") && e.contains("type='node' requires")),
+            "expected a missing-id error for the node action, got: {errs:?}"
         );
     }
 
     #[test]
-    fn validate_rejects_shortcut_colliding_with_action_key() {
-        // Action 'r' is reload; the shortcut also binds 'r'. The static
-        // validator must catch this — at runtime there'd be no way to
-        // dispatch to both.
+    fn validate_rejects_parent_target_on_non_node_action() {
+        // `target: parent` re-addresses the *node* an action is invoked on;
+        // every other type resolves its target from the nav stack.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: refresh, key: r, type: reload, target: parent }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("`target: parent` only applies")),
+            "expected a target error for the reload action, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_two_actions_sharing_one_key() {
+        // Two actions on `r` at one level: there is no way to dispatch to
+        // both. Now that node actions are ordinary actions, this is the one
+        // check that catches it — the leaf keymap the level builds.
         let yaml = r#"
 tab: { name: T }
 adapter: { type: x }
@@ -5473,20 +5481,14 @@ views:
     node_type: t
     actions:
       - { name: refresh, key: r, type: reload }
-    shortcuts:
-      r: execute
+      - { key: r, id: execute }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let errs = cfg
-            .validate(
-                &KeyBindingConfig::default(),
-                &crate::config::editor::EditorsConfig::default(),
-            )
-            .unwrap_err();
+        let errs = crate::keymap::validate_view_file(&cfg, &KeyBindingConfig::default());
         assert!(
             errs.iter()
-                .any(|e| e.contains("views.v.shortcuts['r']") && e.contains("already bound")),
-            "expected a collision error for shortcut 'r' vs action 'refresh', got: {errs:?}"
+                .any(|e| e.contains("views.v") && e.contains("[\"r\"]")),
+            "expected a collision between the two 'r' actions, got: {errs:?}"
         );
     }
 

@@ -54,7 +54,7 @@ use crate::config::keybindings::{
 };
 use crate::config::tui_config::LoadBannerRoute;
 use crate::config::view_config::{
-    ActionDef, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef, ColumnDef,
+    ActionDef, ActionTarget, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef, ColumnDef,
     ColumnKind, CursorOnOpen, DateBucket, ExpandDepth, GroupBy, GroupHeadersDef, GroupOrder,
     LineLayout, PaginationMode, PreviewConfig, ReminderConfig, SplitDirection,
     TreeAggregateDefault, ViewDef, ViewFileConfig,
@@ -91,8 +91,8 @@ use crate::views::{
 
 /// Walk a view's declared tree, emitting `(view_name, child_name_path,
 /// node_type)` for the level itself and every descendant. Mirrors the
-/// recursion in `keymap::collect_node_shortcuts` so the levels line up with
-/// the `NodeShortcut` child paths used for binding.
+/// recursion in `keymap::build_leaf_maps` so the levels line up with the
+/// child paths a `KeySource::YamlAction` records.
 fn collect_declared_levels(
     view_name: &str,
     child_path: &[String],
@@ -2013,44 +2013,6 @@ impl ContentPane {
 
     // ── Shortcut hints ───────────────────────────────────────────────
 
-    /// Collect every YAML `shortcuts:` entry visible at the current
-    /// chain position — chain-aware in tree mode, drill-aware in flat
-    /// mode. Deeper levels win on duplicate keys, mirroring
-    /// `app::node_actions::resolve_shortcut`'s precedence. Returned
-    /// entries are `(key, raw_value)`: the raw value still carries
-    /// the `parent:` prefix when present, so the caller decides which
-    /// node_id to look up actions on.
-    fn current_shortcuts(&self, view_defs: &[ViewDef]) -> Vec<(char, String)> {
-        let Some(vd) = self.view_def(view_defs) else {
-            return Vec::new();
-        };
-        let chain = self.selected_node_type_chain(view_defs);
-        // BTreeMap (not HashMap): callers feed the result straight into
-        // the action / status bar in iteration order, so the order must
-        // be stable across frames. HashMap::new() seeds its hasher per
-        // instance — every per-frame rebuild would shuffle the hint
-        // positions and the bar flickers visibly (3 actions on a
-        // postgres db_script node was the trigger that surfaced this).
-        // Sorted-by-char gives a deterministic, predictable layout.
-        let mut out: std::collections::BTreeMap<char, String> = std::collections::BTreeMap::new();
-        // Walk from deepest to root — first-seen wins. `resolve_shortcut`
-        // does the same and `entry().or_insert_with()` keeps the
-        // deeper-level binding.
-        for end in (1..=chain.len()).rev() {
-            if let Some(child) =
-                crate::views::content_tree::child_def_for_type_chain(vd, &chain[..end])
-            {
-                for (k, v) in &child.shortcuts {
-                    out.entry(*k).or_insert_with(|| v.action().to_string());
-                }
-            }
-        }
-        for (k, v) in &vd.shortcuts {
-            out.entry(*k).or_insert_with(|| v.action().to_string());
-        }
-        out.into_iter().collect()
-    }
-
     /// Resolve a YAML shortcut target to `(node_id, node_type)`. The
     /// `node_id` is the concrete instance to fetch from (any row of
     /// the right type works, the selected row is the cheapest choice);
@@ -2058,20 +2020,18 @@ impl ContentPane {
     /// actions list is stored. Returns `None` when the target isn't
     /// addressable from the current pane state (e.g. parent shortcut
     /// at root level, empty list, …).
-    fn shortcut_target_ref(
+    fn node_action_target_ref(
         &self,
-        raw_value: &str,
+        target: ActionTarget,
         view_defs: &[ViewDef],
     ) -> Option<(String, String)> {
-        use crate::app::node_actions::{ShortcutTarget, parse_shortcut_value};
-        let (target, _action_name) = parse_shortcut_value(raw_value);
         match target {
-            ShortcutTarget::Selected => {
+            ActionTarget::Selected => {
                 let id = self.selected_item_id()?.to_string();
                 let ty = self.selected_target_node_type(view_defs)?;
                 Some((id, ty))
             }
-            ShortcutTarget::Parent => {
+            ActionTarget::Parent => {
                 let id = self.selected_parent_node_id_for_shortcut()?;
                 let ty = self.parent_target_node_type(view_defs)?;
                 Some((id, ty))
@@ -2134,54 +2094,58 @@ impl ContentPane {
         self.parent_node_id().map(str::to_string)
     }
 
-    /// Render shortcut hints for the current chain position by
-    /// joining each visible YAML `shortcuts:` entry with the
-    /// adapter's `actions_for_type()` lookup. Returns one
-    /// [`ShortcutHint`] per resolvable entry (unknown node_type or
-    /// action_id → drop silently), carrying the adapter's `placement`
-    /// and the [`ActiveSurface`] derived from the action's `id` + input
-    /// shape. Caller splits by placement for the action / status bars.
+    /// Render the hints for the level's `type: node` actions by joining
+    /// each keyed entry with the adapter's `actions_for_type()` lookup.
+    /// Returns one [`ShortcutHint`] per keyed node action, carrying the
+    /// adapter's label (unless the YAML overrides it with `name:`) and the
+    /// [`ActiveSurface`] derived from the action's `id` + input shape.
+    /// Caller splits by placement for the action / status bars.
+    ///
+    /// A node action whose target or adapter action can't be resolved right
+    /// now (no adapter yet, cursor at a level without that node type, id not
+    /// in the adapter's set) still gets a hint — from the YAML's own
+    /// [`ActionDef::name`] and with no active surface, so the key stays
+    /// visible in the status bar instead of vanishing.
     ///
     /// Synchronous: the adapter is required to answer without I/O
     /// (`actions_for_type` is instance-free and type-keyed). No
     /// `get_by_id` walk, no DB round-trip per cursor move.
-    fn collect_shortcut_hints(
+    fn collect_node_action_hints(
         &self,
         view_defs: &[ViewDef],
         adapter: Option<&dyn not_yet_done_content::ContentAdapter>,
     ) -> Vec<ShortcutHint> {
-        use crate::app::node_actions::parse_shortcut_value;
         use crate::views::content_action_hints::source_for_shortcut;
-        let Some(adapter) = adapter else {
-            return Vec::new();
-        };
-        let shortcuts = self.current_shortcuts(view_defs);
-        if shortcuts.is_empty() {
-            return Vec::new();
-        }
         let mut out = Vec::new();
-        for (key, raw) in shortcuts {
-            let (_target, action_name) = parse_shortcut_value(&raw);
-            let Some((_id, node_type)) = self.shortcut_target_ref(&raw, view_defs) else {
+        for action in self.current_actions(view_defs) {
+            if action.action_type != "node" {
+                continue;
+            }
+            let Some(key) = action.primary_key().map(str::to_string) else {
                 continue;
             };
-            let nt = not_yet_done_content::NodeType {
-                type_id: node_type,
-                mime_type: String::new(),
-                syntax: None,
-                file_extension: String::new(),
-                display_name: String::new(),
-            };
-            let actions = adapter.actions_for_type(&nt);
-            if let Some(action) = actions.iter().find(|a| a.id == action_name) {
-                let opens_input = !matches!(action.input, not_yet_done_content::InputSpec::None);
-                let source = source_for_shortcut(&action.id, &action.label, opens_input);
-                out.push(ShortcutHint {
-                    key: key.to_string(),
-                    label: action.label.clone(),
-                    source,
-                });
-            }
+            let action_id = action.id.as_deref().unwrap_or_default();
+            let resolved = adapter.and_then(|adapter| {
+                let (_id, node_type) = self.node_action_target_ref(action.target, view_defs)?;
+                let nt = not_yet_done_content::NodeType {
+                    type_id: node_type,
+                    mime_type: String::new(),
+                    syntax: None,
+                    file_extension: String::new(),
+                    display_name: String::new(),
+                };
+                let found = adapter.actions_for_type(&nt).into_iter().find(|a| a.id == action_id)?;
+                let opens_input = !matches!(found.input, not_yet_done_content::InputSpec::None);
+                // An explicit `name:` in the YAML wins over the adapter's
+                // wording; without one the adapter stays the single source
+                // of truth for how the action is called.
+                let label = action.label.clone().unwrap_or(found.label);
+                let source = source_for_shortcut(&found.id, &label, opens_input);
+                Some((label, source))
+            });
+            let (label, source) =
+                resolved.unwrap_or_else(|| (action.name().to_string(), None));
+            out.push(ShortcutHint { key, label, source });
         }
         out
     }
@@ -6040,6 +6004,11 @@ impl ContentPane {
         use crate::views::content_action_hints::source_for_action_type;
         let mut hints: Vec<ActionBarHint> = Vec::new();
         for action in self.current_actions(view_defs) {
+            // `node` actions are rendered by `collect_node_action_hints`
+            // below, where the adapter supplies label and placement.
+            if action.action_type == "node" {
+                continue;
+            }
             // Event-only actions (no key) never appear in the action bar.
             let Some(key) = action.primary_key().map(str::to_string) else {
                 continue;
@@ -6053,22 +6022,19 @@ impl ContentPane {
                     ("custom", Some(id)) if action.in_action_bar => {
                         ActiveSurface::ContentAction(id.clone())
                     }
-                    _ => source_for_action_type(&action.action_type, &action.name),
+                    _ => source_for_action_type(&action.action_type, &action.name()),
                 };
-                hints.push(ActionBarHint::new(key, action.name.clone(), source));
+                hints.push(ActionBarHint::new(key, action.name().to_string(), source));
             }
         }
-        // SH: YAML `shortcuts:` entries whose adapter action is *activatable*
-        // — i.e. a bar placement is derived (`source` is `Some`). Placement
-        // is a TUI concern derived from the action's InputSpec + id, not
-        // declared by the adapter: an action that opens an editor/form/picker
-        // (or is delete / toggle-tracking / mark-move) can light up, so it
-        // belongs here; a fire-and-forget action has no source and drops to
-        // the status bar below. Unknown adapter / node_type → dropped in
-        // `collect_shortcut_hints`. Deduplicate against the `actions:`-derived
-        // entries above to avoid double-display when the user binds both
-        // `actions:` and `shortcuts:` to the same key.
-        for sh in self.collect_shortcut_hints(view_defs, adapter) {
+        // `type: node` actions whose adapter action is *activatable* — i.e.
+        // a bar placement is derived (`source` is `Some`). Placement is a TUI
+        // concern derived from the action's InputSpec + id, not declared by
+        // the adapter: an action that opens an editor/form/picker (or is
+        // delete / toggle-tracking / mark-move) can light up, so it belongs
+        // here; a fire-and-forget action has no source and drops to the
+        // status bar below. Deduplicate by key against the entries above.
+        for sh in self.collect_node_action_hints(view_defs, adapter) {
             let Some(source) = sh.source else {
                 continue;
             };
@@ -6170,19 +6136,23 @@ impl ContentPane {
             hints.push((key, nav.label.to_string()));
         }
         for action in self.current_actions(view_defs) {
+            // `node` actions are rendered from the adapter's own label by
+            // the loop below, which also decides their bar.
+            if action.action_type == "node" {
+                continue;
+            }
             if !action.shows_in_action_bar() {
                 // Event-only actions (no key) have no status-bar hint.
                 if let Some(key) = action.primary_key() {
-                    hints.push((key.to_string(), action.name.clone()));
+                    hints.push((key.to_string(), action.name().to_string()));
                 }
             }
         }
-        // SH: YAML `shortcuts:` entries whose adapter action is
-        // fire-and-forget — no derivable active source, so it renders in the
-        // status bar (mirror of the action-bar branch above, which claims the
-        // activatable `Some(source)` entries). Same dedup-against-existing-key
-        // guard.
-        for sh in self.collect_shortcut_hints(view_defs, adapter) {
+        // `type: node` actions whose adapter action is fire-and-forget — no
+        // derivable active source, so it renders in the status bar (mirror of
+        // the action-bar branch above, which claims the activatable
+        // `Some(source)` entries). Same dedup-against-existing-key guard.
+        for sh in self.collect_node_action_hints(view_defs, adapter) {
             if sh.source.is_some() {
                 continue;
             }
@@ -6297,42 +6267,8 @@ impl ContentPane {
 
     // ── Key handling ─────────────────────────────────────────────────
 
-    /// Resolve a single-char keypress against the YAML `shortcuts:`
-    /// maps for the selected row's node-type chain (Phase CP-1c). On
-    /// hit, emits a [`ViewRequest::InvokeNodeAction`] so the App can
-    /// drive the async `Node::invoke_action` call. Returns `None` when
-    /// the key has no shortcut binding, no node is selected, or the
-    /// shortcut targets `parent:` but the cursor sits at root.
-    pub(super) fn try_node_action_shortcut(
-        &self,
-        key: &str,
-        view_index: usize,
-        pane_id: PaneId,
-        view_defs: &[ViewDef],
-    ) -> Option<ViewRequest> {
-        use crate::app::node_actions::{ShortcutTarget, resolve_shortcut};
-        if key.chars().count() != 1 {
-            return None;
-        }
-        let ch = key.chars().next()?;
-        let view_def = self.view_def(view_defs)?;
-        let chain = self.selected_node_type_chain(view_defs);
-        let resolved = resolve_shortcut(view_def, &chain, ch)?;
-        let action_name = resolved.action_name.to_string();
-        let node_id = match resolved.target {
-            ShortcutTarget::Selected => self.selected_item_id()?.to_string(),
-            ShortcutTarget::Parent => self.selected_parent_node_id()?,
-        };
-        Some(ViewRequest::InvokeNodeAction {
-            view_index,
-            pane_id,
-            node_id,
-            action_name,
-        })
-    }
-
     /// Immediate parent node id of the currently selected row — used
-    /// by `parent:`-prefixed shortcuts. In tree mode this walks the
+    /// by `target: parent` node actions. In tree mode this walks the
     /// selected entry's `parent_path`; in flat mode it returns
     /// [`Self::parent_node_id`]. Returns `None` at the root level
     /// (the user is on a row whose container has no addressable id).
@@ -6379,14 +6315,6 @@ impl ContentPane {
                 self.preview_scroll.saturating_sub(step)
             };
             return SubViewMessage::SelectionChanged(None);
-        }
-
-        // Per-node shortcuts (Phase CP-1c). Resolved before the claims
-        // loop so a YAML `shortcuts:` binding wins over any matching
-        // ContentAction / ActionDef key. Only single-char keys are
-        // eligible — modifier-bearing keys (`ctrl+e`) never trigger.
-        if let Some(req) = self.try_node_action_shortcut(key, view_index, pane_id, view_defs) {
-            return SubViewMessage::Request(req);
         }
 
         // Build the active claims for this pane state and dispatch.
@@ -6707,7 +6635,7 @@ impl ContentPane {
                 KeySource::YamlAction {
                     view: source_view.clone(),
                     child_path: source_child_path.clone(),
-                    name: action.name.clone(),
+                    name: action.name().to_string(),
                 },
             ));
         }
@@ -6726,6 +6654,19 @@ impl ContentPane {
                 },
             ));
         }
+
+        // Honour `force: true` here too, not just in the validator's leaf
+        // maps: the claims above are pushed in dispatch order with the
+        // built-ins first, so an action that deliberately takes over a
+        // built-in key would lose at runtime while the validator reports the
+        // config as clean. Stripping the built-in's claim makes the two agree.
+        let forced: Vec<ActionDef> = self
+            .current_actions(view_defs)
+            .into_iter()
+            .filter(|a| a.force)
+            .cloned()
+            .collect();
+        km.force_override_keys(&crate::keymap::forced_keys(&forced));
 
         km
     }
@@ -6896,7 +6837,7 @@ impl ContentPane {
                 let action = self
                     .current_actions(view_defs)
                     .into_iter()
-                    .find(|a| a.name == *name)
+                    .find(|a| a.name() == *name)
                     .cloned()?;
                 Some(self.execute_action(&action, view_index, pane_id, view_defs))
             }
@@ -7170,6 +7111,27 @@ impl ContentPane {
         view_defs: &[ViewDef],
     ) -> SubViewMessage {
         match action.action_type.as_str() {
+            // The default type: hand the action id straight to the adapter's
+            // `Node::invoke_action` for the selected row (or its parent, for
+            // `target: parent`). The App drives the async call; everything
+            // this arm decides is *which* node it fires on.
+            "node" => {
+                let Some(action_name) = action.id.clone() else {
+                    return SubViewMessage::Unhandled;
+                };
+                let node_id = match action.target {
+                    ActionTarget::Selected => self.resolve_action_node_id(action),
+                    ActionTarget::Parent => self.selected_parent_node_id(),
+                };
+                if let Some(node_id) = node_id {
+                    return SubViewMessage::Request(ViewRequest::InvokeNodeAction {
+                        view_index,
+                        pane_id,
+                        node_id,
+                        action_name,
+                    });
+                }
+            }
             "edit" => {
                 if let Some(id) = self.resolve_action_node_id(action) {
                     let action_id = action.id.clone().unwrap_or_else(|| "edit_full".into());
@@ -7178,7 +7140,7 @@ impl ContentPane {
                         pane_id,
                         node_id: id,
                         action_id,
-                        label: action.name.clone(),
+                        label: action.name().to_string(),
                         editor_profile: action.editor.clone(),
                         commit_on_save: action.commit_on_save,
                     });
@@ -7238,7 +7200,7 @@ impl ContentPane {
                 let Some(action_id) = action.id.clone() else {
                     return SubViewMessage::Request(ViewRequest::Notify(format!(
                         "create action '{}' missing `id` (e.g. id: create_comment)",
-                        action.name
+                        action.name()
                     )));
                 };
                 // `under_selection`: parent the new node on the highlighted
@@ -7273,7 +7235,7 @@ impl ContentPane {
                         parent_node_id: parent_id,
                         child_node_type: child_type,
                         action_id,
-                        label: action.name.clone(),
+                        label: action.name().to_string(),
                         editor_profile: action.editor.clone(),
                         commit_on_save: action.commit_on_save,
                     });
@@ -7296,7 +7258,7 @@ impl ContentPane {
                     }
                     return SubViewMessage::Request(ViewRequest::Notify(format!(
                         "container action '{}' missing `id`",
-                        action.name
+                        action.name()
                     )));
                 }
                 if let (Some(id), Some(action_id)) =
@@ -7322,7 +7284,7 @@ impl ContentPane {
                 let Some(config) = action.option_menu.clone() else {
                     return SubViewMessage::Request(ViewRequest::Notify(format!(
                         "option_menu action '{}' missing `option_menu` config",
-                        action.name
+                        action.name()
                     )));
                 };
                 return SubViewMessage::Request(ViewRequest::OpenOptionMenuForNode {
@@ -7437,7 +7399,7 @@ impl ContentView {
         self.view_defs
             .iter()
             .flat_map(|vd| vd.actions.iter())
-            .find(|a| a.name == name)
+            .find(|a| a.name() == name)
             .cloned()
     }
 
@@ -7454,7 +7416,7 @@ impl ContentView {
         let Some(action) = view_defs
             .iter()
             .flat_map(|vd| vd.actions.iter())
-            .find(|a| a.name == name)
+            .find(|a| a.name() == name)
             .cloned()
         else {
             return SubViewMessage::Unhandled;
@@ -10496,30 +10458,6 @@ impl ContentView {
         let in_text_input =
             self.active_pane().table.fuzzy_active || self.active_pane().search.active();
 
-        // Per-node YAML `shortcuts:` win over tab-level claims (subtab
-        // switch, query-menu key, saved-query / per-table chords). The
-        // user binds these on the deepest reachable ChildDef, so they
-        // are by definition the most-specific binding visible at the
-        // cursor — and the action-bar hint we surface to the user
-        // commits to them being live. Without this pre-check, a subtab
-        // key like `d` for the "databases" view in postgres.yaml
-        // shadows the leaf-level `d: delete` on `postgres:db_script`
-        // and the hint silently lies. Single-char keys only; modifier-
-        // bearing keys (`ctrl+e`, …) can't collide with subtab keys
-        // and don't need this fast-path.
-        if !in_text_input {
-            let view_index = self.view_index;
-            let pane_id = self.active_pane_id();
-            let view_defs_ref = &self.view_defs;
-            let req = self.pane_trees[self.active_subtab]
-                .focused_leaf()
-                .pane
-                .try_node_action_shortcut(key, view_index, pane_id, view_defs_ref);
-            if let Some(req) = req {
-                return SubViewMessage::Request(req);
-            }
-        }
-
         if !in_text_input {
             let claims = self.build_view_claims();
             for claim in &claims.claims {
@@ -10830,9 +10768,8 @@ impl ContentView {
     /// keymaps the dispatcher uses, any chord-length YAML key becomes a
     /// usable chord automatically, with no per-feature wiring.
     ///
-    /// Node `shortcuts:` are single-char by construction (see
-    /// [`Self::try_node_action_shortcut`]) and so are never chords —
-    /// they need no consideration here.
+    /// `type: node` actions are ordinary `actions:` entries and so are
+    /// covered by the same probe — a chord-length node binding works.
     pub fn yaml_action_chord_prefix(&self, key: &str) -> bool {
         if self.active_view_def().is_none() {
             return false;
@@ -10947,69 +10884,19 @@ impl ContentView {
         let mut seen: std::collections::HashSet<String> =
             rows.iter().map(|r| r.name.clone()).collect();
 
-        // Node `shortcuts:` (e.g. `s: toggle-tracking`) dispatch through the
-        // node-action path, not the pane's live keymap, so the projection
-        // above misses them. Append the ones that apply at the current level:
-        // a shortcut defined at child-name path `P` is live at `P` and every
-        // level below it, with the nearest definition winning per key. These
-        // carry a real `NodeShortcut` source, so they stay editable.
         let view_name = pane
             .view_def(&self.view_defs)
             .map(|vd| vd.name.clone())
             .unwrap_or_default();
         let current = pane.current_child_name_path();
-        let mut by_key: std::collections::HashMap<String, crate::keymap::KeyClaim> =
-            std::collections::HashMap::new();
-        for claim in crate::keymap::node_shortcut_claims(&self.tab_name, &self.view_defs) {
-            let KeySource::NodeShortcut {
-                view,
-                child_path,
-                key,
-                ..
-            } = &claim.source
-            else {
-                continue;
-            };
-            // Only this focused subtab's view, and only ancestor-or-self
-            // levels (child_path a prefix of the current drilldown path).
-            if *view != view_name {
-                continue;
-            }
-            if child_path.len() > current.len() || current[..child_path.len()] != child_path[..] {
-                continue;
-            }
-            match by_key.get(key) {
-                Some(existing)
-                    if matches!(
-                        &existing.source,
-                        KeySource::NodeShortcut { child_path: cp, .. } if cp.len() >= child_path.len()
-                    ) => {}
-                _ => {
-                    by_key.insert(key.clone(), claim.clone());
-                }
-            }
-        }
-        for claim in by_key.into_values() {
-            let name = claim.source.action_name();
-            if seen.insert(name.clone()) {
-                rows.push(crate::keymap::ShortcutRow {
-                    name,
-                    keys: claim.key.0.join(" / "),
-                    scope: label.clone(),
-                    source: Some(claim.source.clone()),
-                    key_scope: Some(claim.scope.clone()),
-                });
-            }
-        }
 
         // Adapter-declared actions are the source of truth for what the
-        // focused node can do — the YAML `shortcuts:` map above only *binds
-        // keys* to a subset of them. Enumerate the adapter's actions for the
-        // current level's node type and surface any that no shortcut binds yet
-        // as keyless, bindable rows (a `NodeShortcut` source with an empty
-        // key). This is why an adapter action like `toggle-tracking` now shows
-        // up — and can be bound — even in a tab whose view file never mentions
-        // it. Bound ones were already emitted above and dedup out by name.
+        // focused node can do — a `type: node` action only *binds a key* to
+        // one of them, and those are already in the keymap projection above.
+        // Enumerate the adapter's actions for the current level's node type
+        // and surface any that nothing binds yet as keyless, bindable rows.
+        // This is why an adapter action like `toggle-tracking` shows up — and
+        // can be bound — even in a tab whose view file never mentions it.
         if let (Some(adapter), Some(node_type)) = (
             self.adapter.as_deref(),
             pane.selected_target_node_type(&self.view_defs),
@@ -11025,20 +10912,25 @@ impl ContentView {
                 if not_yet_done_content::describe::is_builtin(&action.id) {
                     continue;
                 }
-                let source = KeySource::NodeShortcut {
+                if pane
+                    .current_actions(&self.view_defs)
+                    .iter()
+                    .any(|a| a.action_type == "node" && a.id.as_deref() == Some(&action.id))
+                {
+                    continue;
+                }
+                let source = KeySource::YamlAction {
                     view: view_name.clone(),
                     child_path: current.clone(),
-                    key: String::new(),
-                    action: action.id.clone(),
+                    name: action.id.clone(),
                 };
-                let name = source.action_name();
-                if seen.insert(name.clone()) {
+                if seen.insert(action.id.clone()) {
                     rows.push(crate::keymap::ShortcutRow {
-                        name,
+                        name: action.id.clone(),
                         keys: String::new(),
                         scope: label.clone(),
                         source: Some(source),
-                        key_scope: Some(crate::keymap::node_shortcut_scope(
+                        key_scope: Some(crate::keymap::pane_level_scope(
                             &self.tab_name,
                             &current,
                         )),
@@ -11048,9 +10940,9 @@ impl ContentView {
         }
 
         for action in pane.current_actions(&self.view_defs) {
-            if action.key.is_none() && seen.insert(action.name.clone()) {
+            if action.key.is_none() && seen.insert(action.name().to_string()) {
                 rows.push(crate::keymap::ShortcutRow {
-                    name: action.name.clone(),
+                    name: action.name().to_string(),
                     keys: String::new(),
                     scope: label.clone(),
                     // Menu-only actions appended here (not projected as keymap
@@ -11182,20 +11074,22 @@ impl ContentView {
         }
     }
 
-    /// Every node-shortcut row across *all* declared levels of this view's
-    /// tree: the keys already bound in the `shortcuts:` maps *and* the
-    /// adapter-declared actions that nothing binds yet (keyless, bindable).
+    /// Every adapter action across *all* declared levels of this view's tree
+    /// that no `actions:` entry binds yet — keyless, but bindable.
     ///
     /// The shortcut menu's "All tabs" / "Unbound" scopes call this so an
     /// unbound adapter action (e.g. `toggle-tracking`) is listed — and can be
-    /// bound — from any tab, not just the focused drilldown level. It mirrors
-    /// the node-shortcut portion of [`Self::context_shortcut_rows`] but walks
-    /// the whole declared tree instead of the single focused level, keying the
-    /// adapter lookup off each level's *configured* `node_type` (no live
-    /// selection needed).
+    /// bound — from any tab, not just the focused drilldown level. Bound ones
+    /// need no help here: a `type: node` action is an ordinary `actions:`
+    /// entry, so `build_leaf_maps_for` already emits it. The adapter lookup is
+    /// keyed off each level's *configured* `node_type`, so no live selection
+    /// is needed.
     pub fn all_node_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
         let mut rows = Vec::new();
-        // Node shortcuts are declared per subtab (view) *and* per drill level,
+        let Some(adapter) = self.adapter.as_deref() else {
+            return rows;
+        };
+        // Node actions are declared per subtab (view) *and* per drill level,
         // so a tab with several subtabs (e.g. Trackings' `trackings` /
         // `condensed` / `tree`) exposes the same adapter action — say
         // `toggle-tracking` — once per subtab, each independently bindable.
@@ -11215,35 +11109,6 @@ impl ContentView {
                 crate::keymap::leaf_scope_label(&self.tab_name, child_path)
             }
         };
-        // Keys already bound in the `shortcuts:` maps, at every level. These
-        // dispatch through the node-action path, so `build_leaf_maps_for`
-        // (the pane keymap) never emits them — we add them here.
-        let mut bound: std::collections::HashSet<(String, Vec<String>, String)> =
-            std::collections::HashSet::new();
-        for claim in crate::keymap::node_shortcut_claims(&self.tab_name, &self.view_defs) {
-            let KeySource::NodeShortcut {
-                view,
-                child_path,
-                action,
-                ..
-            } = &claim.source
-            else {
-                continue;
-            };
-            bound.insert((view.clone(), child_path.clone(), action.clone()));
-            rows.push(crate::keymap::ShortcutRow {
-                name: claim.source.action_name(),
-                keys: claim.key.0.join(" / "),
-                scope: scope_label(view, child_path),
-                source: Some(claim.source.clone()),
-                key_scope: Some(claim.scope.clone()),
-            });
-        }
-
-        // Adapter-declared actions that no shortcut binds yet, at every level.
-        let Some(adapter) = self.adapter.as_deref() else {
-            return rows;
-        };
         let mut levels: Vec<(String, Vec<String>, String)> = Vec::new();
         for view in &self.view_defs {
             collect_declared_levels(
@@ -11255,6 +11120,7 @@ impl ContentView {
             );
         }
         for (view_name, child_path, node_type) in levels {
+            let bound = self.bound_node_action_ids(&view_name, &child_path);
             let nt = not_yet_done_content::NodeType {
                 type_id: node_type,
                 mime_type: String::new(),
@@ -11266,21 +11132,22 @@ impl ContentView {
                 if not_yet_done_content::describe::is_builtin(&action.id) {
                     continue;
                 }
-                if bound.contains(&(view_name.clone(), child_path.clone(), action.id.clone())) {
+                if bound.contains(&action.id) {
                     continue;
                 }
-                let source = KeySource::NodeShortcut {
-                    view: view_name.clone(),
-                    child_path: child_path.clone(),
-                    key: String::new(),
-                    action: action.id.clone(),
-                };
                 rows.push(crate::keymap::ShortcutRow {
-                    name: source.action_name(),
+                    name: action.id.clone(),
                     keys: String::new(),
                     scope: scope_label(&view_name, &child_path),
-                    source: Some(source),
-                    key_scope: Some(crate::keymap::node_shortcut_scope(
+                    // A row for an action the view file never mentions: the
+                    // editor's write path creates the `actions:` entry when
+                    // the user binds it, addressing it by this id.
+                    source: Some(KeySource::YamlAction {
+                        view: view_name.clone(),
+                        child_path: child_path.clone(),
+                        name: action.id.clone(),
+                    }),
+                    key_scope: Some(crate::keymap::pane_level_scope(
                         &self.tab_name,
                         &child_path,
                     )),
@@ -11288,6 +11155,38 @@ impl ContentView {
             }
         }
         rows
+    }
+
+    /// Adapter-action ids that a `type: node` action already binds at the
+    /// level `(view, child_path)`. Used to tell a bound adapter action from
+    /// one that is still free to bind.
+    fn bound_node_action_ids(
+        &self,
+        view_name: &str,
+        child_path: &[String],
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let Some(view) = self.view_defs.iter().find(|v| v.name == view_name) else {
+            return out;
+        };
+        let mut actions: &[ActionDef] = &view.actions;
+        let mut children: &[ChildDef] = &view.children;
+        for name in child_path {
+            let Some(child) = children.iter().find(|c| c.name == *name) else {
+                return out;
+            };
+            actions = &child.actions;
+            children = &child.children;
+        }
+        for action in actions {
+            if action.action_type != "node" {
+                continue;
+            }
+            if let Some(id) = action.id.clone() {
+                out.insert(id);
+            }
+        }
+        out
     }
 
     /// Cycle the active subtab forward (`forward = true`) or backward,
@@ -13938,6 +13837,13 @@ mod tests {
         Arc::new(Theme::new(ThemeConfig::default()))
     }
 
+    /// A `type: node` action as the YAML spells it — key plus adapter action
+    /// id, everything else defaulted.
+    fn node_action(key: &str, id: &str) -> ActionDef {
+        serde_yaml::from_str(&format!("{{ key: {key}, id: {id} }}"))
+            .expect("node action parses")
+    }
+
     #[test]
     fn path_segments_tag_only_separators() {
         // Fitted, left-aligned, padded: "/a/b   ".
@@ -14404,10 +14310,11 @@ mod tests {
                     markdown: false,
                 }),
                 actions: vec![ActionDef {
-                    name: "edit".into(),
+                    label: Some("edit".into()),
                     key: Some("e".into()),
                     action_type: "edit".into(),
                     id: None,
+                    target: Default::default(),
                     node_id_from: None,
                     navigate_to: None,
                     fuzzy_filter: None,
@@ -14464,7 +14371,6 @@ mod tests {
                     record_detail: false,
                     node_scripts: false,
                     tree_label: None,
-                    shortcuts: HashMap::new(),
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
@@ -14484,7 +14390,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -14641,15 +14546,14 @@ mod tests {
     }
 
     #[test]
-    fn context_shortcut_rows_include_node_shortcuts() {
-        // A per-node `shortcuts:` entry (e.g. `s: toggle-tracking`) dispatches
-        // through the node-action path, not the pane keymap — it must still be
+    fn context_shortcut_rows_include_bound_node_actions() {
+        // A `type: node` action (e.g. `- { key: s, id: toggle-tracking }`)
+        // claims its key in the pane keymap like any other action, and must be
         // surfaced (and stay editable) in the shortcut menu's context scope.
         let mut config = test_config_with_children();
-        config.views[0].shortcuts.insert(
-            's',
-            crate::config::view_config::ShortcutDef::Action("toggle-tracking".into()),
-        );
+        config.views[0]
+            .actions
+            .push(node_action("s", "toggle-tracking"));
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let rows = view.context_shortcut_rows();
         let row = rows
@@ -14657,21 +14561,21 @@ mod tests {
             .find(|r| {
                 matches!(
                     &r.source,
-                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
-                        if action == "toggle-tracking"
+                    Some(crate::keymap::KeySource::YamlAction { name, .. })
+                        if name == "toggle-tracking"
                 )
             })
-            .expect("node shortcut 's' should appear in the context menu");
+            .expect("node action 's' should appear in the context menu");
         assert_eq!(row.keys, "s");
     }
 
     #[test]
     fn context_shortcut_rows_surface_unbound_adapter_actions() {
         // The adapter — not the YAML — is the source of truth for what a node
-        // can do. An adapter action with *no* `shortcuts:` binding must still
+        // can do. An adapter action *no* `actions:` entry binds must still
         // appear in the context menu as a keyless, bindable row, so the user
         // can assign it a key. Built-in framework actions (e.g. `help`) are
-        // excluded — they are not per-node shortcuts.
+        // excluded — they are not per-node actions.
         let config = test_config_with_children(); // root node_type: mock:issue
         let adapter: Arc<dyn not_yet_done_content::ContentAdapter> = Arc::new(test_adapter(&[(
             "mock:issue",
@@ -14693,8 +14597,8 @@ mod tests {
             .find(|r| {
                 matches!(
                     &r.source,
-                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
-                        if action == "toggle-tracking"
+                    Some(crate::keymap::KeySource::YamlAction { name, .. })
+                        if name == "toggle-tracking"
                 )
             })
             .expect("unbound adapter action should appear as a bindable row");
@@ -14707,9 +14611,9 @@ mod tests {
         assert!(
             !rows.iter().any(|r| matches!(
                 &r.source,
-                Some(crate::keymap::KeySource::NodeShortcut { action, .. }) if action == "help"
+                Some(crate::keymap::KeySource::YamlAction { name, .. }) if name == "help"
             )),
-            "built-in framework actions must not surface as per-node shortcuts"
+            "built-in framework actions must not surface as per-node actions"
         );
     }
 
@@ -14723,7 +14627,7 @@ mod tests {
         // for view ''". The runtime keymap must carry the real view name.
         let mut config = test_config_with_children();
         let mut keyless = config.views[0].actions[0].clone();
-        keyless.name = "free text".into();
+        keyless.label = Some("free text".into());
         keyless.key = Some(KeyBinding(vec![]));
         config.views[0].actions.push(keyless);
 
@@ -14753,13 +14657,13 @@ mod tests {
         // The "All tabs" / "Unbound" scopes must list unbound adapter actions
         // from *every* declared level, not just the focused one — walking the
         // configured node_types (root `mock:issue`, child `mock:comment`)
-        // rather than the live selection. A bound `shortcuts:` key surfaces
-        // with its key; the same action stops appearing as a keyless row.
+        // rather than the live selection. An action a level already binds is
+        // left out — it claims its key in that level's leaf map and the menu
+        // lists it from there, so listing it again would duplicate the row.
         let mut config = test_config_with_children();
-        config.views[0].shortcuts.insert(
-            's',
-            crate::config::view_config::ShortcutDef::Action("toggle-tracking".into()),
-        );
+        config.views[0]
+            .actions
+            .push(node_action("s", "toggle-tracking"));
         let adapter: Arc<dyn not_yet_done_content::ContentAdapter> = Arc::new(test_adapter(&[
             (
                 "mock:issue",
@@ -14781,20 +14685,16 @@ mod tests {
         );
         let rows = view.all_node_shortcut_rows();
 
-        // The root's bound `toggle-tracking` shows its key, at root scope, and
-        // is *not* duplicated as an unbound row.
-        let bound: Vec<_> = rows
-            .iter()
-            .filter(|r| {
-                matches!(
-                    &r.source,
-                    Some(crate::keymap::KeySource::NodeShortcut { action, child_path, .. })
-                        if action == "toggle-tracking" && child_path.is_empty()
-                )
-            })
-            .collect();
-        assert_eq!(bound.len(), 1, "bound action appears once, not twice");
-        assert_eq!(bound[0].keys, "s");
+        // The root binds `toggle-tracking` to `s`, so it must not come back
+        // as a keyless row on top of the leaf map's bound one.
+        assert!(
+            !rows.iter().any(|r| matches!(
+                &r.source,
+                Some(crate::keymap::KeySource::YamlAction { name, child_path, .. })
+                    if name == "toggle-tracking" && child_path.is_empty()
+            )),
+            "an action the level already binds is not repeated as unbound"
+        );
 
         // The child level's `resolve` is surfaced unbound and bindable, at the
         // child's scope with the child in its path.
@@ -14803,8 +14703,8 @@ mod tests {
             .find(|r| {
                 matches!(
                     &r.source,
-                    Some(crate::keymap::KeySource::NodeShortcut { action, child_path, .. })
-                        if action == "resolve" && !child_path.is_empty()
+                    Some(crate::keymap::KeySource::YamlAction { name, child_path, .. })
+                        if name == "resolve" && !child_path.is_empty()
                 )
             })
             .expect("child-level adapter action should appear from the whole tree");
@@ -14814,7 +14714,7 @@ mod tests {
         // Built-ins never surface.
         assert!(!rows.iter().any(|r| matches!(
             &r.source,
-            Some(crate::keymap::KeySource::NodeShortcut { action, .. }) if action == "help"
+            Some(crate::keymap::KeySource::YamlAction { name, .. }) if name == "help"
         )));
     }
 
@@ -14866,8 +14766,8 @@ mod tests {
             .filter(|r| {
                 matches!(
                     &r.source,
-                    Some(crate::keymap::KeySource::NodeShortcut { action, .. })
-                        if action == "toggle-tracking"
+                    Some(crate::keymap::KeySource::YamlAction { name, .. })
+                        if name == "toggle-tracking"
                 )
             })
             .map(|r| r.scope.as_str())
@@ -14965,10 +14865,11 @@ mod tests {
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // Mirror stoat.yaml: a multi-char chord action on the root view.
         view.view_defs[0].actions.push(ActionDef {
-            name: "new channel".into(),
+            label: Some("new channel".into()),
             key: Some("al".into()),
             action_type: "custom".into(),
             id: Some("create_channel".into()),
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -15182,7 +15083,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -15383,7 +15283,6 @@ mod tests {
             record_detail: false,
             node_scripts: false,
             tree_label: None,
-            shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
@@ -15762,7 +15661,6 @@ mod tests {
                     record_detail: false,
                     node_scripts: false,
                     tree_label: Some("name".into()),
-                    shortcuts: HashMap::new(),
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
@@ -15782,7 +15680,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -15907,7 +15804,6 @@ mod tests {
             record_detail: false,
             node_scripts: false,
             tree_label: tree_label.map(String::from),
-            shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
@@ -16004,7 +15900,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -16177,7 +16072,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -17255,7 +17149,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -18195,10 +18088,11 @@ mod tests {
     /// behavior.
     fn test_config_with_tree_filter_at(depth: usize) -> ViewFileConfig {
         let filter_action = crate::config::view_config::ActionDef {
-            name: "filter".into(),
+            label: Some("filter".into()),
             key: Some("f".into()),
             action_type: "fuzzy_filter".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
@@ -18588,7 +18482,6 @@ mod tests {
             record_detail: false,
             node_scripts: false,
             tree_label: None,
-            shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
@@ -18690,7 +18583,6 @@ mod tests {
             record_detail: false,
             node_scripts: false,
             tree_label: None,
-            shortcuts: HashMap::new(),
             enter_action: None,
             recursive: false,
             editor_in_place: false,
@@ -18777,10 +18669,11 @@ mod tests {
         let mut config = test_config_with_tree();
         // Root view: edit + global fuzzy_filter.
         config.views[0].actions.push(ActionDef {
-            name: "edit".into(),
+            label: Some("edit".into()),
             key: Some("e".into()),
             action_type: "edit".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -18805,10 +18698,11 @@ mod tests {
             on_event: None,
         });
         config.views[0].actions.push(ActionDef {
-            name: "filter".into(),
+            label: Some("filter".into()),
             key: Some("f".into()),
             action_type: "fuzzy_filter".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
@@ -18837,10 +18731,11 @@ mod tests {
         // Root view: tree_find (`/`). Like fuzzy_filter it is declared only
         // here yet must reach every cursor depth (it is in the GLOBAL set).
         config.views[0].actions.push(ActionDef {
-            name: "treefind".into(),
+            label: Some("treefind".into()),
             key: Some("/".into()),
             action_type: "tree_find".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -18866,10 +18761,11 @@ mod tests {
         });
         // Schemas child: inspect (level-only) action.
         config.views[0].children[0].actions.push(ActionDef {
-            name: "inspect".into(),
+            label: Some("inspect".into()),
             key: Some("i".into()),
             action_type: "custom".into(),
             id: Some("inspect_schema".into()),
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -18918,7 +18814,7 @@ mod tests {
         view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
         // Cursor on db1 (depth 0).
         let actions = view.active_pane().current_actions(&view.view_defs);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        let names: Vec<&str> = actions.iter().map(|a| a.name()).collect();
         assert_eq!(names, vec!["edit", "filter", "treefind"]);
     }
 
@@ -18934,7 +18830,7 @@ mod tests {
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         // No set_items: tree is Some but empty, cursor resolves to nothing.
         let actions = view.active_pane().current_actions(&view.view_defs);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        let names: Vec<&str> = actions.iter().map(|a| a.name()).collect();
         assert_eq!(
             names,
             vec!["edit", "filter", "treefind"],
@@ -18950,7 +18846,7 @@ mod tests {
         expand_db1_and_select(&mut view, 1); // cursor on "public" (depth 1)
 
         let actions = view.active_pane().current_actions(&view.view_defs);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        let names: Vec<&str> = actions.iter().map(|a| a.name()).collect();
         // depth-1 own action first, then the root globals (fuzzy_filter +
         // tree_find) appended. root `edit` is not global → stays hidden at
         // depth 1. The `treefind` entry is the regression guard: before the
@@ -18964,10 +18860,11 @@ mod tests {
         // Both levels define an action under key "x"; only the active
         // level's should win.
         config.views[0].actions.push(ActionDef {
-            name: "root_x".into(),
+            label: Some("root_x".into()),
             key: Some("x".into()),
             action_type: "custom".into(),
             id: Some("root_x".into()),
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -18995,10 +18892,11 @@ mod tests {
         // wouldn't show up at depth 1 anyway. Use search (global) to
         // force the collision path: same key "x" exists at child.
         config.views[0].actions.push(ActionDef {
-            name: "root_search".into(),
+            label: Some("root_search".into()),
             key: Some("x".into()),
             action_type: "search".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -19027,10 +18925,11 @@ mod tests {
             on_event: None,
         });
         config.views[0].children[0].actions.push(ActionDef {
-            name: "child_x".into(),
+            label: Some("child_x".into()),
             key: Some("x".into()),
             action_type: "custom".into(),
             id: Some("child_x".into()),
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -19059,7 +18958,7 @@ mod tests {
         expand_db1_and_select(&mut view, 1);
 
         let actions = view.active_pane().current_actions(&view.view_defs);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
+        let names: Vec<&str> = actions.iter().map(|a| a.name()).collect();
         // Active level wins for key "x"; root's global search is skipped.
         assert_eq!(names, vec!["child_x"]);
     }
@@ -19208,7 +19107,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: HashMap::new(),
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -20276,10 +20174,11 @@ mod tests {
         // dispatcher. Mirrors the user's taiga.yaml configuration.
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
-            name: "script".into(),
+            label: Some("script".into()),
             key: Some("x".into()),
             action_type: "script".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -20319,10 +20218,11 @@ mod tests {
         // `A` (add-child-under-cursor) so nesting works without drilling in.
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
-            name: "add child".into(),
+            label: Some("add child".into()),
             key: Some("A".into()),
             action_type: "create".into(),
             id: Some("add".into()),
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -20368,10 +20268,11 @@ mod tests {
         // top action bar lists it alongside `edit` / `create` / etc.
         let mut config = test_config_with_children();
         config.views[0].actions.push(ActionDef {
-            name: "script".into(),
+            label: Some("script".into()),
             key: Some("x".into()),
             action_type: "script".into(),
             id: None,
+            target: Default::default(),
             node_id_from: None,
             navigate_to: None,
             fuzzy_filter: None,
@@ -20978,10 +20879,11 @@ mod tests {
         config.adapter.manual_connect = true;
         if let Some(k) = reload_key {
             config.views[0].actions.push(ActionDef {
-                name: "refresh".into(),
+                label: Some("refresh".into()),
                 key: Some(k.into()),
                 action_type: "reload".into(),
                 id: None,
+                target: Default::default(),
                 node_id_from: None,
                 navigate_to: None,
                 fuzzy_filter: None,
@@ -21046,18 +20948,25 @@ mod tests {
 
     use not_yet_done_content::{InputSpec, NodeAction};
 
-    fn shortcut_config_flat(
-        view_shortcuts: HashMap<char, String>,
-        child_shortcuts: HashMap<char, String>,
+    /// `(key, id)` pairs as `type: node` actions. An id prefixed with
+    /// `parent:` becomes `target: parent`.
+    fn node_actions(pairs: &[(&str, &str)]) -> Vec<ActionDef> {
+        pairs
+            .iter()
+            .map(|(key, id)| match id.strip_prefix("parent:") {
+                Some(id) => serde_yaml::from_str(&format!(
+                    "{{ key: {key}, id: {id}, target: parent }}"
+                ))
+                .expect("parent-targeted node action parses"),
+                None => node_action(key, id),
+            })
+            .collect()
+    }
+
+    fn node_action_config_flat(
+        view_actions: &[(&str, &str)],
+        child_actions: &[(&str, &str)],
     ) -> ViewFileConfig {
-        let view_shortcuts: HashMap<char, ShortcutDef> = view_shortcuts
-            .into_iter()
-            .map(|(k, v)| (k, ShortcutDef::Action(v)))
-            .collect();
-        let child_shortcuts: HashMap<char, ShortcutDef> = child_shortcuts
-            .into_iter()
-            .map(|(k, v)| (k, ShortcutDef::Action(v)))
-            .collect();
         ViewFileConfig {
             reminder: None,
             hooks: None,
@@ -21104,7 +21013,7 @@ mod tests {
                     long_source: None,
                 }],
                 preview: None,
-                actions: vec![],
+                actions: node_actions(view_actions),
                 children: vec![ChildDef {
                     card: None,
                     row_layout: None,
@@ -21128,7 +21037,7 @@ mod tests {
                         long_source: None,
                     }],
                     preview: None,
-                    actions: vec![],
+                    actions: node_actions(child_actions),
                     children: vec![],
                     split: None,
                     pagination: None,
@@ -21138,7 +21047,6 @@ mod tests {
                     record_detail: false,
                     node_scripts: false,
                     tree_label: None,
-                    shortcuts: child_shortcuts,
                     enter_action: None,
                     recursive: false,
                     editor_in_place: false,
@@ -21158,7 +21066,6 @@ mod tests {
                 retries: 0,
                 script_template: None,
                 script_source: None,
-                shortcuts: view_shortcuts,
                 leaf_glyph: None,
                 icon: None,
                 group_by: None,
@@ -21184,31 +21091,34 @@ mod tests {
     }
 
     #[test]
-    fn current_shortcuts_at_root_returns_view_def_entries() {
-        let mut sc = HashMap::new();
-        sc.insert('a', "do_alpha".to_string());
-        sc.insert('b', "parent:do_beta".to_string());
-        let config = shortcut_config_flat(sc, HashMap::new());
+    fn current_actions_at_root_returns_view_def_node_actions() {
+        let config = node_action_config_flat(&[("a", "do_alpha"), ("b", "parent:do_beta")], &[]);
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
 
-        let mut entries = view.active_pane().current_shortcuts(&view.view_defs);
-        entries.sort_by_key(|(k, _)| *k);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ('a', "do_alpha".to_string()));
-        assert_eq!(entries[1], ('b', "parent:do_beta".to_string()));
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let mut entries: Vec<(&str, &str, ActionTarget)> = actions
+            .iter()
+            .map(|a| (a.primary_key().unwrap(), a.id.as_deref().unwrap(), a.target))
+            .collect();
+        entries.sort_by_key(|(key, _, _)| *key);
+        assert_eq!(
+            entries,
+            vec![
+                ("a", "do_alpha", ActionTarget::Selected),
+                ("b", "do_beta", ActionTarget::Parent),
+            ]
+        );
     }
 
     #[test]
-    fn current_shortcuts_after_drill_child_overrides_view() {
-        let mut view_sc = HashMap::new();
-        view_sc.insert('a', "view_alpha".to_string());
-        view_sc.insert('c', "view_charlie".to_string());
-        let mut child_sc = HashMap::new();
-        // 'a' clashes with view-level — child wins; 'b' is child-only.
-        child_sc.insert('a', "child_alpha".to_string());
-        child_sc.insert('b', "child_bravo".to_string());
-
-        let config = shortcut_config_flat(view_sc, child_sc);
+    fn current_actions_after_drill_returns_the_child_level() {
+        // Drilling swaps the whole action set for the child's: the child
+        // level does not merge with its parent's (only `inherit: true` on a
+        // tree continuation cascades, which this flat view is not).
+        let config = node_action_config_flat(
+            &[("a", "view_alpha"), ("c", "view_charlie")],
+            &[("a", "child_alpha"), ("b", "child_bravo")],
+        );
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
@@ -21217,12 +21127,10 @@ mod tests {
         view.active_pane_mut()
             .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
 
-        let mut entries = view.active_pane().current_shortcuts(&view.view_defs);
-        entries.sort_by_key(|(k, _)| *k);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0], ('a', "child_alpha".to_string())); // child wins
-        assert_eq!(entries[1], ('b', "child_bravo".to_string()));
-        assert_eq!(entries[2], ('c', "view_charlie".to_string())); // inherited
+        let actions = view.active_pane().current_actions(&view.view_defs);
+        let mut entries: Vec<&str> = actions.iter().map(|a| a.id.as_deref().unwrap()).collect();
+        entries.sort();
+        assert_eq!(entries, vec!["child_alpha", "child_bravo"]);
     }
 
     /// Tiny `ContentAdapter` stub for the shortcut-hint tests below.
@@ -21279,11 +21187,8 @@ mod tests {
     }
 
     #[test]
-    fn collect_shortcut_hints_emits_adapter_action_label_and_source() {
-        let mut sc = HashMap::new();
-        sc.insert('a', "do_alpha".to_string());
-        sc.insert('s', "do_sigma".to_string());
-        let config = shortcut_config_flat(sc, HashMap::new());
+    fn node_action_hints_emit_adapter_label_and_source() {
+        let config = node_action_config_flat(&[("a", "do_alpha"), ("s", "do_sigma")], &[]);
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
@@ -21300,9 +21205,9 @@ mod tests {
 
         let mut hints = view
             .active_pane()
-            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
+            .collect_node_action_hints(&view.view_defs, Some(&adapter));
         hints.sort_by(|a, b| a.key.cmp(&b.key));
-        assert_eq!(hints.len(), 2, "exactly the two configured shortcuts");
+        assert_eq!(hints.len(), 2, "exactly the two configured node actions");
         assert_eq!(hints[0].key, "a");
         assert_eq!(hints[0].label, "Alpha");
         assert!(hints[0].source.is_some(), "editor action is activatable");
@@ -21315,13 +21220,13 @@ mod tests {
     }
 
     #[test]
-    fn collect_shortcut_hints_drops_when_action_id_not_in_adapter_set() {
-        // Adapter returns a different action_id than the YAML shortcut
-        // references — mirrors the "a:add on a leaf row whose
-        // actions_for_type omits add" case.
-        let mut sc = HashMap::new();
-        sc.insert('a', "add".to_string());
-        let config = shortcut_config_flat(sc, HashMap::new());
+    fn node_action_hint_falls_back_when_the_adapter_does_not_offer_the_id() {
+        // The adapter offers a different id than the YAML action references —
+        // mirrors the "a:add on a leaf row whose actions_for_type omits add"
+        // case. The key is bound either way, so the hint stays visible under
+        // its YAML name; only the adapter-derived surface is missing, which
+        // parks it in the status bar.
+        let config = node_action_config_flat(&[("a", "add")], &[]);
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
@@ -21332,35 +21237,33 @@ mod tests {
 
         let hints = view
             .active_pane()
-            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
-        assert!(
-            hints.is_empty(),
-            "missing action_id → hint dropped silently"
-        );
+            .collect_node_action_hints(&view.view_defs, Some(&adapter));
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].key, "a");
+        assert_eq!(hints[0].label, "add", "falls back to the YAML name");
+        assert!(hints[0].source.is_none(), "no adapter surface to place it");
     }
 
     #[test]
-    fn collect_shortcut_hints_empty_without_adapter() {
-        let mut sc = HashMap::new();
-        sc.insert('a', "do_alpha".to_string());
-        let config = shortcut_config_flat(sc, HashMap::new());
+    fn node_action_hints_without_an_adapter_use_the_yaml_name() {
+        let config = node_action_config_flat(&[("a", "do_alpha")], &[]);
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
         let hints = view
             .active_pane()
-            .collect_shortcut_hints(&view.view_defs, None);
-        assert!(hints.is_empty(), "no adapter → no hints");
+            .collect_node_action_hints(&view.view_defs, None);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].label, "do_alpha");
+        assert!(hints[0].source.is_none());
     }
 
     #[test]
-    fn collect_shortcut_hints_parent_target_uses_parent_node_type() {
-        // 'p' on the child references the parent's action — resolver
-        // must look it up under the parent's node_type, not the
-        // currently-selected child's.
-        let mut child_sc = HashMap::new();
-        child_sc.insert('p', "parent:promote".to_string());
-        let config = shortcut_config_flat(HashMap::new(), child_sc);
+    fn node_action_hint_with_parent_target_uses_the_parent_node_type() {
+        // 'p' on the child invokes the parent's action — the resolver must
+        // look it up under the parent's node_type, not the currently
+        // selected child's.
+        let config = node_action_config_flat(&[], &[("p", "parent:promote")]);
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
 
@@ -21381,7 +21284,7 @@ mod tests {
 
         let hints = view
             .active_pane()
-            .collect_shortcut_hints(&view.view_defs, Some(&adapter));
+            .collect_node_action_hints(&view.view_defs, Some(&adapter));
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].key, "p");
         assert_eq!(hints[0].label, "Promote Parent");
@@ -22672,7 +22575,6 @@ views:
                 record_detail: false,
                 node_scripts: false,
                 tree_label: Some("label".into()),
-                shortcuts: HashMap::new(),
                 enter_action: None,
                 recursive: true,
                 editor_in_place: false,
@@ -22692,7 +22594,6 @@ views:
             retries: 0,
             script_template: None,
             script_source: None,
-            shortcuts: HashMap::new(),
             leaf_glyph: None,
             icon: None,
             group_by: None,
@@ -24304,10 +24205,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             }),
             actions: vec![
                 ActionDef {
-                    name: "edit".to_string(),
+                    label: Some("edit".to_string()),
                     key: Some("e".into()),
                     action_type: "edit".to_string(),
                     id: Some("edit_full".into()),
+                    target: Default::default(),
                     node_id_from: None,
                     navigate_to: None,
                     fuzzy_filter: None,
@@ -24332,10 +24234,11 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     on_event: None,
                 },
                 ActionDef {
-                    name: "refresh".to_string(),
+                    label: Some("refresh".to_string()),
                     key: Some("r".into()),
                     action_type: "reload".to_string(),
                     id: None,
+                    target: Default::default(),
                     node_id_from: None,
                     navigate_to: None,
                     fuzzy_filter: None,
@@ -24370,7 +24273,6 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             retries: 0,
             script_template: None,
             script_source: None,
-            shortcuts: HashMap::new(),
             leaf_glyph: None,
             icon: None,
             group_by: None,

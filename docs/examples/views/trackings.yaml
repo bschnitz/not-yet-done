@@ -38,7 +38,7 @@
 #
 # `d` soft-deletes a tracking (keeping its times) through the confirm flow;
 # `R`/`A` restore deleted trackings; `s` toggles time tracking on the row's
-# task. See the `shortcuts:` block below. `i` splits an interval at a time
+# task. See the node actions below. `i` splits an interval at a time
 # point and `M` moves it to a new start (both open a form — see the `split`/
 # `move` actions below); these are the same operations the legacy `nyd track
 # split`/`nyd track move` commands ran, now adapter actions so the CLI's
@@ -222,8 +222,8 @@ views:
         type: reload
       # `restore all` operates on the **whole list** (the adapter container),
       # not the selected row — so it's declared here as an `on_container`
-      # action rather than a `parent:`-prefixed shortcut. A `parent:` shortcut
-      # resolves its target from the nav stack, which is empty at the
+      # action rather than a `target: parent` node action. A parent-targeted
+      # action resolves its target from the nav stack, which is empty at the
       # un-drilled flat root; the hint would vanish and the key would do
       # nothing there. An `on_container` action instead builds its hint
       # statically (so `A` is always visible) and dispatches against
@@ -269,9 +269,21 @@ views:
         key: M
         type: custom
         id: move
+      - { key: d, id: delete }
+      - { key: R, id: restore }
+      - { key: s, id: toggle-tracking }
+      # Repack an interval into another day slot (`mark-move` / `paste-move`,
+      # the generic move-clipboard vocabulary). `m` marks the selected
+      # tracking; `p` on another row moves the marked interval — keeping its
+      # own task and duration — into *that row's day*: directly after the
+      # target if it fits, else (after a `(y/n)` confirm) directly after the
+      # day's last interval, else directly before the day's first interval,
+      # else it aborts with "no room". Only the flat list offers it.
+      - { key: m, id: mark-move }
+      - { key: p, id: paste-move }
 
-    # Adapter-backed per-row shortcuts (A2b), dispatched via `invoke_action`
-    # against the selected tracking.
+    # The adapter-backed per-row actions above (A2b), dispatched via
+    # `invoke_action` against the selected tracking.
     #
     #   * `d` delete — soft-delete the tracking, keeping its start/end times,
     #     through the generic confirm-then-delete flow. The row drops out of
@@ -297,19 +309,6 @@ views:
     # to surface them. Deleted rows then render **greyed-out** (a `deleted`
     # styling signal on the row), and `R`/`A` act on the deleted rows the
     # current query makes visible.
-    shortcuts:
-      d: delete
-      R: restore
-      s: toggle-tracking
-      # Repack an interval into another day slot (`mark-move` / `paste-move`,
-      # the generic move-clipboard vocabulary). `m` marks the selected
-      # tracking; `p` on another row moves the marked interval — keeping its
-      # own task and duration — into *that row's day*: directly after the
-      # target if it fits, else (after a `(y/n)` confirm) directly after the
-      # day's last interval, else directly before the day's first interval,
-      # else it aborts with "no room". Only the flat list offers it.
-      m: mark-move
-      p: paste-move
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #
@@ -403,12 +402,11 @@ views:
       - name: refresh
         key: r
         type: reload
+      - { key: s, id: toggle-tracking }
 
     # A condensed cell aggregates many intervals, so per-interval delete/
     # restore are gone (deleting "one" interval of a summed cell is
     # meaningless); toggle-tracking acts on the cell's task.
-    shortcuts:
-      s: toggle-tracking
 
   # ── Tree (A2c) ───────────────────────────────────────────────────────
   #
@@ -526,7 +524,7 @@ views:
         key: r
         type: reload
 
-    # No `shortcuts:` here: this level describes the **group buckets**, and
+    # No node actions here: this level describes the **group buckets**, and
     # a bucket is a read-only aggregate (nothing to toggle). The task rows'
     # `s: toggle-tracking` lives on the `subtasks` child level below — which
     # also serves the root rows when grouping is cycled off.
@@ -570,6 +568,5 @@ views:
           - name: refresh
             key: r
             type: reload
+          - { key: s, id: toggle-tracking }
 
-        shortcuts:
-          s: toggle-tracking

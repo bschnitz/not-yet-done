@@ -6268,35 +6268,6 @@ impl App {
         //    edited above).
         match self.set_db_shortcut(&source, &binding) {
             Ok(true) => {}
-            Ok(false) if matches!(source, crate::keymap::KeySource::NodeShortcut { .. }) => {
-                // Per-node `shortcuts:` target: add `<binding>: <action>`,
-                // reading fresh so it composes with any key freed above.
-                let crate::keymap::KeySource::NodeShortcut { action, .. } = &source else {
-                    unreachable!()
-                };
-                let action = action.clone();
-                let current = Self::row_bindings(&row);
-                let target = if overwrite {
-                    vec![binding.clone()]
-                } else {
-                    let mut t = current.clone();
-                    if !t.contains(&binding) {
-                        t.push(binding.clone());
-                    }
-                    t
-                };
-                match self.rewrite_node_shortcut(&source, &action, &current, &target) {
-                    Ok(path) => {
-                        if !touched.contains(&path) {
-                            touched.push(path);
-                        }
-                    }
-                    Err(e) => {
-                        self.notify_error(e);
-                        return;
-                    }
-                }
-            }
             Ok(false) => {
                 let (loc, path) = match self.resolve_binding_target(&source) {
                     Ok(v) => v,
@@ -6370,55 +6341,6 @@ impl App {
         self.validate_config_text(path, &edited)
             .map_err(|e| format!("Change rejected — would break {}: {e}", path.display()))?;
         std::fs::write(path, &edited).map_err(|e| format!("Cannot write {}: {e}", path.display()))
-    }
-
-    /// Rewrite a per-node `shortcuts:` block so the keys mapping to `action`
-    /// become exactly `target` (each entry is `key: action`). Keys in
-    /// `current` but not `target` are removed; keys in `target` but not
-    /// `current` are inserted with the action verb as their value, creating
-    /// the `shortcuts:` map/block if it is absent or empty.
-    ///
-    /// This is the write path for adapter-declared actions surfaced by the
-    /// menu without a YAML binding: their map key *is* the chord and the value
-    /// is the action verb — the reverse of every `key:`-valued binding, so the
-    /// generic [`Self::edit_binding_file`] cannot express it. Reads the file
-    /// fresh (so it composes with prior same-file edits) and returns the
-    /// touched path; the caller reloads.
-    fn rewrite_node_shortcut(
-        &self,
-        source: &crate::keymap::KeySource,
-        action: &str,
-        current: &[String],
-        target: &[String],
-    ) -> Result<std::path::PathBuf, String> {
-        use crate::config::keybinding_edit::{remove_binding, set_binding_in_optional_map};
-
-        let (base, path) = self.resolve_binding_target(source)?;
-        let mut text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        // Drop keys that should no longer map to this action.
-        for k in current.iter().filter(|k| !target.contains(k)) {
-            let mut loc = base.clone();
-            loc.entry = k.clone();
-            match remove_binding(&loc, &text) {
-                Ok(t) => text = t,
-                // An already-absent key (e.g. never persisted) is not an error.
-                Err(e) if e.contains("not found") => {}
-                Err(e) => return Err(format!("Edit failed: {e}")),
-            }
-        }
-        // Insert the newly-wanted keys, each pointing at the action verb.
-        for k in target.iter().filter(|k| !current.contains(k)) {
-            let mut loc = base.clone();
-            loc.entry = k.clone();
-            text = set_binding_in_optional_map(&loc, &text, &[action.to_string()])
-                .map_err(|e| format!("Edit failed: {e}"))?;
-        }
-        self.validate_config_text(&path, &text)
-            .map_err(|e| format!("Change rejected — would break {}: {e}", path.display()))?;
-        std::fs::write(&path, &text)
-            .map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
-        Ok(path)
     }
 
     /// Reload an already-written config `path` in-process, surface `ok_msg` and
@@ -6567,31 +6489,6 @@ impl App {
             return;
         }
 
-        // Per-node `shortcuts:` binding: the map key is the chord and its
-        // value is the action verb, so we can't append a chord to a `key:`
-        // list — we add a `<binding>: <action>` entry (keeping any existing
-        // keys; several keys may map to the same action).
-        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
-            let action = action.clone();
-            let current = Self::row_bindings(&row);
-            // Overwrite replaces the key(s) mapping to this action with just the
-            // new chord; add keeps the existing keys and appends.
-            let target = if overwrite {
-                vec![binding.clone()]
-            } else {
-                let mut t = current.clone();
-                t.push(binding.clone());
-                t
-            };
-            match self.rewrite_node_shortcut(&source, &action, &current, &target) {
-                Ok(path) => {
-                    self.reload_note_refresh(&path, format!("Bound '{binding}' to {}", row.name))
-                }
-                Err(e) => self.notify_error(e),
-            }
-            return;
-        }
-
         // DB-stored shortcut: chord lives in the `query_shortcut` table (single
         // chord — Ctrl+N replaces, there is no alternatives list to append to).
         match self.set_db_shortcut(&source, &binding) {
@@ -6648,19 +6545,6 @@ impl App {
         } else {
             format!("Updated bindings for '{}'", row.name)
         };
-
-        // Per-node `shortcuts:` binding: the remaining keys must map to the
-        // action verb, so rewrite the block to exactly `values` (empty =>
-        // every key line removed) rather than writing a bogus `key: []`.
-        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
-            let action = action.clone();
-            let current = Self::row_bindings(&row);
-            match self.rewrite_node_shortcut(&source, &action, &current, &values) {
-                Ok(path) => self.reload_note_refresh(&path, ok_msg),
-                Err(e) => self.notify_error(e),
-            }
-            return;
-        }
 
         // DB-stored shortcut: a single chord in `query_shortcut`. Empty values
         // (`[]`) means disable → unset the row; otherwise replace with the one
@@ -6789,10 +6673,6 @@ impl App {
         }
         claims.extend(self.tab_switch_claims());
         for cv in self.content_views_iter() {
-            claims.extend(crate::keymap::node_shortcut_claims(
-                &cv.tab_name,
-                &cv.view_defs,
-            ));
             // View-level claims — this is where the DB-stored shortcuts
             // (saved query / `:script` menu / per-table script) live; without
             // them a conflict check would happily hand out a key another
@@ -6879,15 +6759,13 @@ impl App {
                 false => {}
             }
             let (loc, path) = self.resolve_binding_target(other_source)?;
-            // Single-slot bindings (a per-node `shortcuts:` map key, a subtab
-            // `key`, the query `menu_key`, a `preview.keybinding`, or a child
-            // keybinding override) carry no alternatives list to trim — freeing
-            // the key means deleting the whole entry line, not rewriting a
-            // `key:` value.
+            // Single-slot bindings (a subtab `key`, the query `menu_key`, a
+            // `preview.keybinding`, or a child keybinding override) carry no
+            // alternatives list to trim — freeing the key means deleting the
+            // whole entry line, not rewriting a `key:` value.
             let is_slot = matches!(
                 other_source,
-                KeySource::NodeShortcut { .. }
-                    | KeySource::YamlSubtab { .. }
+                KeySource::YamlSubtab { .. }
                     | KeySource::YamlMenuKey { .. }
                     | KeySource::YamlPreviewKey { .. }
                     | KeySource::YamlChildKeybinding { .. }
@@ -6968,14 +6846,6 @@ impl App {
             .clone()
             .ok_or_else(|| "This shortcut is read-only".to_string())?;
 
-        // Per-node `shortcuts:` binding: remove every key line mapping to the
-        // action (the map key is the chord — there's no `key: []` to write).
-        if let crate::keymap::KeySource::NodeShortcut { action, .. } = &source {
-            let action = action.clone();
-            let current = Self::row_bindings(row);
-            let path = self.rewrite_node_shortcut(&source, &action, &current, &[])?;
-            return Ok(vec![path]);
-        }
         // DB-stored shortcut: unset the `query_shortcut` row; no YAML file.
         if self.resolve_db_shortcut(&source).is_some() {
             self.free_db_shortcut(&source)?;
@@ -7186,29 +7056,11 @@ impl App {
         binding: &str,
         overwrite: bool,
     ) -> Result<Vec<std::path::PathBuf>, String> {
-        use crate::keymap::KeySource;
         let source = row
             .source
             .clone()
             .ok_or_else(|| "This shortcut is read-only".to_string())?;
 
-        // Per-node `shortcuts:` binding: the map key is the chord, its value the
-        // action verb, so we rewrite the block rather than a `key:` list.
-        if let KeySource::NodeShortcut { action, .. } = &source {
-            let action = action.clone();
-            let current = Self::row_bindings(row);
-            let target = if overwrite {
-                vec![binding.to_string()]
-            } else {
-                let mut t = current.clone();
-                if !t.iter().any(|b| b == binding) {
-                    t.push(binding.to_string());
-                }
-                t
-            };
-            let path = self.rewrite_node_shortcut(&source, &action, &current, &target)?;
-            return Ok(vec![path]);
-        }
         // DB-stored shortcut: a single chord in `query_shortcut` (no list to
         // append to — the chord is replaced regardless of `overwrite`).
         if self.resolve_db_shortcut(&source).is_some() {
@@ -10184,7 +10036,7 @@ impl App {
                 .actions
                 .iter()
                 .find(|a| a.id.as_deref() == Some(action_id.as_str()))?;
-            Some((a.name.clone(), a.form.clone()))
+            Some((a.name().to_string(), a.form.clone()))
         });
         let (title, form_cfg) = match action_def {
             Some((name, cfg)) => (name, cfg),
