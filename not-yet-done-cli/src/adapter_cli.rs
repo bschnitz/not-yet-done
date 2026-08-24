@@ -714,7 +714,7 @@ fn action_flag_hint(a: &NodeAction) -> &'static str {
     match &a.input {
         InputSpec::None => "no input; --yes to skip a confirm",
         InputSpec::Editor => "editor: -m TEXT | --file FILE (else $EDITOR)",
-        InputSpec::Picker => "picker: --value V (see `values`)",
+        InputSpec::Picker => "picker: --value V (omit --value to list the options)",
         InputSpec::FilePicker { multi: true } => "files: --file PATH (repeatable)",
         InputSpec::FilePicker { multi: false } => "file: --file PATH",
         InputSpec::Form { .. } | InputSpec::ColumnForm => "form: --field K=V (repeatable)",
@@ -1284,14 +1284,44 @@ fn form_values(
     Ok(values)
 }
 
-/// `InputSpec::Picker`: the chosen value comes from `--value` (enumerate the
-/// options with `actions`/`values`).
+/// `InputSpec::Picker`: the chosen value comes from `--value`. Without one,
+/// list what this node offers instead of failing — the options are node state,
+/// not adapter state, so `values` (which is [`ContentAdapter::list_values`],
+/// one level up) cannot answer the question. This is the same call the TUI
+/// makes to fill its selection popup, so both frontends show the same list.
 async fn do_picker(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
-    let value = inv.value.clone().ok_or_else(|| {
-        anyhow!("action '{action_id}' needs a choice — pass --value <v> (see `values`)")
-    })?;
+    let Some(value) = inv.value.clone() else {
+        return list_picker_options(node, action_id, inv).await;
+    };
     let outcome = node.execute(action_id, ActionInput::Picked(value)).await?;
     report_outcome(outcome, action_id)
+}
+
+/// Print the options of an `InputSpec::Picker` action, ready to be passed
+/// straight back as `--value`.
+///
+/// An empty list is reported, not printed as an empty table: the trait default
+/// for [`Node::picker_options`] returns no options, so silence here would read
+/// as "nothing to choose" when the truth may be that the adapter declared a
+/// picker without implementing one.
+async fn list_picker_options(node: &dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+    let options = node.picker_options(action_id).await?;
+    if options.is_empty() {
+        return Err(anyhow!(
+            "action '{action_id}' offers no options on '{}' — nothing to pass as --value",
+            node.id()
+        ));
+    }
+    let values: Vec<ValueOption> = options
+        .into_iter()
+        .map(|o| ValueOption {
+            value: o.value,
+            label: o.label,
+            extra: Default::default(),
+        })
+        .collect();
+    output_values(&values, inv.output);
+    Ok(())
 }
 
 /// `InputSpec::FilePicker`: paths come from one or more `--file` flags.
