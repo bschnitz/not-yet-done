@@ -63,7 +63,7 @@ views:
       # (e.g. j/k navigation). When binding, the key is therefore checked
       # against *all* bindings active in the tab (globals, common
       # navigation, window chords including the leader prefix, subtab
-      # keys, menu_key, YAML `actions:`/`shortcuts:`, chord prefixes such
+      # keys, menu_key, YAML `actions:`, chord prefixes such
       # as `z` in front of `zg`, other saved-query shortcuts) and rejected
       # on collision, naming the conflict. When loading from the DB
       # (externally written rows, or rows stale after config changes) a
@@ -134,9 +134,8 @@ views:
     # chord interceptor only knows the typed `keybindings.*` sections, but
     # additionally asks the view keymap via
     # `ContentView::yaml_action_chord_prefix` — the first character of a
-    # chord is stashed as a prefix, the second one fires. (Node
-    # `shortcuts:`, by contrast, are single-character by definition and
-    # never chords.)
+    # chord is stashed as a prefix, the second one fires. This holds for
+    # node actions (`type: node`) too — they are the same entries.
     actions:
       - name: Edit
         key: e
@@ -735,7 +734,7 @@ with a keybinding legend at the bottom, `●` marks the current state, the hotke
 letter is underlined in the label. Same condition and same semantics as `zg`
 (it only rotates the outer level, view state, not persisted) — it is the parity
 with the `u` menu of the native trackings tab. On levels without `group_by:`,
-`u` stays free for YAML `shortcuts:`.
+`u` stays free for YAML actions.
 
 **Flip the group order (`toggle_group_order`, default `o`):** on a grouped flat
 view, `o` flips exclusively the **order of the groups** (e.g. day buckets
@@ -802,7 +801,7 @@ subtree whose values are folded from the entries of _that_ bucket only.
   of buckets). The engine's chain resolution matches **by type**: with buckets
   the root `ViewDef` level applies (`tracking:tree-group`), without buckets the
   recursive item `ChildDef` matches from depth 0. So no second view is needed —
-  but the root level's columns/`shortcuts:` only apply to bucket rows (buckets
+  but the root level's columns/`actions:` only apply to bucket rows (buckets
   are read-only aggregates; row actions belong on the item level).
 - **Bucket identity is part of the node id.** The same task can appear in
   several buckets; nodes under a bucket carry the bucket scope in their id so
@@ -1421,17 +1420,14 @@ views:
         # … no columns: — inherits St/Task from the root.
 ```
 
-#### Tree action and shortcut inheritance — `inherit:` per entry
+#### Tree action inheritance — `inherit:` per entry
 
-Analogous to the columns, `actions:` and `shortcuts:` entries can be inherited
-**down** the tree-continuing levels, so that the recursive branch does not have
-to repeat them verbatim. The inheritance is **fine-grained and opt-in per
-entry**, not all-or-nothing:
-
-- An `actions:` entry is inherited if it carries `inherit: true`.
-- A `shortcuts:` entry is inherited if it uses the long form
-  `{ action: <name>, inherit: true }` instead of the short form
-  `<key>: <name>` (see [per-node actions](#per-node-actions-shortcuts)).
+Analogous to the columns, `actions:` entries can be inherited **down** the
+tree-continuing levels, so that the recursive branch does not have to repeat
+them verbatim. The inheritance is **fine-grained and opt-in per entry**, not
+all-or-nothing: an entry is inherited if it carries `inherit: true`. This
+holds for node actions (`type: node`) exactly as for every other type — they
+are the same entries.
 
 The inheritance runs **once, directly after the parse**
 (`inherit_tree_actions`, next to `inherit_tree_columns`), before the validator
@@ -1439,10 +1435,10 @@ and the runtime read the config. The scope is deliberately narrow — the same
 three rules as for the columns, plus an **override-per-field** rule:
 
 - **Only tree-continuing levels inherit** (gate: `tree_label` set).
-- **Override by key, per field:** if the child level declares the same key
-  (action `key` resp. shortcut char) itself, the local entry wins — the
-  inherited one is not copied for exactly that key. This makes it possible to
-  inherit _one_ thing and override _another_ deliberately.
+- **Override by key:** if the child level declares the same `key` itself, the
+  local entry wins — the inherited one is not copied for exactly that key.
+  This makes it possible to inherit _one_ thing and override _another_
+  deliberately.
 - **Inherited entries keep their inheritability** and cascade further down
   (relevant with more than one continuing level).
 - **Separate views do not inherit across the view boundary** (a flat list
@@ -1467,15 +1463,14 @@ views:
           inherit: true,
         }
       - { name: fuzzy filter, key: f, type: fuzzy_filter } # not inheritable
-    shortcuts:
-      d: { action: delete, inherit: true } # inherited
-      s: toggle-tracking # short form → NOT inherited
+      - { key: d, id: delete, inherit: true } # node action, inherited
+      - { key: s, id: toggle-tracking } # no inherit: → this level only
     children:
       - name: subtasks
         tree_label: description
         recursive: true
-        # no actions:/shortcuts: — inherits edit/add + `d` from the root.
-        # `s` (short form) and `f` (search family) are not inherited.
+        # no actions: — inherits edit/add + `d` from the root.
+        # `s` (no inherit:) and `f` (search family) are not inherited.
 ```
 
 #### Column config popup (`c c`) — visibility & order at runtime
@@ -1878,52 +1873,77 @@ navigation:
 
 ---
 
-## Per-node actions (`shortcuts:`)
+## Per-node actions (`type: node`)
 
-Besides the `actions:` entries of a view (refresh, filter, search, …),
-individual nodes can offer _their own_ actions — e.g. a TableNode offers
-`edit_sql`, a DbScriptNode offers `execute`, `edit`, `delete`. They are
-advertised by the adapter via
-[`Node::actions()`](../not-yet-done-content/src/lib.rs) and bound to keys from
-the YAML through the `shortcuts:` map.
+Besides the view's own actions (refresh, filter, search, …), individual nodes
+can offer _their own_ actions — e.g. a TableNode offers `edit_sql`, a
+DbScriptNode offers `execute`, `edit`, `delete`. They are advertised by the
+adapter via [`Node::actions()`](../not-yet-done-content/src/lib.rs) and bound
+to keys from the same `actions:` list as everything else. `type: node` is the
+**default**, so an entry that only names a key and an adapter action id needs
+neither `type:` nor `name:`:
 
 ```yaml
 children:
   - name: DB Script
     node_type: "postgres:db_script"
-    shortcuts:
-      x: execute # → Node::invoke_action("execute", …)
-      e: edit # → Node::invoke_action("edit", …)
-      d: delete # → Node::invoke_action("delete", …)
+    actions:
+      - { key: x, id: execute } # → Node::invoke_action("execute", …)
+      - { key: e, id: edit } # → Node::invoke_action("edit", …)
+      - { key: d, id: delete } # → Node::invoke_action("delete", …)
 ```
 
-A `shortcuts:` map exists both on the view level (`ViewDef.shortcuts`) and on
+The label comes from the adapter's own action list, so it stays in one place;
+set `name:` only to override it for this level.
+
+An `actions:` list exists both on the view level (`ViewDef.actions`) and on
 every `ChildDef`. The TUI resolver picks the deepest matching entry along the
 `node_type` chain; if none applies, it falls back to the view level.
 
-Action values can be prefixed with `parent:` — the resolver then fires against
-the immediate parent node instead of the selected one. Example:
+`target: parent` fires the action against the immediate parent node instead of
+the selected one — that is how a key keeps working one level deeper:
 
 ```yaml
 - name: Rows
   node_type: "postgres:row"
-  shortcuts:
-    Q: "parent:edit_sql" # → acts on the underlying table node
+  actions:
+    - { key: Q, id: edit_sql, target: parent } # → acts on the table node
 ```
 
-A shortcut value has **two forms**: the short form `<key>: <action>` (above)
-and the explicit map form `<key>: { action: <action>, inherit: <bool> }`. Both
-bind the same action name; the map form additionally carries the `inherit` flag
-(default `false`), which inherits the shortcut down the tree-continuing levels
-(see
-[tree action and shortcut inheritance](#tree-action-and-shortcut-inheritance--inherit-per-entry)).
-The `parent:` prefix works in both forms.
+`inherit: true` (default `false`) hands the entry down the tree-continuing
+levels (see
+[tree action inheritance](#tree-action-inheritance--inherit-per-entry)),
+and `target: parent` works together with it:
 
 ```yaml
-shortcuts:
-  d: delete # short form — this level only
-  s: { action: toggle-tracking, inherit: true } # inherits downwards
+actions:
+  - { key: d, id: delete } # this level only
+  - { key: s, id: toggle-tracking, inherit: true } # inherits downwards
 ```
+
+Because a node action is an ordinary `actions:` entry, its `key:` is a full
+key binding, so a chord such as `key: 'a d'` works here too.
+
+#### Taking a key from a built-in — `force: true`
+
+A key that a built-in handler already claims (a global hotkey, a common
+fallback such as `c` column-config or `S` sort, a window-leader chord, a
+content action) is a **hard config error** when an `actions:` entry binds it
+without saying so: the entry would silently shadow the built-in, which then has
+no way to fire on that leaf. `force: true` is the explicit opt-in — it drops
+the built-in's claim for that key at that leaf, at validation time and at
+runtime alike:
+
+```yaml
+# `Q` is the built-in query editor's key (content.edit_query); this level
+# wants it for the adapter's own SQL editor.
+- { key: Q, id: edit_sql, force: true }
+```
+
+It only ever suppresses conflicts against **built-in** claims. Two YAML
+actions fighting over one key stay an error, and so does a collision with a
+subtab switch key (`views[*].key`), whose claim covers the whole tab — there
+the only fix is a different key.
 
 **`under_selection` on `type: create` actions:** by default a `create` action
 creates the new child in the currently drilled container (root → top level,
@@ -2002,8 +2022,8 @@ their target already is the calling node. A natural boundary: `task.undelete`
 set operation; it deliberately does not scope over the query, because by
 definition it concerns exactly one, the latest.
 
-Validator (start time): empty action ids are rejected; so is a `shortcuts:` key
-already claimed by an `actions:` entry of the same view.
+Validator (start time): empty action ids are rejected; so is a key claimed by
+two `actions:` entries of the same level.
 
 ### Structured input forms (`InputSpec::Form`, M6/E5)
 
@@ -2152,8 +2172,8 @@ instead of in `$TMPDIR`:
 - name: DB Script
   node_type: "postgres:db_script"
   editor_in_place: true
-  shortcuts:
-    e: edit
+  actions:
+    - { key: e, id: edit }
 ```
 
 **When it makes sense**: when an external editor / language server derives

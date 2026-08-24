@@ -6000,7 +6000,7 @@ impl App {
                     }
                 }
             }
-            // Node `shortcuts:` and unbound adapter actions dispatch through
+            // Node actions and unbound adapter actions dispatch through
             // the node-action path, not the pane keymap, so the leaf maps
             // above miss them entirely. Add them across every declared level
             // so the "All tabs" / "Unbound" scopes list bindable adapter
@@ -6326,9 +6326,10 @@ impl App {
     }
 
     /// Read `path`, remove the located entry line entirely (comment-preserving)
-    /// and write it back. Used for per-node `shortcuts:` collisions, whose map
-    /// key *is* the binding — dropping it means deleting the whole line, not
-    /// rewriting a `key:` value. Returns a user-facing error string on failure.
+    /// and write it back. Used when a colliding entry has to go entirely
+    /// rather than be rewritten — dropping it means deleting the whole line,
+    /// not rewriting a `key:` value. Returns a user-facing error string on
+    /// failure.
     fn remove_binding_file(
         &self,
         path: &std::path::Path,
@@ -6660,7 +6661,7 @@ impl App {
     /// Every live [`KeyClaim`] across all content tabs — the full set the
     /// shortcut-menu conflict check runs against. Folds together each view's
     /// leaf keymaps, the generic tab-switch keys (kept out of leaf maps), and
-    /// the per-node `shortcuts:` entries (which override built-ins in leaves,
+    /// the per-node `actions:` entries (which override built-ins in leaves,
     /// so they must be added explicitly or a real binding would be invisible).
     fn all_live_claims(&self) -> Vec<crate::keymap::KeyClaim> {
         use crate::keymap::{KeyClaim, build_leaf_maps_for};
@@ -11539,7 +11540,7 @@ impl App {
     /// Every live binding that collides with `chord` for `target`, as prompt
     /// items — the one conflict check all three DB-stored shortcut kinds use.
     /// It is claim-based, so it catches the same collisions the shortcut menu
-    /// catches (prefixes, chords, node `shortcuts:`), not just literal key
+    /// catches (prefixes, chords, node actions), not just literal key
     /// equality, and it skips the target's own current chord so rebinding a
     /// shortcut onto itself is not a conflict.
     fn shortcut_conflict_items(

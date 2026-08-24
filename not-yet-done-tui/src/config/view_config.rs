@@ -2036,9 +2036,9 @@ pub struct ActionDef {
     /// Invoke this action on the pane's *container* (the adapter `root()`)
     /// instead of the selected row. Built for actions that operate on the
     /// whole list/level and must stay reachable even at the un-drilled flat
-    /// root, where there is no selected row and no `parent:` shortcut target
-    /// to address — e.g. trackings `restore all`. Unlike a `shortcuts:`
-    /// `parent:`-prefixed entry (which resolves its target from the nav
+    /// root, where there is no selected row and no parent target to
+    /// address — e.g. trackings `restore all`. Unlike a `target: parent`
+    /// node action (which resolves its target from the nav
     /// stack and so disappears at the empty root), an `on_container` action
     /// builds its hint statically and dispatches through `adapter.root()`.
     /// Today only `type: custom` honours this flag. Default `false`.
@@ -3481,9 +3481,9 @@ views: []
         let mut cfg: ViewFileConfig =
             serde_yaml::from_str(yaml).expect("tasks.yaml should deserialize");
         // The loader fills tree-continuation columns AND inheritable
-        // actions/shortcuts right after parse, so the recursive subtask
-        // branch (which ships neither `columns:` nor `actions:`/`shortcuts:`)
-        // inherits the root's set. Mirror both passes here before asserting.
+        // actions right after parse, so the recursive subtask branch
+        // (which ships neither `columns:` nor `actions:`) inherits the
+        // root's set. Mirror both passes here before asserting.
         cfg.inherit_tree_columns();
         cfg.inherit_tree_actions();
         assert_eq!(cfg.adapter.adapter_type, "tasks");

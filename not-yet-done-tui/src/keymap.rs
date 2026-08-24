@@ -1234,7 +1234,7 @@ fn drilled_profile() -> PaneStateProfile {
 /// runtime or outside the static builder:
 ///
 /// - the other saved-query shortcuts already bound in this tab,
-/// - the per-node YAML `shortcuts:` maps (dispatched *before* the
+/// - the per-node YAML `actions:` entries (dispatched *before* the
 ///   view-claim layer, so a colliding saved-query shortcut would be
 ///   dead rather than shadowing — a misconfiguration either way),
 /// - the full `ContentAction` section (the pane dispatches chords like

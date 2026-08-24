@@ -1473,20 +1473,20 @@ printf '%s\n%s\n%s\n' '-- scratch' '-- ▼ THIS SQL WILL BE EXECUTED ON SAVE ▼
 
 Precondition: a configured Postgres tab with the DB scripts branch as in
 [multi-tree continuation](#multi-tree-continuation--db-level-scripts-mt-1--mt-4).
-The per-node shortcuts are set in `postgres.yaml`:
+The per-node actions are set in `postgres.yaml`:
 
 ```yaml
 - name: Scripts
   node_type: "postgres:db_scripts"
-  shortcuts:
-    a: add
+  actions:
+    - { key: a, id: add }
   children:
     - name: DB Script
       node_type: "postgres:db_script"
-      shortcuts:
-        X: execute
-        e: edit
-        d: delete
+      actions:
+        - { key: X, id: execute }
+        - { key: e, id: edit }
+        - { key: d, id: delete }
       children:
         - name: DB Script Result
           node_type: "postgres:db_script_result"
@@ -1700,16 +1700,16 @@ Condition: a Postgres tab, at least one database with a few base tables
       Regression bait: before the feature there was no `tt_` path at all,
       the adapter executed the query verbatim.
 
-### Shortcut resolver (CP-1)
+### Node action resolver (CP-1)
 
 - [ ] Press `Q` in a rows pane (`postgres:row`) → it opens the Q SQL
       editor of the parent table node (via
-      `shortcuts: { Q: "parent:edit_sql" }`).
-- [ ] Keys that are **not** a shortcut and **not** a view action pass
-      through as before (cursor movement, and so on).
-- [ ] YAML with an empty action ID (`shortcuts: { x: "" }`) or with a key
-      collision against the `actions:` list → a validator error on
-      reload, the tab goes into the broken state.
+      `- { key: Q, id: edit_sql, target: parent }`).
+- [ ] Keys that are bound by no action at all pass through as before
+      (cursor movement, and so on).
+- [ ] YAML with an empty action ID (`- { key: x, id: "" }`) or with two
+      `actions:` entries on the same key → a validator error on reload,
+      the tab goes into the broken state.
 
 ## Cross-app Linking (L1–L11)
 
@@ -2456,10 +2456,44 @@ and functionally.
 - [ ] The transition picker now shows `^N next  ^P prev …` and exactly those
       keys navigate.
 
+## Node actions live in `actions:` (NA-1 … NA-6)
+
+Background: the `shortcuts:` map is gone. A level binds an adapter action
+through the same `actions:` list as everything else, with `type: node` as the
+default — so `- { key: d, id: delete }` is a complete entry. `name:` is
+optional and falls back to the label the adapter reports for that id.
+
+- [ ] **NA-1 — the migrated keys still fire.** In each of jira, taiga, tasks,
+      trackings, stoat, postgres, sqlite: the keys that used to sit in
+      `shortcuts:` do exactly what they did before (`d` delete, `s`
+      toggle-tracking, `X`/`e` on script rows, `C`/`P` channel cut/paste).
+- [ ] **NA-2 — the label comes from the adapter.** An entry without `name:`
+      shows the adapter's own label in the action/status bar and in `Ctrl+Y`,
+      not the raw id. Adding `name:` to that entry overrides it for this level
+      only.
+- [ ] **NA-3 — `target: parent`.** `Q` in a rows pane opens the SQL editor of
+      the parent table; at the un-drilled root (no parent) the binding is
+      simply absent instead of erroring.
+- [ ] **NA-4 — `force: true` at runtime, not just at load.** Postgres/SQLite:
+      `Q` on a table row opens the adapter's SQL editor, **not** the built-in
+      query editor. Remove the `force: true` → the tab goes into the broken
+      state with the collision named. (Regression bait: `force` used to be
+      honoured by the validator alone, so the built-in still won at runtime.)
+- [ ] **NA-5 — a subtab key cannot be forced away.** Give a level
+      `- { key: <k>, id: … , force: true }` where `<k>` is a subtab switch key
+      of the same tab → still a load-time conflict, because that claim covers
+      the whole tab. Only a different key fixes it.
+- [ ] **NA-6 — `Ctrl+Y` rebinds a node action in place.** Put the cursor on a
+      migrated entry, assign a free key → the YAML line keeps its `id:` and its
+      trailing comment, only `key:` changes. Rebind an adapter action that the
+      level does not mention yet → a new `- { key: …, id: … }` line is appended
+      to that level's `actions:`, the surrounding comments untouched.
+
 ## Shortcut Hints (SH-1 … SH-7)
 
-Background: YAML `shortcuts:` (e.g. `a: add`, `x: execute`,
-`Q: parent:edit_sql`) are now rendered as action-bar or status-bar hints for
+Background: YAML node actions (e.g. `- { key: a, id: add }`,
+`- { key: Q, id: edit_sql, target: parent }`) are rendered as action-bar or
+status-bar hints for
 the currently selected row. The hints are row-specific and come from the
 `Node::actions()` lookup per `node_id`, fetched asynchronously and cached. Free
 of races because the cache key is the `node_id`.
@@ -3879,11 +3913,11 @@ Prerequisite: a `tasks.yaml` with the `run script` action (key `x`).
 - [ ] `U` on a task that is already top level → the notification "already at
       the top level", nothing changes.
 
-**Action and shortcut inheritance** (the recursive `subtasks` branch declares
-no `actions:`/`shortcuts:` of its own):
+**Action inheritance** (the recursive `subtasks` branch declares no
+`actions:` of its own):
 
 - [ ] Drill into a task (the recursive level) → `e`/`a`/`A`/`x`/`ctrl+n`/`r`
-      and the shortcuts `d`/`u`/`s`/`m`/`p`/`U` work there exactly as they do
+      and the node actions `d`/`u`/`s`/`m`/`p`/`U` work there exactly as they do
       on the root level (all inherited via `inherit: true`).
 - [ ] `f` (fuzzy filter) and `/` (tree find) are active **only** on the root
       level (not inherited — a validator rule).
@@ -4003,7 +4037,7 @@ paths:
       common.list_next!" and a re-prompt; `v` → a conflict with the subtab key;
       `w` → a conflict with a window chord (the leader prefix); `z` → a
       conflict with `content.cycle_grouping` (a chord prefix); `d` → a conflict
-      with the YAML `shortcuts:` entry. `esc` aborts.
+      with the YAML node action. `esc` aborts.
 - [ ] A free key (for example `M`) is accepted: "Favorite … added".
 - [ ] **Load time:** write a colliding row directly into `query_shortcut` (or
       make a config change that lets an existing shortcut collide) → at startup
@@ -4141,7 +4175,7 @@ the native one persisted via `SaveTrackingGrouping`).
 - [x] Condensed subtab: `u` → `m` rotates only the day-bucket level to month
       (`── 2026-06`), the adapter-side per-task breakdown stays.
 - [x] On a level without a `group_by` (tasks, say): no `u group` hint, `u`
-      stays free for YAML `shortcuts:`.
+      stays free for YAML actions.
 
 ## The trackings tree: always expanded, no markers (`expand_depth: all`)
 
@@ -4875,9 +4909,9 @@ editor, and saving replaces the view. Prerequisite: the `Views` branches from
 `docs/examples/views/{sqlite,postgres}.yaml` in your own config, and for SQLite
 `read_only: false` in `sqlite-adapter.yaml`.
 
-The binding is deliberately an `actions:` line with `type: edit, id: edit_view`
-and **not** a `shortcuts:` line — which is why the first item is not a detail
-but the proof that the wiring is right.
+The binding deliberately carries `type: edit, id: edit_view` and **not** the
+default `type: node` — which is why the first item is not a detail but the
+proof that the wiring is right.
 
 ### Common to both adapters
 
@@ -4957,7 +4991,7 @@ banner above your own text.
 Prerequisite: the `e` binding on the `Rows` levels from
 `docs/examples/views/{sqlite,postgres}.yaml`, and for SQLite `read_only: false`
 in `sqlite-adapter.yaml`. As with the view editor it is an `actions:` entry
-with `type: edit, id: edit_row` and **no** `shortcuts:` entry.
+with `type: edit, id: edit_row`, not the default `type: node`.
 
 The core of the test: the row is addressed by the **key values that were read
 when it was opened** — not by the offset in the tree row. The offset is only

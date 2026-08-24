@@ -143,8 +143,8 @@ pub fn group_actions() -> Vec<NodeAction> {
     ]
 }
 
-/// Actions on a folder inside the script tree. Suggested `shortcuts:`
-/// in a view spec: `a`/`A` add-script/add-dir, `r` rename, `m`/`p`
+/// Actions on a folder inside the script tree. Suggested `actions:`
+/// keys in a view spec: `a`/`A` add-script/add-dir, `r` rename, `m`/`p`
 /// mark/paste move, `M` move (target prompt), `d` delete-dir.
 pub fn dir_actions() -> Vec<NodeAction> {
     vec![
@@ -190,7 +190,7 @@ pub fn dir_actions() -> Vec<NodeAction> {
     ]
 }
 
-/// Actions on a script leaf. Suggested `shortcuts:` in a view spec:
+/// Actions on a script leaf. Suggested `actions:` keys in a view spec:
 /// `x` execute, `e` edit, `r` rename, `m` mark-move, `M` move,
 /// `d` delete. Only `edit` belongs in the (highlighted) action bar —
 /// editor-action convention.

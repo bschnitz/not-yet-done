@@ -34,12 +34,13 @@ columns/shortcuts/subtabs for tasks and trackings too.
 - Identity: `id()`, `label()`, `node_type()`, `metadata()`
 - Navigation: `children_types()`, `list(params)`, `get_child(id)`
 - Actions (menu path): `actions()`, `prepare()`, `picker_options()`, `execute()`
-- Actions (shortcut path): `invoke_action()` → `ActionDispatch` (`OpenEditor` |
+- Actions (node path): `invoke_action()` → `ActionDispatch` (`OpenEditor` |
   `ExecuteQuery` | `CreateChild` | `DeleteSelf` | `Reload` | `Noop` | `Error`)
 
 A `ViewDef`/`ChildDef` hierarchy binds a path through this tree: `node_type` per
-level, `columns` (from `metadata`/`label`), `shortcuts` (→ `invoke_action`),
-`tree_label` (tree mode), `actions` (menu path). Adapters are instantiated via
+level, `columns` (from `metadata`/`label`), `tree_label` (tree mode) and
+`actions` — the one list that binds both the menu path and, with the default
+`type: node`, `invoke_action`. Adapters are instantiated via
 `AdapterFactory::create(instance_id, yaml_config)` and registered by type in the
 TUI.
 

@@ -271,9 +271,9 @@ fn field(key: &str, label: &str, value: &str) -> MetadataField {
 /// browser, and everything else a table could do (drop, rename, …) would
 /// need a writable adapter first.
 ///
-/// The YAML binds this via `shortcuts:` — `Q: edit_sql` on the
-/// `sqlite:table` level, `Q: parent:edit_sql` on `sqlite:row` so the key
-/// keeps working one level deeper.
+/// The YAML binds this via `actions:` — `{ key: Q, id: edit_sql }` on the
+/// `sqlite:table` level, `{ key: Q, id: edit_sql, target: parent }` on
+/// `sqlite:row` so the key keeps working one level deeper.
 fn table_actions() -> Vec<not_yet_done_content::NodeAction> {
     vec![not_yet_done_content::NodeAction::new(
         "edit_sql",
@@ -287,7 +287,7 @@ fn table_actions() -> Vec<not_yet_done_content::NodeAction> {
 ///
 /// `edit_view` is an [`InputSpec::Editor`](not_yet_done_content::InputSpec)
 /// action, so it has to be bound as an `actions:` entry of `type: edit`
-/// with `id: edit_view` — not via `shortcuts:`, which routes through
+/// with `id: edit_view` — the default `type: node` routes through
 /// `invoke_action` and cannot open an editor.
 fn view_actions() -> Vec<not_yet_done_content::NodeAction> {
     let mut actions = table_actions();
