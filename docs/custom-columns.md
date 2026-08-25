@@ -48,12 +48,12 @@ same view:
 ```yaml
 actions:
   - name: edit custom cells
-    key: M
+    key: "e c"
     type: custom
     id: edit-cells
 ```
 
-Pressing `M` on a row opens one form with a field per custom column of that
+Pressing `e c` on a row opens one form with a field per custom column of that
 level, prefilled with the current values. Submitting writes only what changed;
 clearing a field deletes the cell.
 

@@ -149,7 +149,7 @@ knows any special cases.
 - [ ] **Track**: start a tracking in tasks / trackings (`t`/`s`) → the
       `track` hint stays marked as long as a tracking is running; stop →
       marking gone.
-- [ ] **Cut**: put a node on the move clipboard with `C` (mark-move) →
+- [ ] **Cut**: put a node on the move clipboard with `a m` (mark-move) →
       the `cut` hint is marked until paste/abort/tab switch.
 - [ ] **Editor**: open an editor (`e`/`a`) → the corresponding hint
       (`edit`/`add`/…) is marked as long as the edit session is open.
@@ -3222,11 +3222,11 @@ and `ay` — a name form with one field; it is not pre-filled.
       the permissions → the server rejects it with a clean error message, the
       tree stays unchanged.
 
-## Stoat adapter — channel cut and paste (`C` / `P`)
+## Stoat adapter — channel cut and paste (`a m` / `a p`)
 
-Moving channels between categories. `C` (cut) **marks** the channel under the
-cursor — **nothing is deleted**; only `P` (paste) reattaches it. It reuses the
-generic `mark-move`/`paste-move` shortcuts (like `m`/`p` in Tasks), via
+Moving channels between categories. `a m` (cut) **marks** the channel under the
+cursor — **nothing is deleted**; only `a p` (paste) reattaches it. It reuses the
+generic `mark-move`/`paste-move` actions (the same keys as in Tasks), via
 `invoke_action` and `ActionContext.marked`. Prerequisite: a server you
 administer. Internally the move is a full-list PATCH of the server categories
 (`update_server_categories`), applied live via `ServerUpdate`.
@@ -3737,10 +3737,10 @@ the native tasks tab (for comparison), this is not the C1 cutover.
       soft-deleted.
 - [ ] `u` (undelete) → the most recently deleted task(s) come back; with no
       previous deletion → "Nothing to undelete".
-- [ ] `m` (mark-move) on task A, then `p` (paste-move) on task B → A becomes
-      a subtask of B. The "marked …" indicator is visible in between.
-- [ ] `m` on A, `p` on A itself or on a descendant of A → error (the cycle is
-      rejected), nothing changes.
+- [ ] `a m` (mark-move) on task A, then `a p` (paste-move) on task B → A
+      becomes a subtask of B. The "marked …" indicator is visible in between.
+- [ ] `a m` on A, `a p` on A itself or on a descendant of A → error (the cycle
+      is rejected), nothing changes.
 - [ ] A mutation in this tab → the native tasks tab (if open) repaints or
       reloads via a DomainEvent.
 

@@ -42,9 +42,9 @@
 # point and `M` moves it to a new start (both open a form — see the `split`/
 # `move` actions below); these are the same operations the legacy `nyd track
 # split`/`nyd track move` commands ran, now adapter actions so the CLI's
-# generic `do split`/`do move` reach them too. `m`/`p` repack an interval into
-# another day's free slot (mark-move / paste-move). Scripts run via the generic
-# `:script` menu (`x`, `type: script`).
+# generic `do split`/`do move` reach them too. `a m`/`a p` repack an interval
+# into another day's free slot (mark-move / paste-move). Scripts run via the
+# generic `:script` menu (`x`, `type: script`).
 #
 # ## A2c scope (Condensed + Tree)
 #
@@ -64,7 +64,7 @@
 # time and its **subtree-cumulated** total side by side (native column
 # parity; the adapter supplies both values).
 #
-# `a` switches back to the flat list from either.
+# `t t` switches back to the flat list from either.
 #
 # Until the C1 cutover this file is illustrative: the bespoke native Trackings
 # tab still ships; copying this file in stands up the adapter path alongside
@@ -92,12 +92,13 @@ adapter:
 
 views:
   # Flat list of trackings. No `tree_label` / no children — every row is a
-  # leaf (`tracking:entry`). `key: a` switches back here from Condensed
-  # (mirrors the native "normal" mode key).
+  # leaf (`tracking:entry`). `t t` switches back here from Condensed
+  # (subtab keys all sit on the `t` leader, so none of them shadows a
+  # single-key action).
   - name: trackings
     node_type: "tracking:entry"
     default: true
-    key: a
+    key: 't t'
 
     # Saved-query filter. Queries live as one file per name under the
     # adapter's data dir (`<data>/not_yet_done/trackings/<id>/queries/
@@ -262,8 +263,8 @@ views:
       # `gravity` (start|end) snaps to a boundary and finds the next free slot;
       # `offset` (+1h, -30min, …) is applied after the snap; the three toggles
       # relax the overlap/future guards. `type: custom` → form popup →
-      # `execute("move", …)`. Bound to `M` (shift-m) — plain `m` is the
-      # `mark-move` gesture below; this manual-form move is the escape hatch
+      # `execute("move", …)`. Bound to `M` (shift-m), next to the `a m` /
+      # `a p` repack gesture below; this manual-form move is the escape hatch
       # for an arbitrary start time the repack cascade doesn't cover.
       - name: move
         key: M
@@ -273,14 +274,14 @@ views:
       - { key: R, id: restore }
       - { key: s, id: toggle-tracking }
       # Repack an interval into another day slot (`mark-move` / `paste-move`,
-      # the generic move-clipboard vocabulary). `m` marks the selected
-      # tracking; `p` on another row moves the marked interval — keeping its
+      # the generic move-clipboard vocabulary). `a m` marks the selected
+      # tracking; `a p` on another row moves the marked interval — keeping its
       # own task and duration — into *that row's day*: directly after the
       # target if it fits, else (after a `(y/n)` confirm) directly after the
       # day's last interval, else directly before the day's first interval,
       # else it aborts with "no room". Only the flat list offers it.
-      - { key: m, id: mark-move }
-      - { key: p, id: paste-move }
+      - { key: 'a m', id: mark-move }
+      - { key: 'a p', id: paste-move }
 
     # The adapter-backed per-row actions above (A2b), dispatched via
     # `invoke_action` against the selected tracking.
@@ -312,8 +313,8 @@ views:
 
   # ── Condensed (A2c) ──────────────────────────────────────────────────
   #
-  # The native Trackings "Condensed" mode. Switched to with `v` (mirrors the
-  # native condensed key); `a` switches back to the flat list above.
+  # The native Trackings "Condensed" mode. Switched to with `t c`; `t t`
+  # switches back to the flat list above.
   #
   # Condensing is **adapter-side**: the `trackings` adapter collapses each
   # day's intervals of a task into one `tracking:condensed-row` carrying the
@@ -336,7 +337,7 @@ views:
   # label, so two distinct tasks sharing a description never merge.
   - name: condensed
     node_type: "tracking:condensed-row"
-    key: v
+    key: 't c'
 
     # Same saved-query filter + startup default as the flat list.
     # `inherit_default: true` additionally stamps the *user-set* default
@@ -412,9 +413,8 @@ views:
   #
   # The native Trackings "Tree" mode: the *task forest* with tracked time
   # rolled up per task, **grouped into date buckets**. Switched to with
-  # `t` (toggle-tracking moved to `s`, the native track key, freeing `t`
-  # for the subtab — full native key parity); `a` switches
-  # back to the flat list.
+  # `t r` (toggle-tracking sits on `s`, the native track key); `t t`
+  # switches back to the flat list.
   #
   # **Adapter-side grouping (`group_by_via_adapter`).** A tree can't group
   # engine-side like the flat list (each bucket's subtree durations must be
@@ -438,7 +438,7 @@ views:
   # at load (no live tick, like Condensed).
   - name: tree
     node_type: "tracking:tree-group"
-    key: t
+    key: 't r'
     tree_label: task
     # The grouping the adapter applies (same block as the flat view's
     # engine-side grouping — the keys/labels match across both). `desc`

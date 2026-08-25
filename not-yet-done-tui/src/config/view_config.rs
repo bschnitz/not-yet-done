@@ -3515,8 +3515,8 @@ views: []
             ("d", "delete"),
             ("u", "undelete"),
             ("s", "toggle-tracking"),
-            ("m", "mark-move"),
-            ("p", "paste-move"),
+            ("a m", "mark-move"),
+            ("a p", "paste-move"),
         ] {
             assert_eq!(action_id_for_key(&root.actions, k), Some(id));
         }
@@ -3614,19 +3614,19 @@ views: []
             .unwrap();
         assert_eq!(root_script.primary_key(), Some("x"));
         assert!(child.actions.iter().any(|a| a.action_type == "script"));
-        // Task-1 semantics: `a` adds a child of the selected node in the
-        // tree (`under_selection`, adapter id `add`); `A` adds a *sibling*
-        // (adapter id `add-sibling`). `U` un-nests to the top level. All
-        // three inherit down to the recursive branch.
+        // Task-1 semantics: `a a` adds a child of the selected node in
+        // the tree (`under_selection`, adapter id `add`); `A` adds a
+        // *sibling* (adapter id `add-sibling`). `U` un-nests to the top
+        // level. All three inherit down to the recursive branch.
         let add = root
             .actions
             .iter()
-            .find(|a| a.primary_key() == Some("a"))
+            .find(|a| a.primary_key() == Some("a a"))
             .unwrap();
         assert_eq!(add.id.as_deref(), Some("add"));
         assert!(
             add.under_selection,
-            "tree `a` re-targets onto the selection"
+            "tree `a a` re-targets onto the selection"
         );
         let add_sibling = root
             .actions
@@ -3666,22 +3666,23 @@ views: []
             serde_yaml::from_str(yaml).expect("trackings.yaml should deserialize");
         assert_eq!(cfg.adapter.adapter_type, "trackings");
 
-        // Three views: flat (key a), condensed (key v), tree (key t).
+        // Three views on the `t` leader: flat (t t), condensed (t c),
+        // tree (t r).
         let flat = cfg.views.iter().find(|v| v.name == "trackings").unwrap();
-        assert_eq!(flat.key, Some("a".into()));
+        assert_eq!(flat.key, Some("t t".into()));
         let condensed = cfg.views.iter().find(|v| v.name == "condensed").unwrap();
-        assert_eq!(condensed.key, Some("v".into()));
+        assert_eq!(condensed.key, Some("t c".into()));
         // Condensed + Tree are projections of the same trackings, so the
         // user-set default saved query follows across them.
         assert!(condensed.query.as_ref().unwrap().inherit_default);
 
         // A2c Tree: an adapter-grouped tree (`group_by_via_adapter`) —
         // root level = `tracking:tree-group` day buckets, switched to with
-        // `t` (native parity — track itself sits on `s`), with own and
+        // `t r` (native parity — track itself sits on `s`), with own and
         // subtree-cumulated tracked time as two side-by-side columns
         // (native column parity).
         let tree = cfg.views.iter().find(|v| v.name == "tree").unwrap();
-        assert_eq!(tree.key, Some("t".into()));
+        assert_eq!(tree.key, Some("t r".into()));
         assert_eq!(tree.node_type, "tracking:tree-group");
         assert_eq!(tree.tree_label.as_deref(), Some("task"));
         assert!(tree.query.as_ref().unwrap().inherit_default);
