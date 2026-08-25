@@ -36,11 +36,11 @@
 #   * `e` edit — open the selected task in a markdown buffer (`---`
 #     frontmatter + `## Description:` / `## Notes:`); a `type: edit`. The
 #     buffer's `tracking:` flag starts/stops time tracking.
-#   * `a` add / `A` add-sibling — both open the same markdown buffer; they
+#   * `a a` add / `A` add-sibling — both open the same markdown buffer; they
 #     differ only in where the new task lands (native-tab parity):
-#       - In the **tree** view `a` adds a *child* of the selected task
+#       - In the **tree** view `a a` adds a *child* of the selected task
 #         (`under_selection` → the adapter's `add` re-parents onto the
-#         highlighted row). In the **flat list** `a` adds a *top-level*
+#         highlighted row). In the **flat list** `a a` adds a *top-level*
 #         task (the list has no hierarchy, so the container is the root).
 #       - `A` adds a *sibling* of the selected task in both views: the
 #         adapter's `add-sibling` resolves the parent to the selected
@@ -54,8 +54,8 @@
 #   * `s` toggle-tracking — start/stop time tracking for the selected task
 #     in one key. The `tracking` column shows a `⏱` glyph on running rows.
 #     Respects the host's exclusivity policy (`tracking.allow_parallel`).
-#   * `m` mark-move / `p` paste-move — reparent: mark a task, move onto the
-#     target task (which becomes its new parent). Cycles are rejected.
+#   * `a m` mark-move / `a p` paste-move — reparent: mark a task, move onto
+#     the target task (which becomes its new parent). Cycles are rejected.
 #   * `U` un-nest — move the selected task back to the top level. The
 #     target-free inverse of mark/paste-move.
 #
@@ -160,10 +160,11 @@ views:
   - name: tasks
     node_type: "task:item"
     default: true
-    # Subtab key: `t` switches back here from the flat `list` view (`v`,
-    # bottom of this file) — the generic counterpart of the native vt/vl
-    # view toggle.
-    key: t
+    # Subtab key: `t t` switches back here from the flat `list` view
+    # (`t l`, bottom of this file) — the generic counterpart of the native
+    # vt/vl view toggle. Subtab keys all sit on the `t` leader, so none of
+    # them shadows a single-key action.
+    key: 't t'
     tree_label: description
 
     # Initial expansion depth (native parity:
@@ -301,12 +302,12 @@ views:
         type: edit
         id: edit-notes
         inherit: true
-      # Add a task. In the tree view `under_selection: true` makes `a` add a
-      # *child* of the selected task (the adapter's `add` re-parents onto the
+      # Add a task. In the tree view `under_selection: true` makes `a a` add
+      # a *child* of the selected task (the adapter's `add` re-parents onto the
       # highlighted row); with no selection it falls back to a top-level
       # task. The buffer's `parent:` field can still override.
       - name: add task
-        key: a
+        key: 'a a'
         type: create
         id: add
         under_selection: true
@@ -351,7 +352,7 @@ views:
       # an adapter action below — create/rename/delete are pure data ops on
       # the tag list; the selected task is only the dispatch vehicle, so the
       # menu refreshes in place and the popup stays open. `T` (shift+t) — `t`
-      # is the tree-view subtab key. `inherit: true` so it works at every
+      # is the subtab leader. `inherit: true` so it works at every
       # subtask depth.
       - name: tags
         key: T
@@ -412,8 +413,8 @@ views:
       - { key: d, id: delete, inherit: true }
       - { key: u, id: undelete, inherit: true }
       - { key: s, id: toggle-tracking, inherit: true }
-      - { key: m, id: mark-move, inherit: true }
-      - { key: p, id: paste-move, inherit: true }
+      - { key: 'a m', id: mark-move, inherit: true }
+      - { key: 'a p', id: paste-move, inherit: true }
       # Un-nest: move the selected task back to the top level (parent_id =
       # None). The comfort inverse of mark/paste-move — no target needed.
       # No-op (notification) when the task is already top-level.
@@ -451,8 +452,8 @@ views:
         # inheritable and the validator restricts them to the tree root.
 
   # Flat list view (native `vl` parity): every task in the forest as one
-  # flat table, depth-first order — no hierarchy, no expand glyphs. `v`
-  # switches here, `t` back to the tree. The adapter routes the synthetic
+  # flat table, depth-first order — no hierarchy, no expand glyphs. `t l`
+  # switches here, `t t` back to the tree. The adapter routes the synthetic
   # `task:flat` node_type to the flat projection; the rows themselves are
   # ordinary tasks, so edit/add/track/move behave exactly like in the tree
   # view. The one difference is delete: the flat list has no hierarchy on
@@ -462,7 +463,7 @@ views:
   # matching the native flat list's filter semantics.
   - name: list
     node_type: "task:flat"
-    key: v
+    key: 't l'
 
     query:
       editable: true
@@ -547,10 +548,10 @@ views:
         key: o
         type: edit
         id: edit-notes
-      # Flat list: no hierarchy, so `a` adds a *top-level* task (the
+      # Flat list: no hierarchy, so `a a` adds a *top-level* task (the
       # container is the root — no `under_selection`).
       - name: add task
-        key: a
+        key: 'a a'
         type: create
         id: add
       # `A` adds a *sibling* of the selected task (same parent), exactly as
@@ -597,7 +598,7 @@ views:
       - { key: d, id: delete-single }
       - { key: u, id: undelete }
       - { key: s, id: toggle-tracking }
-      - { key: m, id: mark-move }
-      - { key: p, id: paste-move }
+      - { key: 'a m', id: mark-move }
+      - { key: 'a p', id: paste-move }
       - { key: U, id: unnest }
 

@@ -1811,9 +1811,9 @@ struct NavFrame {
 
 A Vimium-style direct jump across the visible rows — parity with the native
 tasks tab (`p` there). The action `jump_mode` is bindable in
-`keybindings.yaml` under `content:`; the default is `J` (capital J), so that
-the adapter tab keeps `p` free for a `paste`/`paste-move` shortcut (the native
-tab still uses `p` via `common.jump_mode`).
+`keybindings.yaml` under `content:`; the default is `J` (capital J), so a bare
+`p` stays free on the adapter tabs (the native tab still uses `p` via
+`common.jump_mode`; `paste-move` itself sits on the `a` leader, `a p`).
 
 Flow:
 
