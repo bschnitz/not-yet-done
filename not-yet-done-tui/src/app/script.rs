@@ -1244,6 +1244,11 @@ impl App {
     ///     header says. A load hook answers with `cells`, not `commands`,
     ///     so tying the file to the commands mode would be a riddle rather
     ///     than a contract.
+    ///   - **`NYD_SCRIPT_HOOK=load` in the environment.** The same script is
+    ///     usually runnable by hand from the menu, where `cells` means
+    ///     nothing and a `reload` command is exactly what is wanted. Without
+    ///     a marker the script cannot tell the two apart and one of the two
+    ///     invocations has to stay broken.
     ///
     /// Its own temp files, deliberately not the `nyd-bg-script-*` pair: a
     /// detached interactive script started earlier still reads those when
@@ -1278,6 +1283,7 @@ impl App {
             .stderr(Stdio::piped())
             .envs(&child_env)
             .env("NYD_OUTPUT_FILE", &output_path)
+            .env("NYD_SCRIPT_HOOK", "load")
             .spawn()
             .and_then(|child| child.wait_with_output());
         let output = match output {
