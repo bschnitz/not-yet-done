@@ -1,11 +1,13 @@
 # Plan: configurable row / column / cell highlighting
 
-> **Status: phases 1-2 implemented, phases 3-7 planned.** The style grammar of
+> **Status: phases 1-3 implemented, phases 4-7 planned.** The style grammar of
 > [Part 1](#part-1--the-style-grammar) and the rule surface of
 > [Part 2](#part-2--the-rules) live in
 > `not-yet-done-tui/src/config/highlight.rs`: `highlights:` parses on every
-> level, its rules are validated at config load, and they can be evaluated
-> against a row -- but nothing paints from them yet. This
+> level, its rules are resolved and validated at config load, and a rule that
+> names `columns:` paints its cells in table mode
+> (`not-yet-done-tui/src/views/content_highlights.rs`). A rule without
+> `columns:` -- the whole-row case -- still paints nothing. This
 > document fixes the config surface and the layering before the rest is
 > written, because one part of it (row-level styles) reaches into
 > `not-yet-done-ratatui`.
@@ -400,19 +402,23 @@ Two traps:
   colour are computed in the same run, so they cannot disagree — but it
   belongs in the docs.
 
-### The one change outside the TUI
+### The changes outside the TUI
 
-Column and cell highlights fit the existing machinery: extra `StyleMap` slots
-(slots 0–6 are statically assigned today, `views/content_view.rs:13500`) plus
-`TableWidgetCell.style_id`.
+Column and cell highlights mostly fit the existing machinery: extra `StyleMap`
+slots (slots 0–6 are statically assigned today, `views/content_view.rs`) plus
+`TableWidgetCell.style_id`. **Correction from the implementation:** that slot
+only ever contributed a _foreground_, which is fine for the six chrome slots
+and useless for a highlight, whose point is usually the background. A cell
+override now carries fg, bg and modifiers, and a cell can name a _second_
+slot (`selected_style_id`, set together via `with_style_pair`) that takes over
+while its row is the cursor row. Without that pair the table would have to be
+rebuilt on every cursor move to answer "what does this cell look like now".
 
-**Row** highlights do not. `TableWidgetRow`
-(`not-yet-done-ratatui/src/widgets/table/mod.rs:219`) carries no style of its
-own; the only row-level styles are the global `Row`/`RowSelected` entries.
-It needs an optional style pair (normal, selected) and a place in the
-existing precedence `CellSelected > RowSelected > ColumnSelected > Row`
-(`widgets/table/render.rs:556`). Everything else stays inside
-`not-yet-done-tui`.
+**Row** highlights need one more thing. `TableWidgetRow` carries no style of
+its own; the only row-level styles are the global `Row`/`RowSelected`
+entries. It needs the same optional style pair and a place in the existing
+precedence `CellSelected > RowSelected > ColumnSelected > Row`
+(`widgets/table/render.rs`). Everything else stays inside `not-yet-done-tui`.
 
 ## Phases
 
@@ -422,7 +428,7 @@ Each phase ends in something demonstrable.
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1 ✓ | Style grammar: `styles:` in theme + view file, the three style forms, `ColorSpec` (hex / role / `auto`), resolution incl. contrast pick. Unit tests only.                                                               |
 | 2 ✓ | Matcher: `Matches` in `not-yet-done-filter` + eval, the SQL translator's refusal arm, the short form as sugar, regex compile + cache at config load. Plus `highlights:` on `ViewDef`/`ChildDef` and the load-time walk. |
-| 3   | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                                                                                   |
+| 3 ✓ | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                                                                                   |
 | 4   | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                                                                               |
 | 5   | Script channel: `highlights` in the `load`-hook answer, the pane-side map, the `*` axes, `reload` refusal, tree-merge.                                                                                                  |
 | 6   | Modes: `card`, `details`, `tree`.                                                                                                                                                                                       |

@@ -48,6 +48,7 @@ use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
 use crate::components::search::SearchComponent;
 use crate::components::tab_set_popup::{TabSetEntry, TabSetPopup, TabSetPopupMessage};
+use crate::config::highlight::HighlightRule;
 use crate::config::keybindings::{
     CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
     QueryMenuAction, WindowAction, binding_steps,
@@ -69,6 +70,7 @@ use crate::views::content_action_hints::{
     ActionBarHint, HintBar, ShortcutHint, nav_hint_for_source, window_nav_hint,
 };
 use crate::views::content_detail;
+use crate::views::content_highlights::TableHighlights;
 use crate::views::content_tree::{
     TreeLevel, TreeState, child_def_for_type_chain, effective_child_children, icon_opt_for_chain,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
@@ -2283,6 +2285,43 @@ impl ContentPane {
         self.current_columns(view_defs)
             .iter()
             .any(|c| c.kind == ColumnKind::Elapsed)
+    }
+
+    /// The `highlights:` rules of the level currently on screen.
+    ///
+    /// Mirrors the flat branch of [`Self::current_columns`] — a rule names
+    /// its columns by key, so the two have to come from the same level or
+    /// the rule would silently address nothing. Rules are *not* inherited
+    /// from the parent level (see `ChildDef::highlights`), so a level
+    /// without its own list has none.
+    fn current_highlights<'a>(&'a self, view_defs: &'a [ViewDef]) -> &'a [HighlightRule] {
+        if let Some(ref child) = self.active_child {
+            return &child.highlights;
+        }
+        self.view_def(view_defs)
+            .map(|vd| vd.highlights.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The highlight pass for the table currently being rebuilt.
+    ///
+    /// The two backgrounds are the ones `build_content_table_style` puts
+    /// under an ordinary and a selected row — an `auto` foreground has to
+    /// contrast against what will actually be behind it.
+    fn table_highlights<'a>(
+        &'a self,
+        view_defs: &'a [ViewDef],
+        columns: &'a [ColumnDef],
+        t: &'a Theme,
+    ) -> TableHighlights<'a> {
+        TableHighlights {
+            columns,
+            rules: self.current_highlights(view_defs),
+            theme: t,
+            row_bg: Some(t.bg()),
+            selected_bg: Some(t.surface_2()),
+            slot_base: HIGHLIGHT_SLOT_BASE,
+        }
     }
 
     fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
@@ -5598,16 +5637,27 @@ impl ContentPane {
                         &columns,
                         header_overlay,
                     )];
+                    // Grouped views are never trees, so the connector slot
+                    // is unused here — the default theme colors are fine.
+                    let mut style_map = content_style_map(t, t.tree_connector(), t.unread());
+                    let mut widget_rows = build.widget_rows;
+                    // The group headers and per-group totals stand for no
+                    // item; `filtered_indices` already marks them, so the
+                    // highlight pass walks the same rows either way.
+                    let extra = self.table_highlights(view_defs, &columns, t).apply(
+                        &mut widget_rows,
+                        &self.filtered_indices,
+                        &self.items,
+                    );
+                    style_map.0.extend(extra);
                     self.table.set_data(
-                        build.widget_rows,
+                        widget_rows,
                         vec![],
                         headers,
                         build.footers,
                         ColumnStyles::new(content_col_styles(&columns, t)),
                         build_content_table_style(t),
-                        // Grouped views are never trees, so the connector slot
-                        // is unused here — the default theme colors are fine.
-                        content_style_map(t, t.tree_connector(), t.unread()),
+                        style_map,
                         "  ",
                     );
                     return;
@@ -5850,7 +5900,7 @@ impl ContentPane {
         };
         let mut fold_zones: Vec<Option<u16>> = vec![None; computed.rows.len()];
         let col_widths = self.last_col_widths.clone();
-        let widget_rows: Vec<TableWidgetRow> = computed
+        let mut widget_rows: Vec<TableWidgetRow> = computed
             .rows
             .into_iter()
             .enumerate()
@@ -5974,6 +6024,18 @@ impl ContentPane {
         let tree_connector_col = self.tree_connector_color(view_defs, t);
         let unread_col = self.unread_color(view_defs, t);
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
+        let mut style_map = content_style_map(t, tree_connector_col, unread_col);
+        // Tree rows map through `tree_visible_indices` and carry their own
+        // structure, so the flat row→item map is the only one that fits
+        // here; tree highlighting is a surface of its own.
+        if self.tree.is_none() {
+            let extra = self.table_highlights(view_defs, &columns, t).apply(
+                &mut widget_rows,
+                &self.filtered_indices,
+                &self.items,
+            );
+            style_map.0.extend(extra);
+        }
         self.table.set_data(
             widget_rows,
             vec![],
@@ -5981,7 +6043,7 @@ impl ContentPane {
             vec![],
             ColumnStyles::new(content_col_styles(&columns, t)),
             build_content_table_style(t),
-            content_style_map(t, tree_connector_col, unread_col),
+            style_map,
             "  ",
         );
     }
@@ -12152,6 +12214,13 @@ const UNREAD_STYLE_ID: usize = 5;
 /// reads as struck-through-without-the-line, present but greyed. Kept in
 /// sync with the `StyleMap::new(...)` in `content_style_map`.
 const DELETED_STYLE_ID: usize = 6;
+
+/// First StyleMap slot a `highlights:` rule may claim. Everything below is
+/// fixed chrome resolved by `content_style_map`; a highlight's styles are
+/// data-dependent (one per distinct look in the current rows), so they are
+/// appended past the fixed block on every rebuild. Kept in sync with the
+/// `StyleMap::new(...)` in `content_style_map`.
+const HIGHLIGHT_SLOT_BASE: usize = 7;
 
 /// Default leading marker glyph for unread chat items when a view sets no
 /// `unread_marker`. `💬` (speech balloon) — a colorful, at-a-glance "new
