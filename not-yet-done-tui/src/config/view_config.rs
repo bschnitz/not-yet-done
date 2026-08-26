@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use crate::action::ActionChains;
-use crate::config::highlight::StyleSpec;
+use crate::config::highlight::{HighlightRule, StyleSpec};
 use crate::config::keybindings::{ContentAction, KeyBinding, KeyBindingConfig};
 
 // ---------------------------------------------------------------------------
@@ -948,6 +948,22 @@ pub struct ViewDef {
     pub query: Option<QueryConfig>,
     #[serde(default)]
     pub columns: Vec<ColumnDef>,
+    /// Highlight rules for the rows of this level, tried in order; later
+    /// rules layer over earlier ones. A rule without `columns:` paints the
+    /// whole row, one with `columns:` only those cells, and `when:` narrows
+    /// either to the rows that match. See
+    /// [`HighlightRule`](crate::config::highlight::HighlightRule) and
+    /// docs/generic-view-spec.md `highlights:`.
+    ///
+    /// ```yaml
+    /// highlights:
+    ///   - when: { field: status, matches: '^Blocked$' }
+    ///     style: blocked
+    ///   - columns: [actual_days]
+    ///     style: { fg: '#e0a030' }
+    /// ```
+    #[serde(default)]
+    pub highlights: Vec<HighlightRule>,
     /// Optional multi-line row layout. When set, each entry is one physical
     /// line of every row, listing the columns rendered on it (`[]` = blank
     /// spacer). Absent → the classic single-line table. In multi-line mode
@@ -2400,6 +2416,12 @@ pub struct ChildDef {
     pub node_type: String,
     #[serde(default)]
     pub columns: Vec<ColumnDef>,
+    /// Highlight rules for this drill level's rows. Same semantics as
+    /// [`ViewDef::highlights`]; the rules of the level whose rows are on
+    /// screen are the ones that paint (they are not inherited from the
+    /// parent).
+    #[serde(default)]
+    pub highlights: Vec<HighlightRule>,
     /// Multi-line row layout for this drill level. Same semantics as
     /// [`ViewDef::row_layout`]. Used by the Stoat `messages` level to render
     /// each message as a meta line + body line + spacer.

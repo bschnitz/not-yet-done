@@ -12562,6 +12562,20 @@ fn load_content_views(
         // down tree-continuation levels, likewise before validation.
         config.inherit_tree_actions();
 
+        // Highlight rules never break a file: an unresolvable style paints
+        // nothing and a bad regex matches nothing, so a typo costs the one
+        // rule. Report it anyway, or the rule fails invisibly.
+        for w in crate::config::highlight::view_file_warnings(&config, theme) {
+            let file = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let w = format!("{file}: {w}");
+            not_yet_done_content::http_log::log_error("view_config", &w);
+            warnings.push(w);
+        }
+
         match config.validate(keybindings, editors) {
             Ok(()) => loaded.push((path.clone(), Loaded::Ok(config))),
             Err(errors) => loaded.push((

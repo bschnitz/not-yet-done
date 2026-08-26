@@ -32,7 +32,7 @@ use not_yet_done_filter::eval::RowFields;
 use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs, eval};
 
 use super::color::HexColor;
-use super::view_config::TextModifier;
+use super::view_config::{ChildDef, ColumnDef, TextModifier, ViewFileConfig};
 use crate::ui::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -348,6 +348,78 @@ impl HighlightRule {
             }
         }
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation across a whole view file
+// ---------------------------------------------------------------------------
+
+/// Every problem in one view file's `styles:` and `highlights:` blocks, as
+/// lines for the user.
+///
+/// These are **warnings, not errors**. A rule that cannot resolve is inert —
+/// it paints nothing — so a typo costs that one highlight while the file
+/// keeps loading. Reporting it is the whole point: a silently ignored rule is
+/// the config bug that costs an afternoon.
+pub fn view_file_warnings(config: &ViewFileConfig, theme: &Theme) -> Vec<String> {
+    let resolver = StyleResolver::new(&config.styles, theme.styles(), theme);
+    let mut out = Vec::new();
+
+    // The named styles themselves, so a broken definition is reported once
+    // here rather than once per rule that uses it.
+    let mut names: Vec<&String> = config.styles.keys().collect();
+    names.sort();
+    for name in names {
+        let spec = &config.styles[name];
+        let path = format!("styles.{name}");
+        spec.warnings(&path, &mut out);
+        if let Err(e) = resolver.resolve(spec) {
+            out.push(format!("{path}: {e}"));
+        }
+    }
+
+    for view in &config.views {
+        level_warnings(
+            &view.name,
+            &view.columns,
+            &view.highlights,
+            &resolver,
+            &mut out,
+        );
+        for child in &view.children {
+            child_warnings(&view.name, child, &resolver, &mut out);
+        }
+    }
+    out
+}
+
+fn child_warnings(
+    parent: &str,
+    child: &ChildDef,
+    resolver: &StyleResolver<'_>,
+    out: &mut Vec<String>,
+) {
+    let path = format!("{parent} > {}", child.name);
+    level_warnings(&path, &child.columns, &child.highlights, resolver, out);
+    for grandchild in &child.children {
+        child_warnings(&path, grandchild, resolver, out);
+    }
+}
+
+fn level_warnings(
+    path: &str,
+    columns: &[ColumnDef],
+    highlights: &[HighlightRule],
+    resolver: &StyleResolver<'_>,
+    out: &mut Vec<String>,
+) {
+    if highlights.is_empty() {
+        return;
+    }
+    let keys: Vec<String> = columns.iter().map(|c| c.key.clone()).collect();
+    for (i, rule) in highlights.iter().enumerate() {
+        out.extend(rule.validate(&format!("{path}.highlights[{i}]"), &keys, resolver));
     }
 }
 
@@ -1149,5 +1221,79 @@ mod tests {
         parse(r#"{ bg: '#7a1c1c', fg: auto, modes: [table], selected: { bg: '#9c2a2a' } }"#)
             .warnings("style", &mut out);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    // ── The whole-file walk ──────────────────────────────────────────────
+
+    /// A whole view file with one root level and one drill level, each
+    /// carrying a single highlight rule given as a YAML flow mapping.
+    fn view_file(root_rule: &str, child_rule: &str) -> ViewFileConfig {
+        let yaml = format!(
+            r#"
+tab: {{ name: Demo }}
+adapter: {{ type: demo, config_inline: '' }}
+styles:
+  hot: {{ bg: '#7a1c1c' }}
+views:
+  - name: tickets
+    node_type: 'demo:item'
+    columns: [{{ key: status }}]
+    highlights:
+      - {root_rule}
+    children:
+      - name: comments
+        node_type: 'demo:comment'
+        columns: [{{ key: body }}]
+        highlights:
+          - {child_rule}
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("view file should parse")
+    }
+
+    #[test]
+    fn highlights_parse_on_both_levels() {
+        let config = view_file(
+            "{ when: { field: status, matches: '^Blocked$' }, style: hot }",
+            "{ columns: [body], style: [bold] }",
+        );
+        let root = &config.views[0];
+        assert_eq!(root.highlights.len(), 1);
+        assert_eq!(root.highlights[0].scope(), HighlightScope::Row);
+        let child = &root.children[0];
+        assert_eq!(child.highlights.len(), 1);
+        assert_eq!(child.highlights[0].scope(), HighlightScope::Columns);
+    }
+
+    #[test]
+    fn the_walk_names_the_level_of_a_bad_column() {
+        let config = view_file(
+            "{ columns: [status], style: hot }",
+            "{ columns: [nope], style: hot }",
+        );
+        let warnings = view_file_warnings(&config, &theme());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("tickets > comments"), "{warnings:?}");
+        assert!(warnings[0].contains("nope"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unknown_style_name_is_reported_once_per_rule() {
+        let config = view_file("{ style: missing }", "{ columns: [body], style: hot }");
+        let warnings = view_file_warnings(&config, &theme());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("tickets.highlights[0]"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_sound_file_warns_about_nothing() {
+        let config = view_file(
+            "{ when: { field: status, matches: '^Blocked$' }, style: hot }",
+            "{ columns: [body], style: [bold] }",
+        );
+        assert!(view_file_warnings(&config, &theme()).is_empty());
     }
 }

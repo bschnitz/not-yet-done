@@ -1,8 +1,11 @@
 # Plan: configurable row / column / cell highlighting
 
-> **Status: phase 1 implemented, phases 2-7 planned.** The style grammar of
-> [Part 1](#part-1--the-style-grammar) lives in
-> `not-yet-done-tui/src/config/highlight.rs`; nothing paints from it yet. This
+> **Status: phases 1-2 implemented, phases 3-7 planned.** The style grammar of
+> [Part 1](#part-1--the-style-grammar) and the rule surface of
+> [Part 2](#part-2--the-rules) live in
+> `not-yet-done-tui/src/config/highlight.rs`: `highlights:` parses on every
+> level, its rules are validated at config load, and they can be evaluated
+> against a row -- but nothing paints from them yet. This
 > document fixes the config surface and the layering before the rest is
 > written, because one part of it (row-level styles) reaches into
 > `not-yet-done-ratatui`.
@@ -211,6 +214,13 @@ use too. A rule naming a column that the level does not have is a validator
 warning (the mechanism from the unknown-view-field warning); a rule naming a
 column that is currently _hidden_ simply paints nothing.
 
+Every problem a highlight rule can have is a **warning, never a broken file**:
+an unresolvable style paints nothing and a regex that does not compile matches
+nothing, so a typo costs that one rule while the rest of the view keeps
+working. The messages carry the level they came from
+(`tickets > comments.highlights[1]`), because a rule buried three drill levels
+deep is otherwise a needle.
+
 ### `when:` — two forms
 
 **Short form** — one field, one regex:
@@ -408,15 +418,15 @@ existing precedence `CellSelected > RowSelected > ColumnSelected > Row`
 
 Each phase ends in something demonstrable.
 
-| Ph  | Content                                                                                                                                                   |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1 ✓ | Style grammar: `styles:` in theme + view file, the three style forms, `ColorSpec` (hex / role / `auto`), resolution incl. contrast pick. Unit tests only. |
-| 2   | Matcher: `Matches` in `not-yet-done-filter` + eval, the SQL translator's refusal arm, the short form as sugar, regex compile + cache at config load.      |
-| 3   | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                     |
-| 4   | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                 |
-| 5   | Script channel: `highlights` in the `load`-hook answer, the pane-side map, the `*` axes, `reload` refusal, tree-merge.                                    |
-| 6   | Modes: `card`, `details`, `tree`.                                                                                                                         |
-| 7   | Docs (`generic-view-spec.md` §`highlights:` and the hook table's "may answer with", README) + smoke tests in `smoke-tests.md`.                            |
+| Ph  | Content                                                                                                                                                                                                                 |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 ✓ | Style grammar: `styles:` in theme + view file, the three style forms, `ColorSpec` (hex / role / `auto`), resolution incl. contrast pick. Unit tests only.                                                               |
+| 2 ✓ | Matcher: `Matches` in `not-yet-done-filter` + eval, the SQL translator's refusal arm, the short form as sugar, regex compile + cache at config load. Plus `highlights:` on `ViewDef`/`ChildDef` and the load-time walk. |
+| 3   | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                                                                                   |
+| 4   | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                                                                               |
+| 5   | Script channel: `highlights` in the `load`-hook answer, the pane-side map, the `*` axes, `reload` refusal, tree-merge.                                                                                                  |
+| 6   | Modes: `card`, `details`, `tree`.                                                                                                                                                                                       |
+| 7   | Docs (`generic-view-spec.md` §`highlights:` and the hook table's "may answer with", README) + smoke tests in `smoke-tests.md`.                                                                                          |
 
 ## Non-goals (for now)
 

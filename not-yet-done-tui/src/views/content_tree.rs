@@ -810,6 +810,7 @@ mod tests {
         children: Vec<ChildDef>,
     ) -> ChildDef {
         ChildDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -841,6 +842,7 @@ mod tests {
 
     fn view(tree_label: Option<&str>, columns: Vec<ColumnDef>, children: Vec<ChildDef>) -> ViewDef {
         ViewDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
