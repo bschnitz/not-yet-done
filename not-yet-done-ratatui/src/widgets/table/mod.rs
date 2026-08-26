@@ -243,6 +243,13 @@ pub struct TableWidgetRow {
     pub lines: Vec<TableWidgetLine>,
     /// Whether this row can be selected by the user.
     pub selectable: bool,
+    /// Style override for the whole row: it replaces the row background and
+    /// sits under every cell's own override. `None` leaves the table's
+    /// `Row` / `RowSelected` styles in force.
+    pub style_id: Option<usize>,
+    /// Style override used **instead of** [`Self::style_id`] while this row
+    /// is the cursor row. `None` keeps `style_id` in force there.
+    pub selected_style_id: Option<usize>,
 }
 
 impl TableWidgetRow {
@@ -251,6 +258,8 @@ impl TableWidgetRow {
         Self {
             lines: vec![TableWidgetLine::new(cells)],
             selectable: true,
+            style_id: None,
+            selected_style_id: None,
         }
     }
 
@@ -259,11 +268,21 @@ impl TableWidgetRow {
         Self {
             lines,
             selectable: true,
+            style_id: None,
+            selected_style_id: None,
         }
     }
 
     pub fn not_selectable(mut self) -> Self {
         self.selectable = false;
+        self
+    }
+
+    /// Set both style overrides at once: `normal` off the cursor row,
+    /// `selected` on it.
+    pub fn with_style_pair(mut self, normal: usize, selected: usize) -> Self {
+        self.style_id = Some(normal);
+        self.selected_style_id = Some(selected);
         self
     }
 
