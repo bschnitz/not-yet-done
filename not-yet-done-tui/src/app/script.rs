@@ -40,6 +40,26 @@ pub struct ScriptRow {
     pub fields: Vec<(String, String)>,
 }
 
+/// Project loaded rows into the payload shape. Shared by the two builders
+/// that produce a `scope: table` payload — the menu/shortcut path, which
+/// projects the rows the pane *displays*, and the load hook, which projects
+/// the rows that have not reached the pane yet.
+fn script_rows(items: Vec<not_yet_done_content::NodeSummary>) -> Vec<ScriptRow> {
+    items
+        .into_iter()
+        .map(|item| ScriptRow {
+            id: item.id,
+            label: item.label,
+            fields: item
+                .metadata
+                .fields
+                .into_iter()
+                .map(|f| (f.key, f.value))
+                .collect(),
+        })
+        .collect()
+}
+
 /// What the open script menu is operating on. Drives the on-disk
 /// scripts directory, the JSON layout handed to executed scripts, the
 /// session scope used for the action-bar slot, and the scaffold
@@ -547,20 +567,7 @@ impl App {
             self.notify("Pane not found".to_string());
             return None;
         };
-        let rows: Vec<ScriptRow> = pane
-            .visible_items()
-            .into_iter()
-            .map(|item| ScriptRow {
-                id: item.id,
-                label: item.label,
-                fields: item
-                    .metadata
-                    .fields
-                    .into_iter()
-                    .map(|f| (f.key, f.value))
-                    .collect(),
-            })
-            .collect();
+        let rows = script_rows(pane.visible_items());
         let selected_index = pane.selected_row_index();
         // Column cursor under the field, else fall back to the action's
         // configured default field key.
@@ -592,6 +599,61 @@ impl App {
             new_script_template,
         };
         Some(ctx)
+    }
+
+    /// Build the payload a [`ScriptHook::Load`](crate::app::script_hook::ScriptHook)
+    /// script receives: the rows that just came off the adapter, in the
+    /// `scope: table` shape, *before* the pane has seen them.
+    ///
+    /// Always the table shape — a script's own `# scope:` header is ignored
+    /// here. The other two shapes have nothing to offer at this point: there
+    /// is no cursor yet, so `node` addresses nothing, and `filtered_set`
+    /// carries ids without values, so it could not compute a patch against
+    /// what the rows already hold.
+    ///
+    /// `selected_index` is `0` and `selected_field` is `null` for the same
+    /// reason — the fields exist in the shape, but nothing is selected while
+    /// a load is in flight.
+    ///
+    /// Silent on a missing view / pane / adapter, unlike its menu-driven
+    /// sibling: this runs on every load, and a notification per load would
+    /// be noise the user cannot act on.
+    pub(super) fn build_load_hook_ctx(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        items: &[not_yet_done_content::NodeSummary],
+    ) -> Option<ScriptContext> {
+        let ContentSlot::Working(cv) = self.content_views.get(view_index)? else {
+            return None;
+        };
+        let kind = cv.adapter.as_ref()?.adapter_type().to_string();
+        let pane = cv.find_pane(pane_id)?;
+        let view_path = pane.script_scope_path(&cv.view_defs);
+        let query_text = pane.current_query_text(&cv.view_defs);
+        let query = if query_text.trim().is_empty() {
+            None
+        } else {
+            Some(query_text)
+        };
+        let per_view_template = cv
+            .view_defs
+            .get(pane.view_def_index())
+            .and_then(|vd| vd.script_template.clone());
+        let new_script_template =
+            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+
+        Some(ScriptContext::ContentTable {
+            view_index,
+            pane_id,
+            tab: kind,
+            view_path,
+            rows: script_rows(items.to_vec()),
+            query,
+            selected_index: 0,
+            selected_field: None,
+            new_script_template,
+        })
     }
 
     /// Internal: enumerate the context's scripts dir, populate the
@@ -1165,6 +1227,89 @@ impl App {
             let _ = std::fs::remove_file(&p);
         }
         EditorRequest::None
+    }
+
+    /// Run a script and hand back its parsed answer file instead of acting
+    /// on it — the runner behind the load hook.
+    ///
+    /// Differs from [`Self::run_script_background`] in the three things a
+    /// pre-load run must not do:
+    ///   - **no reload.** The menu path reloads the pane after a table
+    ///     script because such a script may have written to the backend.
+    ///     Here a load is already in flight; reloading from inside it is
+    ///     exactly the round trip this hook exists to avoid.
+    ///   - **no command execution.** The answer is data, not control flow;
+    ///     the caller decides what to do with it.
+    ///   - **the answer file is always offered**, whatever the `# mode:`
+    ///     header says. A load hook answers with `cells`, not `commands`,
+    ///     so tying the file to the commands mode would be a riddle rather
+    ///     than a contract.
+    ///
+    /// Its own temp files, deliberately not the `nyd-bg-script-*` pair: a
+    /// detached interactive script started earlier still reads those when
+    /// it eventually exits.
+    ///
+    /// `None` when the script could not run, wrote nothing, or wrote
+    /// something that is not JSON — every one of which is reported to the
+    /// user, because a hook that silently does nothing is indistinguishable
+    /// from a hook that is not bound.
+    pub(super) fn run_script_for_output(
+        &mut self,
+        ctx: &ScriptContext,
+        script_path: &std::path::Path,
+    ) -> Option<serde_json::Value> {
+        use std::process::{Command, Stdio};
+
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let json_path = tmp.join(format!("nyd-load-hook-{pid}.json"));
+        let output_path = tmp.join(format!("nyd-load-hook-{pid}-answer.json"));
+        if let Err(e) = std::fs::write(&json_path, ctx.build_json()) {
+            self.notify_error(format!("Failed to write script JSON: {e}"));
+            return None;
+        }
+        let _ = std::fs::remove_file(&output_path);
+
+        let child_env = self.child_env_for_script(ctx);
+        let output = Command::new(script_path)
+            .arg(&json_path)
+            .current_dir(script_path.parent().unwrap_or(std::path::Path::new(".")))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .envs(&child_env)
+            .env("NYD_OUTPUT_FILE", &output_path)
+            .spawn()
+            .and_then(|child| child.wait_with_output());
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                self.notify_error(format!("Failed to run script: {e}"));
+                return None;
+            }
+        };
+        // Same split as the commands path: stderr is the script's channel to
+        // the user, stdout is its scratch pad.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            self.notify(stderr.trim().to_string());
+        }
+        if !output.status.success() {
+            self.notify_error(format!("Script exited with {}", output.status));
+            return None;
+        }
+
+        let raw = std::fs::read_to_string(&output_path).ok()?;
+        let _ = std::fs::remove_file(&output_path);
+        if raw.trim().is_empty() {
+            return None;
+        }
+        match serde_json::from_str(&raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.notify_error(format!("Script output is not valid JSON: {e}"));
+                None
+            }
+        }
     }
 
     /// Read the script's commands output file and execute each entry

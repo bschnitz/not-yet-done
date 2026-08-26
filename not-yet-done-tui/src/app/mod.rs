@@ -4202,7 +4202,7 @@ impl App {
                 LoadMsg::ContentItems {
                     view_index,
                     pane_id,
-                    items,
+                    mut items,
                     applied_sort,
                     page,
                     columns,
@@ -4223,6 +4223,16 @@ impl App {
                     // failed fetch — a script must not act on an empty view
                     // that only looks empty because the request died.
                     let load_ok = error.is_none();
+                    // First seam: scripts bound to `load` get the rows here,
+                    // before the pane does, and may patch them. Everything
+                    // below — filtering, sorting, the table build — then runs
+                    // on the patched values, so a computed column sorts and
+                    // filters like any other. Skipped on a failed fetch for
+                    // the same reason the reload hook is: an empty result is
+                    // not a result.
+                    if load_ok {
+                        self.run_load_hooks(view_index, pane_id, hook_depth, &mut items);
+                    }
                     let item_count = items.len();
                     // Distinct node types present, captured before `items` is
                     // moved — used to fetch the backend-described column schema
