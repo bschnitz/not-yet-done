@@ -2559,6 +2559,12 @@ to _write_ somewhere and wants the view to catch up afterwards, `reload` is the
 hook — a script may of course do both: write in a `load` hook so other views and
 the CLI see the value too, and still patch the rows it was handed.
 
+**Telling the invocations apart.** A `load` hook runs with `NYD_SCRIPT_HOOK=load`
+in its environment. The same file is usually still runnable by hand from the
+menu, where nobody is holding the rows and `cells` has no reader — a script that
+wants to work both ways answers with `cells` when the variable is set and with
+`{"commands": ["reload"]}` when it is not.
+
 **Loop protection.** Every load carries a `hook_depth`: `0` when a person (or a
 timer) asked for it, one more than the triggering load when a hook script caused
 it. Loads arriving at depth ≥ 1 fire no hooks, so a `reload` hook that asks for
