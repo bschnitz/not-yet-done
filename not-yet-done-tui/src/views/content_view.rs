@@ -13418,33 +13418,12 @@ fn apply_column_override(
     result
 }
 
+/// A view file's colour reference (`style: accent`) resolved against the
+/// theme. Unknown names fall back to `text_med` rather than failing — the
+/// vocabulary itself lives in [`Theme::role`], so a name that works here works
+/// in a highlight style too.
 fn resolve_theme_color(t: &Theme, name: &str) -> ratatui::style::Color {
-    match name {
-        "accent" => t.accent(),
-        "text_high" => t.text_high(),
-        "text_med" => t.text_med(),
-        "text_dim" => t.text_dim(),
-        // `secondary`/`tertiary` mirror the native task table's column color
-        // keys (see `tabs/columns.rs`), so an adapter view can reproduce the
-        // bespoke tab's per-column coloring exactly. Both route through the
-        // theme — no hardcoded colors.
-        "secondary" => t.secondary(),
-        "tertiary" => t.tertiary(),
-        "success" => t.success(),
-        "warning" => t.warning(),
-        "error" => t.error(),
-        // The dedicated tree-connector color, so a view's `tree_connector_style`
-        // can point back at the global default (or any view at it explicitly).
-        "tree_connector" => t.tree_connector(),
-        // The dedicated unread accent, so a view's `unread_style` can point
-        // back at the global default (or any view at it explicitly).
-        "unread" => t.unread(),
-        // Card-mode slots, so a level's `card.border_style` /
-        // `card.label_style` can name the global default explicitly.
-        "card_border" => t.card_border(),
-        "card_label" => t.card_label(),
-        _ => t.text_med(),
-    }
+    t.role(name).unwrap_or_else(|| t.text_med())
 }
 
 /// The shared content-table style (row / selection / header / scroll colors),
@@ -14237,6 +14216,7 @@ mod tests {
 
     fn test_config_with_children() -> ViewFileConfig {
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -15018,6 +14998,7 @@ mod tests {
     /// message list.
     fn smooth_chat_config() -> ViewFileConfig {
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -15582,6 +15563,7 @@ mod tests {
 
     fn test_config_with_tree() -> ViewFileConfig {
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -15859,6 +15841,7 @@ mod tests {
             vec![chan],
         );
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -16031,6 +16014,7 @@ mod tests {
         );
         child.recursive = true;
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -17108,6 +17092,7 @@ mod tests {
             hidden: false,
         };
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -19045,6 +19030,7 @@ mod tests {
 
     fn test_config_with_query() -> ViewFileConfig {
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -20968,6 +20954,7 @@ mod tests {
         child_actions: &[(&str, &str)],
     ) -> ViewFileConfig {
         ViewFileConfig {
+            styles: Default::default(),
             reminder: None,
             hooks: None,
             tab: TabConfig {
@@ -24083,6 +24070,7 @@ views:
 pub fn default_jira_view_config() -> ViewFileConfig {
     use crate::config::view_config::*;
     ViewFileConfig {
+        styles: Default::default(),
         reminder: None,
         hooks: None,
         tab: TabConfig {

@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use ratatui::style::Color;
 
 use crate::config::ThemeConfig;
+use crate::config::highlight::StyleSpec;
 
 /// Runtime theme — wraps `ThemeConfig` and exposes `ratatui::Color` values.
 ///
@@ -267,5 +270,58 @@ impl Theme {
     }
     pub fn alert_bg(&self) -> Color {
         self.cfg.alert_bg.to_ratatui()
+    }
+
+    // ── Highlights ───────────────────────────────────────────────────────
+    /// The light candidate for `fg: auto` in a highlight style.
+    pub fn auto_fg_light(&self) -> Color {
+        self.cfg.auto_fg_light.to_ratatui()
+    }
+    /// The dark candidate for `fg: auto` in a highlight style.
+    pub fn auto_fg_dark(&self) -> Color {
+        self.cfg.auto_fg_dark.to_ratatui()
+    }
+    /// The theme-wide named highlight styles (`styles:` in `tui-theme.yaml`).
+    pub fn styles(&self) -> &HashMap<String, StyleSpec> {
+        &self.cfg.styles
+    }
+
+    /// A theme colour by its role name, or `None` if the theme has no such
+    /// role. The single place the config's colour vocabulary is defined:
+    /// view files, highlight styles and the validator all go through here, so
+    /// a name that works in one place works in the others.
+    pub fn role(&self, name: &str) -> Option<Color> {
+        Some(match name {
+            "bg" => self.bg(),
+            "surface" => self.surface(),
+            "surface_2" => self.surface_2(),
+            "primary" => self.primary(),
+            "primary_dim" => self.primary_dim(),
+            "on_primary" => self.on_primary(),
+            "accent" => self.accent(),
+            "accent_dim" => self.accent_dim(),
+            "text_high" => self.text_high(),
+            "text_med" => self.text_med(),
+            "text_dim" => self.text_dim(),
+            // `secondary`/`tertiary` mirror the native task table's column
+            // color keys (see `tabs/columns.rs`), so an adapter view can
+            // reproduce the bespoke tab's per-column coloring exactly.
+            "secondary" => self.secondary(),
+            "tertiary" => self.tertiary(),
+            "success" => self.success(),
+            "warning" => self.warning(),
+            "error" => self.error(),
+            // The dedicated tree-connector color, so a view's
+            // `tree_connector_style` can point back at the global default.
+            "tree_connector" => self.tree_connector(),
+            // The dedicated unread accent, likewise for `unread_style`.
+            "unread" => self.unread(),
+            "group_header" => self.group_header(),
+            // Card-mode slots, so a level's `card.border_style` /
+            // `card.label_style` can name the global default explicitly.
+            "card_border" => self.card_border(),
+            "card_label" => self.card_label(),
+            _ => return None,
+        })
     }
 }

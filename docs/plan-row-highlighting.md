@@ -1,8 +1,11 @@
 # Plan: configurable row / column / cell highlighting
 
-> **Status: planned.** Nothing implemented yet. This document fixes the
-> config surface and the layering before any code is written, because one
-> part of it (row-level styles) reaches into `not-yet-done-ratatui`.
+> **Status: phase 1 implemented, phases 2-7 planned.** The style grammar of
+> [Part 1](#part-1--the-style-grammar) lives in
+> `not-yet-done-tui/src/config/highlight.rs`; nothing paints from it yet. This
+> document fixes the config surface and the layering before the rest is
+> written, because one part of it (row-level styles) reaches into
+> `not-yet-done-ratatui`.
 
 ## Goal
 
@@ -108,7 +111,7 @@ Two rules that are easy to get wrong:
 
 ### Modes
 
-`modes:` restricts a style to certain render surfaces:
+`modes:` restricts a highlight to certain render surfaces:
 
 | Mode      | Surface                       |
 | --------- | ----------------------------- |
@@ -118,6 +121,33 @@ Two rules that are easy to get wrong:
 | `tree`    | the label line in tree mode   |
 
 Omitted = every surface where the style can technically apply.
+
+It may be written in **two places**, and they mean different things:
+
+| Written on | Means                                     |
+| ---------- | ----------------------------------------- |
+| a style    | this _colour_ is meant for those surfaces |
+| a rule     | this _rule_ fires only on those surfaces  |
+
+**The rule wins**, replacing the style's list outright rather than
+intersecting with it. The style's list is the default a shared style brings
+along; a rule that states its own reach has the last word.
+
+Both places are needed. Without the rule level, a named style shared by two
+rules of different reach has to be duplicated under two names that differ in
+nothing but their `modes:` -- see the pair of rules in
+[Part 2](#part-2--declarative-rules-highlights), where the same `over-budget`
+paints a whole row in the table but only one cell on a card. Without the
+style level, a script has no way to say it at all: a `load` hook answers with
+style objects, never with rules.
+
+Intersecting instead of replacing was considered and dropped: a style saying
+`[table]` and a rule saying `[card]` would then paint nothing at all, with
+nothing to report -- a silent empty result is a worse failure than a rule
+overriding its style.
+
+`modes:` inside a nested `selected:` style is meaningless (the selected state
+is not a surface). The validator warns and ignores it.
 
 In `card` and `details` there are no columns in the layout sense, but there
 are fields — a rule naming `columns: [estimate]` paints the **value** of the
@@ -153,6 +183,15 @@ for _what_ is painted and an optional condition for _when_.
       when: { field: priority, matches: "(?i)^(highest|blocker)$" }
       style: hot
       modes: [table, card]
+
+    # one shared style, two reaches — see Modes
+    - when: { field: over_budget, matches: "^yes$" }
+      style: over-budget
+      modes: [table] # a red band across the row reads well in a table
+    - columns: [actual_days]
+      when: { field: over_budget, matches: "^yes$" }
+      style: over-budget
+      modes: [card, details] # a fully red card would not
 ```
 
 | `columns:` | `when:` | Result                                               |
@@ -232,6 +271,12 @@ can lay down a background and a cell rule can put a foreground on top of it.
 If a rule sets `style.bg` but no `selected.bg`, the selection keeps its
 `RowSelected` background. Otherwise the cursor disappears on exactly the rows
 that were made conspicuous.
+
+The complement, settled while implementing: the cursor row **does** keep the
+normal layer's foreground and modifiers. Only the background is dropped. A
+highlight that vanishes under the cursor would be worse than none, and a rule
+that wants its background there too can say so explicitly with the same value
+in `selected.bg`.
 
 ## Part 3 — the script channel
 
@@ -365,7 +410,7 @@ Each phase ends in something demonstrable.
 
 | Ph  | Content                                                                                                                                                   |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Style grammar: `styles:` in theme + view file, the three style forms, `ColorSpec` (hex / role / `auto`), resolution incl. contrast pick. Unit tests only. |
+| 1 ✓ | Style grammar: `styles:` in theme + view file, the three style forms, `ColorSpec` (hex / role / `auto`), resolution incl. contrast pick. Unit tests only. |
 | 2   | Matcher: `Matches` in `not-yet-done-filter` + eval, the SQL translator's refusal arm, the short form as sugar, regex compile + cache at config load.      |
 | 3   | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                     |
 | 4   | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                 |
@@ -382,10 +427,6 @@ Each phase ends in something demonstrable.
 
 ## Open points
 
-- Whether `modes:` should also be accepted on a **rule** rather than only
-  inside a style. It reads better on the rule for the declarative case, and
-  a style is the only place the script can put it. Probably both, with the
-  rule's winning.
 - Whether a rule should be able to opt _out_ of the layering ("this style
   replaces everything below") — cheap to add (`replace: true`), but only
   worth it if the layering turns out to fight the user in practice.

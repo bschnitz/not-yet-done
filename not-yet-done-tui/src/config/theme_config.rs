@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::color::HexColor;
+use super::highlight::StyleSpec;
 
 /// All theme colours, fully configurable via `tui-theme.yaml`.
 ///
@@ -167,6 +170,21 @@ pub struct ThemeConfig {
     pub alert_fg: HexColor,
     #[serde(default = "d_alert_bg")]
     pub alert_bg: HexColor,
+
+    // ── Highlights ───────────────────────────────────────────────────────
+    /// The two candidates `fg: auto` picks from in a highlight style. The one
+    /// with the better WCAG contrast against the effective background wins,
+    /// so a computed colour ramp stays legible from end to end without the
+    /// script having to know the palette. Default: near-white and near-black.
+    #[serde(default = "d_auto_fg_light")]
+    pub auto_fg_light: HexColor,
+    #[serde(default = "d_auto_fg_dark")]
+    pub auto_fg_dark: HexColor,
+    /// Named highlight styles available to every view (`style: <name>` in a
+    /// `highlights:` rule or in a `load`-hook answer). A view file's own
+    /// `styles:` block shadows entries of the same name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub styles: HashMap<String, StyleSpec>,
 }
 
 /// Optional per-role overrides for the spec-driven form popup. Each `None`
@@ -387,6 +405,13 @@ fn d_alert_fg() -> HexColor {
     // Bold black text on the orange field — maximum legibility, not garish.
     hex("#000000")
 }
+fn d_auto_fg_light() -> HexColor {
+    // Not pure white: on a saturated ramp colour it glares.
+    hex("#f5f5f5")
+}
+fn d_auto_fg_dark() -> HexColor {
+    hex("#101010")
+}
 fn d_alert_bg() -> HexColor {
     // The warm app orange already used elsewhere (accent_dim, taskpath_separator),
     // here as the bar's fill.
@@ -431,6 +456,9 @@ impl Default for ThemeConfig {
             mouse: MouseThemeConfig::default(),
             alert_fg: d_alert_fg(),
             alert_bg: d_alert_bg(),
+            auto_fg_light: d_auto_fg_light(),
+            auto_fg_dark: d_auto_fg_dark(),
+            styles: HashMap::new(),
         }
     }
 }
