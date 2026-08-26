@@ -22,6 +22,10 @@
 //!   task hierarchy that a flat row list does not have.
 //! - **Column-vs-column comparison is not supported** here and evaluates to
 //!   false; rows expose values, not a resolvable schema.
+//! - **`matches` is the exception to case-insensitivity.** A regex is a
+//!   classification rather than a search, so it matches the raw value exactly
+//!   as written; `(?i)` asks for the other behaviour. It is also the one
+//!   operator with no SQL half — see [`crate::Operator::Matches`].
 
 use std::borrow::Cow;
 
@@ -66,11 +70,34 @@ fn matches_leaf<R: RowFields + ?Sized>(leaf: &FilterLeaf, row: &R) -> bool {
         Operator::IsNull => field == Field::Null,
         Operator::IsNotNull => field != Field::Null,
         Operator::HasAncestor | Operator::InTree => false,
+        Operator::Matches => match &leaf.rhs {
+            Rhs::Lit(Literal::String(pattern)) => matches_regex(&field, pattern),
+            _ => false,
+        },
         _ => match &leaf.rhs {
             Rhs::Lit(lit) => eval_op(&field, &leaf.op, lit),
             Rhs::Col(_) | Rhs::None => false,
         },
     }
+}
+
+/// Match a compiled regex against the field's **raw** value.
+///
+/// Raw, not rendered: matching the rendering would test `1h 30m` where the
+/// data says `5400`, and a narrow column would be matched including its
+/// ellipsis. A null matches nothing — the same three-valued logic every other
+/// operator here follows.
+fn matches_regex(field: &Field, pattern: &str) -> bool {
+    let subject: Cow<str> = match field {
+        Field::Null => return false,
+        Field::Text(s) => Cow::Borrowed(s.as_ref()),
+        Field::Number(n) => Cow::Owned(format_number(*n)),
+        Field::Bool(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+        Field::DateTime(dt) => Cow::Owned(dt.to_rfc3339()),
+    };
+    // A pattern that failed to compile matches nothing; the loader has already
+    // reported it by name, and a render path is no place to raise it again.
+    crate::regex_cache::compiled(pattern).is_ok_and(|re| re.is_match(&subject))
 }
 
 fn eval_op(field: &Field, op: &Operator, lit: &Literal) -> bool {
@@ -354,6 +381,52 @@ mod tests {
 
     fn hits(yaml: &str) -> bool {
         matches(&expr(yaml), &row())
+    }
+
+    #[test]
+    fn matches_is_case_sensitive_unlike_every_other_text_operator() {
+        // A regex here is a classification, not a search — silent case-folding
+        // in a classification is a surprise.
+        assert!(hits("[title, matches, '^Sprint']"));
+        assert!(!hits("[title, matches, '^sprint']"));
+        // ...and `(?i)` is how you ask for the other behaviour.
+        assert!(hits("[title, matches, '(?i)^sprint']"));
+    }
+
+    #[test]
+    fn matches_is_unanchored() {
+        assert!(hits("[title, matches, 'Plan']"));
+        assert!(hits("[title, matches, '^Sprint Planning$']"));
+    }
+
+    #[test]
+    fn matches_sees_the_raw_value_of_a_non_text_column() {
+        // Not the rendering: a duration column says 5400, not "1h 30m".
+        assert!(hits("[prio, matches, '^5$']"));
+        assert!(!hits("[prio, matches, '^5.0$']"));
+        assert!(hits("[done, matches, '^false$']"));
+        assert!(hits("[updated, matches, '^2030-01-15']"));
+    }
+
+    #[test]
+    fn matches_against_a_null_is_false() {
+        // The same three-valued logic every other operator here follows —
+        // including against a pattern that would match the empty string.
+        assert!(!hits("[note, matches, '.*']"));
+        assert!(!hits("[nonexistent, matches, '.*']"));
+    }
+
+    #[test]
+    fn a_pattern_that_does_not_compile_matches_nothing() {
+        // Reported by the config loader; a render path is no place to raise it.
+        assert!(!hits("[title, matches, '(']"));
+    }
+
+    #[test]
+    fn a_pattern_is_never_read_as_a_column_reference() {
+        // `is_col_ref` would take `a.b` for the column `b` of table `a`.
+        let e = expr("[title, matches, 'Sprint.Planning']");
+        assert!(matches(&e, &row()));
     }
 
     #[test]

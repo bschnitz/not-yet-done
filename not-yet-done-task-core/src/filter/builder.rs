@@ -141,6 +141,15 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
                  Call resolve_tree_operators() first."
                     .to_string(),
             )),
+            // `matches` has no portable SQL form. It exists for in-memory
+            // evaluation over adapter rows (highlight rules); written into a
+            // saved query against the task DB it fails here, loudly, rather
+            // than being translated into something that means almost this.
+            Operator::Matches => Err(AppError::FilterError(
+                "matches is not supported in SQL filters — it evaluates in memory only \
+                 (use like or has for a database query)"
+                    .to_string(),
+            )),
         }
     }
 

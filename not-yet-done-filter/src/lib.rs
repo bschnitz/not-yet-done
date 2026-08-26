@@ -31,7 +31,9 @@ mod date_range;
 pub mod eval;
 mod expr;
 pub mod query_filter;
+pub mod regex_cache;
 
 pub use date_range::{DateBounds, extract_date_bounds};
 pub use eval::{Field, RowFields};
 pub use expr::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+pub use regex_cache::precompile;

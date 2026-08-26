@@ -28,6 +28,9 @@ use std::str::FromStr;
 use ratatui::style::{Color, Modifier};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use not_yet_done_filter::eval::RowFields;
+use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs, eval};
+
 use super::color::HexColor;
 use super::view_config::TextModifier;
 use crate::ui::theme::Theme;
@@ -243,6 +246,185 @@ impl StyleSpec {
             sel.collect_warnings(&format!("{path}.selected"), true, out);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------
+
+/// One entry of a level's `highlights:` list.
+///
+/// `columns:` selects *what* is painted, `when:` decides *when* — the two are
+/// orthogonal, which is why there is no `scope:` field:
+///
+/// | `columns:` | `when:` | Result                                               |
+/// | ---------- | ------- | ---------------------------------------------------- |
+/// | set        | unset   | those columns, in every row                          |
+/// | unset      | set     | the whole row, where the condition holds             |
+/// | set        | set     | those columns, in the rows where the condition holds |
+///
+/// ```yaml
+/// highlights:
+///   - columns: [priority]
+///     when: { field: priority, matches: '(?i)^(highest|blocker)$' }
+///     style: hot
+///     modes: [table, card]
+/// ```
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HighlightRule {
+    /// Column **keys** (not labels — those get renamed). Empty = the whole row.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// When the rule fires. Absent = always.
+    #[serde(default)]
+    pub when: Option<HighlightWhen>,
+    /// How the match is painted.
+    pub style: StyleSpec,
+    /// Where the rule fires. Overrides the style's own `modes:` — see
+    /// [`ResolvedStyle::with_modes`].
+    #[serde(default)]
+    pub modes: Option<Vec<HighlightMode>>,
+}
+
+/// What a [`HighlightRule`] paints, derived from which selectors it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightScope {
+    /// No `columns:` — the whole row.
+    Row,
+    /// `columns:` without `when:` — those columns in every row.
+    Columns,
+    /// Both — those columns in the matching rows.
+    Cells,
+}
+
+impl HighlightRule {
+    pub fn scope(&self) -> HighlightScope {
+        match (self.columns.is_empty(), self.when.is_some()) {
+            (true, _) => HighlightScope::Row,
+            (false, false) => HighlightScope::Columns,
+            (false, true) => HighlightScope::Cells,
+        }
+    }
+
+    /// Whether this rule fires on `row`. A rule without `when:` always does.
+    pub fn matches<R: RowFields + ?Sized>(&self, row: &R) -> bool {
+        match &self.when {
+            Some(when) => eval::matches(when.expr(), row),
+            None => true,
+        }
+    }
+
+    /// Everything wrong with this rule, as lines for the user.
+    ///
+    /// A rule with a problem is *inert*, not fatal: an unresolvable style
+    /// paints nothing and a regex that does not compile matches nothing, so a
+    /// typo costs the one highlight rather than the whole view file.
+    /// `known_columns` are the level's column keys.
+    pub fn validate(
+        &self,
+        path: &str,
+        known_columns: &[String],
+        resolver: &StyleResolver<'_>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        self.style.warnings(&format!("{path}.style"), &mut out);
+        if let Err(e) = resolver.resolve(&self.style) {
+            out.push(format!("{path}.style: {e}"));
+        }
+        if let Some(when) = &self.when {
+            // Compiles every pattern into the shared cache, so no regex is
+            // built again in a render path.
+            if let Err(e) = not_yet_done_filter::precompile(when.expr()) {
+                out.push(format!("{path}.when: {e}"));
+            }
+        }
+        for col in &self.columns {
+            if !known_columns.iter().any(|k| k == col) {
+                out.push(format!(
+                    "{path}.columns: no column {col:?} at this level — highlights name \
+                     a column by its `key`, not its label"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// The condition of a [`HighlightRule`], in either of two surface forms.
+///
+/// **Short** — one field, one regex:
+///
+/// ```yaml
+/// when: { field: status, matches: '^(Blocked|On Hold)$' }
+/// ```
+///
+/// **Full** — any [`FilterExpr`], the same DSL saved queries are written in:
+///
+/// ```yaml
+/// when:
+///   or:
+///     - [due, "<", today]
+///     - [labels, has, hotfix]
+/// ```
+///
+/// The short form is desugared into `[<field>, matches, <regex>]` at parse
+/// time, so there is one stored representation and one evaluator, not two.
+///
+/// Evaluation is **purely in memory** over the rows the adapter delivered —
+/// custom columns and `load`-hook-patched cells included, since both are
+/// ordinary metadata fields by the time highlighting runs. No database is
+/// involved.
+///
+/// One YAML trap worth knowing: write regexes as **single-quoted** scalars. A
+/// double-quoted scalar processes backslash escapes, so `"\d+"` is a YAML
+/// error before the regex engine ever sees it, while `'\d+'` arrives intact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HighlightWhen(FilterExpr);
+
+impl HighlightWhen {
+    pub fn expr(&self) -> &FilterExpr {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for HighlightWhen {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        let value = serde_yaml::Value::deserialize(d)?;
+        let Some(map) = value.as_mapping() else {
+            // A sequence is a bare leaf; anything else FilterExpr will reject
+            // with its own message.
+            return FilterExpr::deserialize(value)
+                .map(Self)
+                .map_err(D::Error::custom);
+        };
+
+        // The short form is told apart by its `field:` key. `and`/`or`/`not`
+        // go to the full parser, which owns their vocabulary.
+        let field_key = serde_yaml::Value::String("field".to_string());
+        if !map.contains_key(&field_key) {
+            return FilterExpr::deserialize(value)
+                .map(Self)
+                .map_err(D::Error::custom);
+        }
+
+        let short = ShortWhen::deserialize(value).map_err(D::Error::custom)?;
+        Ok(Self(FilterExpr::Leaf(FilterLeaf {
+            lhs: ColRef::unqualified(short.field),
+            op: Operator::Matches,
+            rhs: Rhs::Lit(Literal::String(short.matches)),
+        })))
+    }
+}
+
+/// The short `when:` form, before desugaring.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShortWhen {
+    field: String,
+    matches: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +1049,98 @@ mod tests {
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(out[0].contains("modes"), "{out:?}");
         assert!(out[0].contains("selected"), "{out:?}");
+    }
+
+    // ── Rules ────────────────────────────────────────────────────────────
+
+    fn rule(yaml: &str) -> HighlightRule {
+        serde_yaml::from_str(yaml).expect("rule should parse")
+    }
+
+    #[test]
+    fn the_selectors_decide_what_is_painted() {
+        assert_eq!(
+            rule("when: { field: status, matches: '^Done$' }\nstyle: [bold]").scope(),
+            HighlightScope::Row
+        );
+        assert_eq!(
+            rule("columns: [estimate]\nstyle: [bold]").scope(),
+            HighlightScope::Columns
+        );
+        assert_eq!(
+            rule("columns: [estimate]\nwhen: { field: status, matches: '^Done$' }\nstyle: [bold]")
+                .scope(),
+            HighlightScope::Cells
+        );
+    }
+
+    #[test]
+    fn the_short_when_form_is_sugar_for_a_matches_leaf() {
+        let short = rule("when: { field: status, matches: '^Done$' }\nstyle: [bold]");
+        let long = rule("when: [status, matches, '^Done$']\nstyle: [bold]");
+        // One stored representation, so there is one evaluator and not two.
+        assert_eq!(short.when, long.when);
+    }
+
+    #[test]
+    fn a_full_when_expression_still_parses() {
+        let r = rule(
+            "style: [bold]\nwhen:\n  or:\n    - [status, '=', Blocked]\n    - [labels, has, hotfix]",
+        );
+        assert!(matches!(r.when.unwrap().expr(), FilterExpr::Or(v) if v.len() == 2));
+    }
+
+    #[test]
+    fn a_rule_without_a_condition_always_fires() {
+        struct Empty;
+        impl RowFields for Empty {
+            fn field(&self, _: &str) -> not_yet_done_filter::Field<'_> {
+                not_yet_done_filter::Field::Null
+            }
+        }
+        assert!(rule("columns: [a]\nstyle: [bold]").matches(&Empty));
+    }
+
+    #[test]
+    fn a_misspelt_rule_key_is_named() {
+        let err = serde_yaml::from_str::<HighlightRule>("column: [a]\nstyle: [bold]").unwrap_err();
+        assert!(err.to_string().contains("column"), "{err}");
+    }
+
+    #[test]
+    fn a_broken_regex_is_reported_against_the_rule_not_panicked_on() {
+        let theme = theme();
+        let empty = HashMap::new();
+        let resolver = StyleResolver::new(&empty, &empty, &theme);
+        let r = rule("style: [bold]\nwhen: { field: status, matches: '(' }");
+        let errs = r.validate("views[0].highlights[0]", &["status".to_string()], &resolver);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("invalid regex"), "{errs:?}");
+    }
+
+    #[test]
+    fn a_column_the_level_does_not_have_is_reported() {
+        let theme = theme();
+        let empty = HashMap::new();
+        let resolver = StyleResolver::new(&empty, &empty, &theme);
+        let r = rule("columns: [estimate]\nstyle: [bold]");
+        let errs = r.validate("views[0].highlights[0]", &["status".to_string()], &resolver);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("estimate"), "{errs:?}");
+    }
+
+    #[test]
+    fn a_sound_rule_validates_clean() {
+        let theme = theme();
+        let styles = named(&[("hot", "{ bg: '#7a1c1c' }")]);
+        let empty = HashMap::new();
+        let resolver = StyleResolver::new(&styles, &empty, &theme);
+        let r =
+            rule("columns: [status]\nstyle: hot\nwhen: { field: status, matches: '(?i)^done$' }");
+        assert!(
+            r.validate("views[0].highlights[0]", &["status".to_string()], &resolver)
+                .is_empty()
+        );
     }
 
     #[test]
