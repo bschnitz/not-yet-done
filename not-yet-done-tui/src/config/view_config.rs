@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use crate::action::ActionChains;
+use crate::config::highlight::StyleSpec;
 use crate::config::keybindings::{ContentAction, KeyBinding, KeyBindingConfig};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,20 @@ pub struct ViewFileConfig {
     /// documented, working block as an ignored key.
     #[serde(default)]
     pub hooks: Option<serde_yaml::Value>,
+    /// Named highlight styles for this file's views (`style: <name>` in a
+    /// `highlights:` rule). Shadows an entry of the same name in the theme's
+    /// `styles:` block, so a view can retune a shared style without touching
+    /// the theme. See [`crate::config::highlight`].
+    ///
+    /// ```yaml
+    /// styles:
+    ///   over-budget:
+    ///     bg: "#7a1c1c"
+    ///     fg: auto
+    ///     selected: { bg: "#9c2a2a" }
+    /// ```
+    #[serde(default)]
+    pub styles: HashMap<String, StyleSpec>,
 }
 
 /// Frontend-side reminder handling for one tab (see [`ViewFileConfig::reminder`]).
@@ -858,7 +873,7 @@ impl TabUnreadStyle {
 /// A font attribute a [`TabUnreadStyle`] can add. Named after the ratatui
 /// modifiers it maps onto; how much of it a terminal honours is up to the
 /// terminal (italic and crossed-out are the usual casualties).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextModifier {
     Bold,

@@ -1,5 +1,6 @@
 pub mod color;
 pub mod editor;
+pub mod highlight;
 pub mod keybinding_edit;
 pub mod keybindings;
 pub mod script;
