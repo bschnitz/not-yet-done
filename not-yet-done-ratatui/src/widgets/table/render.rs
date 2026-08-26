@@ -471,7 +471,8 @@ fn render_fixed_row(
         first_rendered = false;
         starts.push((spans.len(), cell_col));
 
-        let col_fg = resolve_cell_fg(cell, cell_col, data);
+        // A header row is never the cursor row.
+        let col_fg = resolve_cell_fg(cell_override(cell, false, data), cell_col, data);
         let normal = Style::default()
             .fg(col_fg)
             .bg(bg)
@@ -561,8 +562,18 @@ fn render_data_row(
             (false, true) => data.style.resolved_style(ST::ColumnSelected),
             (false, false) => row_base,
         };
-        let cell_bg = cell_base.bg.unwrap_or(row_bg);
-        let col_fg = resolve_cell_fg(cell, cell_col, data);
+        // The cell's own style override (a `highlights:` rule, the deleted
+        // dim, …), already picked for this row's selection state.
+        let cell_override = cell_override(cell, is_selected_row, data);
+        // An override's background loses to the column cursor: that is a
+        // deliberate, transient pointer at one cell, and a highlight that
+        // swallowed it would leave the user without a cursor exactly on the
+        // rows made conspicuous.
+        let cell_bg = match (is_col_match, cell_override.and_then(|s| s.bg)) {
+            (false, Some(bg)) => bg,
+            _ => cell_base.bg.unwrap_or(row_bg),
+        };
+        let col_fg = resolve_cell_fg(cell_override, cell_col, data);
         // Per-column / per-cell color (`col_fg`, from a column `style:` or a
         // cell `style_id`) owns the foreground. Selecting a row changes only
         // the *background* (RowSelected bg), keeping each column's color — a
@@ -580,7 +591,8 @@ fn render_data_row(
         let normal_style = Style::default()
             .fg(cell_fg)
             .bg(cell_bg)
-            .add_modifier(cell_base.add_modifier);
+            .add_modifier(cell_base.add_modifier)
+            .add_modifier(cell_override.map(|s| s.add_modifier).unwrap_or_default());
         let cell_hl_style = Style::default()
             .fg(hl_style.fg.unwrap_or(cell_fg))
             .bg(cell_bg)
@@ -642,17 +654,33 @@ fn render_data_row(
     cols
 }
 
-fn resolve_cell_fg(
+/// The style a cell overrides its column with, or `None` when it declares
+/// none.
+///
+/// On the cursor row [`TableWidgetCell::selected_style_id`] wins when the
+/// cell carries one; falling back to `style_id` keeps every override that
+/// predates the pair (the deleted dim, the header overlay) painting on the
+/// selected row exactly as it does elsewhere.
+fn cell_override(
     cell: &TableWidgetCell,
+    is_selected_row: bool,
+    data: &RenderData,
+) -> Option<Style> {
+    let id = if is_selected_row {
+        cell.selected_style_id.or(cell.style_id)
+    } else {
+        cell.style_id
+    };
+    id.and_then(|id| data.style_map.get(id))
+}
+
+fn resolve_cell_fg(
+    cell_override: Option<Style>,
     col_idx: usize,
     data: &RenderData,
 ) -> ratatui::style::Color {
-    if let Some(style_id) = cell.style_id {
-        if let Some(style) = data.style_map.get(style_id) {
-            if let Some(fg) = style.fg {
-                return fg;
-            }
-        }
+    if let Some(fg) = cell_override.and_then(|s| s.fg) {
+        return fg;
     }
     data.col_styles.get(col_idx).fg.unwrap_or_default()
 }

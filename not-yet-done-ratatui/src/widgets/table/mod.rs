@@ -34,9 +34,18 @@ pub struct TableWidgetCell {
     /// Number of columns this cell spans. 1 = normal, >1 = grouped.
     /// When >1, the next `col_span - 1` cells in the row are skipped.
     pub col_span: usize,
-    /// Optional style override. When set, this style is used instead of
-    /// the column style. Resolved from the Table's `style_map`.
+    /// Optional style override. When set, this style's foreground,
+    /// background and modifiers are used instead of the column style.
+    /// Resolved from the Table's `style_map`.
     pub style_id: Option<usize>,
+    /// Style override used **instead of** [`Self::style_id`] while this
+    /// cell's row is the cursor row. `None` keeps `style_id` in force there.
+    ///
+    /// The pair exists because a highlight and the cursor compete for the
+    /// same background: a cell that paints itself red must be able to say
+    /// what it looks like once the cursor is on it, without the caller
+    /// having to rebuild the table on every cursor move.
+    pub selected_style_id: Option<usize>,
     /// Optional inline segments. When non-empty, the cell is rendered as a
     /// sequence of styled spans — each segment carries its own style id
     /// (resolved via `StyleMap`). `None` means "use cell's default style".
@@ -53,6 +62,7 @@ impl TableWidgetCell {
             prefix_len: 0,
             col_span: 1,
             style_id: None,
+            selected_style_id: None,
             segments: vec![],
         }
     }
@@ -64,6 +74,7 @@ impl TableWidgetCell {
             prefix_len: 0,
             col_span: 1,
             style_id: None,
+            selected_style_id: None,
             segments: vec![],
         }
     }
@@ -75,6 +86,7 @@ impl TableWidgetCell {
             prefix_len,
             col_span: 1,
             style_id: None,
+            selected_style_id: None,
             segments: vec![],
         }
     }
@@ -90,6 +102,7 @@ impl TableWidgetCell {
             prefix_len: connector_chars,
             col_span: 1,
             style_id: None,
+            selected_style_id: None,
             segments: vec![],
         }
     }
@@ -102,6 +115,7 @@ impl TableWidgetCell {
             prefix_len: 0,
             col_span: col_span.max(1),
             style_id: None,
+            selected_style_id: None,
             segments: vec![],
         }
     }
@@ -116,6 +130,7 @@ impl TableWidgetCell {
             prefix_len: 0,
             col_span: 1,
             style_id: None,
+            selected_style_id: None,
             segments,
         }
     }
@@ -123,6 +138,14 @@ impl TableWidgetCell {
     /// Set a style override for this cell.
     pub fn with_style(mut self, style_id: usize) -> Self {
         self.style_id = Some(style_id);
+        self
+    }
+
+    /// Set both style overrides at once: `normal` off the cursor row,
+    /// `selected` on it.
+    pub fn with_style_pair(mut self, normal: usize, selected: usize) -> Self {
+        self.style_id = Some(normal);
+        self.selected_style_id = Some(selected);
         self
     }
 }
