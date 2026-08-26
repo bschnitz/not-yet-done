@@ -285,6 +285,14 @@ pub struct HighlightRule {
     /// [`ResolvedStyle::with_modes`].
     #[serde(default)]
     pub modes: Option<Vec<HighlightMode>>,
+    /// The style, resolved against the theme once at config load by
+    /// [`prepare_view_file`]. `None` means it could not be resolved — the
+    /// rule is then inert, and the load already said why.
+    ///
+    /// Never read from YAML: the name table it needs (`styles:`) lives on
+    /// the file, not the level, and the render path only ever sees levels.
+    #[serde(skip)]
+    pub resolved: Option<ResolvedStyle>,
 }
 
 /// What a [`HighlightRule`] paints, derived from which selectors it carries.
@@ -349,68 +357,105 @@ impl HighlightRule {
         }
         out
     }
+
+    /// Check the rule and remember its resolved style, for the render path.
+    ///
+    /// Resolution happens exactly once, here at config load, because that is
+    /// the only place where both halves are in reach: the file's `styles:`
+    /// table and the theme. Afterwards a level carries everything a renderer
+    /// needs, which is what lets the panes keep taking `&[ViewDef]` alone.
+    pub fn prepare(
+        &mut self,
+        path: &str,
+        known_columns: &[String],
+        resolver: &StyleResolver<'_>,
+    ) -> Vec<String> {
+        let warnings = self.validate(path, known_columns, resolver);
+        self.resolved = resolver
+            .resolve(&self.style)
+            .ok()
+            .map(|style| style.with_modes(self.modes.clone()));
+        warnings
+    }
+
+    /// The resolved style, if this rule paints on `mode` at all.
+    pub fn style_for(&self, mode: HighlightMode) -> Option<&ResolvedStyle> {
+        self.resolved.as_ref().filter(|s| s.applies_to(mode))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Validation across a whole view file
 // ---------------------------------------------------------------------------
 
-/// Every problem in one view file's `styles:` and `highlights:` blocks, as
-/// lines for the user.
+/// Resolve every highlight rule in one view file against the theme, and
+/// report every problem in its `styles:` and `highlights:` blocks.
 ///
-/// These are **warnings, not errors**. A rule that cannot resolve is inert —
-/// it paints nothing — so a typo costs that one highlight while the file
-/// keeps loading. Reporting it is the whole point: a silently ignored rule is
-/// the config bug that costs an afternoon.
-pub fn view_file_warnings(config: &ViewFileConfig, theme: &Theme) -> Vec<String> {
-    let resolver = StyleResolver::new(&config.styles, theme.styles(), theme);
+/// Both jobs are the same walk on purpose: whatever the walk can say about a
+/// rule, it says while it has the rule in hand, and what it resolves it
+/// stores on the rule ([`HighlightRule::resolved`]) so no render path has to
+/// find the file's `styles:` table again.
+///
+/// The messages are **warnings, not errors**. A rule that cannot resolve is
+/// inert — it paints nothing — so a typo costs that one highlight while the
+/// file keeps loading. Reporting it is the whole point: a silently ignored
+/// rule is the config bug that costs an afternoon.
+pub fn prepare_view_file(config: &mut ViewFileConfig, theme: &Theme) -> Vec<String> {
     let mut out = Vec::new();
 
     // The named styles themselves, so a broken definition is reported once
     // here rather than once per rule that uses it.
-    let mut names: Vec<&String> = config.styles.keys().collect();
-    names.sort();
-    for name in names {
-        let spec = &config.styles[name];
-        let path = format!("styles.{name}");
-        spec.warnings(&path, &mut out);
-        if let Err(e) = resolver.resolve(spec) {
-            out.push(format!("{path}: {e}"));
+    {
+        let resolver = StyleResolver::new(&config.styles, theme.styles(), theme);
+        let mut names: Vec<&String> = config.styles.keys().collect();
+        names.sort();
+        for name in names {
+            let spec = &config.styles[name];
+            let path = format!("styles.{name}");
+            spec.warnings(&path, &mut out);
+            if let Err(e) = resolver.resolve(spec) {
+                out.push(format!("{path}: {e}"));
+            }
         }
     }
 
-    for view in &config.views {
-        level_warnings(
+    // The rule walk writes back into `config.views`, so the resolver cannot
+    // borrow `config.styles` — it gets its own copy of the (tiny, load-time)
+    // name table instead.
+    let styles = config.styles.clone();
+    let resolver = StyleResolver::new(&styles, theme.styles(), theme);
+    for view in &mut config.views {
+        prepare_level(
             &view.name,
             &view.columns,
-            &view.highlights,
+            &mut view.highlights,
             &resolver,
             &mut out,
         );
-        for child in &view.children {
-            child_warnings(&view.name, child, &resolver, &mut out);
+        for child in &mut view.children {
+            prepare_child(&view.name, child, &resolver, &mut out);
         }
     }
     out
 }
 
-fn child_warnings(
+fn prepare_child(
     parent: &str,
-    child: &ChildDef,
+    child: &mut ChildDef,
     resolver: &StyleResolver<'_>,
     out: &mut Vec<String>,
 ) {
     let path = format!("{parent} > {}", child.name);
-    level_warnings(&path, &child.columns, &child.highlights, resolver, out);
-    for grandchild in &child.children {
-        child_warnings(&path, grandchild, resolver, out);
+    prepare_level(&path, &child.columns, &mut child.highlights, resolver, out);
+    for grandchild in &mut child.children {
+        prepare_child(&path, grandchild, resolver, out);
     }
 }
 
-fn level_warnings(
+fn prepare_level(
     path: &str,
     columns: &[ColumnDef],
-    highlights: &[HighlightRule],
+    highlights: &mut [HighlightRule],
     resolver: &StyleResolver<'_>,
     out: &mut Vec<String>,
 ) {
@@ -418,8 +463,8 @@ fn level_warnings(
         return;
     }
     let keys: Vec<String> = columns.iter().map(|c| c.key.clone()).collect();
-    for (i, rule) in highlights.iter().enumerate() {
-        out.extend(rule.validate(&format!("{path}.highlights[{i}]"), &keys, resolver));
+    for (i, rule) in highlights.iter_mut().enumerate() {
+        out.extend(rule.prepare(&format!("{path}.highlights[{i}]"), &keys, resolver));
     }
 }
 
@@ -1271,7 +1316,8 @@ views:
             "{ columns: [status], style: hot }",
             "{ columns: [nope], style: hot }",
         );
-        let warnings = view_file_warnings(&config, &theme());
+        let mut config = config;
+        let warnings = prepare_view_file(&mut config, &theme());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("tickets > comments"), "{warnings:?}");
         assert!(warnings[0].contains("nope"), "{warnings:?}");
@@ -1280,7 +1326,8 @@ views:
     #[test]
     fn an_unknown_style_name_is_reported_once_per_rule() {
         let config = view_file("{ style: missing }", "{ columns: [body], style: hot }");
-        let warnings = view_file_warnings(&config, &theme());
+        let mut config = config;
+        let warnings = prepare_view_file(&mut config, &theme());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("tickets.highlights[0]"),
@@ -1294,6 +1341,41 @@ views:
             "{ when: { field: status, matches: '^Blocked$' }, style: hot }",
             "{ columns: [body], style: [bold] }",
         );
-        assert!(view_file_warnings(&config, &theme()).is_empty());
+        let mut config = config;
+        assert!(prepare_view_file(&mut config, &theme()).is_empty());
+    }
+
+    #[test]
+    fn preparing_leaves_the_resolved_style_on_the_rule() {
+        let mut config = view_file(
+            "{ when: { field: status, matches: '^Blocked$' }, style: hot }",
+            "{ columns: [body], style: nope }",
+        );
+        prepare_view_file(&mut config, &theme());
+        let root = &config.views[0].highlights[0];
+        assert_eq!(
+            root.resolved.as_ref().map(|s| s.normal.bg),
+            Some(Some(Color::Rgb(0x7a, 0x1c, 0x1c)))
+        );
+        // An unresolvable name leaves the rule inert rather than half-painted.
+        assert!(config.views[0].children[0].highlights[0].resolved.is_none());
+    }
+
+    #[test]
+    fn a_rule_modes_list_wins_over_the_styles_own() {
+        let mut config = view_file(
+            "{ columns: [status], style: hot, modes: [card] }",
+            "{ columns: [body], style: hot }",
+        );
+        prepare_view_file(&mut config, &theme());
+        let root = &config.views[0].highlights[0];
+        assert!(root.style_for(HighlightMode::Card).is_some());
+        assert!(root.style_for(HighlightMode::Table).is_none());
+        // No `modes:` anywhere = every surface.
+        assert!(
+            config.views[0].children[0].highlights[0]
+                .style_for(HighlightMode::Table)
+                .is_some()
+        );
     }
 }
