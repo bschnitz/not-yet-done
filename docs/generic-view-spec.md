@@ -2499,7 +2499,78 @@ to the level, because all three shapes are built from the same pane.
 
 A reload hook is the case that needs this most: it fires with no cursor intent
 behind it, so a script maintaining a column wants the rows that just landed
-rather than whatever row the cursor happens to sit on.
+rather than whatever row the cursor happens to sit on. A **load** hook is the
+one exception: it always receives the `table` payload and ignores the header
+(see below).
+
+### Script hooks (`ctrl+h` in the menu)
+
+A script can be bound to an event instead of a key. `ctrl+h` on a menu entry
+offers the hooks; the binding is stored in the DB table
+`script_hook(scope, name, hook)` under the same scope as a script chord
+(`script:<tab>/<view-node-type…>`), and the entry then carries the hook name as
+a suffix (`[reload]`). Hooks run **unattended**, so only the two modes that need
+neither the terminal nor an editor may be bound: `background` and `commands`;
+`interactive` and `capture` are refused when binding.
+
+| hook     | fires                                            | payload                    | may answer with |
+| -------- | ------------------------------------------------ | -------------------------- | --------------- |
+| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`      |
+| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`         |
+
+Both fire on the first load of a view and on every drill-down into a level, and
+neither fires when the fetch failed — an empty view that only looks empty
+because the request died is not something to act on.
+
+**`reload` — act on the settled view.** The script sees what the user sees,
+including the cursor, and hands back commands the TUI executes
+(`{"commands": ["reload"]}`). This is the hook for anything that reaches
+_outside_ the rows: writing to a backend, jumping somewhere, refreshing after a
+mutation.
+
+**`load` — change the rows on their way in.** The script receives the rows the
+adapter just produced, before any filtering, sorting or table build, and hands
+back a sparse patch:
+
+```json
+{ "cells": { "<row id>": { "<column key>": "<value>" } } }
+```
+
+Values may be strings, numbers or booleans — all three land as the text the cell
+holds, so a `kind: number` column can be answered with `4.5` unquoted. `null`
+clears a cell. A column the row does not carry yet is **added**, because the row
+with nothing stored for it is exactly the row a computed column exists for; such
+added cells are not editable, since the next load recomputes them. Row ids the
+answer names but the load does not contain are reported and skipped.
+
+Because the patch lands before the pane sees the rows, the computed values take
+part in sorting, filtering and the column cursor like any other value — and no
+second load is needed to make them visible. A `load` hook may **not** emit
+`commands`: it would be emitting them into the middle of the load that is
+running it. Commands in its answer are refused with a message rather than
+quietly dropped.
+
+The column still has to exist in the view's `columns:` — a `load` hook supplies
+values, it does not declare columns.
+
+**Which one to use.** If the value can be computed from the rows themselves plus
+local data, `load` is both cheaper and correct at first sight. If the script has
+to _write_ somewhere and wants the view to catch up afterwards, `reload` is the
+hook — a script may of course do both: write in a `load` hook so other views and
+the CLI see the value too, and still patch the rows it was handed.
+
+**Loop protection.** Every load carries a `hook_depth`: `0` when a person (or a
+timer) asked for it, one more than the triggering load when a hook script caused
+it. Loads arriving at depth ≥ 1 fire no hooks, so a `reload` hook that asks for
+a reload runs no second round. The guard sits on the _load_, not on the command
+name — a script emitting `:jump` or a query command also ends in a fetch and
+would slip past a `:reload`-only check.
+
+**Scripts run synchronously**, on the main loop, both hooks alike: a `load` hook
+has to be finished before the rows can be handed on, and there is nothing to
+hand a patch to afterwards. Nothing is painted between the two seams, so the
+runtime of either hook sits in front of the first frame that shows the new rows.
+A hook that shells out to slow commands makes every load feel that slow.
 
 **Script shortcuts (`ctrl+s` in the menu).** As in the query menu, a key can be
 assigned to a script in the script menu via **`ctrl+s`**. The captured chord is

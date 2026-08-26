@@ -5396,6 +5396,59 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
       `ctrl+h` arrives at all — some terminals deliver it as `backspace`. If
       so, rebind `script_menu.edit_hook` in `tui.yaml`.
 
+## View scripts on a load hook (rows patched before they land)
+
+The other half of `ctrl+h`: the script sees the rows on their way in and hands
+back cell values instead of commands. The point of the test is that the value is
+right on the **first** frame and that no extra load happens.
+
+Preparation — a `commands`-mode script in the view's script directory that
+stamps a value onto every row it is given and logs each run:
+
+```python
+#!/usr/bin/env python3
+# mode: commands
+import json, os, sys
+with open(sys.argv[1]) as f:
+    payload = json.load(f)
+with open("/tmp/nyd-load-hook.log", "a") as f:
+    f.write(f"{len(payload['rows'])}\n")
+cells = {row["id"]: {"<a column key of this level>": "PATCHED"} for row in payload["rows"]}
+with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+    json.dump({"cells": cells}, f)
+```
+
+- [ ] `ctrl+h` on the script now offers `none`, `reload` **and** `load`. Picking
+      `load` reports "Script '…' now runs on the rows before they reach the
+      table"; the entry gets the suffix `[load]`.
+- [ ] `r` on the view: every row shows `PATCHED` **immediately** — no flicker
+      from the real value to the patched one, and the log grows by exactly one
+      line per reload.
+- [ ] `s` (sort) on that column sorts by the patched value, and a fuzzy filter
+      on it finds the patched rows — the patch is in before sorting/filtering.
+- [ ] Patch a column that is configured in `columns:` but has **no** stored
+      value on any row: the value appears anyway (the field is added, not
+      skipped).
+- [ ] Answer with a number instead of a string (`{"days": 4.5}`) on a
+      `kind: number` column: it renders as `4.5`, right-aligned like a number.
+- [ ] Answer with an id that is not in this load (`{"cells": {"NOPE-1": …}}`):
+      one message "… row id(s) not in this load — ignored", the other rows
+      still patched.
+- [ ] Answer with `{"commands": ["reload"]}` from a `load` hook: refused with a
+      message, and **no** reload happens (the log stands still).
+- [ ] Answer with nothing / `{}` / a file the script never wrote: the rows show
+      their unpatched values, no error.
+- [ ] Let the script exit non-zero: an error notification, rows unpatched, the
+      view still usable.
+- [ ] Bind the **same** script to `reload` instead: the `cells` are ignored
+      there (that hook executes commands), which is the honest way round —
+      one script, one hook.
+- [ ] Bind two scripts to `load` on the same level: they run in name order and
+      the second sees what the first wrote (patch the same column from both and
+      the alphabetically last one wins).
+- [ ] Drill into a child level: the hook stays silent there (its own scope).
+- [ ] Failed load (no connection / adapter error): the hook does not run.
+
 ## A script declares its own payload scope (`# scope:`)
 
 The level's `scope:` setting says what a script is handed; a `# scope:` header

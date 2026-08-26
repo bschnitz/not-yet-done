@@ -2,14 +2,26 @@
 //! runs, started by an event instead of a key press.
 //!
 //! Three pieces:
-//!   - [`ScriptHook`]: the vocabulary. Today only `reload`, stored per
-//!     `(scope, name)` in the `script_hook` table next to the script's key
-//!     chord — see [`crate::app::script::ScriptContext::shortcut_scope`]
-//!     for the scope string both share.
+//!   - [`ScriptHook`]: the vocabulary — `reload` (after the rows landed)
+//!     and `load` (before they reach the table), stored per `(scope, name)`
+//!     in the `script_hook` table next to the script's key chord — see
+//!     [`crate::app::script::ScriptContext::shortcut_scope`] for the scope
+//!     string both share.
 //!   - The picker ([`ScriptHookPicker`]), opened with Ctrl+H on a selected
 //!     entry in the script menu.
-//!   - The firing seam, [`App::fire_reload_hooks`], called from the
-//!     `LoadMsg::ContentItems` handler once a pane's rows have landed.
+//!   - Two firing seams, both in the `LoadMsg::ContentItems` handler:
+//!     [`App::run_load_hooks`] on the rows *before* they are handed to the
+//!     pane, and [`App::fire_reload_hooks`] once they have landed.
+//!
+//! **Why two hooks and not one.** They have different contracts and only
+//! one of them can be moved. A `reload` hook sees the settled view — the
+//! cursor, the filtered rows — and may emit commands (`:reload`, `:jump`)
+//! that presuppose a table to act on; what it changes in the data it has to
+//! write out and pull back in with a second load. A `load` hook has no
+//! cursor (nothing is selected yet) and may emit no commands at all — it
+//! would be emitting them into the middle of the load that is running it —
+//! but it can hand back a patch that lands in the rows before anyone sees
+//! them, which costs no second load and never shows a stale value.
 //!
 //! **Loop protection.** A hook script may itself ask for a reload — that
 //! is the point of the `commands` mode — so the trigger has to be able to
@@ -23,7 +35,10 @@
 //! script emitting `:jump`, a query command or anything else that ends in
 //! a fetch would otherwise slip past a `:reload`-only check.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use not_yet_done_content::{MetadataField, NodeSummary};
 
 use crate::app::editor::parse_script_mode;
 use crate::app::{App, EditorRequest};
@@ -39,20 +54,25 @@ pub enum ScriptHook {
     /// Run right after the pane's rows have (re)loaded — including the
     /// first load when the view opens, and a drill-down into a level.
     Reload,
+    /// Run on the freshly loaded rows *before* they reach the pane, with
+    /// the chance to patch them (see [`App::run_load_hooks`]).
+    Load,
 }
 
 impl ScriptHook {
-    pub const ALL: &'static [ScriptHook] = &[ScriptHook::Reload];
+    pub const ALL: &'static [ScriptHook] = &[ScriptHook::Reload, ScriptHook::Load];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Reload => "reload",
+            Self::Load => "load",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "reload" => Some(Self::Reload),
+            "load" => Some(Self::Load),
             _ => None,
         }
     }
@@ -61,6 +81,7 @@ impl ScriptHook {
     pub fn description(self) -> &'static str {
         match self {
             Self::Reload => "after the view's rows (re)loaded",
+            Self::Load => "on the rows before they reach the table",
         }
     }
 }
@@ -219,6 +240,114 @@ impl App {
         }
     }
 
+    /// Run every script bound to [`ScriptHook::Load`] on the rows a load
+    /// just produced, letting each one patch them before the pane — and
+    /// with it the user — ever sees them.
+    ///
+    /// The rows are handed over in the `scope: table` payload shape and come
+    /// back as `{"cells": {"<row id>": {"<column key>": <value>}}}`. Sparse
+    /// by design: a script answers for what it computed, not for the table.
+    ///
+    /// Runs synchronously, like the reload hook, and for the same reason —
+    /// the rows in `items` are on their way to
+    /// [`ContentView::set_items_for_pane`](crate::views::content_view::ContentView::set_items_for_pane)
+    /// in this very message handler, and there is nothing to hand a patch to
+    /// afterwards. It costs no *extra* stall either: nothing is painted
+    /// between the two seams anyway, so a reload hook's runtime already sits
+    /// in front of the first frame that shows the new rows.
+    ///
+    /// Several scripts on one level run in name order, each seeing what the
+    /// previous one wrote — the payload is rebuilt from the patched rows.
+    pub(super) fn run_load_hooks(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        hook_depth: u8,
+        items: &mut [NodeSummary],
+    ) {
+        // Same provenance guard as the reload hook: rows fetched *because* a
+        // hook asked for them run no hooks of their own. A load hook cannot
+        // trigger a load itself (its commands are refused), so this is not
+        // loop protection here — it keeps the two hooks from doubling up on
+        // the round trip a reload hook already paid for.
+        if hook_depth >= HOOK_MAX_DEPTH {
+            return;
+        }
+        if self.hook_runs_in_flight.contains(&(view_index, pane_id)) {
+            return;
+        }
+        let Some(scope) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.pane_script_scope(pane_id))
+        else {
+            return;
+        };
+        let mut names: Vec<String> = self
+            .hooks_for_scope(&scope)
+            .into_iter()
+            .filter(|(_, hook)| ScriptHook::parse(hook) == Some(ScriptHook::Load))
+            .map(|(name, _)| name)
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        names.sort();
+
+        self.hook_runs_in_flight.insert((view_index, pane_id));
+        for name in names {
+            self.run_load_hook_script(view_index, pane_id, &name, items);
+        }
+        self.hook_runs_in_flight.remove(&(view_index, pane_id));
+    }
+
+    /// One load-hook run: build the payload from the rows as they stand,
+    /// execute, apply what came back.
+    fn run_load_hook_script(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        name: &str,
+        items: &mut [NodeSummary],
+    ) {
+        let Some(ctx) = self.build_load_hook_ctx(view_index, pane_id, items) else {
+            return;
+        };
+        let path = ctx.scripts_dir().join(name);
+        if !path.exists() {
+            return;
+        }
+        if let Some(reason) = hook_mode_rejection(&path.to_string_lossy()) {
+            self.notify_error(format!("Hook script '{name}' not run: {reason}"));
+            return;
+        }
+        let Some(answer) = self.run_script_for_output(&ctx, &path) else {
+            return;
+        };
+        // Commands would have to be executed into the middle of the load that
+        // is running this script — refused rather than quietly dropped, so a
+        // script bound to the wrong hook says so instead of half-working.
+        if answer
+            .get("commands")
+            .and_then(|c| c.as_array())
+            .is_some_and(|c| !c.is_empty())
+        {
+            self.notify_error(format!(
+                "Load hook '{name}' returned commands — ignored (only `cells` runs before the rows land)"
+            ));
+        }
+        match apply_cell_patch(items, &answer) {
+            Ok(patch) => {
+                if patch.unknown > 0 {
+                    self.notify_error(format!(
+                        "Load hook '{name}': {} row id(s) not in this load — ignored",
+                        patch.unknown
+                    ));
+                }
+            }
+            Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
+        }
+    }
+
     /// Run every script bound to [`ScriptHook::Reload`] on the pane whose
     /// load just landed. `hook_depth` is the depth the finished load
     /// carried; see the module docs for how it stops a trigger loop.
@@ -309,6 +438,86 @@ impl App {
     }
 }
 
+/// What one [`apply_cell_patch`] run did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PatchOutcome {
+    /// Cells written into a row.
+    applied: usize,
+    /// Row ids the answer named that this load does not contain.
+    unknown: usize,
+}
+
+/// Apply a load hook's answer to the rows.
+///
+/// Shape: `{"cells": {"<row id>": {"<column key>": <value>}}}`. A missing
+/// `cells` key is not an error — a script that found nothing to change says
+/// so by leaving it out (or by writing `{}`).
+///
+/// Values may be strings, numbers or booleans; all three land as the text a
+/// cell holds, so a script can answer `4.0` for a `kind: number` column
+/// without quoting it. `null` clears the cell.
+///
+/// A column the row does not carry yet is **added**, not skipped: a computed
+/// column has no value on a row nothing was ever stored for, and that is
+/// precisely the row a load hook exists to fill. Added fields are
+/// non-editable — the next load recomputes them, so a typed-in value would
+/// vanish without explanation.
+fn apply_cell_patch(
+    items: &mut [NodeSummary],
+    answer: &serde_json::Value,
+) -> Result<PatchOutcome, String> {
+    let Some(cells) = answer.get("cells") else {
+        return Ok(PatchOutcome::default());
+    };
+    let cells = cells
+        .as_object()
+        .ok_or_else(|| "`cells` must be an object keyed by row id".to_string())?;
+    // Owns its keys: the rows are patched through the same slice the index
+    // was built from, so a borrow of their ids could not survive it.
+    let index: HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (item.id.clone(), i))
+        .collect();
+
+    let mut out = PatchOutcome::default();
+    for (row_id, columns) in cells {
+        let Some(&i) = index.get(row_id.as_str()) else {
+            out.unknown += 1;
+            continue;
+        };
+        let columns = columns
+            .as_object()
+            .ok_or_else(|| format!("cells['{row_id}'] must be an object keyed by column"))?;
+        for (key, value) in columns {
+            let text = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                _ => {
+                    return Err(format!(
+                        "cells['{row_id}']['{key}'] must be a string, number, bool or null"
+                    ));
+                }
+            };
+            let fields = &mut items[i].metadata.fields;
+            match fields.iter_mut().find(|f| f.key == *key) {
+                Some(field) => field.value = text,
+                None => fields.push(MetadataField {
+                    key: key.clone(),
+                    value: text,
+                    display_label: key.clone(),
+                    editable: false,
+                    allowed_values: None,
+                }),
+            }
+            out.applied += 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Why `path` cannot run as a hook, or `None` when it can. Hooks run
 /// unattended while a load lands, so only the two modes that need neither
 /// the terminal nor an editor are allowed: `background` and `commands`.
@@ -341,6 +550,116 @@ mod tests {
     fn unknown_hook_names_are_ignored() {
         assert_eq!(ScriptHook::parse("on_startup"), None);
         assert_eq!(ScriptHook::parse(""), None);
+    }
+
+    fn row(id: &str, fields: &[(&str, &str)]) -> NodeSummary {
+        NodeSummary {
+            id: id.to_string(),
+            label: format!("label of {id}"),
+            node_type: not_yet_done_content::NodeType {
+                type_id: "mock:issue".to_string(),
+                mime_type: "text/plain".to_string(),
+                syntax: None,
+                file_extension: ".txt".to_string(),
+                display_name: "Issue".to_string(),
+            },
+            metadata: not_yet_done_content::Metadata {
+                fields: fields
+                    .iter()
+                    .map(|(k, v)| MetadataField {
+                        key: k.to_string(),
+                        value: v.to_string(),
+                        display_label: k.to_string(),
+                        editable: true,
+                        allowed_values: None,
+                    })
+                    .collect(),
+            },
+            has_children: None,
+        }
+    }
+
+    fn field(item: &NodeSummary, key: &str) -> Option<String> {
+        item.metadata
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+    }
+
+    #[test]
+    fn patch_overwrites_an_existing_cell() {
+        let mut items = vec![row("MOCK-1", &[("days", "1.00")])];
+        let answer = serde_json::json!({"cells": {"MOCK-1": {"days": "2.50"}}});
+        let out = apply_cell_patch(&mut items, &answer).unwrap();
+        assert_eq!(out.applied, 1);
+        assert_eq!(field(&items[0], "days").as_deref(), Some("2.50"));
+    }
+
+    /// The row a computed column exists for is exactly the row that has no
+    /// stored value yet — patching it must add the field, not skip it.
+    #[test]
+    fn patch_adds_a_column_the_row_does_not_carry() {
+        let mut items = vec![row("MOCK-1", &[])];
+        let answer = serde_json::json!({"cells": {"MOCK-1": {"days": "0.25"}}});
+        apply_cell_patch(&mut items, &answer).unwrap();
+        assert_eq!(field(&items[0], "days").as_deref(), Some("0.25"));
+        assert!(!items[0].metadata.fields[0].editable);
+    }
+
+    #[test]
+    fn patch_accepts_numbers_bools_and_null() {
+        let mut items = vec![row("MOCK-1", &[("n", "x"), ("b", "x"), ("z", "x")])];
+        let answer = serde_json::json!({"cells": {"MOCK-1": {"n": 4.5, "b": true, "z": serde_json::Value::Null}}});
+        apply_cell_patch(&mut items, &answer).unwrap();
+        assert_eq!(field(&items[0], "n").as_deref(), Some("4.5"));
+        assert_eq!(field(&items[0], "b").as_deref(), Some("true"));
+        assert_eq!(field(&items[0], "z").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn patch_is_sparse_and_leaves_other_rows_alone() {
+        let mut items = vec![
+            row("MOCK-1", &[("days", "1.00")]),
+            row("MOCK-2", &[("days", "3.00")]),
+        ];
+        let answer = serde_json::json!({"cells": {"MOCK-2": {"days": "4.00"}}});
+        apply_cell_patch(&mut items, &answer).unwrap();
+        assert_eq!(field(&items[0], "days").as_deref(), Some("1.00"));
+        assert_eq!(field(&items[1], "days").as_deref(), Some("4.00"));
+    }
+
+    /// A script that found nothing to change answers without `cells` — that
+    /// is a result, not a malformed answer.
+    #[test]
+    fn empty_answer_is_not_an_error() {
+        let mut items = vec![row("MOCK-1", &[("days", "1.00")])];
+        for answer in [serde_json::json!({}), serde_json::json!({"commands": []})] {
+            let out = apply_cell_patch(&mut items, &answer).unwrap();
+            assert_eq!(out, PatchOutcome::default());
+        }
+        assert_eq!(field(&items[0], "days").as_deref(), Some("1.00"));
+    }
+
+    #[test]
+    fn rows_outside_this_load_are_counted_not_applied() {
+        let mut items = vec![row("MOCK-1", &[("days", "1.00")])];
+        let answer = serde_json::json!({"cells": {"GONE-9": {"days": "9.00"}}});
+        let out = apply_cell_patch(&mut items, &answer).unwrap();
+        assert_eq!(out.unknown, 1);
+        assert_eq!(out.applied, 0);
+    }
+
+    #[test]
+    fn malformed_shapes_are_rejected() {
+        let mut items = vec![row("MOCK-1", &[])];
+        for answer in [
+            serde_json::json!({"cells": ["MOCK-1"]}),
+            serde_json::json!({"cells": {"MOCK-1": "days"}}),
+            serde_json::json!({"cells": {"MOCK-1": {"days": ["1.0"]}}}),
+        ] {
+            assert!(apply_cell_patch(&mut items, &answer).is_err());
+        }
     }
 
     #[test]
