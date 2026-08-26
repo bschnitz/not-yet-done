@@ -187,6 +187,10 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) -> Ren
             None
         };
         let dim_row = data.jump_showing_labels && jump_match.is_none() && row.selectable;
+        // The row's own style override (a whole-row `highlights:` rule),
+        // already picked for its selection state. Resolved once per row —
+        // every physical line of a multi-line row wears the same one.
+        let row_override = style_override(row.style_id, row.selected_style_id, is_selected, data);
 
         // Smooth scrolling clips the first visible row's leading lines so it
         // can be partially scrolled off the top. Later rows always start at
@@ -210,7 +214,15 @@ pub(super) fn render(buf: &mut Buffer, area: Rect, data: &mut RenderData) -> Ren
             // A line opts out of selection styling via `highlight_on_select`
             // (e.g. a spacer line stays "outside" the selection block).
             let line_selected = is_selected && line.highlight_on_select && !dim_row;
-            let cols = render_data_row(buf, row_area, &line.cells, row_idx, line_selected, data);
+            let cols = render_data_row(
+                buf,
+                row_area,
+                &line.cells,
+                row_override,
+                row_idx,
+                line_selected,
+                data,
+            );
             // Fallback column geometry for header-less tables. Merged cells
             // report only the first column they cover, so this is a best
             // effort — a real header row is always the better source.
@@ -471,8 +483,13 @@ fn render_fixed_row(
         first_rendered = false;
         starts.push((spans.len(), cell_col));
 
-        // A header row is never the cursor row.
-        let col_fg = resolve_cell_fg(cell_override(cell, false, data), cell_col, data);
+        // A header row is never the cursor row, and carries no row override.
+        let col_fg = resolve_cell_fg(
+            style_override(cell.style_id, cell.selected_style_id, false, data),
+            None,
+            cell_col,
+            data,
+        );
         let normal = Style::default()
             .fg(col_fg)
             .bg(bg)
@@ -507,10 +524,17 @@ fn render_fixed_row(
 /// pre-fill uses the row-level base (Row or RowSelected) so separators and
 /// trailing whitespace inherit it; per-cell spans then override their own
 /// bg/fg when they sit on the column cursor.
+///
+/// `row_override` is the row's own style, resolved by the caller for this
+/// row's selection state. It replaces the row background before anything
+/// else is decided and contributes a foreground under every cell's own —
+/// so a whole-row highlight reaches the padding, and a cell rule can still
+/// put a colour on top of it.
 fn render_data_row(
     buf: &mut Buffer,
     area: Rect,
     cells: &[TableWidgetCell],
+    row_override: Option<Style>,
     row_idx: usize,
     selected: bool,
     data: &RenderData,
@@ -520,7 +544,14 @@ fn render_data_row(
     } else {
         data.style.resolved_style(ST::Row)
     };
-    let row_bg = row_base.bg.unwrap_or_default();
+    // A row override's background replaces the row's, which is what makes it
+    // reach the padding between and past the columns — a highlight that
+    // stopped at the last cell would read as a stripe, not a row.
+    let row_bg = row_override
+        .and_then(|s| s.bg)
+        .or(row_base.bg)
+        .unwrap_or_default();
+    let row_base = row_base.bg(row_bg);
     let hl_style = data.style.resolved_style(ST::Highlight);
     let prefix_style = data.style.resolved_style(ST::Prefix);
     let is_selected_row = data.focused && row_idx == data.selected_row;
@@ -564,7 +595,8 @@ fn render_data_row(
         };
         // The cell's own style override (a `highlights:` rule, the deleted
         // dim, …), already picked for this row's selection state.
-        let cell_override = cell_override(cell, is_selected_row, data);
+        let cell_override =
+            style_override(cell.style_id, cell.selected_style_id, is_selected_row, data);
         // An override's background loses to the column cursor: that is a
         // deliberate, transient pointer at one cell, and a highlight that
         // swallowed it would leave the user without a cursor exactly on the
@@ -573,7 +605,7 @@ fn render_data_row(
             (false, Some(bg)) => bg,
             _ => cell_base.bg.unwrap_or(row_bg),
         };
-        let col_fg = resolve_cell_fg(cell_override, cell_col, data);
+        let col_fg = resolve_cell_fg(cell_override, row_override, cell_col, data);
         // Per-column / per-cell color (`col_fg`, from a column `style:` or a
         // cell `style_id`) owns the foreground. Selecting a row changes only
         // the *background* (RowSelected bg), keeping each column's color — a
@@ -592,6 +624,7 @@ fn render_data_row(
             .fg(cell_fg)
             .bg(cell_bg)
             .add_modifier(cell_base.add_modifier)
+            .add_modifier(row_override.map(|s| s.add_modifier).unwrap_or_default())
             .add_modifier(cell_override.map(|s| s.add_modifier).unwrap_or_default());
         let cell_hl_style = Style::default()
             .fg(hl_style.fg.unwrap_or(cell_fg))
@@ -654,35 +687,40 @@ fn render_data_row(
     cols
 }
 
-/// The style a cell overrides its column with, or `None` when it declares
-/// none.
+/// Resolve a style-override pair against the map, or `None` when neither
+/// slot is set.
 ///
-/// On the cursor row [`TableWidgetCell::selected_style_id`] wins when the
-/// cell carries one; falling back to `style_id` keeps every override that
-/// predates the pair (the deleted dim, the header overlay) painting on the
-/// selected row exactly as it does elsewhere.
-fn cell_override(
-    cell: &TableWidgetCell,
+/// On the cursor row `selected` wins when there is one; falling back to
+/// `normal` keeps every override that predates the pair (the deleted dim,
+/// the header overlay) painting on the selected row exactly as it does
+/// elsewhere. Rows and cells share this — the pair means the same thing at
+/// both levels.
+fn style_override(
+    normal: Option<usize>,
+    selected: Option<usize>,
     is_selected_row: bool,
     data: &RenderData,
 ) -> Option<Style> {
     let id = if is_selected_row {
-        cell.selected_style_id.or(cell.style_id)
+        selected.or(normal)
     } else {
-        cell.style_id
+        normal
     };
     id.and_then(|id| data.style_map.get(id))
 }
 
+/// The foreground of one cell, most specific source first: the cell's own
+/// override, then the row's, then the column's declared colour.
 fn resolve_cell_fg(
     cell_override: Option<Style>,
+    row_override: Option<Style>,
     col_idx: usize,
     data: &RenderData,
 ) -> ratatui::style::Color {
-    if let Some(fg) = cell_override.and_then(|s| s.fg) {
-        return fg;
-    }
-    data.col_styles.get(col_idx).fg.unwrap_or_default()
+    cell_override
+        .and_then(|s| s.fg)
+        .or_else(|| row_override.and_then(|s| s.fg))
+        .unwrap_or_else(|| data.col_styles.get(col_idx).fg.unwrap_or_default())
 }
 
 fn spans_with_highlights<'a>(
