@@ -14236,6 +14236,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -14319,6 +14320,7 @@ mod tests {
                     on_event: None,
                 }],
                 children: vec![ChildDef {
+                    highlights: Vec::new(),
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -15018,6 +15020,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: Some(vec![
                     LineLayout {
@@ -15219,6 +15222,7 @@ mod tests {
         root.row_layout = None;
         root.smooth_scroll = false;
         root.children = vec![ChildDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: Some(vec![
                 LineLayout {
@@ -15583,6 +15587,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -15611,6 +15616,7 @@ mod tests {
                 preview: None,
                 actions: vec![],
                 children: vec![ChildDef {
+                    highlights: Vec::new(),
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -15769,6 +15775,7 @@ mod tests {
         children: Vec<ChildDef>,
     ) -> ChildDef {
         ChildDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -15861,6 +15868,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -16034,6 +16042,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -17112,6 +17121,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -18431,6 +18441,7 @@ mod tests {
         // test_config_with_tree gives databases(tree) → Schemas(tree).
         // Add a "Rows" leaf as Schemas' only child, with split: right.
         config.views[0].children[0].children.push(ChildDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -18536,6 +18547,7 @@ mod tests {
         // set and entries) when leaving the leaf.
         let mut config = test_config_with_tree();
         config.views[0].children[0].children.push(ChildDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -19050,6 +19062,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -20974,6 +20987,7 @@ mod tests {
                 manual_connect: false,
             },
             views: vec![ViewDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -21002,6 +21016,7 @@ mod tests {
                 preview: None,
                 actions: node_actions(view_actions),
                 children: vec![ChildDef {
+                    highlights: Vec::new(),
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -22502,6 +22517,7 @@ views:
         // Mirrors confluence.yaml's spaces tree (one space root that
         // recurses through pages).
         ViewDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -22530,6 +22546,7 @@ views:
             preview: None,
             actions: vec![],
             children: vec![ChildDef {
+                highlights: Vec::new(),
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,
@@ -24090,6 +24107,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             manual_connect: false,
         },
         views: vec![ViewDef {
+            highlights: Vec::new(),
             card: None,
             row_layout: None,
             smooth_scroll: false,
