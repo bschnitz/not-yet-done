@@ -140,6 +140,16 @@ pub enum Operator {
     /// Tree query: find the named task and all its descendants.
     /// `[in_tree, AcmeCorp]` → resolves to `path LIKE '%/<id>%'` for each match.
     InTree,
+    /// Regular-expression match against the raw field value:
+    /// `[status, matches, '^(Blocked|On Hold)$']`.
+    ///
+    /// In-memory only — there is no portable SQL translation, so the SeaORM
+    /// builder rejects it rather than matching nothing. Unanchored and
+    /// case-**sensitive**, unlike the text operators around it: those are a
+    /// search feature, while a regex here is a classification, and silent
+    /// case-folding in a classification is a surprise. Write `(?i)` for the
+    /// other behaviour.
+    Matches,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +174,7 @@ impl Operator {
             "not_in" | "NOT IN" => Some(Self::NotIn),
             "has_ancestor" => Some(Self::HasAncestor),
             "in_tree" => Some(Self::InTree),
+            "matches" | "~" => Some(Self::Matches),
             _ => None,
         }
     }
@@ -343,7 +354,22 @@ impl<'de> Visitor<'de> for FilterExprVisitor {
             let val: serde_yaml::Value = seq
                 .next_element()?
                 .ok_or_else(|| de::Error::invalid_length(2, &"3 elements"))?;
-            yaml_value_to_rhs(&val).map_err(de::Error::custom)?
+            if op == Operator::Matches {
+                // A pattern is always a string, never a column reference and
+                // never a number: `[key, matches, 'a.b']` is a regex with a
+                // wildcard in it, not the column `b` of table `a`, and
+                // `[n, matches, '2.5']` must not be coerced to a float.
+                match val {
+                    serde_yaml::Value::String(s) => Rhs::Lit(Literal::String(s)),
+                    other => {
+                        return Err(de::Error::custom(format!(
+                            "the right-hand side of `matches` must be a regex string, got {other:?}"
+                        )));
+                    }
+                }
+            } else {
+                yaml_value_to_rhs(&val).map_err(de::Error::custom)?
+            }
         } else {
             Rhs::None
         };
