@@ -945,7 +945,7 @@ mod image_placement_tests {
 }
 
 #[cfg(test)]
-mod fg_precedence_tests {
+mod style_precedence_tests {
     use super::super::{TableWidgetCell, TableWidgetLine, TableWidgetRow};
     use super::*;
     use ratatui::style::Color;
@@ -1092,5 +1092,111 @@ mod fg_precedence_tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut data);
         assert_eq!(buf.cell(Position::new(0, 0)).unwrap().fg, Color::Yellow);
+    }
+
+    // ── row overrides (a whole-row `highlights:` rule) ───────────────────
+
+    /// One unselected row wearing `style_id` 0, rendered 10 columns wide.
+    fn row_with_override(row: TableWidgetRow, map: Vec<Style>, focused: bool) -> Buffer {
+        let style = TableStyle::new()
+            .set_style(ST::Row, Style::default().fg(Color::Red).bg(Color::Black))
+            .set_style(
+                ST::RowSelected,
+                Style::default().fg(Color::Yellow).bg(Color::Blue),
+            );
+        let col_styles = ColumnStyles::default();
+        let style_map = StyleMap::new(map);
+        render_one(&[row], &style, &col_styles, &style_map, focused, 1)
+    }
+
+    #[test]
+    fn a_row_override_background_reaches_past_the_last_column() {
+        // The point of a row rule: the whole line changes colour, not just
+        // the text cells — so the padding after the last column must wear it
+        // too, or the highlight ends mid-row.
+        let row = TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())]);
+        let buf = row_with_override(
+            row.with_style_pair(0, 0),
+            vec![Style::default().bg(Color::Green)],
+            false,
+        );
+        assert_eq!(buf.cell(Position::new(0, 0)).unwrap().bg, Color::Green);
+        assert_eq!(buf.cell(Position::new(9, 0)).unwrap().bg, Color::Green);
+    }
+
+    #[test]
+    fn a_cell_override_sits_on_top_of_the_row_override() {
+        let mut row =
+            TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string()).with_style(1)]);
+        row.style_id = Some(0);
+        let buf = row_with_override(
+            row,
+            vec![
+                Style::default().fg(Color::Cyan).bg(Color::Green),
+                Style::default().fg(Color::Magenta),
+            ],
+            false,
+        );
+        let cell = buf.cell(Position::new(0, 0)).unwrap();
+        assert_eq!(cell.fg, Color::Magenta, "the cell's own foreground wins");
+        assert_eq!(cell.bg, Color::Green, "the row's background stays under it");
+    }
+
+    #[test]
+    fn the_second_slot_takes_over_on_the_cursor_row() {
+        let row = TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())]);
+        let buf = row_with_override(
+            row.with_style_pair(0, 1),
+            vec![
+                Style::default().bg(Color::Green),
+                Style::default().bg(Color::Magenta),
+            ],
+            true,
+        );
+        assert_eq!(buf.cell(Position::new(0, 0)).unwrap().bg, Color::Magenta);
+    }
+
+    #[test]
+    fn without_a_second_slot_the_override_stays_on_the_cursor_row() {
+        // No `selected:` in the rule — the highlight must not disappear
+        // exactly where the cursor is.
+        let mut row = TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())]);
+        row.style_id = Some(0);
+        let buf = row_with_override(row, vec![Style::default().bg(Color::Green)], true);
+        assert_eq!(buf.cell(Position::new(0, 0)).unwrap().bg, Color::Green);
+    }
+
+    /// `col_styles` colouring column 0 green, against `map` as the style map.
+    fn against_a_green_column(map: Vec<Style>, row: TableWidgetRow) -> Buffer {
+        let style = TableStyle::new().set_style(ST::Row, Style::default().fg(Color::Red));
+        let col_styles = ColumnStyles::new(vec![Style::default().fg(Color::Green)]);
+        let style_map = StyleMap::new(map);
+        render_one(&[row], &style, &col_styles, &style_map, false, 1)
+    }
+
+    #[test]
+    fn a_row_overrides_foreground_wins_over_a_column_colour() {
+        // A column colour is static decoration from the view config; a row
+        // override is the user saying this row is special. If the palette
+        // outranked it, an `fg:` on a row rule would be invisible on exactly
+        // the columns that carry a colour.
+        let row = TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())]);
+        let buf = against_a_green_column(
+            vec![Style::default().fg(Color::Cyan).bg(Color::Black)],
+            row.with_style_pair(0, 0),
+        );
+        assert_eq!(buf.cell(Position::new(0, 0)).unwrap().fg, Color::Cyan);
+    }
+
+    #[test]
+    fn a_row_override_without_a_foreground_leaves_the_column_colour_alone() {
+        // The common case — a rule that only sets `bg:`. It must tint the
+        // line without flattening the palette on it.
+        let row = TableWidgetRow::new(vec![TableWidgetCell::plain("Hi".to_string())]);
+        let buf = against_a_green_column(
+            vec![Style::default().bg(Color::Black)],
+            row.with_style_pair(0, 0),
+        );
+        assert_eq!(buf.cell(Position::new(0, 0)).unwrap().fg, Color::Green);
     }
 }
