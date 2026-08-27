@@ -22,6 +22,7 @@ pub mod script_buffer;
 pub mod slug;
 pub mod sort_serde;
 pub mod text;
+pub mod workspace;
 
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};

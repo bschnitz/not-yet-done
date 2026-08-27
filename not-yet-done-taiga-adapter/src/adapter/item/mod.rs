@@ -18,8 +18,10 @@ mod clone;
 mod convert;
 mod edit_full;
 mod edit_with_comments;
+mod markdown;
 mod slugs;
 mod template;
+mod workspace;
 
 /// Detail fetched eagerly for the body/preview *and* for edit flows. Most
 /// fields surface in the editable template; `version` is Taiga's optimistic
@@ -66,6 +68,13 @@ pub(super) fn item_actions(item_type: Option<ItemType>) -> Vec<NodeAction> {
             InputSpec::FilePicker { multi: true },
         ),
         NodeAction::new("clone", "clone", InputSpec::Editor),
+        NodeAction::new(
+            "export_workspace",
+            "export workspace",
+            InputSpec::Form {
+                fields: vec![FormFieldSpec::text("dir", "Workspace base directory")],
+            },
+        ),
     ];
     if let Some(item_type) = item_type {
         // The convert menu (Picker) plus its hidden per-target editor actions.
@@ -84,6 +93,10 @@ pub(super) struct TaigaItemNode {
     pub(super) client: Arc<TaigaClient>,
     pub(super) detail: ItemDetail,
     pub(super) composite_id: String,
+    /// Base directory for the persistent per-item workspace, attached at the
+    /// node-building boundary via [`TaigaItemNode::with_workspace_base`].
+    /// `None` on internal rebuilds, which never dispatch `export_workspace`.
+    workspace_base: Option<Arc<std::path::PathBuf>>,
 }
 
 impl TaigaItemNode {
@@ -98,7 +111,16 @@ impl TaigaItemNode {
             client,
             detail,
             composite_id,
+            workspace_base: None,
         })
+    }
+
+    /// Attach the item-workspace base directory. Called where the adapter
+    /// builds a node from an id, so `export_workspace` can materialise
+    /// `<base>/<ref>-<slug>/` in the folder the config names.
+    pub(super) fn with_workspace_base(mut self, base: Arc<std::path::PathBuf>) -> Self {
+        self.workspace_base = Some(base);
+        self
     }
 }
 
@@ -356,6 +378,21 @@ impl Node for TaigaItemNode {
         }
     }
 
+    /// Prefill the `export_workspace` form's `dir` field with the configured
+    /// workspace base so the user only edits it for a one-off location.
+    async fn form_prep(
+        &self,
+        action_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut prefill = std::collections::HashMap::new();
+        if action_id == "export_workspace" {
+            if let Some(base) = &self.workspace_base {
+                prefill.insert("dir".to_string(), base.display().to_string());
+            }
+        }
+        Ok(prefill)
+    }
+
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         // A `convert:<target>` id routes to the target-specific convert editor.
         if let Some(target) = convert::parse_convert_target(action_id) {
@@ -417,6 +454,10 @@ impl Node for TaigaItemNode {
                 self.execute_upload_attachment(paths).await
             }
             ("clone", ActionInput::Edited { text, .. }) => self.execute_clone(&text).await,
+            ("export_workspace", ActionInput::Form(values)) => {
+                let dir = values.get("dir").map(String::as_str).unwrap_or("");
+                self.execute_export_workspace(dir).await
+            }
             (convert::CONVERT_ACTION_ID, ActionInput::Picked(value)) => {
                 // Menu step: the picked value is a `convert:<target>` editor
                 // action id. Hand it back so the frontend opens that editor on
@@ -473,6 +514,52 @@ impl TaigaItemNode {
 
         Ok(ActionOutcome::Done {
             message: Some(format!("opened {url}")),
+        })
+    }
+
+    /// Materialise the item workspace: `<base>/<ref>-<slug>/` with `ticket.md`
+    /// (header tables + description + comments) and `attachments/`. No editor
+    /// and no write-back — a local, read-oriented snapshot, and the source the
+    /// `o p` HTML preview renders.
+    async fn execute_export_workspace(&self, base_input: &str) -> Result<ActionOutcome> {
+        let base = if base_input.trim().is_empty() {
+            self.workspace_base
+                .as_ref()
+                .map(|b| b.as_ref().clone())
+                .ok_or_else(|| {
+                    ContentError::Other("export_workspace: no workspace base configured".into())
+                })?
+        } else {
+            not_yet_done_content::download::prepare_target_dir(base_input)?
+        };
+        let comments = fetch_comments(&self.client, self.detail.item_type, self.detail.id)
+            .await
+            .map_err(|e| ContentError::Other(e.into()))?;
+        let attachments = list_attachments(
+            &self.client,
+            self.detail.item_type,
+            self.detail.id,
+            self.detail.project_id,
+        )
+        .await
+        .map_err(|e| ContentError::Other(e.into()))?;
+        let md = markdown::item_markdown(&self.detail, &comments, &attachments);
+        let key = markdown::workspace_key(&self.detail);
+        let dir = workspace::materialize(
+            &self.client,
+            &key,
+            &self.detail.subject,
+            &md,
+            &attachments,
+            &base,
+        )
+        .await?;
+        Ok(ActionOutcome::Done {
+            message: Some(format!(
+                "{}: exported workspace to {}",
+                markdown::display_ref(&self.detail),
+                dir.display()
+            )),
         })
     }
 

@@ -105,6 +105,7 @@ impl TypedAdapterFactory for TaigaAdapterFactory {
             connect_secs,
         };
 
+        let ticket_workspace = cfg.ticket_workspace;
         let auth = AuthBridge::new(cfg.url, Arc::clone(&db), scope_id, cfg.auth, timeouts)
             .map_err(|e| ContentError::Other(e.into()))?;
 
@@ -123,6 +124,7 @@ impl TypedAdapterFactory for TaigaAdapterFactory {
             instance_id.to_string(),
             db,
             scope_id,
+            ticket_workspace,
         )))
     }
 }

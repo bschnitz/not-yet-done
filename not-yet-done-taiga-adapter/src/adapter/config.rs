@@ -37,6 +37,12 @@ pub struct TaigaConfig {
     /// Falls back to a private SQLite file under the user's local data dir.
     #[serde(default)]
     pub(super) db: Option<DbConfig>,
+    /// Base directory for the persistent per-item workspace the
+    /// `export workspace` action materialises (`<base>/<ref>-<slug>/`
+    /// with `ticket.md` + `attachments/`). Tilde-expanded. Defaults to
+    /// `<local data>/not_yet_done/taiga/<instance>/tickets`.
+    #[serde(default)]
+    pub(super) ticket_workspace: Option<String>,
     /// Hard ceiling (seconds) on every HTTP request to the Taiga API,
     /// including the time spent establishing the connection.
     ///
