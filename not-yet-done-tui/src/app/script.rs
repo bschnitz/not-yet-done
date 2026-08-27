@@ -1349,8 +1349,21 @@ impl App {
                 return;
             }
         };
+        // The one refusal this seam has to make. Everything arriving here is
+        // either a manual run or a `reload` hook, and both land *after* the
+        // table was built from the rows — there is nothing left to colour.
+        // Said out loud rather than dropped quietly, so a script bound to the
+        // wrong hook reads as refused instead of as half-working.
+        let misplaced = highlights_rejection(&parsed);
+        if let Some(reason) = &misplaced {
+            self.notify_error(reason.clone());
+        }
         let Some(cmds) = parsed.get("commands").and_then(|v| v.as_array()) else {
-            self.notify_error("Script output JSON missing `commands` array".to_string());
+            // One message per mistake: a script that answered with nothing but
+            // highlights has already been told what was wrong with it.
+            if misplaced.is_none() {
+                self.notify_error("Script output JSON missing `commands` array".to_string());
+            }
             return;
         };
         for entry in cmds {
@@ -1365,6 +1378,19 @@ impl App {
             self.execute_cmdline(stripped);
         }
     }
+}
+
+/// Why a script's output file cannot carry `highlights`, or `None` when it
+/// does not try to.
+///
+/// Colours reach the table through one channel only: the answer of a `load`
+/// hook, read before the rows are handed to the pane (see
+/// [`crate::app::script_hook::App::run_load_hooks`]). By the time an output
+/// file is read here the table already exists, so the key is refused rather
+/// than silently ignored.
+fn highlights_rejection(parsed: &serde_json::Value) -> Option<String> {
+    parsed.get("highlights")?;
+    Some("Script output has `highlights` — ignored (only a `load` hook paints rows)".to_string())
 }
 
 #[cfg(test)]
@@ -1499,5 +1525,28 @@ mod tests {
         };
         let dir = batch.scripts_dir();
         assert!(dir.ends_with("scripts/trackings/tracking_entry"), "{dir:?}");
+    }
+
+    /// A `reload` hook (or a manual run) answering with colours is told so:
+    /// the rows it would paint have already been built into a table.
+    #[test]
+    fn an_output_file_carrying_highlights_is_refused() {
+        let parsed = serde_json::json!({
+            "highlights": {"row-1": {"status": {"bg": "#202020"}}}
+        });
+        let reason = highlights_rejection(&parsed).expect("refused");
+        assert!(reason.contains("load"), "{reason}");
+    }
+
+    /// The refusal is about the key being there at all, not about what is
+    /// under it — an empty map is the same mistake.
+    #[test]
+    fn even_an_empty_highlights_key_is_refused() {
+        assert!(highlights_rejection(&serde_json::json!({"highlights": {}})).is_some());
+    }
+
+    #[test]
+    fn an_ordinary_commands_answer_is_left_alone() {
+        assert!(highlights_rejection(&serde_json::json!({"commands": [":reload"]})).is_none());
     }
 }
