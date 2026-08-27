@@ -28,7 +28,7 @@
 //! | `*bold*`                      | `**bold**`                        |
 //! | `_italic_`                    | `_italic_` (already valid MD)     |
 //! | `-strike-`                    | `~~strike~~`                      |
-//! | `{{mono}}`                    | `` `mono` ``                      |
+//! | `{{mono}}`, `{{{}mono{}}}`    | `` `mono` `` (padding dropped)    |
 //! | `[text\|url]`                 | `[text](url)`                     |
 //! | `{color:c}…{color}`           | `<span style="color:c">…</span>`  |
 //! | single newline (in paragraph) | line + trailing `\` (hard break)  |
@@ -893,6 +893,11 @@ pub(super) fn normalize_ws(s: &str) -> String {
     // drop all blank lines.
     let s = s.replace("\r\n", "\n").replace('\r', "\n");
     let s = split_block_macros(&s);
+    // Drop the empty-macro padding Jira's editor puts inside a monospace span
+    // (`{{{}x{}}}` → `{{x}}`). It renders as nothing and the converter cannot
+    // put it back, so — like the cosmetic table and panel padding below — it
+    // has to be insignificant to the guard.
+    let s = W_MONO.replace_all(&s, "{{${1}}}").into_owned();
     let lines: Vec<&str> = s.split('\n').collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -1685,7 +1690,16 @@ static ESCAPE_MACRO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{[-*_+^~]\
 static W_IMAGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!([^!|\r\n]+\.[A-Za-z0-9]+)(?:\|([^!\r\n]*))?!").unwrap());
 
-static W_MONO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{(.+?)\}\}").unwrap());
+/// Wiki monospace `{{x}}`, tolerating the empty macro `{}` as padding on either
+/// side (`{{{}x{}}}`). Jira's rich-text editor writes that padding whenever the
+/// span touches other markup, and Jira's own renderer drops it — so it is not
+/// content and must not reach the Markdown. It also has to be *matched*, not
+/// merely stripped afterwards: the lazy `.+?` would otherwise close on the
+/// padding's own brace and hand back a mangled span (`` `{}x{` `` plus a stray
+/// `}`). Because the padding cannot be restored on the way back,
+/// [`normalize_ws`] canonicalizes it away on both sides of the round-trip.
+static W_MONO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{\{(?:\{\})?(.+?)(?:\{\})?\}\}").unwrap());
 static W_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]|]+)\|([^\]]+)\]").unwrap());
 static W_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)?)\*").unwrap());
 // Jira strikethrough `-text-`. The dashes are only delimiters at a word
@@ -2128,6 +2142,18 @@ a title-less panel whose sole attribute makes its opener marker long enough
         assert_roundtrip("an _*emph*_ word", "an _**emph**_ word");
         assert_roundtrip("a -struck- word", "a ~~struck~~ word");
         assert_roundtrip("use {{code}} here", "use `code` here");
+    }
+
+    /// Jira's rich-text editor pads a monospace span with the empty macro `{}`
+    /// (`{{{}x{}}}`), which its own renderer drops. The padding must not leak
+    /// into the Markdown, and dropping it must stay invisible to the guard.
+    #[test]
+    fn mono_with_empty_macro_padding() {
+        assert_roundtrip("the {{{}table_name{}}} column", "the `table_name` column");
+        assert_roundtrip("only {{{}left_pad}} here", "only `left_pad` here");
+        assert_roundtrip("only {{right_pad{}}} here", "only `right_pad` here");
+        // A ticket that never had the padding keeps converting byte-for-byte.
+        assert_eq!(wiki_to_md("plain {{mono}}"), "plain `mono`");
     }
 
     #[test]
