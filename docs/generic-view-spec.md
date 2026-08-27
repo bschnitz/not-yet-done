@@ -1536,6 +1536,380 @@ menu and vice versa.
 - Levels that expose no sortable columns say so via a notification instead of
   opening an empty popup — the same gate `S` uses.
 
+### `highlights:` — painting rows, columns and cells
+
+A level can declare that certain **rows**, **columns** and **cell values** are
+painted differently — foreground and background, for the normal and for the
+cursor state, each of the four independently optional. On top of that a
+**script** bound to the `load` hook can compute a colour per row, so a colour
+can be a function of the data rather than a fixed rule (the motivating case: a
+ramp that grows more alarming as an "actual" column climbs past its
+"estimated" one).
+
+Two producers, **one style grammar**: everything in this section is shared
+between the YAML rules and the script channel, only the way a style is
+_selected_ differs.
+
+#### Named styles: `styles:`
+
+A map of name → style, allowed in `tui-theme.yaml` (shared by every view) and
+at the top level of a view file. On a name collision the **view file wins**, so
+a view can specialise a shared name without renaming it everywhere.
+
+```yaml
+# tui-theme.yaml or <view>.yaml
+styles:
+  over-budget:
+    fg: "#ffffff"
+    bg: "#7a1c1c"
+    modifiers: [bold]
+    selected: { bg: "#a52222" }
+  muted: { fg: "#6c6c6c" }
+```
+
+#### A style value
+
+Wherever a style is expected (`style:`, `selected:`, a script's answer), three
+forms are accepted:
+
+| Form                               | Meaning                     |
+| ---------------------------------- | --------------------------- |
+| `over-budget`                      | a name from `styles:`       |
+| `{ fg: "#ff5555", bg: "#2a1111" }` | inline definition           |
+| `[bold, italic]`                   | modifiers only, no recolour |
+
+Fields of the inline form, **all optional**:
+
+| Field       | Value                                                              |
+| ----------- | ------------------------------------------------------------------ |
+| `fg`        | `#rrggbb`, `auto`, or a theme role name                            |
+| `bg`        | `#rrggbb` or a theme role name (`auto` is meaningless and warns)   |
+| `modifiers` | `bold`, `dim`, `italic`, `underlined`, `reversed`, `crossed_out`   |
+| `selected`  | a nested style used while the row is the cursor row                |
+| `modes`     | where the style applies (see [Modes](#modes)); default: everywhere |
+
+`selected:` does not nest, and `modes:` inside it is meaningless (the selected
+state is not a render surface) — both are reported and ignored.
+
+**Hex is the primary form here, deliberately.** Everywhere else in this config
+colours go through theme roles, and for structural chrome that is right: a
+theme swap should recolour the app. Highlights are the opposite case — they
+encode a _domain_ meaning ("over budget", "stale") that the theme knows nothing
+about, and a computed ramp needs values the theme has no names for. Role names
+stay accepted (`fg: accent` keeps working), but they are the convenience, not
+the rule. Only the `#` form is read as a colour: a bare `abc123` is far more
+likely a misspelt role than a hex value, and letting it through as one would
+swallow the warning.
+
+**Name resolution order:** `styles:` of the view file → `styles:` of
+`tui-theme.yaml` → theme role name → unknown, reported and ignored.
+
+#### `fg: auto`
+
+Picks a foreground with usable contrast against the **effective background at
+that point**, from two configurable candidates:
+
+```yaml
+# tui-theme.yaml
+auto_fg_light: "#f5f5f5" # default
+auto_fg_dark: "#101010" # default
+```
+
+Both are scored by WCAG relative-luminance contrast against the resolved
+background and the better one wins — a fixed lightness threshold would be wrong
+as soon as the two candidates are not black and white. Two rules that are easy
+to get wrong:
+
+- The **cursor state is computed separately.** If `selected:` carries a
+  different `bg`, `fg: auto` is re-evaluated against it; otherwise contrast
+  would collapse on exactly the row the user is looking at.
+- If **no `bg` is set anywhere** in the stack at that point, `fg: auto`
+  resolves to nothing and the layer below keeps its foreground. Resolving it
+  against the theme background instead would silently throw the column colour
+  away.
+
+#### Modes
+
+`modes:` restricts a highlight to certain render surfaces:
+
+| Mode      | Surface                       |
+| --------- | ----------------------------- |
+| `table`   | the normal table              |
+| `card`    | card mode (`card:`)           |
+| `details` | the record-detail split (`o`) |
+| `tree`    | the label line in tree mode   |
+
+Omitted = every surface the style can technically apply to. It may be written
+in **two places**, and they mean different things:
+
+| Written on | Means                                     |
+| ---------- | ----------------------------------------- |
+| a style    | this _colour_ is meant for those surfaces |
+| a rule     | this _rule_ fires only on those surfaces  |
+
+**The rule wins**, replacing the style's list outright rather than intersecting
+with it. The style's list is the default a shared style brings along; a rule
+that states its own reach has the last word. Intersecting was considered and
+dropped: a style saying `[table]` and a rule saying `[card]` would then paint
+nothing at all, with nothing to report — a silent empty result is a worse
+failure than a rule overriding its style.
+
+Both places are needed. Without the rule level, a named style used by two rules
+of different reach would have to be duplicated under two names differing in
+nothing but their `modes:`. Without the style level a script could not say it
+at all: a `load` hook answers with style objects, never with rules.
+
+In `card` and `details` there are no columns in the layout sense, but there are
+fields — a rule naming `columns: [estimate]` paints the **value** of the
+`estimate` field there. The field _label_ is not touched (that is what
+`card.label_style` is for).
+
+#### The rules
+
+A list per level, next to `columns:` — on a root view, on any `children:` entry
+and on any tree level. Every entry has an optional selector for _what_ is
+painted and an optional condition for _when_.
+
+```yaml
+- name: tickets
+  node_type: "jira:issue"
+  columns: [...]
+
+  highlights:
+    # column — no condition, so the whole column, every row
+    - columns: [estimate]
+      style: { bg: "#1c2430", selected: { bg: "#2c3a50" } }
+
+    # row — no column selector, so the whole row
+    - when:
+        and:
+          - [status, "!=", Done]
+          - [blocked_by, is_not_null]
+      style: over-budget
+
+    # cell — both
+    - columns: [priority]
+      when: { field: priority, matches: "(?i)^(highest|blocker)$" }
+      style: hot
+      modes: [table, card]
+
+    # one shared style, two reaches
+    - when: { field: over_budget, matches: "^yes$" }
+      style: over-budget
+      modes: [table] # a red band across the row reads well in a table
+    - columns: [actual_days]
+      when: { field: over_budget, matches: "^yes$" }
+      style: over-budget
+      modes: [card, details] # a fully red card would not
+```
+
+| `columns:` | `when:` | Result                                               |
+| ---------- | ------- | ---------------------------------------------------- |
+| set        | unset   | those columns, in every row                          |
+| unset      | set     | the whole row, where the condition holds             |
+| set        | set     | those columns, in the rows where the condition holds |
+
+`columns:` selects _what is painted_, `when:` decides _when_ — the two are
+orthogonal, which is why there is no `scope:` field. In particular
+`columns: [key]` with `when: { field: status, … }` is well-defined: paint
+`key`, decide on `status`.
+
+Columns are named by their **`key`**, not their `label` — stable across
+renames, and the key is what the script channel and the filter expressions use
+too. Note that there is **no `selected:` on the rule itself**: the cursor
+variant lives inside the style (`style: { bg: …, selected: { bg: … } }`), or
+inside the named style the rule points at.
+
+**Highlights are not inherited.** Unlike `columns:` and `actions:`, a tree
+level does not pick up its parent's rules — a rule paints the level that
+declares it and no other. A tree whose levels should all look alike repeats the
+block (or, more usually, names the same entry from `styles:`).
+
+#### `when:` — two forms
+
+**Short form** — one field, one regex:
+
+```yaml
+when: { field: status, matches: "^(Blocked|On Hold)$" }
+```
+
+**Full form** — any expression of the filter DSL (see “Filter DSL” in the README), the same one
+saved queries are written in, evaluated against the row:
+
+```yaml
+when:
+  or:
+    - [due, "<", today]
+    - [labels, has, hotfix]
+```
+
+The short form is sugar for `[<field>, matches, <regex>]`, so there is one
+stored representation and one evaluator, not two. A numeric or date comparison
+therefore has to be written in the list form — `when: { field: x, '>': 5 }` is
+not a thing, `when: [x, '>', 5]` is.
+
+Evaluation is **purely in memory** over the rows the adapter delivered — custom
+columns and `load`-hook-patched cells included, since both are ordinary
+metadata fields by the time highlighting runs. No database is involved.
+
+`matches` also exists in the shared DSL now, which means it can be written into
+a _saved query_ against the task DB — where it fails loudly with "operator not
+supported in SQL filters" rather than matching nothing.
+
+##### Regex semantics
+
+- Matched against the **raw field value**, not the rendered cell text. Against
+  the rendering, a `kind: duration` column would be matched as `1h 30m` instead
+  of `5400`, and a narrow column would be matched including its `…`.
+- Unanchored and case-**sensitive**; `(?i)` is available. This deviates from
+  the filter DSL's text comparisons, which are case-insensitive by design (they
+  are a search feature) — a highlight is a classification, and silent
+  case-folding there is a surprise.
+- Compiled once when the view config is loaded, not per row. An invalid regex
+  disables that one rule and is reported; it is never a panic in a render path.
+- Write regexes as **single-quoted** YAML scalars. A double-quoted scalar
+  processes backslash escapes, so `"\d+"` is a YAML error before the regex
+  engine ever sees it, while `'\d+'` arrives intact. This is the first thing
+  anyone trips over.
+
+#### Layering and precedence
+
+All matching rules apply, **in file order, later wins per field**: a row rule
+can lay down a background and a cell rule put a foreground on top of it. The
+full stack, bottom to top, each layer setting only the fields it names:
+
+`Theme` → `ColumnDef.style` → `highlights:` rules (file order) → script
+highlights → the `selected:` of whichever layers set one
+
+Within one row the render precedence is
+`cell override > row override > column colour > row base`.
+
+Two consequences worth stating:
+
+- If a rule sets `style.bg` but no `selected.bg`, the cursor keeps its normal
+  `RowSelected` background — otherwise the cursor would disappear on exactly
+  the rows that were made conspicuous.
+- The cursor row **does** keep the normal layer's foreground and modifiers;
+  only the background is dropped. A highlight that vanished under the cursor
+  would be worse than none, and a rule that wants its background there too says
+  so with the same value in `selected.bg`.
+
+#### Validation
+
+Every problem a highlight can have is a **warning, never a broken file**: an
+unresolvable style paints nothing, a regex that does not compile matches
+nothing, so a typo costs that one rule while the rest of the view keeps
+working. The messages carry the level they came from
+(`tickets > comments.highlights[1]: …`), because a rule buried three drill
+levels deep is otherwise a needle. A rule naming a column the level does not
+have is reported the same way; a rule naming a column that is merely _hidden_
+right now is legal and simply paints nothing.
+
+#### The script channel
+
+The `load` hook's answer may carry a `highlights` key next to `cells`:
+
+```json
+{
+  "cells": { "ABC-1": { "actual_days": "6.5" } },
+  "highlights": {
+    "ABC-1": {
+      "actual_days": { "bg": "#7a1c1c", "fg": "auto" },
+      "*": { "bg": "#2a1414" }
+    },
+    "*": { "actual_days": { "modifiers": ["bold"] } }
+  }
+}
+```
+
+Same addressing as `cells` (row id → column key → …), same error handling
+(unknown row ids counted and reported, never fatal), and the value is a style
+in the grammar above — a name from `styles:` or an inline object, `modes:`
+included. `"*"` is reserved in **both** axes:
+
+| Painted         | JSON                                  |
+| --------------- | ------------------------------------- |
+| one cell        | `{"ABC-1": {"actual_days": <style>}}` |
+| one row         | `{"ABC-1": {"*": <style>}}`           |
+| one column      | `{"*": {"actual_days": <style>}}`     |
+| the whole table | `{"*": {"*": <style>}}`               |
+
+Specificity, least to most specific: `*`/`*` → `*`/column → row/`*` →
+row/column. A row whose adapter id is literally `*` is not addressable.
+
+**Script highlights win over the YAML rules**, still layering field by field: a
+rule that only sets `fg` and a script that only sets `bg` combine. The script
+looked at the actual row, so it holds the more specific information. Several
+scripts on one load fold in name order, the later one having the last word per
+address — the same order their `cells` patches take effect in.
+
+**Only the `load` hook.** A `reload` hook — or a manual run from the menu —
+answering with `highlights` is refused with a message: by the time either of
+those runs, the table has already been built from the rows and there is nothing
+left to paint. An answer consisting of nothing but `highlights` gets exactly
+that one message, not a second one about the missing `commands` array.
+
+**Staleness.** The hook runs on load. Editing a value in the TUI leaves its
+colour stale until the next reload. For the ratio case above that cannot bite —
+the value and its colour are computed in the same run, so they cannot disagree
+— but a script that colours from something it did not also patch should be read
+with that in mind.
+
+A worked example, bound with `ctrl+h` → `load` in the script menu
+(`# mode: background` is mandatory; interactive and capture scripts are refused
+as hooks):
+
+```python
+#!/usr/bin/env python3
+# scope: table
+# mode: background
+import json, sys
+
+payload = json.load(open(sys.argv[1]))
+out = {}
+
+def ramp(ratio):
+    """0.0 -> unobtrusive, 1.0 -> warning, >1.3 -> alarm."""
+    t = max(0.0, min(1.5, ratio)) / 1.5
+    r = int(0x1E + t * (0xC0 - 0x1E))
+    g = int(0x1E + (1 - t) * 0x40)
+    return f"#{r:02x}{g:02x}1e"
+
+for row in payload["rows"]:
+    f = row["fields"]
+    try:
+        actual, est = float(f.get("actual_days", 0)), float(f.get("estimated_days", 0))
+    except ValueError:
+        continue
+    if est <= 0:
+        continue
+    out[row["id"]] = {"actual_days": {"bg": ramp(actual / est), "fg": "auto"}}
+
+print(json.dumps({"highlights": out}))
+```
+
+#### Surfaces: what a rule looks like where
+
+What a rule _says_ about an item does not depend on where the item is drawn —
+only the geometry does. The same decision is mapped onto four layouts:
+
+| Surface   | A rule without `columns:` | A rule with `columns:`                       |
+| --------- | ------------------------- | -------------------------------------------- |
+| `table`   | the whole row             | those cells                                  |
+| `card`    | the whole card            | the **value** span of those fields           |
+| `details` | every line of the split   | the value of those fields, wrapping included |
+| `tree`    | the whole row of a level  | those cells, if the level renders them       |
+
+Two things to know about the edges:
+
+- In the record-detail split the rules are the **source level's**, and they are
+  evaluated once against the record on show; a value that wraps over several
+  lines wears the colour on all of them.
+- In tree mode a cell rule only reaches a row when its column key is among the
+  columns that level actually renders. The `tree_label` column carries
+  pre-styled segments (connectors, icon, label), so a cell override there may
+  not be visible — colour the row instead.
+
 ### Second example: `confluence.yaml`
 
 ```yaml
@@ -2513,10 +2887,10 @@ a suffix (`[reload]`). Hooks run **unattended**, so only the two modes that need
 neither the terminal nor an editor may be bound: `background` and `commands`;
 `interactive` and `capture` are refused when binding.
 
-| hook     | fires                                            | payload                    | may answer with |
-| -------- | ------------------------------------------------ | -------------------------- | --------------- |
-| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`      |
-| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`         |
+| hook     | fires                                            | payload                    | may answer with       |
+| -------- | ------------------------------------------------ | -------------------------- | --------------------- |
+| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`            |
+| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`, `highlights` |
 
 Both fire on the first load of a view and on every drill-down into a level, and
 neither fires when the fetch failed — an empty view that only looks empty
@@ -2552,6 +2926,22 @@ quietly dropped.
 
 The column still has to exist in the view's `columns:` — a `load` hook supplies
 values, it does not declare columns.
+
+**`highlights` — colour the rows on their way in.** The same answer may carry a
+`highlights` map in the same addressing, so a script can paint what it just
+computed:
+
+```json
+{ "highlights": { "<row id>": { "<column key>": "<style>" } } }
+```
+
+`"*"` is reserved in both axes (a whole row, a whole column, the whole table),
+and the style is written in the grammar of
+[`highlights:`](#highlights--painting-rows-columns-and-cells), where the
+channel is documented in full. Like `commands` in a `load` hook, `highlights`
+in a **`reload`** hook — or in a manual run from the menu — is refused with a
+message: by then the table is already built from the rows and there is nothing
+left to paint.
 
 **Which one to use.** If the value can be computed from the rows themselves plus
 local data, `load` is both cheaper and correct at first sight. If the script has
