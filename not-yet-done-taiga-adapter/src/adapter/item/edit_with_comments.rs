@@ -43,7 +43,7 @@ fn render_comment_header(c: &TaigaComment) -> String {
 }
 
 /// Trim the time component off ISO timestamps; keep up to minute precision.
-fn short_ts(ts: &str) -> String {
+pub(super) fn short_ts(ts: &str) -> String {
     if let Some((date, rest)) = ts.split_once('T') {
         let time_part = rest.split('.').next().unwrap_or(rest);
         let time_part = time_part.split('+').next().unwrap_or(time_part);

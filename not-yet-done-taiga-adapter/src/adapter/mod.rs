@@ -44,6 +44,11 @@ pub struct TaigaAdapter {
     #[allow(dead_code)]
     scope_id: Uuid,
     saved_queries: FsQueryStore,
+    /// Base directory for the persistent per-item workspace the
+    /// `export workspace` action writes. Config `ticket_workspace`
+    /// (tilde-expanded) or, when unset, `<instance_root>/tickets`. Handed to
+    /// every item node built from an id.
+    workspace_base: Arc<std::path::PathBuf>,
 }
 
 impl TaigaAdapter {
@@ -53,20 +58,29 @@ impl TaigaAdapter {
         instance_id: String,
         db: Arc<DatabaseConnection>,
         scope_id: Uuid,
+        ticket_workspace: Option<String>,
     ) -> Self {
-        let queries_root = dirs::data_local_dir()
+        let instance_root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("not_yet_done")
             .join("taiga")
-            .join(&instance_id)
-            .join("queries");
+            .join(&instance_id);
+        // Same rule as the Jira adapter's, so both write their workspaces
+        // under a path the user can predict (and point the preview at).
+        let workspace_base = Arc::new(match ticket_workspace {
+            Some(raw) if !raw.trim().is_empty() => {
+                std::path::PathBuf::from(not_yet_done_content::download::expand_tilde(raw.trim()))
+            }
+            _ => instance_root.join("tickets"),
+        });
         Self {
             auth,
             connection_name,
             instance_id,
             db,
             scope_id,
-            saved_queries: FsQueryStore::new(queries_root, ".yaml"),
+            saved_queries: FsQueryStore::new(instance_root.join("queries"), ".yaml"),
+            workspace_base,
         }
     }
 }
@@ -85,6 +99,7 @@ impl ContentAdapter for TaigaAdapter {
         Ok(Box::new(TaigaRoot {
             auth: Arc::clone(&self.auth),
             connection_name: self.connection_name.clone(),
+            workspace_base: Arc::clone(&self.workspace_base),
         }))
     }
 
@@ -97,10 +112,12 @@ impl ContentAdapter for TaigaAdapter {
         // The closure runs at most twice (retry-on-401 in `with_client`),
         // so its captures must be Clone-friendly. `id` is by &str (Copy).
         let id_owned = id.to_string();
+        let base = Arc::clone(&self.workspace_base);
         self.auth
             .with_client(|client| {
                 let id = id_owned.clone();
-                async move { build_node_from_id(client, id).await }
+                let base = Arc::clone(&base);
+                async move { build_node_from_id(client, id, base).await }
             })
             .await
             .map_err(|e| ContentError::Other(e.into()))
@@ -377,6 +394,9 @@ struct TaigaRoot {
     /// can transparently re-authenticate when a cached JWT is rejected.
     auth: Arc<AuthBridge>,
     connection_name: String,
+    /// Forwarded to every item node built via `get_child` — see
+    /// [`TaigaAdapter::workspace_base`].
+    workspace_base: Arc<std::path::PathBuf>,
 }
 
 /// Free fn used by `TaigaAdapter::get_by_id` so the `with_client`
@@ -386,6 +406,7 @@ struct TaigaRoot {
 async fn build_node_from_id(
     client: Arc<TaigaClient>,
     id: String,
+    workspace_base: Arc<std::path::PathBuf>,
 ) -> std::result::Result<Box<dyn Node>, String> {
     if let Some(notif_id) = notification::parse_notification_id(&id) {
         let all = crate::client::fetch_all_web_notifications(&client).await?;
@@ -442,7 +463,8 @@ async fn build_node_from_id(
     Ok(Box::new(
         TaigaItemNode::new(client, item_type, raw_id)
             .await
-            .map_err(|e| format!("{e:?}"))?,
+            .map_err(|e| format!("{e:?}"))?
+            .with_workspace_base(workspace_base),
     ))
 }
 
@@ -474,10 +496,12 @@ impl Node for TaigaRoot {
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         let id_owned = id.to_string();
+        let base = Arc::clone(&self.workspace_base);
         self.auth
             .with_client(|client| {
                 let id = id_owned.clone();
-                async move { build_node_from_id(client, id).await }
+                let base = Arc::clone(&base);
+                async move { build_node_from_id(client, id, base).await }
             })
             .await
             .map_err(|e| ContentError::Other(e.into()))

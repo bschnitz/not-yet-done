@@ -5916,6 +5916,67 @@ example they sit on a bare `l`, in a which-key setup on `o l`.
 - [ ] Anon mode: keys, summaries and assignees appear replaced, the relation
       phrases (Jira-defined, e.g. "relates to") verbatim.
 
+## HTML preview on `o p` — one engine, one profile per adapter (Jira + Taiga)
+
+The preview script was split: the whole pipeline (export the workspace, build
+the HTML with pandoc, place the window) lives once in
+`~/.local/share/not_yet_done/scripts/_lib/nyd_html_preview.py`, and each entry
+point is a three-line wrapper that names a **profile**. `_lib` is a sibling of
+the `<tab>/<node_type>` folders, not a tab: script discovery only reads the one
+directory a level maps to, so it is never enumerated.
+
+The profiles differ where the two trackers do:
+
+|                                    | `jira`                                                      | `taiga`                                                                 |
+| ---------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Markdown source                    | wiki markup converted by the adapter                        | already Markdown                                                        |
+| Jira icon filter (`(-)`, `(/)`, …) | on                                                          | off — those glyphs are literal text                                     |
+| `#### CACHE` block                 | stripped                                                    | does not exist                                                          |
+| Staleness check                    | remote `updated` vs. mtime, old file kept as `.bak-<stamp>` | none — always re-export                                                 |
+| Node id vs. workspace key          | both the key (`KEY`)                                        | id is `task:123`, key comes from the `ref` cell (`proj#42` → `proj-42`) |
+
+Taiga always re-exports because its `ticket.md` is a pure snapshot: no editor
+writes back to it, so there is nothing to lose and no cheap way to ask Taiga
+for a change stamp without a query body.
+
+Prerequisites: the `o p` shortcut rows in `nyd.db` (`script:jira/jira:issue`
+and `script:taiga/taiga:item`, both named `html_preview.py`), and the TUI
+restarted after inserting one — script shortcuts are cached per scope.
+
+- [ ] Jira `o p` on a ticket still opens the preview as before: icons rendered,
+      no `#### CACHE` block, window title `pandoc-preview/nyd-jira: <KEY>`.
+- [ ] Jira `o x p` still opens the **dev** ticket's preview; on a ticket with
+      no `dev_ticket` cell it fails with "no dev_ticket set" and no window.
+- [ ] Taiga `o p` on an item opens a window titled
+      `pandoc-preview/nyd-taiga: <project>-<ref>`.
+- [ ] The document shows two header tables (subject/status/assignee/tags and
+      ref/type/creator/modified), then the description, then the comments under
+      `### @author <when>`. No `===` markers and no completions block — those
+      belong to the edit template, not to a document.
+- [ ] Every run re-exports: change the subject in Taiga, hit `o p` again, the
+      new subject is there without any manual refresh.
+- [ ] An item with attachments: the folder
+      `<data>/not_yet_done/taiga/<inst>/tickets/<key>-<slug>/attachments/`
+      holds the files, and the document ends in an `## Attachments` section —
+      images embedded, other files as links. A name with spaces must still be a
+      working link (the target is wrapped in `<…>`); a bare `](path with
+    spaces)` would render as literal text.
+- [ ] An attachment the description already embeds appears **once** — inline,
+      not a second time in the attachment list.
+- [ ] Replace an attachment in Taiga under the same name, run `o p` again: the
+      new file is fetched (the sidecar compares the modification stamp, not
+      just the file's existence).
+- [ ] An item without comments has no `## Comments` heading; one without
+      attachments no `## Attachments` heading.
+- [ ] `ticket_workspace:` in `views/taiga-adapter.yaml` redirects the folder
+      (`~` expanded); unset it falls back to
+      `<data-local>/not_yet_done/taiga/<instance>/tickets`.
+- [ ] Headless: `nyd adapter taiga:item <id> export_workspace` prints
+      "<ref>: exported workspace to <dir>" — the marker the script parses. With
+      `--field dir=/tmp/x` it writes there instead.
+- [ ] The width picker at the top of the page works in both profiles and the
+      choice survives a reload (localStorage).
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

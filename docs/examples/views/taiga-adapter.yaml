@@ -56,3 +56,15 @@ auth:
 # omitted.
 # db:
 #   url: "sqlite:///home/me/.local/share/not_yet_done/taiga-cache.sqlite?mode=rwc"
+
+# Base directory for the persistent per-item workspace the `export workspace`
+# action writes. Each item gets its own folder `<base>/<project>-<ref>-<slug>/`
+# containing `ticket.md` plus an `attachments/` subfolder that is populated on
+# demand (only missing or replaced files are fetched; a `.attachments.json`
+# sidecar tracks what was downloaded). `ticket.md` is a read-only snapshot:
+# two header tables, the description, the comments and — because Taiga keeps
+# attachments beside the text rather than in it — a trailing `## Attachments`
+# section that embeds the images and links the rest. A leading `~` is
+# expanded. When unset, defaults to
+# <data-local>/not_yet_done/taiga/<instance>/tickets.
+# ticket_workspace: "~/taiga-tickets"
