@@ -111,6 +111,13 @@ pub fn detail_items(fields: &[DetailField], wrap: bool, value_width: usize) -> V
     items
 }
 
+/// The index of the source field a synthetic row shows, read back out of the
+/// id [`detail_items`] minted for it (`"<field>:<segment>"`). A wrapped value
+/// spans several rows, and all of them answer with the same field.
+pub fn field_index(item: &NodeSummary) -> Option<usize> {
+    item.id.split(':').next()?.parse().ok()
+}
+
 /// Split a field value into the physical lines the detail table renders.
 ///
 /// Wrap off → one line, embedded newlines flattened to spaces. Wrap on →

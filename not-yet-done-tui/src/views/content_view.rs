@@ -48,16 +48,16 @@ use crate::components::data_table::DataTable;
 use crate::components::query_menu::{QueryMenuComponent, QueryMenuEntry, QueryMenuMessage};
 use crate::components::search::SearchComponent;
 use crate::components::tab_set_popup::{TabSetEntry, TabSetPopup, TabSetPopupMessage};
-use crate::config::highlight::HighlightRule;
+use crate::config::highlight::{HighlightMode, HighlightRule};
 use crate::config::keybindings::{
     CommonAction, ContentAction, KeyBinding, KeyBindingConfig, KeyBindingSection, KeyIconMap,
     QueryMenuAction, WindowAction, binding_steps,
 };
 use crate::config::tui_config::LoadBannerRoute;
 use crate::config::view_config::{
-    ActionDef, ActionTarget, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef, ColumnDef,
-    ColumnKind, CursorOnOpen, DateBucket, ExpandDepth, GroupBy, GroupHeadersDef, GroupOrder,
-    LineLayout, PaginationMode, PreviewConfig, ReminderConfig, SplitDirection,
+    ActionDef, ActionTarget, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef,
+    ColumnDef, ColumnKind, CursorOnOpen, DateBucket, ExpandDepth, GroupBy, GroupHeadersDef,
+    GroupOrder, LineLayout, PaginationMode, PreviewConfig, ReminderConfig, SplitDirection,
     TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
@@ -70,7 +70,9 @@ use crate::views::content_action_hints::{
     ActionBarHint, HintBar, ShortcutHint, nav_hint_for_source, window_nav_hint,
 };
 use crate::views::content_detail;
-use crate::views::content_highlights::{ScriptHighlights, TableHighlights};
+use crate::views::content_highlights::{
+    DetailPaint, NO_ITEM, ScriptHighlights, SlotTable, Surface, TableHighlights,
+};
 use crate::views::content_tree::{
     TreeLevel, TreeState, child_def_for_type_chain, effective_child_children, icon_opt_for_chain,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
@@ -406,6 +408,11 @@ pub struct ContentPane {
     pub table: DataTable,
 
     pub items: Vec<NodeSummary>,
+    /// For a record-detail follower: what the *source* level's `highlights:`
+    /// say about the record on show, already keyed by the source column
+    /// positions. Computed in `sync_detail_panes`, where both panes are in
+    /// reach, and empty on every other pane.
+    pub detail_paint: DetailPaint,
     /// Highlights the `load` hook asked for on exactly these `items`,
     /// addressed by row id. Refilled by every load, cleared when a load
     /// brings none — a colour must never outlive the row it describes.
@@ -1451,6 +1458,7 @@ impl ContentPane {
             table,
             images,
             items: Vec::new(),
+            detail_paint: DetailPaint::default(),
             script_highlights: ScriptHighlights::default(),
             fetch_error: None,
             filtered_indices: Vec::new(),
@@ -2145,7 +2153,10 @@ impl ContentPane {
                     file_extension: String::new(),
                     display_name: String::new(),
                 };
-                let found = adapter.actions_for_type(&nt).into_iter().find(|a| a.id == action_id)?;
+                let found = adapter
+                    .actions_for_type(&nt)
+                    .into_iter()
+                    .find(|a| a.id == action_id)?;
                 let opens_input = !matches!(found.input, not_yet_done_content::InputSpec::None);
                 // An explicit `name:` in the YAML wins over the adapter's
                 // wording; without one the adapter stays the single source
@@ -2154,8 +2165,7 @@ impl ContentPane {
                 let source = source_for_shortcut(&found.id, &label, opens_input);
                 Some((label, source))
             });
-            let (label, source) =
-                resolved.unwrap_or_else(|| (action.name().to_string(), None));
+            let (label, source) = resolved.unwrap_or_else(|| (action.name().to_string(), None));
             out.push(ShortcutHint { key, label, source });
         }
         out
@@ -2332,6 +2342,63 @@ impl ContentPane {
             selected_bg: Some(t.surface_2()),
             slot_base: HIGHLIGHT_SLOT_BASE,
         }
+    }
+
+    /// The highlight pass for tree mode.
+    ///
+    /// A tree draws several levels at once, and rules are not inherited — so
+    /// the rows are grouped by their `node_type_chain` and each group is
+    /// asked of its *own* level's `highlights:`. The table's column set is
+    /// shared by all of them, so a cell rule reaches a row only where the
+    /// level's key is among the rendered columns; a rule without `columns:`
+    /// paints the row wherever it matches.
+    fn apply_tree_highlights(
+        &self,
+        view_defs: &[ViewDef],
+        columns: &[ColumnDef],
+        t: &Theme,
+        widget_rows: &mut [TableWidgetRow],
+    ) -> Vec<Style> {
+        let (Some(tree), Some(view_def)) = (self.tree.as_ref(), self.view_def(view_defs)) else {
+            return Vec::new();
+        };
+        // Rows in visible order, bucketed by the level they belong to. A tree
+        // is a handful of levels deep, so the linear search over the buckets
+        // is cheaper than hashing the chain.
+        let mut by_level: Vec<(&[String], Vec<(usize, &NodeSummary)>)> = Vec::new();
+        for (row_idx, &eidx) in self.tree_visible_indices.iter().enumerate() {
+            let Some(entry) = tree.entries.get(eidx) else {
+                continue;
+            };
+            let chain = entry.node_type_chain.as_slice();
+            match by_level.iter_mut().find(|(c, _)| *c == chain) {
+                Some((_, rows)) => rows.push((row_idx, &entry.node)),
+                None => by_level.push((chain, vec![(row_idx, &entry.node)])),
+            }
+        }
+
+        let mut slots = SlotTable::new(HIGHLIGHT_SLOT_BASE);
+        for (chain, rows) in by_level {
+            let Some(level) = tree_level_for_chain(view_def, chain) else {
+                continue;
+            };
+            if level.highlights.is_empty() {
+                continue;
+            }
+            let highlights = TableHighlights {
+                columns: level.columns,
+                rules: level.highlights,
+                script: &self.script_highlights,
+                theme: t,
+                row_bg: Some(t.bg()),
+                selected_bg: Some(t.surface_2()),
+                slot_base: HIGHLIGHT_SLOT_BASE,
+            };
+            highlights
+                .on(HighlightMode::Tree)
+                .paint_rows(widget_rows, rows, columns, &mut slots);
+        }
+        slots.into_styles()
     }
 
     fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
@@ -5740,8 +5807,26 @@ impl ContentPane {
             .filter(|_| self.card_mode_active(view_defs))
         {
             let spec = self.card_spec(&card, &columns);
-            let (rows, style_map) =
-                build_card_widget_rows(&data_rows, &columns, &card, &spec, config.max_width, t);
+            // Tree rows map through `tree_visible_indices` and carry their own
+            // structure, so only the flat map fits here — as in the table pass.
+            let empty: Vec<usize> = Vec::new();
+            let row_items = if self.tree.is_none() {
+                &self.filtered_indices
+            } else {
+                &empty
+            };
+            let highlights = self.table_highlights(view_defs, &columns, t);
+            let (rows, style_map) = build_card_widget_rows(
+                &data_rows,
+                &columns,
+                &card,
+                &spec,
+                config.max_width,
+                t,
+                &highlights.on(HighlightMode::Card),
+                row_items,
+                &self.items,
+            );
             self.last_col_widths = Vec::new();
             self.table.set_data(
                 rows,
@@ -6035,10 +6120,30 @@ impl ContentPane {
         let unread_col = self.unread_color(view_defs, t);
         let headers = computed_header.map(|h| vec![h]).unwrap_or_default();
         let mut style_map = content_style_map(t, tree_connector_col, unread_col);
-        // Tree rows map through `tree_visible_indices` and carry their own
-        // structure, so the flat row→item map is the only one that fits
-        // here; tree highlighting is a surface of its own.
-        if self.tree.is_none() {
+        // A record-detail follower shows one record transposed, so its rules
+        // were evaluated against the *source* row long before this — all that
+        // is left is to spread the answer over the field rows.
+        if self.is_detail_pane() {
+            let value_col = columns
+                .iter()
+                .position(|c| c.key == content_detail::VALUE_KEY)
+                .unwrap_or(0);
+            let extra = self.detail_paint.apply(
+                &mut widget_rows,
+                &self.filtered_indices,
+                &self.items,
+                content_detail::field_index,
+                value_col,
+                HIGHLIGHT_SLOT_BASE,
+            );
+            style_map.0.extend(extra);
+        }
+        // Tree rows map through `tree_visible_indices` and every one of them
+        // may belong to a different level, so they get their own pass.
+        else if self.tree.is_some() {
+            let extra = self.apply_tree_highlights(view_defs, &columns, t, &mut widget_rows);
+            style_map.0.extend(extra);
+        } else {
             let extra = self.table_highlights(view_defs, &columns, t).apply(
                 &mut widget_rows,
                 &self.filtered_indices,
@@ -8870,6 +8975,17 @@ impl ContentView {
                 .find_pane(source_id)
                 .map(|p| p.detail_field_columns(&view_defs))
                 .unwrap_or_default();
+            // The rules are the *source* level's and their `when:` asks about
+            // the record on show, so the whole decision is made here — once
+            // per record, not once per transposed row.
+            let theme = Arc::clone(&self.theme);
+            let paint = match (self.find_pane(source_id), current.as_ref()) {
+                (Some(source), Some(record)) => {
+                    let highlights = source.table_highlights(&view_defs, &columns, &theme);
+                    DetailPaint::build(&highlights.on(HighlightMode::Details), record, &columns)
+                }
+                _ => DetailPaint::default(),
+            };
             let Some(follower) = self.find_pane_mut(follower_id) else {
                 continue;
             };
@@ -8879,6 +8995,7 @@ impl ContentView {
             if unchanged && !follower.detail_wrap {
                 continue;
             }
+            follower.detail_paint = paint;
             follower.detail_summary = current.clone();
             follower.detail_field_keys = field_keys;
             let wrap = follower.detail_wrap;
@@ -11003,10 +11120,7 @@ impl ContentView {
                         keys: String::new(),
                         scope: label.clone(),
                         source: Some(source),
-                        key_scope: Some(crate::keymap::pane_level_scope(
-                            &self.tab_name,
-                            &current,
-                        )),
+                        key_scope: Some(crate::keymap::pane_level_scope(&self.tab_name, &current)),
                     });
                 }
             }
@@ -11220,10 +11334,7 @@ impl ContentView {
                         child_path: child_path.clone(),
                         name: action.id.clone(),
                     }),
-                    key_scope: Some(crate::keymap::pane_level_scope(
-                        &self.tab_name,
-                        &child_path,
-                    )),
+                    key_scope: Some(crate::keymap::pane_level_scope(&self.tab_name, &child_path)),
                 });
             }
         }
@@ -13629,6 +13740,12 @@ fn build_header_row(
 /// separator (the spans already carry padding and inter-slot filler). One
 /// cell per span is also what keeps fuzzy-match highlights alive: a widget
 /// cell can carry highlights *or* pre-styled segments, never both.
+///
+/// `highlights` is the level's `highlights:` bound to the card surface, with
+/// `row_items` mapping each data row to its index in `items` — the same map
+/// the table pass walks. A rule without `columns:` paints the whole card; one
+/// naming columns paints those fields' **values**, the labels keeping the
+/// card's own label colour.
 fn build_card_widget_rows(
     data_rows: &[TRow<u32>],
     columns: &[ColumnDef],
@@ -13636,6 +13753,9 @@ fn build_card_widget_rows(
     spec: &CardSpec,
     max_width: usize,
     t: &Theme,
+    highlights: &Surface<'_>,
+    row_items: &[usize],
+    items: &[NodeSummary],
 ) -> (Vec<TableWidgetRow>, StyleMap) {
     // One style slot per declared column (fg from `style:`, else `text_med`),
     // so a value keeps the color it has in table mode.
@@ -13665,11 +13785,22 @@ fn build_card_widget_rows(
     let label_id = styles.len();
     styles.push(Style::default().fg(label_color));
 
+    // Highlight slots continue after the card's own colours, so a rule's
+    // look is interned once however many cards wear it.
+    let mut slots = SlotTable::new(styles.len());
+
     let computed = compute_cards(data_rows, spec, max_width);
     let rows: Vec<TableWidgetRow> = computed
         .cards
         .into_iter()
         .map(|card_out| {
+            // A card carries the id of the row it was laid out from, and that
+            // id is the row's position in `row_items`.
+            let paint = row_items
+                .get(card_out.id as usize)
+                .filter(|&&i| i != NO_ITEM)
+                .and_then(|&i| items.get(i))
+                .and_then(|item| highlights.item(item));
             let lines: Vec<TableWidgetLine> = card_out
                 .lines
                 .into_iter()
@@ -13685,13 +13816,23 @@ fn build_card_widget_rows(
                                 CardSpanKind::Value => {
                                     // The span's field index points into the
                                     // spec, whose fields carry the column key.
-                                    match span
+                                    let key = span
                                         .field
                                         .and_then(|i| spec.fields.get(i))
-                                        .and_then(|f| style_idx.get(f.column.0.as_str()))
-                                    {
-                                        Some(id) => cell.with_style(*id),
-                                        None => cell,
+                                        .map(|f| f.column.0.as_str());
+                                    let highlighted = key
+                                        .and_then(|key| paint.as_ref()?.cell(key))
+                                        .map(|(normal, selected)| {
+                                            (slots.intern(normal), slots.intern(selected))
+                                        });
+                                    match highlighted {
+                                        Some((normal, selected)) => {
+                                            cell.with_style_pair(normal, selected)
+                                        }
+                                        None => match key.and_then(|key| style_idx.get(key)) {
+                                            Some(id) => cell.with_style(*id),
+                                            None => cell,
+                                        },
                                     }
                                 }
                                 // Padding / filler is blank space — no color
@@ -13707,7 +13848,11 @@ fn build_card_widget_rows(
                     }
                 })
                 .collect();
-            let row = TableWidgetRow::multiline(lines);
+            let mut row = TableWidgetRow::multiline(lines);
+            if let Some((normal, selected)) = paint.and_then(|p| p.row) {
+                row.style_id = Some(slots.intern(normal));
+                row.selected_style_id = Some(slots.intern(selected));
+            }
             if card_out.selectable {
                 row
             } else {
@@ -13716,6 +13861,7 @@ fn build_card_widget_rows(
         })
         .collect();
 
+    styles.extend(slots.into_styles());
     (rows, StyleMap::new(styles))
 }
 
@@ -13899,8 +14045,7 @@ mod tests {
     /// A `type: node` action as the YAML spells it — key plus adapter action
     /// id, everything else defaulted.
     fn node_action(key: &str, id: &str) -> ActionDef {
-        serde_yaml::from_str(&format!("{{ key: {key}, id: {id} }}"))
-            .expect("node action parses")
+        serde_yaml::from_str(&format!("{{ key: {key}, id: {id} }}")).expect("node action parses")
     }
 
     #[test]
@@ -16275,6 +16420,60 @@ mod tests {
         view.active_pane_mut().rebuild_table(&view_defs);
         paint_pane_table(&mut view, 40, 10);
         view
+    }
+
+    /// In a tree the rules are the row's *own* level's: a rule on the child
+    /// level paints the children and leaves the root alone, even though both
+    /// are drawn in one table.
+    #[test]
+    fn a_tree_row_wears_its_own_levels_rule() {
+        let mut config = uniform_recursive_config();
+        config.views[0].children[0].highlights = serde_yaml::from_str(
+            r##"
+            - style: { bg: "#123456" }
+            "##,
+        )
+        .expect("rules parse");
+        let t = test_theme();
+        let warnings = crate::config::highlight::prepare_view_file(&mut config, &t);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let mut view = ContentView::new(t.clone(), &config, None, &KeyBindingConfig::default());
+        view.set_items(
+            vec![tnode_val("root", "Root", "RV")],
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+        );
+        let view_defs = view.view_defs.clone();
+        {
+            let pane = view.active_pane_mut();
+            let tree = pane.tree.as_mut().expect("tree mode");
+            tree.set_cached_children(
+                vec!["root".into()],
+                vec![tnode_val("kid", "Kid", "KV")],
+                None,
+            );
+            tree.expanded.insert(vec!["root".into()]);
+            tree.rebuild_entries(&view_defs[0]);
+        }
+        view.active_pane_mut().rebuild_table(&view_defs);
+
+        let pane = view.active_pane();
+        let columns = pane.current_columns(&view_defs);
+        let mut rows = vec![
+            TableWidgetRow::new(vec![TableWidgetCell::plain("Root")]),
+            TableWidgetRow::new(vec![TableWidgetCell::plain("Kid")]),
+        ];
+        let styles = pane.apply_tree_highlights(&view_defs, &columns, &t, &mut rows);
+
+        assert!(rows[0].style_id.is_none(), "the root level has no rule");
+        let id = rows[1].style_id.expect("the child level's rule paints");
+        assert_eq!(
+            styles[id - HIGHLIGHT_SLOT_BASE].bg,
+            Some(ratatui::style::Color::Rgb(0x12, 0x34, 0x56))
+        );
     }
 
     /// The x range of `y` that answers as a fold marker.
@@ -21033,10 +21232,10 @@ mod tests {
         pairs
             .iter()
             .map(|(key, id)| match id.strip_prefix("parent:") {
-                Some(id) => serde_yaml::from_str(&format!(
-                    "{{ key: {key}, id: {id}, target: parent }}"
-                ))
-                .expect("parent-targeted node action parses"),
+                Some(id) => {
+                    serde_yaml::from_str(&format!("{{ key: {key}, id: {id}, target: parent }}"))
+                        .expect("parent-targeted node action parses")
+                }
                 None => node_action(key, id),
             })
             .collect()
@@ -24103,8 +24302,27 @@ views:
                 .cell("summary", "Second"),
         ];
         let t = test_theme();
-        let (widget_rows, _map) =
-            build_card_widget_rows(&rows, &config.views[0].columns, &card, &spec, 60, &t);
+        let script = ScriptHighlights::default();
+        let plain = TableHighlights {
+            columns: &[],
+            rules: &[],
+            script: &script,
+            theme: &t,
+            row_bg: None,
+            selected_bg: None,
+            slot_base: 0,
+        };
+        let (widget_rows, _map) = build_card_widget_rows(
+            &rows,
+            &config.views[0].columns,
+            &card,
+            &spec,
+            60,
+            &t,
+            &plain.on(HighlightMode::Card),
+            &[],
+            &[],
+        );
 
         assert_eq!(widget_rows.len(), 2, "one card per row");
         // Rounded frame: top, one content line (two fields at columns: 2),
@@ -24141,6 +24359,110 @@ views:
             .and_then(|c| c.style_id);
         assert!(border_style.is_some());
         assert_ne!(border_style, label_style);
+    }
+
+    /// On a card a rule without `columns:` paints the whole card, and one
+    /// naming a column paints that field's **value** — the label keeps the
+    /// card's own colour, which is what makes the value readable as data.
+    #[test]
+    fn a_card_rule_paints_the_whole_card_and_a_single_value() {
+        let mut config = test_config_with_children();
+        config.views[0].highlights = serde_yaml::from_str(
+            r##"
+            - when: { field: key, matches: "-1$" }
+              style: { bg: "#301010" }
+            - columns: [summary]
+              style: { fg: "#00ff00" }
+            "##,
+        )
+        .expect("rules parse");
+        let t = test_theme();
+        let warnings = crate::config::highlight::prepare_view_file(&mut config, &t);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let view = ContentView::new(t.clone(), &config, None, &KeyBindingConfig::default());
+        let card = card_config(2, false);
+        let columns = config.views[0].columns.clone();
+        let spec = view.active_pane().card_spec(&card, &columns);
+        let rows = vec![
+            TRow::new(0u32)
+                .cell("key", "ABC-1")
+                .cell("summary", "First"),
+            TRow::new(1u32)
+                .cell("key", "ABC-2")
+                .cell("summary", "Second"),
+        ];
+        let keyed = |id: &str, key: &str| {
+            use not_yet_done_content::{Metadata, MetadataField};
+            let mut n = tnode(id, key, "mock:issue");
+            n.metadata = Metadata {
+                fields: vec![MetadataField {
+                    key: "key".into(),
+                    value: key.into(),
+                    display_label: "Key".into(),
+                    editable: false,
+                    allowed_values: None,
+                }],
+            };
+            n
+        };
+        let items = vec![keyed("a", "ABC-1"), keyed("b", "ABC-2")];
+        let script = ScriptHighlights::default();
+        let highlights = TableHighlights {
+            columns: &columns,
+            rules: &config.views[0].highlights,
+            script: &script,
+            theme: &t,
+            row_bg: None,
+            selected_bg: None,
+            slot_base: 0,
+        };
+        let (widget_rows, map) = build_card_widget_rows(
+            &rows,
+            &columns,
+            &card,
+            &spec,
+            60,
+            &t,
+            &highlights.on(HighlightMode::Card),
+            &[0, 1],
+            &items,
+        );
+
+        // The row rule matched only the first card.
+        let card_style = |row: &TableWidgetRow| row.style_id.map(|id| map.0[id]);
+        assert_eq!(
+            card_style(&widget_rows[0]).and_then(|s| s.bg),
+            Some(ratatui::style::Color::Rgb(0x30, 0x10, 0x10))
+        );
+        assert!(widget_rows[1].style_id.is_none(), "second card unpainted");
+
+        // The value of `summary` wears the cell rule on both cards; its label
+        // does not.
+        let value_fg = |row: &TableWidgetRow| {
+            let line = &row.lines[1];
+            let i = line
+                .cells
+                .iter()
+                .position(|c| c.text.contains("First") || c.text.contains("Second"))
+                .expect("value cell");
+            line.cells[i].style_id.map(|id| map.0[id].fg)
+        };
+        assert_eq!(
+            value_fg(&widget_rows[0]),
+            Some(Some(ratatui::style::Color::Rgb(0, 0xff, 0)))
+        );
+        assert_eq!(
+            value_fg(&widget_rows[1]),
+            Some(Some(ratatui::style::Color::Rgb(0, 0xff, 0)))
+        );
+        let label_fg = widget_rows[0].lines[1]
+            .cells
+            .iter()
+            .find(|c| c.text.starts_with("Title:"))
+            .and_then(|c| c.style_id)
+            .map(|id| map.0[id].fg);
+        assert_ne!(label_fg, Some(Some(ratatui::style::Color::Rgb(0, 0xff, 0))));
     }
 
     #[test]

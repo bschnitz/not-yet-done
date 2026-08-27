@@ -28,10 +28,17 @@
 //! script looked at the actual row, so it holds the more specific
 //! information. Both sources are folded into the same slot table.
 //!
-//! # What is not here
+//! # One decision, four surfaces
 //!
-//! Card, details and tree surfaces paint elsewhere; [`HighlightMode`] is what
-//! keeps a rule out of a surface it was not meant for.
+//! What a rule says about an item does not depend on where the item is drawn
+//! — only the geometry does. [`Surface`] holds the decision (bound to one
+//! [`HighlightMode`], which is what keeps a rule out of a surface it was not
+//! meant for) and hands out an [`ItemPaint`] keyed by column; each render
+//! path maps its own cells onto that. The table walks cells by column
+//! position, a card by the field its value span carries, a tree row by the
+//! level it belongs to, and the record-detail follower through
+//! [`DetailPaint`], which spreads one record's answer over the transposed
+//! rows.
 
 use std::collections::{HashMap, HashSet};
 
@@ -144,29 +151,39 @@ impl ScriptHighlights {
         self.rows.contains_key(ANY) || self.rows.contains_key(row_id)
     }
 
-    /// The style at exactly this address, if it paints on the table.
-    fn at(&self, row_id: &str, column: &str) -> Option<(StyleLayer, StyleLayer)> {
+    /// The style at exactly this address, if it paints on `mode`.
+    fn at(
+        &self,
+        row_id: &str,
+        column: &str,
+        mode: HighlightMode,
+    ) -> Option<(StyleLayer, StyleLayer)> {
         self.rows
             .get(row_id)?
             .get(column)
-            .filter(|style| style.applies_to(HighlightMode::Table))
+            .filter(|style| style.applies_to(mode))
             .map(|style| (style.normal, style.selected_layer()))
     }
 
     /// The whole-row layers, least specific first: the table-wide entry, then
     /// this row's own.
-    fn row_layers(&self, row_id: &str) -> Option<(StyleLayer, StyleLayer)> {
+    fn row_layers(&self, row_id: &str, mode: HighlightMode) -> Option<(StyleLayer, StyleLayer)> {
         stack(
-            [self.at(ANY, ANY), self.at(row_id, ANY)]
+            [self.at(ANY, ANY, mode), self.at(row_id, ANY, mode)]
                 .into_iter()
                 .flatten(),
         )
     }
 
     /// The same for one cell: the whole-column entry, then this row's.
-    fn cell_layers(&self, row_id: &str, column: &str) -> Option<(StyleLayer, StyleLayer)> {
+    fn cell_layers(
+        &self,
+        row_id: &str,
+        column: &str,
+        mode: HighlightMode,
+    ) -> Option<(StyleLayer, StyleLayer)> {
         stack(
-            [self.at(ANY, column), self.at(row_id, column)]
+            [self.at(ANY, column, mode), self.at(row_id, column, mode)]
                 .into_iter()
                 .flatten(),
         )
@@ -216,7 +233,23 @@ impl Prepared<'_> {
     }
 }
 
-impl TableHighlights<'_> {
+impl<'a> TableHighlights<'a> {
+    /// Bind the rules to one render surface.
+    ///
+    /// The surface decides *which* rules count (`modes:`) but not what they
+    /// mean: the answer for one item is the same row pair and the same
+    /// per-column pairs wherever it is drawn. Only the geometry differs, and
+    /// that stays with the caller — a table has cells at column positions, a
+    /// card has value spans that know their field.
+    pub fn on(&'a self, mode: HighlightMode) -> Surface<'a> {
+        Surface {
+            highlights: self,
+            mode,
+            prepared: self.prepare(mode),
+            types: column_types(self.columns),
+        }
+    }
+
     /// Paint the rules onto `rows` and return the styles the new slots hold.
     ///
     /// `row_items` maps each row to its index in `items`, [`NO_ITEM`] for a
@@ -228,85 +261,29 @@ impl TableHighlights<'_> {
         row_items: &[usize],
         items: &[NodeSummary],
     ) -> Vec<Style> {
-        let prepared = self.prepare();
-        if prepared.is_empty() && self.script.is_empty() {
+        let surface = self.on(HighlightMode::Table);
+        if surface.is_empty() {
             return Vec::new();
         }
-        let types = column_types(self.columns);
         let mut slots = SlotTable::new(self.slot_base);
-
-        for (row_idx, row) in rows.iter_mut().enumerate() {
-            let Some(item) = row_items
-                .get(row_idx)
-                .filter(|&&i| i != NO_ITEM)
-                .and_then(|&i| items.get(i))
-            else {
-                continue;
-            };
-            let view = SummaryRow::new(item, &types);
-            // Evaluate each rule once per row, not once per cell: `when:`
-            // asks about the row, and a regex is the expensive part here.
-            let hits: Vec<&Prepared<'_>> =
-                prepared.iter().filter(|p| p.rule.matches(&view)).collect();
-            let script_row = self.script.row_layers(&item.id);
-            if hits.is_empty() && !self.script.touches(&item.id) {
-                continue;
-            }
-            // The row layer goes on first, and its background becomes the
-            // ground the cells sit on — otherwise a cell asking for an `auto`
-            // foreground would contrast against a background the row rule has
-            // already painted over.
-            let mut ground = (self.row_bg, self.selected_bg);
-            let row_layers = stack(
-                hits.iter()
-                    .filter(|p| p.is_row())
-                    .map(|p| (p.normal, p.selected))
-                    .chain(script_row),
-            );
-            if let Some((normal, selected)) = row_layers {
-                let normal = normal.to_ratatui(self.theme, self.row_bg);
-                let selected = selected.to_ratatui(self.theme, self.selected_bg);
-                ground = (normal.bg.or(ground.0), selected.bg.or(ground.1));
-                row.style_id = Some(slots.intern(normal));
-                row.selected_style_id = Some(slots.intern(selected));
-            }
-            // Long-text mode stacks continuation lines under a row; they
-            // hold one wrapped block rather than this level's columns, so
-            // only the row's own line is painted.
-            let Some(line) = row.lines.first_mut() else {
-                continue;
-            };
-            for (col_idx, cell) in line.cells.iter_mut().enumerate() {
-                let script_cell = self
-                    .columns
-                    .get(col_idx)
-                    .and_then(|col| self.script.cell_layers(&item.id, &col.key));
-                let Some((normal, selected)) = stack(
-                    hits.iter()
-                        .filter(|p| p.paints(col_idx))
-                        .map(|p| (p.normal, p.selected))
-                        .chain(script_cell),
-                ) else {
-                    continue;
-                };
-                paint(
-                    cell,
-                    &mut slots,
-                    normal.to_ratatui(self.theme, ground.0),
-                    selected.to_ratatui(self.theme, ground.1),
-                );
-            }
-        }
+        let which = row_items.iter().enumerate().filter_map(|(row_idx, &i)| {
+            (i != NO_ITEM)
+                .then(|| items.get(i))
+                .flatten()
+                .map(|item| (row_idx, item))
+        });
+        surface.paint_rows(rows, which, self.columns, &mut slots);
         slots.into_styles()
     }
 
-    /// The rules that can paint here at all: resolved, meant for the table,
-    /// and — when they name columns — naming at least one this level has.
-    fn prepare(&self) -> Vec<Prepared<'_>> {
+    /// The rules that can paint on `mode` at all: resolved, meant for this
+    /// surface, and — when they name columns — naming at least one this level
+    /// has.
+    fn prepare(&self, mode: HighlightMode) -> Vec<Prepared<'_>> {
         self.rules
             .iter()
             .filter_map(|rule| {
-                let style = rule.style_for(HighlightMode::Table)?;
+                let style = rule.style_for(mode)?;
                 let scope = if rule.columns.is_empty() {
                     Scope::Row
                 } else {
@@ -331,6 +308,227 @@ impl TableHighlights<'_> {
     }
 }
 
+/// The level's rules bound to one render surface, ready to be asked about
+/// individual items.
+pub struct Surface<'a> {
+    highlights: &'a TableHighlights<'a>,
+    mode: HighlightMode,
+    prepared: Vec<Prepared<'a>>,
+    types: ColumnTypes,
+}
+
+impl<'a> Surface<'a> {
+    /// Whether nothing can paint here — the caller can then skip the walk
+    /// entirely instead of asking about every row.
+    pub fn is_empty(&self) -> bool {
+        self.prepared.is_empty() && self.highlights.script.is_empty()
+    }
+
+    /// What this item wears here, or `None` when nothing reaches it.
+    ///
+    /// The row layer is resolved first and its background becomes the ground
+    /// the cells sit on — otherwise a cell asking for an `auto` foreground
+    /// would contrast against a background the row rule has already painted
+    /// over.
+    pub fn item(&self, item: &NodeSummary) -> Option<ItemPaint<'a>> {
+        let hl = self.highlights;
+        let view = SummaryRow::new(item, &self.types);
+        // Evaluate each rule once per row, not once per cell: `when:` asks
+        // about the row, and a regex is the expensive part here.
+        let hits: Vec<&Prepared<'_>> = self
+            .prepared
+            .iter()
+            .filter(|p| p.rule.matches(&view))
+            .collect();
+        if hits.is_empty() && !hl.script.touches(&item.id) {
+            return None;
+        }
+
+        let mut ground = (hl.row_bg, hl.selected_bg);
+        let row = stack(
+            hits.iter()
+                .filter(|p| p.is_row())
+                .map(|p| (p.normal, p.selected))
+                .chain(hl.script.row_layers(&item.id, self.mode)),
+        )
+        .map(|(normal, selected)| {
+            let normal = normal.to_ratatui(hl.theme, hl.row_bg);
+            let selected = selected.to_ratatui(hl.theme, hl.selected_bg);
+            ground = (normal.bg.or(ground.0), selected.bg.or(ground.1));
+            (normal, selected)
+        });
+
+        let mut cells = HashMap::new();
+        for (col_idx, col) in hl.columns.iter().enumerate() {
+            let Some((normal, selected)) = stack(
+                hits.iter()
+                    .filter(|p| p.paints(col_idx))
+                    .map(|p| (p.normal, p.selected))
+                    .chain(hl.script.cell_layers(&item.id, &col.key, self.mode)),
+            ) else {
+                continue;
+            };
+            cells.insert(
+                col.key.as_str(),
+                (
+                    normal.to_ratatui(hl.theme, ground.0),
+                    selected.to_ratatui(hl.theme, ground.1),
+                ),
+            );
+        }
+        Some(ItemPaint { row, cells })
+    }
+}
+
+impl Surface<'_> {
+    /// Paint the rows this surface is responsible for.
+    ///
+    /// `which` names the rows to paint and the item each of them shows — the
+    /// table hands over its whole row→item map, a tree only the rows of one
+    /// level. `rendered` is the column set the table actually laid out, which
+    /// in a tree is not the same as the level's own: a rule addresses its
+    /// columns by key, so the two are matched up by key and a column the
+    /// table does not show simply paints nothing.
+    pub fn paint_rows<'i>(
+        &self,
+        rows: &mut [TableWidgetRow],
+        which: impl IntoIterator<Item = (usize, &'i NodeSummary)>,
+        rendered: &[ColumnDef],
+        slots: &mut SlotTable,
+    ) {
+        for (row_idx, item) in which {
+            let Some(row) = rows.get_mut(row_idx) else {
+                continue;
+            };
+            let Some(paint) = self.item(item) else {
+                continue;
+            };
+            if let Some((normal, selected)) = paint.row {
+                row.style_id = Some(slots.intern(normal));
+                row.selected_style_id = Some(slots.intern(selected));
+            }
+            // Long-text mode stacks continuation lines under a row; they
+            // hold one wrapped block rather than this level's columns, so
+            // only the row's own line is painted.
+            let Some(line) = row.lines.first_mut() else {
+                continue;
+            };
+            for (col_idx, cell) in line.cells.iter_mut().enumerate() {
+                let Some((normal, selected)) =
+                    rendered.get(col_idx).and_then(|col| paint.cell(&col.key))
+                else {
+                    continue;
+                };
+                paint_cell(cell, slots, normal, selected);
+            }
+        }
+    }
+}
+
+/// One item's finished looks: the pair its row wears and the pair each
+/// painted column wears, both already resolved against the surface's
+/// backgrounds.
+pub struct ItemPaint<'a> {
+    /// Ordinary and selected style of the whole row, when a rule paints it.
+    pub row: Option<(Style, Style)>,
+    cells: HashMap<&'a str, (Style, Style)>,
+}
+
+impl ItemPaint<'_> {
+    /// The pair this column's value wears, by column key.
+    pub fn cell(&self, key: &str) -> Option<(Style, Style)> {
+        self.cells.get(key).copied()
+    }
+}
+
+/// The record-detail surface: one record transposed into one row per field.
+///
+/// The rules belong to the level the follower *follows*, and their `when:`
+/// asks about the record on show — so the whole decision is made once, from
+/// the source row, and only then spread over the follower's rows. A rule
+/// without `columns:` paints the transposed record whole; one naming columns
+/// paints those fields' **value** cells, leaving the field labels in the
+/// column's own colour so the pane still reads as label/value.
+#[derive(Debug, Default, Clone)]
+pub struct DetailPaint {
+    /// What the whole record wears, when a row rule matched it.
+    row: Option<(Style, Style)>,
+    /// Per source-column index, what that field's value wears.
+    values: HashMap<usize, (Style, Style)>,
+}
+
+impl DetailPaint {
+    /// Ask `surface` about `record` and key the answer by the position of
+    /// each column in `columns` — the same order the follower transposes.
+    pub fn build(surface: &Surface<'_>, record: &NodeSummary, columns: &[ColumnDef]) -> Self {
+        if surface.is_empty() {
+            return Self::default();
+        }
+        let Some(paint) = surface.item(record) else {
+            return Self::default();
+        };
+        let values = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, col)| Some((i, paint.cell(&col.key)?)))
+            .collect();
+        Self {
+            row: paint.row,
+            values,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.row.is_none() && self.values.is_empty()
+    }
+
+    /// Paint the follower's rows and return the styles the new slots hold.
+    ///
+    /// `field_of` maps one of the follower's synthetic rows back to the index
+    /// of the field it shows — a wrapped value spans several rows and every
+    /// one of them wears the field's colour. `value_col` is the position of
+    /// the value column in the follower's two.
+    pub fn apply(
+        &self,
+        rows: &mut [TableWidgetRow],
+        row_items: &[usize],
+        items: &[NodeSummary],
+        field_of: impl Fn(&NodeSummary) -> Option<usize>,
+        value_col: usize,
+        slot_base: usize,
+    ) -> Vec<Style> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut slots = SlotTable::new(slot_base);
+        for (row_idx, row) in rows.iter_mut().enumerate() {
+            if let Some((normal, selected)) = self.row {
+                row.style_id = Some(slots.intern(normal));
+                row.selected_style_id = Some(slots.intern(selected));
+            }
+            let Some(item) = row_items
+                .get(row_idx)
+                .filter(|&&i| i != NO_ITEM)
+                .and_then(|&i| items.get(i))
+            else {
+                continue;
+            };
+            let Some(&(normal, selected)) = field_of(item).and_then(|f| self.values.get(&f)) else {
+                continue;
+            };
+            let Some(cell) = row
+                .lines
+                .first_mut()
+                .and_then(|line| line.cells.get_mut(value_col))
+            else {
+                continue;
+            };
+            paint_cell(cell, &mut slots, normal, selected);
+        }
+        slots.into_styles()
+    }
+}
+
 /// Lay the layer pairs over one another in the order they arrive — the last
 /// one to name a field wins it, modifiers accumulate. `None` when the
 /// iterator is empty, i.e. nothing paints here.
@@ -346,7 +544,7 @@ fn stack(
 }
 
 /// Point a cell at the pair of slots holding these two styles.
-fn paint(cell: &mut TableWidgetCell, slots: &mut SlotTable, normal: Style, selected: Style) {
+fn paint_cell(cell: &mut TableWidgetCell, slots: &mut SlotTable, normal: Style, selected: Style) {
     // A cell that already carried an override (the deleted dim, say) loses
     // it here: the rule is the user saying what this cell should look like,
     // and two half-applied colours read worse than one deliberate one.
@@ -359,20 +557,21 @@ fn paint(cell: &mut TableWidgetCell, slots: &mut SlotTable, normal: Style, selec
 /// A rule that fires on a hundred rows is one style, and the widget looks a
 /// slot up per cell per frame — so the table stays as short as the set of
 /// distinct looks, not as long as the set of painted cells.
-struct SlotTable {
+pub struct SlotTable {
     base: usize,
     styles: Vec<Style>,
 }
 
 impl SlotTable {
-    fn new(base: usize) -> Self {
+    /// `base` is the first free slot in the caller's style map.
+    pub fn new(base: usize) -> Self {
         Self {
             base,
             styles: Vec::new(),
         }
     }
 
-    fn intern(&mut self, style: Style) -> usize {
+    pub fn intern(&mut self, style: Style) -> usize {
         let idx = match self.styles.iter().position(|s| *s == style) {
             Some(i) => i,
             None => {
@@ -383,7 +582,7 @@ impl SlotTable {
         self.base + idx
     }
 
-    fn into_styles(self) -> Vec<Style> {
+    pub fn into_styles(self) -> Vec<Style> {
         self.styles
     }
 }
@@ -864,5 +1063,65 @@ views:
         let answer: serde_json::Value =
             serde_json::from_str(r##"{"highlights": ["not", "an", "object"]}"##).unwrap();
         assert!(ScriptHighlights::parse(&answer, &resolver).is_err());
+    }
+    /// On the record-detail surface the rules are asked about the *source*
+    /// record once, and the answer is spread over the transposed rows: a
+    /// column rule reaches the value cell of exactly its field — on every
+    /// continuation row of a wrapped value — and leaves the field label alone.
+    #[test]
+    fn a_detail_rule_paints_its_fields_value_on_every_wrapped_row() {
+        let config = level(
+            r##"
+      - columns: [actual]
+        when: [actual, '>', 5]
+        style: { fg: '#00ff00' }
+"##,
+        );
+        let theme = theme();
+        let view = &config.views[0];
+        let script = ScriptHighlights::default();
+        let highlights = TableHighlights {
+            columns: &view.columns,
+            rules: &view.highlights,
+            script: &script,
+            theme: &theme,
+            row_bg: Some(Color::Black),
+            selected_bg: Some(Color::DarkGray),
+            slot_base: 7,
+        };
+        let record = item("open", "7");
+        let paint = DetailPaint::build(
+            &highlights.on(HighlightMode::Details),
+            &record,
+            &view.columns,
+        );
+
+        // The follower: one row for `status`, two for a wrapped `actual`.
+        let mut rows = vec![
+            row(&["Status", "open"]),
+            row(&["Actual", "7"]),
+            row(&["", "…"]),
+        ];
+        // The follower's synthetic rows name the source field they show;
+        // both `actual` rows point at the same one.
+        let follower = [item("0", "0"), item("1", "0"), item("1", "0")];
+        let styles = paint.apply(
+            &mut rows,
+            &[0, 1, 2],
+            &follower,
+            |it| it.id.parse().ok(),
+            1,
+            7,
+        );
+
+        assert!(rows[0].lines[0].cells[1].style_id.is_none(), "other field");
+        let green = Some(Color::Rgb(0, 0xff, 0));
+        for r in [1usize, 2] {
+            let id = rows[r].lines[0].cells[1]
+                .style_id
+                .unwrap_or_else(|| panic!("row {r} painted"));
+            assert_eq!(styles[id - 7].fg, green, "row {r}");
+            assert!(rows[r].lines[0].cells[0].style_id.is_none(), "label plain");
+        }
     }
 }

@@ -1,6 +1,6 @@
 # Plan: configurable row / column / cell highlighting
 
-> **Status: phases 1-5 implemented, phases 6-7 planned.** The style grammar of
+> **Status: phases 1-6 implemented, phase 7 (docs + smoke tests) planned.** The style grammar of
 > [Part 1](#part-1--the-style-grammar) and the rule surface of
 > [Part 2](#part-2--the-rules) live in
 > `not-yet-done-tui/src/config/highlight.rs`: `highlights:` parses on every
@@ -8,7 +8,8 @@
 > mode (`not-yet-done-tui/src/views/content_highlights.rs`) a rule paints its
 > cells when it names `columns:` and the whole row when it does not, and a
 > `load`-hook script can answer with `highlights` that layer over those
-> rules. Card, details and tree still paint nothing. This
+> rules. Card, record-detail and tree paint from the same decision, each
+> mapping it onto its own geometry. This
 > document fixes the config surface and the layering before the rest is
 > written, because one part of it (row-level styles) reaches into
 > `not-yet-done-ratatui`.
@@ -432,7 +433,7 @@ Each phase ends in something demonstrable.
 | 3 ✓ | Column and cell highlights in table mode, via `StyleMap` slots. First visible result.                                                                                                                                   |
 | 4 ✓ | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                                                                               |
 | 5 ✓ | Script channel: `highlights` in the `load`-hook answer, the pane-side map, the `*` axes, `reload` refusal. (Tree-merge is not reachable yet: the `load` hook only fires on the flat load.)                              |
-| 6   | Modes: `card`, `details`, `tree`.                                                                                                                                                                                       |
+| 6 ✓ | Modes: `card`, `details`, `tree` — one `Surface`, three geometries. In a tree a row wears its own level's rules.                                                                                                        |
 | 7   | Docs (`generic-view-spec.md` §`highlights:` and the hook table's "may answer with", README) + smoke tests in `smoke-tests.md`.                                                                                          |
 
 ## Non-goals (for now)
