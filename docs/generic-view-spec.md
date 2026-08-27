@@ -1888,6 +1888,13 @@ for row in payload["rows"]:
 print(json.dumps({"highlights": out}))
 ```
 
+Note what this example does _not_ say: `selected`. A background never carries
+into the cursor row on its own, so the ramp above disappears the moment the row
+is read. A script that wants its colour to survive the cursor has to state it
+for both states — `{"bg": c, "fg": "auto", "selected": {"bg": c}}` — and can
+afford to, because the rest of the row still turns and keeps the cursor
+findable.
+
 #### Surfaces: what a rule looks like where
 
 What a rule _says_ about an item does not depend on where the item is drawn —
