@@ -4230,9 +4230,14 @@ impl App {
                     // filters like any other. Skipped on a failed fetch for
                     // the same reason the reload hook is: an empty result is
                     // not a result.
-                    if load_ok {
-                        self.run_load_hooks(view_index, pane_id, hook_depth, &mut items);
-                    }
+                    // The hooks also answer with highlights, which belong
+                    // beside the rows rather than in them — they travel the
+                    // few lines to the pane instead of being applied here.
+                    let script_highlights = if load_ok {
+                        self.run_load_hooks(view_index, pane_id, hook_depth, &mut items)
+                    } else {
+                        Default::default()
+                    };
                     let item_count = items.len();
                     // Distinct node types present, captured before `items` is
                     // moved — used to fetch the backend-described column schema
@@ -4240,6 +4245,13 @@ impl App {
                     let node_types = distinct_node_types(&items);
                     let mut mark_read = None;
                     if let Some(cv) = self.content_view_mut(view_index) {
+                        // Before the items: `set_items_for_pane` builds the
+                        // table, and the build is what reads the map. Setting
+                        // it unconditionally also clears a previous load's
+                        // colours — a highlight must not outlive its row.
+                        if let Some(pane) = cv.find_pane_mut(pane_id) {
+                            pane.script_highlights = script_highlights;
+                        }
                         cv.set_items_for_pane(pane_id, items, applied_sort, page, columns, error);
                         // Opening a level can land the cursor on an unread
                         // last row without a keypress (a `cursor_on_open`

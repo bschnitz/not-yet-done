@@ -43,7 +43,9 @@ use not_yet_done_content::{MetadataField, NodeSummary};
 use crate::app::editor::parse_script_mode;
 use crate::app::{App, EditorRequest};
 use crate::components::searchable_popup::{PopupItem, SearchablePopup};
+use crate::config::highlight::StyleResolver;
 use crate::config::keybindings::ScriptMenuAction;
+use crate::views::content_highlights::ScriptHighlights;
 use crate::views::content_view::PaneId;
 
 /// Events a view script can be bound to. Unknown values read from the
@@ -248,6 +250,10 @@ impl App {
     /// back as `{"cells": {"<row id>": {"<column key>": <value>}}}`. Sparse
     /// by design: a script answers for what it computed, not for the table.
     ///
+    /// A script may also answer with `highlights` in the same addressing;
+    /// those are returned rather than applied, because they belong beside the
+    /// rows on the pane and not in them (see [`ScriptHighlights`]).
+    ///
     /// Runs synchronously, like the reload hook, and for the same reason —
     /// the rows in `items` are on their way to
     /// [`ContentView::set_items_for_pane`](crate::views::content_view::ContentView::set_items_for_pane)
@@ -264,23 +270,24 @@ impl App {
         pane_id: PaneId,
         hook_depth: u8,
         items: &mut [NodeSummary],
-    ) {
+    ) -> ScriptHighlights {
         // Same provenance guard as the reload hook: rows fetched *because* a
         // hook asked for them run no hooks of their own. A load hook cannot
         // trigger a load itself (its commands are refused), so this is not
         // loop protection here — it keeps the two hooks from doubling up on
         // the round trip a reload hook already paid for.
+        let mut highlights = ScriptHighlights::default();
         if hook_depth >= HOOK_MAX_DEPTH {
-            return;
+            return highlights;
         }
         if self.hook_runs_in_flight.contains(&(view_index, pane_id)) {
-            return;
+            return highlights;
         }
         let Some(scope) = self
             .content_view(view_index)
             .and_then(|cv| cv.pane_script_scope(pane_id))
         else {
-            return;
+            return highlights;
         };
         let mut names: Vec<String> = self
             .hooks_for_scope(&scope)
@@ -289,15 +296,16 @@ impl App {
             .map(|(name, _)| name)
             .collect();
         if names.is_empty() {
-            return;
+            return highlights;
         }
         names.sort();
 
         self.hook_runs_in_flight.insert((view_index, pane_id));
         for name in names {
-            self.run_load_hook_script(view_index, pane_id, &name, items);
+            self.run_load_hook_script(view_index, pane_id, &name, items, &mut highlights);
         }
         self.hook_runs_in_flight.remove(&(view_index, pane_id));
+        highlights
     }
 
     /// One load-hook run: build the payload from the rows as they stand,
@@ -308,6 +316,7 @@ impl App {
         pane_id: PaneId,
         name: &str,
         items: &mut [NodeSummary],
+        highlights: &mut ScriptHighlights,
     ) {
         let Some(ctx) = self.build_load_hook_ctx(view_index, pane_id, items) else {
             return;
@@ -343,6 +352,48 @@ impl App {
                         patch.unknown
                     ));
                 }
+            }
+            Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
+        }
+        self.collect_script_highlights(view_index, name, items, &answer, highlights);
+    }
+
+    /// Read the answer's `highlights` and fold them into `into`.
+    ///
+    /// The styles are resolved here rather than at paint time: this is the
+    /// last place that has the view file's `styles:` table in reach, and a
+    /// name that resolves to nothing should be reported once per load, not
+    /// swallowed once per frame.
+    fn collect_script_highlights(
+        &mut self,
+        view_index: usize,
+        name: &str,
+        items: &[NodeSummary],
+        answer: &serde_json::Value,
+        into: &mut ScriptHighlights,
+    ) {
+        if answer.get("highlights").is_none() {
+            return;
+        }
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let theme = Arc::clone(&cv.theme);
+        let styles = cv.highlight_styles.clone();
+        let resolver = StyleResolver::new(&styles, theme.styles(), &theme);
+
+        match ScriptHighlights::parse(answer, &resolver) {
+            Ok((parsed, warnings)) => {
+                for w in warnings {
+                    self.notify_error(format!("Load hook '{name}': {w}"));
+                }
+                let unknown = parsed.unknown_rows(items);
+                if unknown > 0 {
+                    self.notify_error(format!(
+                        "Load hook '{name}': {unknown} highlighted row id(s) not in this load — ignored"
+                    ));
+                }
+                into.merge(parsed);
             }
             Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
         }

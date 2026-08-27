@@ -70,7 +70,7 @@ use crate::views::content_action_hints::{
     ActionBarHint, HintBar, ShortcutHint, nav_hint_for_source, window_nav_hint,
 };
 use crate::views::content_detail;
-use crate::views::content_highlights::TableHighlights;
+use crate::views::content_highlights::{ScriptHighlights, TableHighlights};
 use crate::views::content_tree::{
     TreeLevel, TreeState, child_def_for_type_chain, effective_child_children, icon_opt_for_chain,
     leaf_glyph_opt_for_chain, tree_child_def_at_depth, tree_level_at_depth, tree_level_children,
@@ -406,6 +406,10 @@ pub struct ContentPane {
     pub table: DataTable,
 
     pub items: Vec<NodeSummary>,
+    /// Highlights the `load` hook asked for on exactly these `items`,
+    /// addressed by row id. Refilled by every load, cleared when a load
+    /// brings none — a colour must never outlive the row it describes.
+    pub script_highlights: ScriptHighlights,
     pub fetch_error: Option<String>,
     /// Maps table row index → items index when fuzzy filter is active.
     filtered_indices: Vec<usize>,
@@ -1200,6 +1204,10 @@ pub struct ContentView {
     pub tab_name: String,
     pub tab_icon: String,
     pub tab_order: i32,
+    /// The view file's `styles:` table, kept for the one consumer that
+    /// cannot be served at config load: a `load`-hook script naming a style
+    /// by name. The level's own rules were resolved long before this.
+    pub highlight_styles: std::collections::HashMap<String, crate::config::highlight::StyleSpec>,
     /// Per-tab switch-key override from the view file's `tab.key`. `None`
     /// falls back to the positional autonumber digit; `Some` with an empty
     /// list means the tab-switch key is disabled. See [`Self::tab_key_override`].
@@ -1443,6 +1451,7 @@ impl ContentPane {
             table,
             images,
             items: Vec::new(),
+            script_highlights: ScriptHighlights::default(),
             fetch_error: None,
             filtered_indices: Vec::new(),
             nav_stack: Vec::new(),
@@ -2317,6 +2326,7 @@ impl ContentPane {
         TableHighlights {
             columns,
             rules: self.current_highlights(view_defs),
+            script: &self.script_highlights,
             theme: t,
             row_bg: Some(t.bg()),
             selected_bg: Some(t.surface_2()),
@@ -7578,6 +7588,7 @@ impl ContentView {
             tab_name: config.tab.name.clone(),
             tab_icon: config.tab.icon.clone().unwrap_or_default(),
             tab_order: config.tab.order,
+            highlight_styles: config.styles.clone(),
             tab_key: config.tab.key.clone(),
             tab_unread_marker: config.tab.unread_marker.clone(),
             tab_unread_style: config.tab.unread_style.clone(),
