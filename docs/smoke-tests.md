@@ -5960,7 +5960,7 @@ restarted after inserting one — script shortcuts are cached per scope.
       holds the files, and the document ends in an `## Attachments` section —
       images embedded, other files as links. A name with spaces must still be a
       working link (the target is wrapped in `<…>`); a bare `](path with
-    spaces)` would render as literal text.
+  spaces)` would render as literal text.
 - [ ] An attachment the description already embeds appears **once** — inline,
       not a second time in the attachment list.
 - [ ] Replace an attachment in Taiga under the same name, run `o p` again: the
@@ -5976,6 +5976,169 @@ restarted after inserting one — script shortcuts are cached per scope.
       `--field dir=/tmp/x` it writes there instead.
 - [ ] The width picker at the top of the page works in both profiles and the
       choice survives a reload (localStorage).
+
+## Highlighting rows, columns and cells (`highlights:`)
+
+Colour that belongs to the view rather than to the theme. The tests walk the
+two producers — the declarative rules and the `load`-hook script — and then the
+four surfaces they paint on. Spec:
+[`generic-view-spec.md`](generic-view-spec.md#highlights--painting-rows-columns-and-cells).
+
+Preparation — in a view file with a level that has a `status`-like text column
+and a numeric one:
+
+```yaml
+styles:
+  over-budget:
+    fg: "#ffffff"
+    bg: "#7a1c1c"
+    modifiers: [bold]
+    selected: { bg: "#a52222" }
+  muted: { fg: "#6c6c6c" }
+
+views:
+  - name: tickets
+    highlights:
+      - columns: [<numeric column>]
+        style: { bg: "#1c2430", selected: { bg: "#2c3a50" } }
+      - when: { field: <status column>, matches: "^(Blocked|On Hold)$" }
+        style: over-budget
+      - columns: [<status column>]
+        when: { field: <status column>, matches: "(?i)^done$" }
+        style: muted
+```
+
+### The style grammar (phase 1)
+
+- [ ] The three style forms all load: a name (`style: over-budget`), an inline
+      map (`style: { fg: "#ff5555" }`) and a bare modifier list
+      (`style: [bold, italic]` — font change only, colours untouched).
+- [ ] A `styles:` entry of the **view file** shadows one of the same name in
+      `tui-theme.yaml`; removing it again falls back to the theme's.
+- [ ] `fg: accent` (a theme role) still works next to hex; a bare `abc123`
+      without `#` is treated as a role name, not found, and reported.
+- [ ] `fg: auto` on a dark `bg` yields the light candidate and on a light `bg`
+      the dark one; changing `auto_fg_light`/`auto_fg_dark` in
+      `tui-theme.yaml` changes which colour appears.
+- [ ] `fg: auto` with a `selected: { bg: … }` of a very different lightness:
+      the cursor row picks the **other** candidate — the text stays legible
+      when the cursor arrives.
+- [ ] `fg: auto` in a style with no `bg` anywhere: nothing is repainted, the
+      layer underneath keeps its foreground (no black-on-black).
+- [ ] `bg: auto` is reported as ignored; `selected:` inside `selected:` and
+      `modes:` inside `selected:` likewise — each a warning, the file still
+      loads.
+
+### The rules (phases 2–4)
+
+- [ ] The column rule paints the numeric column in **every** row, and its
+      `selected:` background shows while the cursor is on such a row.
+- [ ] The row rule paints whole rows whose status matches, background and bold
+      included; the row loses its colour again after the status changes and the
+      view reloads.
+- [ ] The cell rule paints only that one cell in matching rows — the rest of
+      the row keeps its normal colours.
+- [ ] Precedence: on a row that matches both the row rule and the cell rule,
+      the cell wins in the cell and the row colour stands everywhere else.
+- [ ] The cursor row keeps the highlight's **foreground and modifiers**; only
+      the background falls back to the normal `RowSelected` when the rule set
+      no `selected.bg`.
+- [ ] Two rules that set different fields (one only `fg`, the other only `bg`)
+      combine on the same row; two that set the same field: the **later** one
+      in file order wins.
+- [ ] `when:` in the list form works for numbers/dates
+      (`when: [<numeric column>, ">", 5]`), which the short form cannot express.
+- [ ] `when:` in the full form with `and:`/`or:` fires as written.
+- [ ] The regex is matched against the **raw** value: a `kind: duration` column
+      matches `5400`, not the rendered `1h 30m`; a narrowed column still
+      matches on its full value, not on the truncated text with `…`.
+- [ ] Case: `matches: "^done$"` does **not** hit `Done`; `'(?i)^done$'` does.
+- [ ] A regex written double-quoted with a backslash (`"\d+"`) is a YAML error
+      at load; single-quoted (`'\d+'`) it works.
+- [ ] A rule with an unresolvable style name, and one with an invalid regex:
+      each reported with its level path (`tickets > … .highlights[N]`), each
+      inert, and every **other** rule of the file still paints.
+- [ ] A rule naming a column the level does not have: reported. A rule naming a
+      column that is currently hidden via `c c`: no message, nothing painted;
+      unhiding it makes the colour appear.
+- [ ] Highlights on a column value produced by a **custom column** or by a
+      `load`-hook `cells` patch fire — by then both are ordinary fields.
+- [ ] `matches` written into a saved query against the task DB fails loudly
+      ("operator not supported in SQL filters") instead of matching nothing.
+
+### The script channel (phase 5)
+
+Preparation — a `background`-mode script bound with `ctrl+h` → `load`:
+
+```python
+#!/usr/bin/env python3
+# scope: table
+# mode: background
+import json, os, sys
+payload = json.load(open(sys.argv[1]))
+out = {row["id"]: {"<numeric column>": {"bg": "#7a1c1c", "fg": "auto"}}
+       for row in payload["rows"][:3]}
+with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+    json.dump({"highlights": out}, f)
+```
+
+- [ ] The first three rows show the script's background on that column, on the
+      **first** frame after `r` — no flicker from unpainted to painted.
+- [ ] `"*"` in the column axis (`{"<id>": {"*": {…}}}`) paints the whole row;
+      `"*"` in the row axis (`{"*": {"<col>": {…}}}`) the whole column;
+      `{"*": {"*": {…}}}` the whole table.
+- [ ] Specificity: a table-wide `*`/`*` plus a row-specific entry — the
+      specific one wins on its row, the wide one everywhere else.
+- [ ] A script style **wins over** a YAML rule on the same address, still per
+      field: a rule setting only `fg` and a script setting only `bg` combine.
+- [ ] The script may answer with a **name** from `styles:` instead of an
+      object (`{"<id>": {"<col>": "over-budget"}}`).
+- [ ] An unresolvable style in the answer: one warning naming
+      `highlights['<id>']['<col>']`, every other entry still painted.
+- [ ] A row id that is not in this load: "… highlighted row id(s) not in this
+      load — ignored", the rest painted.
+- [ ] `"highlights": []` (wrong shape): one error message, the load survives
+      and the rows appear unpainted.
+- [ ] Two scripts bound to `load` on the same level: they fold in name order,
+      the alphabetically last one winning per (row, column).
+- [ ] Bind the same script to **`reload`** instead: "Script output has
+      `highlights` — ignored (only a `load` hook paints rows)", nothing is
+      painted. Running it by hand from the menu says the same.
+- [ ] A script answering with nothing but `highlights` on a `reload` hook gets
+      **one** message, not additionally "missing `commands` array".
+- [ ] Staleness: edit a value the script colours from, without reloading — the
+      colour stays as it was until the next load. (Expected, documented.)
+- [ ] A ramp script (colour computed per row from a ratio) produces a visibly
+      graded column, and `fg: auto` keeps every step legible from end to end.
+
+### The surfaces (phase 6)
+
+- [ ] **Table** — as tested above.
+- [ ] **Card** (`card:` on the level): a rule without `columns:` paints the
+      whole card; with `columns: [x]` only the **value** of that field, its
+      label keeping the card's own label style.
+- [ ] **Details** (`o`, the record-detail split): the rules of the **source**
+      level fire against the record on show; a rule with `columns: [x]` paints
+      the value cell of row `x` in the split.
+- [ ] A value in the split that **wraps** over several lines carries the colour
+      on all of them, not only the first.
+- [ ] Moving the cursor in the source pane repaints the split for the new
+      record.
+- [ ] **Tree**: a row wears its **own** level's rules — a rule on the parent
+      level does not colour the children, and vice versa (highlights are not
+      inherited, unlike `columns:`).
+- [ ] Two tree levels with different rules, both expanded: each row is painted
+      by its own level, with no colour bleeding between them.
+- [ ] A cell rule in tree mode whose column the level does not render paints
+      nothing; on `tree_label` the pre-styled segments may swallow it — the row
+      form works there.
+- [ ] `modes: [table]` on a rule: painted in the table, not on the card and not
+      in the split. `modes: [card, details]` the other way round.
+- [ ] `modes:` on the **style** alone restricts it the same way; a rule with
+      its own `modes:` **replaces** the style's list rather than intersecting
+      (style `[table]` + rule `[card]` paints on the card).
+- [ ] The same named style used by two rules of different reach behaves
+      differently per rule — no duplicate style needed.
 
 ## Refinements / deferred tasks
 

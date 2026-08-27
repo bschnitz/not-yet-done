@@ -1,6 +1,6 @@
 # Plan: configurable row / column / cell highlighting
 
-> **Status: phases 1-6 implemented, phase 7 (docs + smoke tests) planned.** The style grammar of
+> **Status: implemented (phases 1-7); the live smoke run is still open.** The style grammar of
 > [Part 1](#part-1--the-style-grammar) and the rule surface of
 > [Part 2](#part-2--the-rules) live in
 > `not-yet-done-tui/src/config/highlight.rs`: `highlights:` parses on every
@@ -175,8 +175,7 @@ for _what_ is painted and an optional condition for _when_.
   highlights:
     # column — no condition, so the whole column
     - columns: [estimate]
-      style: { bg: "#1c2430" }
-      selected: { bg: "#2c3a50" }
+      style: { bg: "#1c2430", selected: { bg: "#2c3a50" } }
 
     # row — no column selector, so the whole row
     - when:
@@ -434,7 +433,7 @@ Each phase ends in something demonstrable.
 | 4 ✓ | Row highlights: the row style pair in `not-yet-done-ratatui` + precedence, then wired up.                                                                                                                               |
 | 5 ✓ | Script channel: `highlights` in the `load`-hook answer, the pane-side map, the `*` axes, `reload` refusal. (Tree-merge is not reachable yet: the `load` hook only fires on the flat load.)                              |
 | 6 ✓ | Modes: `card`, `details`, `tree` — one `Surface`, three geometries. In a tree a row wears its own level's rules.                                                                                                        |
-| 7   | Docs (`generic-view-spec.md` §`highlights:` and the hook table's "may answer with", README) + smoke tests in `smoke-tests.md`.                                                                                          |
+| 7 ✓ | Docs: `generic-view-spec.md` §`highlights:` (grammar, rules, `modes:`, the script channel, the surface table), the hook table's "may answer with", a README pointer — plus the smoke-test block in `smoke-tests.md`.    |
 
 ## Non-goals (for now)
 

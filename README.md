@@ -2342,6 +2342,12 @@ stored locally, and available on every adapter without any adapter knowing
 about it — are written up in
 [`docs/custom-columns.md`](docs/custom-columns.md).
 
+Colour as part of the view rather than of the theme — rows, columns and cell
+values painted by declarative rules, or by a `load`-hook script that computes
+the colour from the data it just saw — is
+[`highlights:`](docs/generic-view-spec.md#highlights--painting-rows-columns-and-cells)
+in the same spec.
+
 The original design analysis on whether the (now-removed) native Tasks
 and Trackings tabs could move onto the `ContentAdapter` abstraction —
 since fully realized; both are adapter-backed tabs today — lives in
