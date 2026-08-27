@@ -398,6 +398,9 @@ fn more_placeholder_entry(parent_path: Vec<String>, depth: usize) -> TreeEntry {
 pub struct TreeLevel<'a> {
     pub columns: &'a [ColumnDef],
     pub actions: &'a [ActionDef],
+    /// The level's own `highlights:` — not inherited, exactly as in the flat
+    /// path, so a rule paints the level that declares it and no other.
+    pub highlights: &'a [crate::config::highlight::HighlightRule],
     /// The level's own tree_label key. Always `Some` for a level
     /// returned by [`tree_level_at_depth`] (the walk stops at the
     /// first level without one).
@@ -417,6 +420,7 @@ pub fn tree_level_at_depth<'a>(view_def: &'a ViewDef, depth: usize) -> Option<Tr
         return Some(TreeLevel {
             columns: &view_def.columns,
             actions: &view_def.actions,
+            highlights: &view_def.highlights,
             tree_label: root_label,
         });
     }
@@ -428,6 +432,7 @@ pub fn tree_level_at_depth<'a>(view_def: &'a ViewDef, depth: usize) -> Option<Tr
     Some(TreeLevel {
         columns: &current.columns,
         actions: &current.actions,
+        highlights: &current.highlights,
         tree_label: label,
     })
 }
@@ -453,6 +458,7 @@ pub fn tree_level_for_chain<'a>(
         return Some(TreeLevel {
             columns: &view_def.columns,
             actions: &view_def.actions,
+            highlights: &view_def.highlights,
             tree_label: root_label,
         });
     }
@@ -461,6 +467,7 @@ pub fn tree_level_for_chain<'a>(
     Some(TreeLevel {
         columns: &child.columns,
         actions: &child.actions,
+        highlights: &child.highlights,
         tree_label: label,
     })
 }
