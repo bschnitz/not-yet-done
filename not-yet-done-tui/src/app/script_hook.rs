@@ -21,7 +21,11 @@
 //! cursor (nothing is selected yet) and may emit no commands at all — it
 //! would be emitting them into the middle of the load that is running it —
 //! but it can hand back a patch that lands in the rows before anyone sees
-//! them, which costs no second load and never shows a stale value.
+//! them, which costs no second load and never shows a stale value. Colours
+//! (`highlights`) ride that same answer and are therefore a `load`-hook
+//! privilege too: after the table exists there is nothing left to paint, so
+//! a `reload` hook naming the key is refused
+//! ([`crate::app::script::highlights_rejection`]).
 //!
 //! **Loop protection.** A hook script may itself ask for a reload — that
 //! is the point of the `commands` mode — so the trigger has to be able to
