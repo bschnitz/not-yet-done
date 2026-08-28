@@ -4752,6 +4752,40 @@ the column has to be present in the private view YAML — in `jira.yaml` in
 - [ ] Anon mode: version names appear replaced (they can contain product or
       customer terms), not verbatim.
 
+## The story-points column (Jira)
+
+The column key is `story_points`. Unlike every other Jira column it is a
+**custom** field, so the adapter first has to find out which one: it reads the
+instance's field catalogue (`/rest/api/2/field`) once per session and takes the
+field named `Story Points` (Server / Data Center) or `Story point estimate`
+(Cloud). The adapter file's `story_points_field` pins the id when that lookup
+misses. Sorting uses the discovered `cf[<id>]` clause, not the field name. Same
+prerequisite as the columns above: it has to be listed in the private view YAML
+— in `jira.yaml` in **both** column lists (tickets and bookmarks) and, if used,
+in `card.fields`.
+
+- [ ] Ticket list: the column "Story Points" carries the estimate on estimated
+      tickets and is empty on the rest — blank, not `-`. A ticket estimated at
+      **zero** does show `0`: only an unset field is blank.
+- [ ] A whole estimate renders as `5`, not `5.0`; a half one keeps its digits
+      (`2.5`).
+- [ ] The bookmarks subtab (`m`) shows the column as well.
+- [ ] Sorting with `S` → `story_points` is in the list; descending puts the
+      biggest estimate first. No JQL error banner — that would be the symptom
+      of an unresolved custom-field id.
+- [ ] The bookmarks subtab sorts the same column locally and compares it as a
+      **number**: `10` sorts after `9`, not before it. Unestimated rows collect
+      at the end ascending (the shared rule for every number column, not one of
+      this column's own).
+- [ ] Open a ticket with `e`: a `story_points:` line in the read-only block
+      below the `---` marker. Save it unchanged → no conflict or change banner.
+- [ ] After saving, the row's column stays filled in (the post-edit row patch).
+- [ ] Card mode (`v c`): the field appears as "Story Points" with a label.
+- [ ] Anon mode: the number stays verbatim — an estimate identifies nobody.
+- [ ] Set `story_points_field: customfield_<wrong-id>` in the adapter YAML and
+      restart: the column goes blank and the ticket list still loads. Remove it
+      again → the values come back.
+
 ## The labels column (Jira)
 
 The column key is `labels`; JQL knows the same name, so the sort goes to the
@@ -5960,7 +5994,7 @@ restarted after inserting one — script shortcuts are cached per scope.
       holds the files, and the document ends in an `## Attachments` section —
       images embedded, other files as links. A name with spaces must still be a
       working link (the target is wrapped in `<…>`); a bare `](path with
-  spaces)` would render as literal text.
+spaces)` would render as literal text.
 - [ ] An attachment the description already embeds appears **once** — inline,
       not a second time in the attachment list.
 - [ ] Replace an attachment in Taiga under the same name, run `o p` again: the

@@ -42,6 +42,14 @@ pub struct JiraConfig {
     /// <instance>/tickets`.
     #[serde(default)]
     pub(super) ticket_workspace: Option<String>,
+    /// Custom-field id backing the `story_points` column, either as
+    /// `customfield_10006` or as the bare `10006`. Only needed when the
+    /// automatic lookup misses — the adapter otherwise finds the field by
+    /// name in the instance's field catalogue. An id without a number is
+    /// ignored, so a typo falls back to the lookup instead of blanking the
+    /// column.
+    #[serde(default)]
+    pub(super) story_points_field: Option<String>,
 }
 
 /// Default `bookmarked`-column glyph when `bookmark_marker` is unset.

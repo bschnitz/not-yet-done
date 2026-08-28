@@ -65,11 +65,11 @@ impl Anonymizer for JiraAnonymizer {
             // authored inside the project and routinely embed a product or
             // customer term.
             "summary" | "label" | "labels" | "fix_versions" => self.std.scrub_value(key, value),
-            // Structural / addressing — verbatim. (`type`/`priority` are standard
-            // enums — "Bug", "Story", "High" — not customer-identifying.)
-            "type" | "priority" | "updated" | "created" | "size" | "mime_type" | "attachments" => {
-                value.to_string()
-            }
+            // Structural / addressing / measurements — verbatim.
+            // (`type`/`priority` are standard enums — "Bug", "Story", "High";
+            // `story_points` is a bare estimate, identifying nothing.)
+            "type" | "priority" | "updated" | "created" | "size" | "mime_type" | "attachments"
+            | "story_points" => value.to_string(),
             // Unknown future column → safe fallback.
             _ => self.std.scrub_value(key, value),
         }

@@ -3,6 +3,7 @@
 use not_yet_done_content::http_log;
 use serde::Deserialize;
 
+use super::fields::number_cell;
 use super::{Assignee, JiraClient, NameField, normalize_eol};
 
 /// Join the names of a `fixVersions`-shaped array. Jira allows several
@@ -52,6 +53,12 @@ pub struct JiraTicket {
     /// issue is unscheduled — which is the common case, so the column is
     /// expected to be blank on many rows.
     pub fix_versions: String,
+    /// The issue's story-points estimate, already rendered for display
+    /// (`5`, `2.5`, or empty). Empty both when the issue carries no
+    /// estimate and when the instance has no story-points field at all —
+    /// the column is declared unconditionally, so a Jira without the field
+    /// shows it blank rather than failing the listing.
+    pub story_points: String,
     pub issue_type: String,
     pub updated: String,
     pub attachments_count: u64,
@@ -84,6 +91,9 @@ pub struct JiraIssueDetail {
     /// Names of the issue's `fixVersions`, comma-separated (see
     /// [`JiraTicket::fix_versions`]).
     pub fix_versions: String,
+    /// Story-points estimate, rendered for display (see
+    /// [`JiraTicket::story_points`]).
+    pub story_points: String,
     pub updated: String,
 }
 
@@ -130,6 +140,11 @@ struct IssueFields {
     updated: Option<String>,
     #[serde(default)]
     attachment: Option<Vec<serde_json::Value>>,
+    /// Whatever else was requested — today the story-points custom field,
+    /// whose key (`customfield_10006`) is only known at runtime and so
+    /// cannot be a named member.
+    #[serde(flatten)]
+    custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -154,6 +169,9 @@ struct IssueDetailFields {
     #[serde(default, rename = "fixVersions")]
     fix_versions: Option<Vec<NameField>>,
     updated: Option<String>,
+    /// See [`IssueFields::custom`].
+    #[serde(flatten)]
+    custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl JiraClient {
@@ -167,11 +185,31 @@ impl JiraClient {
     ) -> Result<SearchPage, String> {
         let url = format!("{}/rest/api/2/search", self.base_url);
 
+        // The story-points field is instance-specific, so it is asked for by
+        // its discovered id and read back out of the untyped remainder. An
+        // instance without the field simply requests one field less.
+        let story_points_id = self.story_points_field().await.map(|f| f.id.clone());
+        let mut fields = vec![
+            "summary",
+            "status",
+            "priority",
+            "assignee",
+            "creator",
+            "issuetype",
+            "labels",
+            "fixVersions",
+            "updated",
+            "attachment",
+        ];
+        if let Some(id) = &story_points_id {
+            fields.push(id.as_str());
+        }
+
         let body = serde_json::json!({
             "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
-            "fields": ["summary", "status", "priority", "assignee", "creator", "issuetype", "labels", "fixVersions", "updated", "attachment"]
+            "fields": fields
         });
 
         http_log::log_request("POST", &url);
@@ -221,6 +259,10 @@ impl JiraClient {
                     .unwrap_or_default(),
                 labels: label_names(issue.fields.labels),
                 fix_versions: version_names(issue.fields.fix_versions),
+                story_points: story_points_id
+                    .as_ref()
+                    .map(|id| number_cell(issue.fields.custom.get(id)))
+                    .unwrap_or_default(),
                 updated: issue.fields.updated.unwrap_or_default(),
                 attachments_count: issue.fields.attachment.map(|v| v.len() as u64).unwrap_or(0),
             })
@@ -246,10 +288,20 @@ impl JiraClient {
 
     /// Fetch full details of a single issue (for editing).
     pub async fn get_issue(&self, key: &str) -> Result<JiraIssueDetail, String> {
-        let url = format!(
-            "{}/rest/api/2/issue/{}?fields=summary,description,status,priority,\
+        // As in `search`, the story-points field is appended by its
+        // discovered id; without it the request asks for one field less.
+        let story_points_id = self.story_points_field().await.map(|f| f.id.clone());
+        let mut field_list = String::from(
+            "summary,description,status,priority,\
              issuetype,assignee,reporter,creator,labels,fixVersions,updated",
-            self.base_url, key
+        );
+        if let Some(id) = &story_points_id {
+            field_list.push(',');
+            field_list.push_str(id);
+        }
+        let url = format!(
+            "{}/rest/api/2/issue/{}?fields={}",
+            self.base_url, key, field_list
         );
 
         http_log::log_request("GET", &url);
@@ -313,6 +365,10 @@ impl JiraClient {
             creator_key,
             labels: data.fields.labels.unwrap_or_default(),
             fix_versions: version_names(data.fields.fix_versions),
+            story_points: story_points_id
+                .as_ref()
+                .map(|id| number_cell(data.fields.custom.get(id)))
+                .unwrap_or_default(),
             updated: data.fields.updated.unwrap_or_default(),
         })
     }

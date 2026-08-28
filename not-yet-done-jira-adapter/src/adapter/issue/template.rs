@@ -69,6 +69,7 @@ pub(super) fn field_value_from_detail(d: &JiraIssueDetail, key: &str) -> String 
         "assignee" => d.assignee.clone(),
         "creator" => d.creator.clone(),
         "fix_versions" => d.fix_versions.clone(),
+        "story_points" => d.story_points.clone(),
         "reporter" => d.reporter.clone(),
         "priority" => d.priority.clone(),
         "status" => d.status.clone(),
@@ -166,6 +167,7 @@ fn push_readonly_section(out: &mut String, detail: &JiraIssueDetail, editable_se
         ("assignee", detail.assignee.as_str()),
         ("creator", detail.creator.as_str()),
         ("fix_versions", detail.fix_versions.as_str()),
+        ("story_points", detail.story_points.as_str()),
     ] {
         // `number` doesn't exist as an editable key so always show it;
         // others suppress when the caller put them above the marker.
