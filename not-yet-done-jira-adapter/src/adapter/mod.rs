@@ -578,6 +578,13 @@ fn issue_summary(
             allowed_values: None,
         },
         MetadataField {
+            key: "story_points".into(),
+            value: t.story_points,
+            display_label: "Story Points".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
             key: "updated".into(),
             value: t.updated,
             display_label: "Updated".into(),
@@ -625,7 +632,12 @@ async fn list_issues(
         .as_deref()
         .unwrap_or("assignee = currentUser() ORDER BY updated DESC");
 
-    let (jql, applied_sort) = jql::apply_order_by(base_jql, &params.sort);
+    // The story-points ORDER BY needs the instance's custom-field id, which
+    // the client resolves once and then answers from cache — the same
+    // lookup `search` below performs to request the column at all.
+    let story_points_clause = client.story_points_jql_clause().await;
+    let (jql, applied_sort) =
+        jql::apply_order_by(base_jql, &params.sort, story_points_clause.as_deref());
 
     let page_req = params.page.unwrap_or(PageRequest {
         offset: 0,
@@ -843,8 +855,14 @@ bindings:
 
     let scope_id = Uuid::new_v4();
     let store = SqlAuthSessionStore::new(Arc::clone(&db), scope_id);
-    let auth = AuthBridge::new("http://localhost:0".into(), false, spec, Box::new(store))
-        .expect("auth bridge");
+    let auth = AuthBridge::new(
+        "http://localhost:0".into(),
+        false,
+        spec,
+        None,
+        Box::new(store),
+    )
+    .expect("auth bridge");
 
     JiraAdapter::from_parts(
         auth,
@@ -871,6 +889,7 @@ mod bookmark_marker_tests {
             creator: "someone else".into(),
             labels: "backend, urgent".into(),
             fix_versions: "1.2.0".into(),
+            story_points: "5".into(),
             issue_type: "Bug".into(),
             updated: "2026-06-30".into(),
             attachments_count: 0,

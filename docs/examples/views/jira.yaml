@@ -86,6 +86,16 @@ views:
       - key: fix_versions
         label: Fix Versions
         sizing: max
+      # The story-points estimate, blank on issues that carry none. Read-only.
+      # Story Points is a *custom* field, so the adapter looks its id up in the
+      # instance's field catalogue — nothing to configure here, but the
+      # adapter file's `story_points_field` can pin it if the lookup misses.
+      # Sortable server-side via the discovered `cf[<id>]` clause; on an
+      # instance without the field the column stays blank and a sort on it is
+      # ignored rather than failing the query.
+      - key: story_points
+        label: Story Points
+        sizing: "fixed(12)"
       # ── Custom user column (adapter-agnostic) ────────────────────────────
       # A column the *adapter never emits*: its values are yours, stored
       # locally and matched onto rows by node id. Declare it with

@@ -24,8 +24,23 @@ pub(super) fn jql_field_for_column(column: &str) -> Option<&'static str> {
         "fix_versions" => Some("fixVersion"),
         "summary" => Some("summary"),
         "updated" => Some("updated"),
+        // `story_points` is deliberately absent: it is a custom field, so
+        // its JQL clause (`cf[<id>]`) is only known once the client has
+        // discovered the instance's field id. See [`STORY_POINTS`].
         _ => None,
     }
+}
+
+/// Column key of the story-points estimate. Server-sortable like the rest,
+/// but only via a clause resolved at runtime — hence its own constant
+/// instead of an arm in [`jql_field_for_column`].
+pub(super) const STORY_POINTS: &str = "story_points";
+
+/// Whether the server can order by `column`. Everything
+/// [`jql_field_for_column`] names, plus [`STORY_POINTS`], whose clause the
+/// caller supplies per request.
+fn server_sortable(column: &str) -> bool {
+    jql_field_for_column(column).is_some() || column == STORY_POINTS
 }
 
 /// Every column an issue row carries, with its type. The order matches the
@@ -43,6 +58,7 @@ fn issue_row_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("creator", "Creator"),
         ColumnSchema::new("labels", "Labels"),
         ColumnSchema::new("fix_versions", "Fix Versions"),
+        ColumnSchema::new(STORY_POINTS, "Story Points").typed("number"),
         ColumnSchema::new("updated", "Updated").typed("datetime"),
         ColumnSchema::new("attachments", "Attachm.").typed("number"),
     ]
@@ -57,8 +73,11 @@ pub(super) fn issue_columns() -> Vec<ColumnSchema> {
     issue_row_columns()
         .into_iter()
         .map(|c| {
-            let server_sortable = jql_field_for_column(&c.key).is_some();
-            if server_sortable { c } else { c.unsortable() }
+            if server_sortable(&c.key) {
+                c
+            } else {
+                c.unsortable()
+            }
         })
         .collect()
 }
@@ -84,11 +103,21 @@ pub(super) struct OrderByClause {
 
 /// Build an `ORDER BY ...` clause from sort keys, dropping columns that
 /// don't have a JQL field mapping.
-pub(super) fn build_order_by(sort: &[SortKey]) -> OrderByClause {
+///
+/// `story_points_clause` is the runtime-resolved `cf[<id>]` for the
+/// story-points column, or `None` when the instance has no such field (or
+/// its discovery failed) — in which case a sort on that column is dropped
+/// like any other unmappable one, leaving the pane's order untouched
+/// rather than failing the search.
+pub(super) fn build_order_by(sort: &[SortKey], story_points_clause: Option<&str>) -> OrderByClause {
     let mut parts = Vec::new();
     let mut applied = Vec::new();
     for key in sort {
-        if let Some(field) = jql_field_for_column(&key.column) {
+        let field = match key.column.as_str() {
+            STORY_POINTS => story_points_clause,
+            other => jql_field_for_column(other),
+        };
+        if let Some(field) = field {
             let dir = match key.direction {
                 SortDirection::Asc => "ASC",
                 SortDirection::Desc => "DESC",
@@ -130,11 +159,15 @@ pub(super) fn strip_order_by(jql: &str) -> String {
 /// sort anything itself, it hands the ordering to the server. If `sort` is
 /// empty, the JQL is returned unchanged (preserving any embedded `ORDER BY`).
 /// Otherwise any existing `ORDER BY` is stripped and our clause is appended.
-pub(super) fn apply_order_by(jql: &str, sort: &[SortKey]) -> (String, Vec<SortKey>) {
+pub(super) fn apply_order_by(
+    jql: &str,
+    sort: &[SortKey],
+    story_points_clause: Option<&str>,
+) -> (String, Vec<SortKey>) {
     if sort.is_empty() {
         return (jql.to_string(), Vec::new());
     }
-    let order = build_order_by(sort);
+    let order = build_order_by(sort, story_points_clause);
     if order.clause.is_empty() {
         return (jql.to_string(), Vec::new());
     }
@@ -176,7 +209,7 @@ mod tests {
         for col in issue_columns() {
             assert_eq!(
                 col.sortable,
-                jql_field_for_column(&col.key).is_some(),
+                server_sortable(&col.key),
                 "column '{}' promises a sort JQL cannot deliver",
                 col.key
             );
@@ -195,20 +228,26 @@ mod tests {
 
     #[test]
     fn build_order_by_maps_known_columns() {
-        let order = build_order_by(&[
-            key("status", SortDirection::Asc),
-            key("updated", SortDirection::Desc),
-        ]);
+        let order = build_order_by(
+            &[
+                key("status", SortDirection::Asc),
+                key("updated", SortDirection::Desc),
+            ],
+            None,
+        );
         assert_eq!(order.clause, "ORDER BY status ASC, updated DESC");
         assert_eq!(order.applied.len(), 2);
     }
 
     #[test]
     fn build_order_by_drops_unknown_columns() {
-        let order = build_order_by(&[
-            key("nonsense", SortDirection::Asc),
-            key("priority", SortDirection::Desc),
-        ]);
+        let order = build_order_by(
+            &[
+                key("nonsense", SortDirection::Asc),
+                key("priority", SortDirection::Desc),
+            ],
+            None,
+        );
         assert_eq!(order.clause, "ORDER BY priority DESC");
         assert_eq!(order.applied.len(), 1);
         assert_eq!(order.applied[0].column, "priority");
@@ -216,7 +255,7 @@ mod tests {
 
     #[test]
     fn build_order_by_empty_input_yields_empty_clause() {
-        let order = build_order_by(&[]);
+        let order = build_order_by(&[], None);
         assert!(order.clause.is_empty());
         assert!(order.applied.is_empty());
     }
@@ -250,7 +289,8 @@ mod tests {
 
     #[test]
     fn apply_order_by_appends_when_jql_has_no_order_by() {
-        let (jql, applied) = apply_order_by("project = FOO", &[key("status", SortDirection::Asc)]);
+        let (jql, applied) =
+            apply_order_by("project = FOO", &[key("status", SortDirection::Asc)], None);
         assert_eq!(jql, "project = FOO ORDER BY status ASC");
         assert_eq!(applied.len(), 1);
     }
@@ -260,13 +300,14 @@ mod tests {
         let (jql, _) = apply_order_by(
             "project = FOO ORDER BY updated DESC",
             &[key("status", SortDirection::Asc)],
+            None,
         );
         assert_eq!(jql, "project = FOO ORDER BY status ASC");
     }
 
     #[test]
     fn apply_order_by_preserves_existing_when_input_empty() {
-        let (jql, applied) = apply_order_by("project = FOO ORDER BY updated DESC", &[]);
+        let (jql, applied) = apply_order_by("project = FOO ORDER BY updated DESC", &[], None);
         assert_eq!(jql, "project = FOO ORDER BY updated DESC");
         assert!(applied.is_empty());
     }
@@ -276,6 +317,7 @@ mod tests {
         let (jql, applied) = apply_order_by(
             "project = FOO ORDER BY updated DESC",
             &[key("nonsense", SortDirection::Asc)],
+            None,
         );
         assert_eq!(jql, "project = FOO ORDER BY updated DESC");
         assert!(applied.is_empty());
@@ -283,7 +325,7 @@ mod tests {
 
     #[test]
     fn apply_order_by_handles_empty_jql_with_sort() {
-        let (jql, applied) = apply_order_by("", &[key("status", SortDirection::Asc)]);
+        let (jql, applied) = apply_order_by("", &[key("status", SortDirection::Asc)], None);
         assert_eq!(jql, "ORDER BY status ASC");
         assert_eq!(applied.len(), 1);
     }
@@ -294,10 +336,45 @@ mod tests {
     #[test]
     fn fix_versions_column_maps_to_the_singular_jql_field() {
         assert_eq!(jql_field_for_column("fix_versions"), Some("fixVersion"));
-        let order = build_order_by(&[key("fix_versions", SortDirection::Desc)]);
+        let order = build_order_by(&[key("fix_versions", SortDirection::Desc)], None);
         assert_eq!(order.clause, "ORDER BY fixVersion DESC");
         // Advertised as sortable, so the sort menu offers it at all.
         assert!(issue_columns().iter().any(|c| c.key == "fix_versions"));
+    }
+
+    /// Story points is a custom field, so its ORDER BY is the runtime
+    /// `cf[<id>]` the client discovered — not a name baked into the
+    /// column table.
+    #[test]
+    fn story_points_orders_by_the_discovered_custom_field_clause() {
+        let order = build_order_by(&[key(STORY_POINTS, SortDirection::Desc)], Some("cf[10006]"));
+        assert_eq!(order.clause, "ORDER BY cf[10006] DESC");
+        assert_eq!(order.applied.len(), 1);
+        assert!(
+            issue_columns()
+                .iter()
+                .any(|c| c.key == STORY_POINTS && c.sortable)
+        );
+        // Local sorting on the bookmarks list has to compare it as a number,
+        // or `10` would sort before `9`.
+        let col = bookmark_columns()
+            .into_iter()
+            .find(|c| c.key == STORY_POINTS)
+            .expect("bookmarks carry the column too");
+        assert_eq!(col.sort_kind(), not_yet_done_content::SortKind::Number);
+    }
+
+    /// An instance without the field (or a failed discovery) must leave the
+    /// pane's order untouched rather than emit a clause the server rejects.
+    #[test]
+    fn story_points_sort_is_dropped_when_the_instance_has_no_such_field() {
+        let (jql, applied) = apply_order_by(
+            "project = FOO ORDER BY updated DESC",
+            &[key(STORY_POINTS, SortDirection::Asc)],
+            None,
+        );
+        assert_eq!(jql, "project = FOO ORDER BY updated DESC");
+        assert!(applied.is_empty());
     }
 
     /// The label column is the one Jira field a row carries as a *list*. It
@@ -306,7 +383,7 @@ mod tests {
     #[test]
     fn labels_column_sorts_server_side() {
         assert_eq!(jql_field_for_column("labels"), Some("labels"));
-        let order = build_order_by(&[key("labels", SortDirection::Asc)]);
+        let order = build_order_by(&[key("labels", SortDirection::Asc)], None);
         assert_eq!(order.clause, "ORDER BY labels ASC");
         assert!(
             issue_columns()

@@ -83,3 +83,12 @@ auth:
 # expanded. When unset, defaults to
 # <data-local>/not_yet_done/jira/<instance>/tickets.
 # ticket_workspace: "~/jira-tickets"
+
+# Custom-field id backing the `story_points` column. Story Points is not a
+# built-in Jira field: every instance carries it as a custom field with its
+# own id, so the adapter looks it up by name in the instance's field
+# catalogue (`Story Points` on Server/Data Center, `Story point estimate` on
+# Cloud) and needs no configuration. Set this only when that lookup misses —
+# on a localised instance, or where several fields share the name. Both
+# spellings are accepted: `customfield_10006` or the bare `10006`.
+# story_points_field: customfield_10006

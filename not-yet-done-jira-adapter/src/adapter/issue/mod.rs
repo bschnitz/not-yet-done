@@ -26,9 +26,7 @@ use super::attachment::{JiraAttachmentNode, download_summary, write_attachments}
 use super::cache::{JiraCache, fetch_comments, fetch_issue};
 use super::comment::JiraCommentNode;
 use super::types::{attachment_node_type, comment_node_type, issue_node_type};
-use super::util::{
-    browse_issue, format_file_size, other_err, prepare_target_dir, truncate_body,
-};
+use super::util::{browse_issue, format_file_size, other_err, prepare_target_dir, truncate_body};
 
 mod clone;
 mod edit_full;
@@ -190,13 +188,20 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
                 editable: false,
                 allowed_values: None,
             },
+            MetadataField {
+                key: "story_points".into(),
+                value: detail.story_points.clone(),
+                display_label: "Story Points".into(),
+                editable: false,
+                allowed_values: None,
+            },
         ],
     }
 }
 
 /// The **list-row** metadata projection — must mirror the field keys
 /// `JiraRoot::list_issues` emits (`key, type, status, priority, assignee,
-/// creator, labels, fix_versions, updated`), so the post-edit row patch
+/// creator, labels, fix_versions, story_points, updated`), so the post-edit row patch
 /// refreshes the same columns the list rendered. `labels` matters most here:
 /// it is the one list column the buffer can *change*, so without it the row
 /// would keep the pre-edit labels until a full reload. `attachments` is
@@ -220,6 +225,7 @@ fn build_row_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
             f("creator", detail.creator.clone(), "Creator"),
             f("labels", detail.labels.join(", "), "Labels"),
             f("fix_versions", detail.fix_versions.clone(), "Fix Versions"),
+            f("story_points", detail.story_points.clone(), "Story Points"),
             f("updated", detail.updated.clone(), "Updated"),
         ],
     }
@@ -1052,6 +1058,7 @@ mod tests {
             creator_key: "bob".into(),
             labels: Vec::new(),
             fix_versions: "1.2.0, 1.3.0".into(),
+            story_points: "8".into(),
             updated: "2025-01-01T00:00:00.000+0000".into(),
         }
     }
@@ -1098,7 +1105,7 @@ mod tests {
     /// row, merging by key. For that to refresh the right columns, the row
     /// projection's keys must mirror what `JiraRoot::list_issues` emits
     /// (`key, type, status, priority, assignee, creator, labels, fix_versions,
-    /// updated`) and carry the fresh detail values. `attachments` is
+    /// story_points, updated`) and carry the fresh detail values. `attachments` is
     /// deliberately absent — the detail fetch has no count — so the patch keeps
     /// the row's last-known value there.
     #[test]
@@ -1123,6 +1130,7 @@ mod tests {
                 "creator",
                 "labels",
                 "fix_versions",
+                "story_points",
                 "updated"
             ]
         );
@@ -1144,6 +1152,7 @@ mod tests {
         assert_eq!(value("assignee"), "alice");
         assert_eq!(value("creator"), "bob");
         assert_eq!(value("fix_versions"), "1.2.0, 1.3.0");
+        assert_eq!(value("story_points"), "8");
         assert_eq!(value("type"), "Bug");
         // The column the buffer can change: one cell, comma-separated.
         assert_eq!(value("labels"), "backend, urgent");
@@ -1239,15 +1248,16 @@ mod tests {
         assert!(template.contains("assignee: alice"));
         // Several fix versions render as one comma-separated read-only line.
         assert!(template.contains("fix_versions: 1.2.0, 1.3.0"));
+        assert!(template.contains("story_points: 8"));
 
         // Body after `===`.
         assert!(template.contains("The login form crashes on submit."));
     }
 
     /// The read-only block is informational: re-saving a rendered buffer
-    /// unchanged must not diff. Guards the newest read-only key specifically —
-    /// a parser that took `fix_versions` for an editable field would turn every
-    /// plain save into a phantom field change.
+    /// unchanged must not diff. Guards the newest read-only keys specifically —
+    /// a parser that took `fix_versions` or `story_points` for an editable
+    /// field would turn every plain save into a phantom field change.
     #[test]
     fn read_only_fix_versions_line_does_not_diff() {
         let node = test_node(sample_detail());
@@ -1259,6 +1269,7 @@ mod tests {
             &build_slug_tables(&node.cache),
         );
         assert!(template.contains("fix_versions: "), "line must be rendered");
+        assert!(template.contains("story_points: "), "line must be rendered");
 
         let output = diff_buffer(&node, &template).unwrap();
         assert_eq!(

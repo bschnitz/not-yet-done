@@ -15,6 +15,7 @@ mod attachments;
 mod comments;
 mod create;
 mod delete;
+mod fields;
 mod links;
 mod search;
 mod transitions;
@@ -24,6 +25,7 @@ mod watchers;
 pub use attachments::JiraAttachment;
 pub use comments::JiraComment;
 pub use create::CreateIssueFields;
+use fields::CustomField;
 pub use links::{JiraIssueLink, JiraLinkType};
 pub use search::{JiraIssueDetail, JiraTicket};
 pub use transitions::JiraTransition;
@@ -124,6 +126,14 @@ pub struct JiraClient {
     pub(super) base_url: String,
     pub(super) http: reqwest::Client,
     myself: tokio::sync::OnceCell<MyselfData>,
+    /// Story-points custom field, resolved from the instance's field
+    /// catalogue on first use (see [`fields`]). `Some(None)` is the cached
+    /// answer of an instance that simply has no such field.
+    story_points: tokio::sync::OnceCell<Option<CustomField>>,
+    /// Configured `story_points_field`. When set it wins over discovery and
+    /// spares the catalogue call entirely — the escape hatch for an
+    /// instance whose field is named in a way no heuristic will guess.
+    story_points_override: Option<CustomField>,
     /// Set when the server rejects this client's session; read by the auth
     /// bridge, which then throws the client away and logs in again.
     rejection: http_log::AuthRejection,
@@ -199,8 +209,22 @@ impl JiraClient {
             base_url,
             http,
             myself: tokio::sync::OnceCell::new(),
+            story_points: tokio::sync::OnceCell::new(),
+            story_points_override: None,
             rejection: http_log::AuthRejection::new(),
         })
+    }
+
+    /// Pin the story-points custom field instead of discovering it.
+    /// `raw` is what the config carries — `customfield_10006` or the bare
+    /// `10006`; anything else is ignored and discovery runs as usual, so a
+    /// typo degrades to the default rather than blanking the column.
+    pub fn with_story_points_field(mut self, raw: Option<&str>) -> Self {
+        self.story_points_override = raw
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(fields::custom_field_from_id);
+        self
     }
 
     /// Build a client from a stored session. Thin convenience wrapper
