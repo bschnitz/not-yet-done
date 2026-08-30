@@ -76,7 +76,8 @@ flowchart TD
     subgraph "Data core"
         CORE[not-yet-done-core<br/>nyd.db: settings/queries/links/tags]
         TASKCORE[not-yet-done-task-core<br/>tasks.db: task/tracking domain]
-        FILTER[not-yet-done-filter<br/>filter DSL]
+        FILTER[not-yet-done-filter<br/>task filters]
+        ROWSIEVE[rowsieve<br/>filter language]
         MACROS[not-yet-done-macros]
     end
 
@@ -118,6 +119,7 @@ flowchart TD
     TASKCORE --> FILTER
     FOREST --> TABLE
     NYDRATATUI --> GRID
+    FILTER --> ROWSIEVE
     CORE --> MACROS
 ```
 
@@ -125,7 +127,8 @@ flowchart TD
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | **not-yet-done-core**               | The legacy database (`nyd.db`): settings, saved queries, links, tags; config                                                                                                                                  | macros                                                               |
 | **not-yet-done-task-core**          | The task/tracking domain (`tasks.db`): entities, services, bootstrap, backup                                                                                                                                  | filter                                                               |
-| **not-yet-done-filter**             | The filter DSL (YAML query language, AST → query, tree operators)                                                                                                                                             | —                                                                    |
+| **not-yet-done-filter**             | The task half of the filter DSL: the saved-query document, the tree predicates, AST → SQL                                                                                                                     | rowsieve (external)                                                  |
+| **rowsieve**                        | The filter language itself: AST, YAML form, in-memory evaluator — host-agnostic, publishable on its own                                                                                                       | —                                                                    |
 | **not-yet-done-host**               | The adapter wiring for every frontend: factory registry, `resolve_adapter`, hooks                                                                                                                             | content, every adapter                                               |
 | **not-yet-done-tui**                | The terminal UI: event loop, views, app state                                                                                                                                                                 | core, content, filter, host, local, postgres, forest, table, ratatui |
 | **not-yet-done-cli** (`nyd`)        | The generic adapter frontend (CLI) plus the `tag`/`backup`/`config` built-ins                                                                                                                                 | host, content, core, task-core, filter                               |
@@ -155,7 +158,8 @@ lives in the legacy database but in its own `tasks.db`, looked after by
 `not-yet-done-task-core`; `not-yet-done-core` keeps only the TUI's
 cross-cutting data (`nyd.db`); the filter DSL was extracted into
 `not-yet-done-filter` so that both the domain and the adapters can use it
-without `core`. The reasoning behind the split is in
+without `core`; the _language_ was later lifted one level further out, into
+`rowsieve`. The reasoning behind the split is in
 [`adapterize-tasks-trackings.md`](adapterize-tasks-trackings.md).
 
 - **`not-yet-done-task-core` (`tasks.db`)** — the actual domain: entities
@@ -171,9 +175,28 @@ without `core`. The reasoning behind the split is in
   at `dirs::data_local_dir()/not_yet_done/nyd.db`, config at
   `dirs::config_dir()/not_yet_done/config.yaml`, overridable with
   `DATABASE_URL`.
-- **`not-yet-done-filter`** — the YAML filter DSL with natural-language date
-  expressions: AST → query, including tree-specific operators. No workspace
-  dependencies; used by `task-core`, `local-adapter`, `cli` and `tui`.
+- **`rowsieve`** — the filter _language_, and nothing else: the AST, its YAML
+  form, and an evaluator over anything that can answer "what is field X worth
+  on this row". It knows no entity, no schema and no database, which is what
+  makes the same filter usable against SQL, an API result and a list in memory
+  without three implementations disagreeing about what it means. A workspace
+  member with its own README and publish metadata, used from outside this
+  repository too (the `tidings` notification bar filters its sections with it).
+- **`not-yet-done-filter`** — what is genuinely about _tasks_, layered on top:
+  the saved-query document (`name:` + `query:`), the `has_ancestor`/`in_tree`
+  predicates and their resolution against the materialized `path` column, the
+  date-field list for `extract_date_bounds`, and the AST → SeaORM translation.
+  Everything else is re-exported, so call sites see one crate. Used by
+  `task-core`, `local-adapter`, `cli` and `tui`.
+
+  A predicate the language cannot evaluate is written `[name, argument]` and
+  parses to `FilterExpr::Custom` — carried through the tree untouched, false if
+  it ever reaches the evaluator, and rewritten by
+  `resolve_tree_operators()` before the SQL builder sees it. The hierarchy
+  concepts therefore live where the hierarchy does. The price is that a
+  two-element typo is well-formed, which is why `query_filter::parse` calls
+  `validate_custom(TREE_PREDICATES)`: an unknown name is a load error, not a
+  branch that quietly matches nothing.
 
 Both databases run a schema sync automatically at startup; targeted
 migrations deal with old data (for example the tag `color` → `fg_color` +
