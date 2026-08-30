@@ -434,10 +434,37 @@ impl AuthRejection {
 
 /// Build the network-level error string when `reqwest::send()` itself
 /// fails (DNS, TCP, TLS, timeout). Always includes the URL.
-pub fn network_error(method: &str, url: &str, err: impl std::fmt::Display) -> String {
-    let msg = format!("{method} {url}: {err}");
+///
+/// The error's own `Display` is not the whole message, and on its own it is
+/// close to useless here: reqwest renders every transport failure as `error
+/// sending request for url (…)` and keeps *what* actually went wrong -- timed
+/// out, connection refused, certificate rejected, connection reset by peer --
+/// one step down in the `source` chain. Printed alone it tells the reader the
+/// one thing they already know. So the chain is walked and appended, which is
+/// what makes the difference between "the network hiccuped" and a diagnosis
+/// the next time one of these lands in the log.
+pub fn network_error(method: &str, url: &str, err: impl std::error::Error) -> String {
+    let msg = format!("{method} {url}: {}", with_causes(&err));
     write_line(&format!("ERROR {msg}"));
     msg
+}
+
+/// An error and everything behind it, joined `outer: inner: innermost`.
+///
+/// Duplicates are dropped: several layers here restate their cause verbatim,
+/// and a line that says the same sentence three times is harder to read than
+/// one that says it once, not easier.
+fn with_causes(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut cause = err.source();
+    while let Some(inner) = cause {
+        let text = inner.to_string();
+        if !parts.iter().any(|part| part == &text) {
+            parts.push(text);
+        }
+        cause = inner.source();
+    }
+    parts.join(": ")
 }
 
 #[cfg(test)]
@@ -548,8 +575,50 @@ mod tests {
         assert!(!is_auth_rejection(&network_error(
             "GET",
             "https://jira.example/rest/api/2/myself",
-            "connection refused"
+            std::io::Error::other("connection refused")
         )));
+    }
+
+    /// The shape reqwest hands over: an outer sentence that names nothing and
+    /// the cause one step below it.
+    #[derive(Debug)]
+    struct Layered(std::io::Error);
+
+    impl std::fmt::Display for Layered {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "error sending request for url (https://jira.example/s)")
+        }
+    }
+
+    impl std::error::Error for Layered {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_network_error_names_the_cause_behind_it() {
+        let msg = network_error(
+            "POST",
+            "https://jira.example/rest/api/2/search",
+            Layered(std::io::Error::other("operation timed out")),
+        );
+        assert!(
+            msg.contains("operation timed out"),
+            "the cause is the whole point of the line: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_cause_that_repeats_its_wrapper_is_said_once() {
+        let msg = network_error(
+            "POST",
+            "https://jira.example/rest/api/2/search",
+            Layered(std::io::Error::other(
+                "error sending request for url (https://jira.example/s)",
+            )),
+        );
+        assert_eq!(msg.matches("error sending request").count(), 1, "got: {msg}");
     }
 
     #[tokio::test]
