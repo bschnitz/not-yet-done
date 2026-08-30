@@ -59,10 +59,21 @@ Findings that turn into separate tasks get a short note under the item.
 `Shift+e` on an issue: opens the 3b header plus all comments in one
 buffer (newest→oldest). Own comments are editable inline / deletable via
 `del`; new comments through an `--- add ---` block. Comments by others
-are rendered read-only; conflicts end up in the banner reopen.
+carry `[not yours]` in their header line and are refused on save;
+conflicts end up in the banner reopen.
 
 - [ ] `Shift+e` opens a buffer with the header and all comments in
       newest→oldest order
+- [ ] The header line of a comment by somebody else reads
+      `--- @author <ts> [not yours] (id=…) ---`; own comments are unmarked.
+      Same wording as the Taiga buffer.
+- [ ] `E` (Markdown mode) on the same issue: the heading of a foreign
+      comment keeps `[not yours]`, and saving an unrelated change does not
+      lose it — the marker sits before the id, so it survives
+      wiki→md→wiki.
+- [ ] `o w` (`export_workspace`) / the `o p` preview of the same issue:
+      `ticket.md` carries **no** marker — it is a read-only snapshot, not
+      an editing buffer.
 - [ ] Edit the body of an own comment → `:wq` → notification
       "X updated, comments: ~1" (or with `+`/`-`/`~` counts when there
       are several operations)
@@ -6288,7 +6299,7 @@ repeated. Test one adapter thoroughly and the rest by spot check.
       instance (or block it before the handshake), post a comment, bring it
       back within the backoff → the comment lands once, no error.
 - [ ] **A read is repeated even as a POST:** the Jira search (`POST
-  /rest/api/2/search`) survives a dropped connection — the very case
+/rest/api/2/search`) survives a dropped connection — the very case
       "error sending request for url …" came from.
 - [ ] **An unknown field in the block is rejected:** `retry:` with
       `attemps: 3` (typo) makes the adapter fail to load with a config error
@@ -6309,8 +6320,8 @@ Deletion stays open, because Taiga also lets project admins delete a foreign
 comment.
 
 - [ ] `e e` on a ticket that carries comments from two people: the header line
-      of every comment written by somebody else ends in
-      `(id=…) [not yours] ---`, own comments are unmarked.
+      of every comment written by somebody else reads
+      `--- @author <ts> [not yours] (id=…) ---`, own comments are unmarked.
 - [ ] Change nothing, `:wq` → no `edit_comment` request at all (with
       `NYD_DEBUG=1` the log shows none), the notification reports no comment
       operations.

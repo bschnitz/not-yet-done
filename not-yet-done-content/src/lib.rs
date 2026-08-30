@@ -12,6 +12,7 @@ pub mod auth;
 pub mod children;
 pub mod describe;
 pub mod download;
+pub mod editor_marks;
 pub mod grouping;
 pub mod http_log;
 pub mod http_send;
@@ -41,6 +42,7 @@ pub use auth::{
     InMemorySessionStore, MechanismSpec, ResolvedSession, SessionCachePolicy, SessionEntry,
     SessionStore,
 };
+pub use editor_marks::NOT_YOURS_MARKER;
 pub use http_send::{Repeat, RetryConfig};
 pub use link_route::{LinkRoute, LinkRouteError};
 pub use node_ref::{NodeRef, NodeRefParseError};

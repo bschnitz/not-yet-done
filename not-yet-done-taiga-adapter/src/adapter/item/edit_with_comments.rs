@@ -21,10 +21,6 @@ use super::slugs::build_user_table;
 use super::template::{self, FieldError, Parsed3b, render_3b, render_with_errors};
 
 const ADD_COMMENT_MARKER: &str = "--- add ---";
-/// Appended to the header line of a comment written by somebody else.
-/// Taiga only lets a comment's author edit it, so an edit of such a block
-/// is refused before a request goes out.
-const NOT_YOURS_MARKER: &str = "[not yours]";
 const DELETE_KEYWORD_DEL: &str = "del";
 const DELETE_KEYWORD_DELETE: &str = "delete";
 
@@ -57,7 +53,7 @@ fn render_comment_header(c: &TaigaComment, me: Option<&str>) -> String {
     } else {
         String::new()
     };
-    format!("--- @{} {ts} (id={}){mark} ---", c.author, c.id)
+    format!("--- @{} {ts}{mark} (id={}) ---", c.author, c.id)
 }
 
 /// A comment belongs to somebody else when its authoritative username
@@ -104,7 +100,7 @@ pub(super) fn short_ts(ts: &str) -> String {
     ts.to_string()
 }
 
-/// Parse a `--- @author ts (id=...) [not yours] ---` line; return the id
+/// Parse a `--- @author ts [not yours] (id=...) ---` line; return the id
 /// (anything between `id=` and `)`) and whether the header carries the
 /// [`NOT_YOURS_MARKER`]. A buffer rendered by an older binary has no
 /// marker — then `foreign` is false and the server decides as before.
@@ -117,7 +113,7 @@ fn parse_comment_header(line: &str) -> Option<(&str, bool)> {
     let id_open = inner.rfind("(id=")?;
     let id_part = &inner[id_open + 4..];
     let id_close = id_part.find(')')?;
-    let foreign = id_part[id_close..].contains(NOT_YOURS_MARKER);
+    let foreign = inner[..id_open].contains(NOT_YOURS_MARKER);
     Some((&id_part[..id_close], foreign))
 }
 
@@ -488,7 +484,7 @@ mod tests {
         let line = render_comment_header(&c, Some("rvega"));
         assert_eq!(
             line,
-            "--- @Sam Okoro 2024-03-04 09:15 (id=bbb-222) [not yours] ---"
+            "--- @Sam Okoro 2024-03-04 09:15 [not yours] (id=bbb-222) ---"
         );
         assert_eq!(parse_comment_header(&line), Some(("bbb-222", true)));
     }
@@ -514,7 +510,7 @@ mod tests {
                    ---\n\
                    ===\n\
                    the description\n\
-                   --- @Sam Okoro 2024-03-04 09:15 (id=bbb-222) [not yours] ---\n\
+                   --- @Sam Okoro 2024-03-04 09:15 [not yours] (id=bbb-222) ---\n\
                    theirs\n\
                    --- @Robin Vega 2024-03-04 09:16 (id=aaa-111) ---\n\
                    mine\n";

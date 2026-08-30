@@ -1,6 +1,11 @@
 //! Combined header+comments edit: one buffer holds the issue header in 3b
 //! layout plus every existing comment, with `--- add ---` blocks for new
 //! comments and `del`/`delete` as a sole-body keyword for deletion.
+//!
+//! Jira only lets a comment's author edit it, so a comment written by
+//! somebody else carries [`NOT_YOURS_MARKER`] in its header line — the
+//! same word the Taiga buffer uses — and an edit of it ends in the
+//! banner reopen instead of a write.
 
 use std::sync::Arc;
 
@@ -95,11 +100,75 @@ fn comment_is_own(
     }
 }
 
+/// The authenticated identity, as far as it is known, for the "is this
+/// comment mine?" gate. Both halves are optional: the default value knows
+/// nothing, treats every comment as ours and so leaves the server the
+/// authority — the right answer for a buffer nobody is going to write
+/// back (the workspace export) and for a test fixture.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Identity<'a> {
+    pub display: Option<&'a str>,
+    pub username: Option<&'a str>,
+}
+
+/// Owned counterpart of [`Identity`]: what the async lookup hands back,
+/// kept alive while the borrowed view is passed around.
+#[derive(Default)]
+pub(super) struct OwnIdentity {
+    display: Option<String>,
+    username: Option<String>,
+}
+
+impl OwnIdentity {
+    pub(super) fn as_identity(&self) -> Identity<'_> {
+        Identity {
+            display: self.display.as_deref(),
+            username: self.username.as_deref(),
+        }
+    }
+}
+
+impl JiraIssueNode {
+    /// Who we are, as far as Jira told us. An error here costs the marker,
+    /// not the edit path — the server stays the authority either way.
+    pub(super) async fn identity(&self) -> OwnIdentity {
+        OwnIdentity {
+            display: self.client.current_user().await.ok().map(|s| s.to_string()),
+            username: self
+                .client
+                .current_username()
+                .await
+                .ok()
+                .map(|s| s.to_string()),
+        }
+    }
+}
+
+impl Identity<'_> {
+    pub(super) fn owns(&self, comment: &JiraComment) -> bool {
+        comment_is_own(
+            &comment.author,
+            &comment.author_key,
+            self.display,
+            self.username,
+        )
+    }
+}
+
 /// Build the per-comment header line for `edit_with_comments`, e.g.
-/// `--- @bob 2025-06-01T10:00 (id=10042) ---`.
-pub(super) fn render_comment_header(comment: &JiraComment) -> String {
+/// `--- @bob 2025-06-01T10:00 (id=10042) ---`. A comment written by
+/// somebody else carries [`NOT_YOURS_MARKER`] before the id — Jira
+/// refuses an edit of it, and the marker says so while editing instead of
+/// after saving. It sits *before* `(id=…)` so it survives the trip through
+/// the Markdown buffer, whose heading keeps everything up to the id.
+pub(super) fn render_comment_header(comment: &JiraComment, me: Identity<'_>) -> String {
+    let mark = if me.owns(comment) {
+        String::new()
+    } else {
+        format!(" {NOT_YOURS_MARKER}")
+    };
     format!(
-        "--- @{author} {ts} (id={id}) ---",
+        "--- @{author} {ts}{mark} (id={id}) ---",
         author = comment.author,
         ts = short_ts(&comment.created),
         id = comment.id,
@@ -529,6 +598,7 @@ impl JiraIssueNode {
         detail: &JiraIssueDetail,
         comments: &[JiraComment],
         tables: &SlugTables,
+        me: Identity<'_>,
     ) -> String {
         // Render the 3b header without the CACHE section — we append it
         // once at the very end after the comment list.
@@ -546,7 +616,7 @@ impl JiraIssueNode {
         sorted.sort_by(|a, b| b.created.cmp(&a.created));
 
         for c in sorted {
-            out.push_str(&render_comment_header(c));
+            out.push_str(&render_comment_header(c, me));
             out.push('\n');
             out.push('\n');
             let body = render_user_mentions(c.body.trim_end(), &tables.users);
@@ -659,21 +729,9 @@ impl JiraIssueNode {
         // can be ambiguous or reformatted, so we prefer matching the username
         // (the `name` field, same value that appears inside `[~name]`) and only
         // fall back to the display name when either side lacks a username.
-        let current_user = self.client.current_user().await.ok().map(|s| s.to_string());
-        let current_username = self
-            .client
-            .current_username()
-            .await
-            .ok()
-            .map(|s| s.to_string());
-        let is_own_comment = |c: &JiraComment| -> bool {
-            comment_is_own(
-                &c.author,
-                &c.author_key,
-                current_user.as_deref(),
-                current_username.as_deref(),
-            )
-        };
+        let own = self.identity().await;
+        let me = own.as_identity();
+        let is_own_comment = |c: &JiraComment| -> bool { me.owns(c) };
 
         // Build a snapshot id→body map and a fresh id→comment map for quick lookup.
         let snap_by_id: std::collections::HashMap<&str, &str> = snapshot
@@ -821,6 +879,7 @@ impl JiraIssueNode {
                 &fresh_comments,
                 &errors,
                 &display_tables,
+                me,
             );
             return Ok(ActionOutcome::Reopen {
                 content,
@@ -907,6 +966,7 @@ impl JiraIssueNode {
         fresh_comments: &[JiraComment],
         errors: &[(String, String, String)],
         tables: &SlugTables,
+        me: Identity<'_>,
     ) -> String {
         // Header: re-render the 3b layout with the user's editable values
         // and body, but read-only fields refreshed from fresh_issue.
@@ -951,7 +1011,7 @@ impl JiraIssueNode {
         }
 
         for c in sorted {
-            out.push_str(&render_comment_header(c));
+            out.push_str(&render_comment_header(c, me));
             out.push('\n');
             out.push('\n');
             let body = render_user_mentions(c.body.trim_end(), &tables.users);
