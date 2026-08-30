@@ -41,6 +41,7 @@ mod transitions;
 mod wiki_md;
 mod workspace;
 
+use edit_with_comments::OwnIdentity;
 use template::{edit_full_fields, strip_template_comments};
 
 /// Issue node with lazily-hydrated full detail. `from_key` constructs
@@ -497,8 +498,14 @@ impl Node for JiraIssueNode {
                 super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources)
                     .await;
                 let tables = self.slug_tables(detail).await;
-                let template =
-                    self.render_with_comments(&edit_full_fields(), detail, &comments, &tables);
+                let me = self.identity().await;
+                let template = self.render_with_comments(
+                    &edit_full_fields(),
+                    detail,
+                    &comments,
+                    &tables,
+                    me.as_identity(),
+                );
                 Ok(EditorPrep {
                     template,
                     version: detail.updated.clone(),
@@ -779,7 +786,21 @@ impl JiraIssueNode {
         let mention_sources: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
         super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources).await;
         let tables = self.slug_tables(detail).await;
-        let canonical = self.render_with_comments(&edit_full_fields(), detail, &comments, &tables);
+        // Only the guarded buffer is written back, so only it carries the
+        // ownership marker; the export is a read-only snapshot and stays
+        // free of editing vocabulary.
+        let me = if guarded {
+            self.identity().await
+        } else {
+            OwnIdentity::default()
+        };
+        let canonical = self.render_with_comments(
+            &edit_full_fields(),
+            detail,
+            &comments,
+            &tables,
+            me.as_identity(),
+        );
         Ok(edit_with_comments::comments_canonical_to_md(&canonical))
     }
 
@@ -975,8 +996,8 @@ mod tests {
     use super::super::cache::JiraCache as CacheAlias;
     use super::super::util::normalize_blank_lines;
     use super::edit_with_comments::{
-        CommentBlockKind, comments_canonical_to_md, comments_md_to_canonical, is_delete_keyword,
-        parse_comment_header_id, render_comment_header,
+        CommentBlockKind, Identity, comments_canonical_to_md, comments_md_to_canonical,
+        is_delete_keyword, parse_comment_header_id, render_comment_header,
     };
     use super::markers::{ADD_COMMENT_MARKER, CACHE_MARKER, ERROR_BANNER_START};
     use super::slugs::{build_slug_tables, build_status_table, resolve_slugs_inplace};
@@ -1727,9 +1748,69 @@ mod tests {
     #[test]
     fn comment_header_round_trip() {
         let c = make_comment("10042", "bob", "2025-06-01T10:00:00.000+0000", "x");
-        let header = render_comment_header(&c);
+        let header = render_comment_header(&c, Identity::default());
         assert_eq!(header, "--- @bob 2025-06-01T10:00 (id=10042) ---");
         assert_eq!(parse_comment_header_id(&header), Some("10042"));
+    }
+
+    /// A comment written by somebody else is marked in the buffer — Jira
+    /// refuses the edit, so the user should see that before saving.
+    #[test]
+    fn foreign_comment_header_carries_the_marker() {
+        let c = make_comment("10042", "bob", "2025-06-01T10:00:00.000+0000", "x");
+        let me = Identity {
+            display: Some("alice"),
+            username: Some("alice"),
+        };
+        let header = render_comment_header(&c, me);
+        assert_eq!(
+            header,
+            "--- @bob 2025-06-01T10:00 [not yours] (id=10042) ---"
+        );
+        // The marker sits before the id, so the id still parses out.
+        assert_eq!(parse_comment_header_id(&header), Some("10042"));
+    }
+
+    #[test]
+    fn own_comment_header_stays_unmarked() {
+        let c = make_comment("10042", "alice", "2025-06-01T10:00:00.000+0000", "x");
+        let me = Identity {
+            display: Some("alice"),
+            username: Some("alice"),
+        };
+        assert_eq!(
+            render_comment_header(&c, me),
+            "--- @alice 2025-06-01T10:00 (id=10042) ---"
+        );
+    }
+
+    /// The marker has to survive the trip through the Markdown buffer, or
+    /// `edit_markdown` would silently lose it on every save.
+    #[test]
+    fn marker_survives_the_markdown_round_trip() {
+        let node = test_node(sample_detail());
+        let comments = vec![make_comment(
+            "10042",
+            "bob",
+            "2025-06-01T10:00:00.000+0000",
+            "their words",
+        )];
+        let me = Identity {
+            display: Some("alice"),
+            username: Some("alice"),
+        };
+        let canonical = node.render_with_comments(
+            &edit_full_fields(),
+            node.detail_now(),
+            &comments,
+            &build_slug_tables(&node.cache),
+            me,
+        );
+        assert!(canonical.contains("[not yours] (id=10042)"), "{canonical}");
+        let md = comments_canonical_to_md(&canonical);
+        assert!(md.contains("[not yours]"), "{md}");
+        let back = comments_md_to_canonical(&md);
+        assert!(back.contains("[not yours] (id=10042)"), "{back}");
     }
 
     #[test]
@@ -1769,6 +1850,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
 
         let pos2 = buf.find("(id=2)").expect("id=2 marker");
@@ -1790,6 +1872,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
 
         let parsed = node
@@ -1817,6 +1900,7 @@ mod tests {
             node.detail_now(),
             &[],
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         // Insert the new-comment block before the trailing CACHE section.
         let buf = match buf.find(CACHE_MARKER) {
@@ -1844,6 +1928,7 @@ mod tests {
             node.detail_now(),
             &[],
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         assert!(
             buf.contains(ADD_COMMENT_MARKER),
@@ -1861,6 +1946,7 @@ mod tests {
             node.detail_now(),
             &[],
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let parsed = node
             .parse_with_comments(&buf)
@@ -1880,6 +1966,7 @@ mod tests {
             node.detail_now(),
             &[],
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         // Insert a second add block that contains only whitespace.
         let buf = match buf.find(CACHE_MARKER) {
@@ -1914,6 +2001,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let md = comments_canonical_to_md(&canonical);
 
@@ -1947,6 +2035,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let md = comments_canonical_to_md(&canonical);
         let back = comments_md_to_canonical(&md);
@@ -1977,6 +2066,7 @@ mod tests {
             node.detail_now(),
             &[],
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let md = comments_canonical_to_md(&canonical);
         // User fills in the empty add placeholder.
@@ -2008,6 +2098,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let md = comments_canonical_to_md(&canonical);
         // User replaces the comment body with the sole-body delete keyword.
@@ -2063,6 +2154,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let md = comments_canonical_to_md(&canonical);
 
@@ -2144,6 +2236,7 @@ mod tests {
             node.detail_now(),
             &comments,
             &build_slug_tables(&node.cache),
+            Identity::default(),
         );
         let opened_md = comments_canonical_to_md(&canonical);
         let saved_md = opened_md.replace(
