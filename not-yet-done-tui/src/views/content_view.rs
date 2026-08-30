@@ -7310,7 +7310,17 @@ impl ContentPane {
                 }
             }
             "edit" => {
-                if let Some(id) = self.resolve_action_node_id(action) {
+                // Same target rule as `node`: `target: parent` addresses the
+                // level's parent instead of the row under the cursor. That is
+                // what keeps an editor reachable on an *empty* level — a table
+                // with no rows has no row to stand on, but the pane still knows
+                // the table it was drilled into (the nav stack, not the
+                // selection, answers for the parent).
+                let node_id = match action.target {
+                    ActionTarget::Selected => self.resolve_action_node_id(action),
+                    ActionTarget::Parent => self.selected_parent_node_id(),
+                };
+                if let Some(id) = node_id {
                     let action_id = action.id.clone().unwrap_or_else(|| "edit_full".into());
                     return SubViewMessage::Request(ViewRequest::OpenContentEditor {
                         view_index,
