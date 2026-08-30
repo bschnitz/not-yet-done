@@ -3,8 +3,13 @@
 //! as the sole body of a comment block deletes that comment.
 //!
 //! Per the design discussion: no per-comment conflict detection. The user
-//! can only edit their own comments (server enforces with 403); they take
-//! responsibility for not stomping on parallel edits to their own.
+//! can only edit their own comments — Taiga answers a foreign edit with a
+//! 403, so the buffer marks those comments [`NOT_YOURS_MARKER`] and the
+//! execute path rejects them locally instead of asking. Deletion stays
+//! open: Taiga also lets project admins delete a foreign comment, so that
+//! call keeps going to the server, which is the authority. For their own
+//! comments the user takes responsibility for not stomping on parallel
+//! edits.
 
 use not_yet_done_content::*;
 
@@ -16,12 +21,20 @@ use super::slugs::build_user_table;
 use super::template::{self, FieldError, Parsed3b, render_3b, render_with_errors};
 
 const ADD_COMMENT_MARKER: &str = "--- add ---";
+/// Appended to the header line of a comment written by somebody else.
+/// Taiga only lets a comment's author edit it, so an edit of such a block
+/// is refused before a request goes out.
+const NOT_YOURS_MARKER: &str = "[not yours]";
 const DELETE_KEYWORD_DEL: &str = "del";
 const DELETE_KEYWORD_DELETE: &str = "delete";
 
 #[derive(Debug, Clone)]
 enum CommentBlockKind {
-    Existing(String),
+    /// `foreign` mirrors the [`NOT_YOURS_MARKER`] of the header line.
+    Existing {
+        id: String,
+        foreign: bool,
+    },
     Add,
 }
 
@@ -37,9 +50,41 @@ struct ParsedWithComments {
     blocks: Vec<ParsedCommentBlock>,
 }
 
-fn render_comment_header(c: &TaigaComment) -> String {
+fn render_comment_header(c: &TaigaComment, me: Option<&str>) -> String {
     let ts = short_ts(&c.created);
-    format!("--- @{} {ts} (id={}) ---", c.author, c.id)
+    let mark = if is_foreign(c, me) {
+        format!(" {NOT_YOURS_MARKER}")
+    } else {
+        String::new()
+    };
+    format!("--- @{} {ts} (id={}){mark} ---", c.author, c.id)
+}
+
+/// A comment belongs to somebody else when its authoritative username
+/// differs from the authenticated one. Unknown on either side → treat it
+/// as ours and let the server stay the authority (a 403 still surfaces),
+/// rather than blocking an edit the user is allowed to make.
+fn is_foreign(c: &TaigaComment, me: Option<&str>) -> bool {
+    match (c.author_username.as_deref(), me) {
+        (Some(author), Some(me)) if !author.is_empty() && !me.is_empty() => author != me,
+        _ => false,
+    }
+}
+
+/// Compare comment bodies without the whitespace an editor rewrites on
+/// save. Trailing blanks per line, CRLF and the outer blank lines are
+/// cosmetic; anything else — blank lines between paragraphs, leading
+/// indentation of a code block — is the user's text and stays
+/// significant.
+fn normalize_body(s: &str) -> String {
+    let mut lines: Vec<&str> = s.lines().map(|l| l.trim_end()).collect();
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 /// Trim the time component off ISO timestamps; keep up to minute precision.
@@ -59,9 +104,11 @@ pub(super) fn short_ts(ts: &str) -> String {
     ts.to_string()
 }
 
-/// Parse a `--- @author ts (id=...) ---` line; return the id (anything
-/// between `id=` and `)`).
-fn parse_comment_header_id(line: &str) -> Option<&str> {
+/// Parse a `--- @author ts (id=...) [not yours] ---` line; return the id
+/// (anything between `id=` and `)`) and whether the header carries the
+/// [`NOT_YOURS_MARKER`]. A buffer rendered by an older binary has no
+/// marker — then `foreign` is false and the server decides as before.
+fn parse_comment_header(line: &str) -> Option<(&str, bool)> {
     let trimmed = line.trim_end();
     let inner = trimmed.strip_prefix("--- ")?.strip_suffix(" ---")?;
     if !inner.starts_with('@') {
@@ -70,7 +117,8 @@ fn parse_comment_header_id(line: &str) -> Option<&str> {
     let id_open = inner.rfind("(id=")?;
     let id_part = &inner[id_open + 4..];
     let id_close = id_part.find(')')?;
-    Some(&id_part[..id_close])
+    let foreign = id_part[id_close..].contains(NOT_YOURS_MARKER);
+    Some((&id_part[..id_close], foreign))
 }
 
 fn is_delete_keyword(body: &str) -> bool {
@@ -102,11 +150,17 @@ fn parse_with_comments(text: &str) -> std::result::Result<ParsedWithComments, Ve
             current = Some((CommentBlockKind::Add, Vec::new()));
             continue;
         }
-        if let Some(id) = parse_comment_header_id(trimmed) {
+        if let Some((id, foreign)) = parse_comment_header(trimmed) {
             if let Some(prev) = current.take() {
                 blocks_raw.push(prev);
             }
-            current = Some((CommentBlockKind::Existing(id.to_string()), Vec::new()));
+            current = Some((
+                CommentBlockKind::Existing {
+                    id: id.to_string(),
+                    foreign,
+                },
+                Vec::new(),
+            ));
             continue;
         }
         match current.as_mut() {
@@ -162,6 +216,15 @@ impl TaigaItemNode {
         let comments = fetch_comments(&self.client, self.detail.item_type, self.detail.id)
             .await
             .map_err(|e| ContentError::Other(e.into()))?;
+        // Identity for the "is this comment mine?" gate. Cached from the
+        // login session; an error here only costs the marker, so the edit
+        // path stays usable and the server decides.
+        let me = self
+            .client
+            .current_username()
+            .await
+            .ok()
+            .map(|s| s.to_string());
 
         let mut out = render_3b(
             &edit_full_fields(),
@@ -183,7 +246,7 @@ impl TaigaItemNode {
         let mut sorted: Vec<&TaigaComment> = comments.iter().collect();
         sorted.sort_by(|a, b| b.created.cmp(&a.created));
         for c in sorted {
-            out.push_str(&render_comment_header(c));
+            out.push_str(&render_comment_header(c, me.as_deref()));
             out.push('\n');
             out.push('\n');
             out.push_str(c.body.trim_end());
@@ -227,12 +290,17 @@ impl TaigaItemNode {
             )
         })?;
 
-        // 2. Snapshot map: id → body for diffing existing-comment edits.
-        let snap_by_id: std::collections::HashMap<&str, &str> = snapshot
+        // 2. Snapshot map: id → (body, foreign) for diffing existing-comment
+        //    edits. Ownership is read from the snapshot, not from the user
+        //    buffer, so deleting the marker by hand does not unlock an edit
+        //    the server would refuse anyway.
+        let snap_by_id: std::collections::HashMap<&str, (&str, bool)> = snapshot
             .blocks
             .iter()
             .filter_map(|b| match &b.kind {
-                CommentBlockKind::Existing(id) => Some((id.as_str(), b.body.as_str())),
+                CommentBlockKind::Existing { id, foreign } => {
+                    Some((id.as_str(), (b.body.as_str(), *foreign)))
+                }
                 CommentBlockKind::Add => None,
             })
             .collect();
@@ -254,11 +322,19 @@ impl TaigaItemNode {
         let mut n_deletes = 0usize;
 
         for block in &user.blocks {
-            let CommentBlockKind::Existing(id) = &block.kind else {
+            let CommentBlockKind::Existing {
+                id,
+                foreign: block_foreign,
+            } = &block.kind
+            else {
                 continue;
             };
             let user_body = block.body.trim();
-            let snap_body = snap_by_id.get(id.as_str()).copied().unwrap_or("").trim();
+            let (snap_body, foreign) = snap_by_id
+                .get(id.as_str())
+                .copied()
+                .map(|(body, foreign)| (body.trim(), foreign))
+                .unwrap_or(("", *block_foreign));
             if is_delete_keyword(user_body) {
                 if let Err(e) =
                     delete_comment(&self.client, self.detail.item_type, self.detail.id, id).await
@@ -269,8 +345,18 @@ impl TaigaItemNode {
                 }
             } else {
                 let resolved = template::resolve_user_mentions(user_body, &users);
-                if resolved != snap_body {
-                    if let Err(e) = edit_comment(
+                // Normalized compare: an editor that strips trailing
+                // whitespace on save must not count as an edit — on a
+                // foreign comment that alone bought a doomed 403.
+                if normalize_body(&resolved) != normalize_body(snap_body) {
+                    if foreign {
+                        // Taiga answers this with a 403 while the item
+                        // PATCH still goes through — say so here instead
+                        // of relaying a server error nobody can act on.
+                        comment_errors.push(format!(
+                            "edit {id}: not authored by you — Taiga only lets a comment's author edit it"
+                        ));
+                    } else if let Err(e) = edit_comment(
                         &self.client,
                         self.detail.item_type,
                         self.detail.id,
@@ -300,7 +386,7 @@ impl TaigaItemNode {
                         Some(template::resolve_user_mentions(body, &users))
                     }
                 }
-                CommentBlockKind::Existing(_) => None,
+                CommentBlockKind::Existing { .. } => None,
             })
             .collect();
 
@@ -370,5 +456,101 @@ impl TaigaItemNode {
             &self.detail,
             &tables,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// All fixtures below are invented.
+    fn comment(id: &str, author: &str, username: Option<&str>) -> TaigaComment {
+        TaigaComment {
+            id: id.into(),
+            author: author.into(),
+            author_username: username.map(|s| s.to_string()),
+            created: "2024-03-04T09:15:00+0000".into(),
+            body: "body".into(),
+        }
+    }
+
+    #[test]
+    fn own_comment_header_has_no_marker() {
+        let c = comment("aaa-111", "Robin Vega", Some("rvega"));
+        let line = render_comment_header(&c, Some("rvega"));
+        assert_eq!(line, "--- @Robin Vega 2024-03-04 09:15 (id=aaa-111) ---");
+        assert_eq!(parse_comment_header(&line), Some(("aaa-111", false)));
+    }
+
+    #[test]
+    fn foreign_comment_header_is_marked_and_round_trips() {
+        let c = comment("bbb-222", "Sam Okoro", Some("sokoro"));
+        let line = render_comment_header(&c, Some("rvega"));
+        assert_eq!(
+            line,
+            "--- @Sam Okoro 2024-03-04 09:15 (id=bbb-222) [not yours] ---"
+        );
+        assert_eq!(parse_comment_header(&line), Some(("bbb-222", true)));
+    }
+
+    #[test]
+    fn unknown_identity_stays_unmarked_so_the_server_decides() {
+        let c = comment("ccc-333", "System", None);
+        assert!(!is_foreign(&c, Some("rvega")));
+        assert!(!is_foreign(&comment("d", "Sam", Some("sokoro")), None));
+    }
+
+    #[test]
+    fn header_without_marker_parses_as_own() {
+        assert_eq!(
+            parse_comment_header("--- @Sam Okoro 2024-03-04 09:15 (id=bbb-222) ---"),
+            Some(("bbb-222", false))
+        );
+    }
+
+    #[test]
+    fn parsed_blocks_carry_the_marker() {
+        let buf = "subject: hi\n\
+                   ---\n\
+                   ===\n\
+                   the description\n\
+                   --- @Sam Okoro 2024-03-04 09:15 (id=bbb-222) [not yours] ---\n\
+                   theirs\n\
+                   --- @Robin Vega 2024-03-04 09:16 (id=aaa-111) ---\n\
+                   mine\n";
+        let parsed = parse_with_comments(buf).expect("parses");
+        let kinds: Vec<(String, bool)> = parsed
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                CommentBlockKind::Existing { id, foreign } => Some((id.clone(), *foreign)),
+                CommentBlockKind::Add => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("bbb-222".to_string(), true),
+                ("aaa-111".to_string(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_and_crlf_are_not_an_edit() {
+        assert_eq!(
+            normalize_body("one   \r\ntwo\t\r\n"),
+            normalize_body("one\ntwo")
+        );
+        assert_eq!(normalize_body("\n\ntext \n\n"), normalize_body("text"));
+    }
+
+    #[test]
+    fn real_text_changes_still_differ() {
+        assert_ne!(normalize_body("one\ntwo"), normalize_body("one\nTwo"));
+        // A blank line between paragraphs is the user's text, not cosmetics.
+        assert_ne!(normalize_body("one\ntwo"), normalize_body("one\n\ntwo"));
+        // Leading indentation is significant (code blocks).
+        assert_ne!(normalize_body("    code"), normalize_body("code"));
     }
 }

@@ -6288,7 +6288,7 @@ repeated. Test one adapter thoroughly and the rest by spot check.
       instance (or block it before the handshake), post a comment, bring it
       back within the backoff → the comment lands once, no error.
 - [ ] **A read is repeated even as a POST:** the Jira search (`POST
-    /rest/api/2/search`) survives a dropped connection — the very case
+  /rest/api/2/search`) survives a dropped connection — the very case
       "error sending request for url …" came from.
 - [ ] **An unknown field in the block is rejected:** `retry:` with
       `attemps: 3` (typo) makes the adapter fail to load with a config error
@@ -6298,6 +6298,38 @@ repeated. Test one adapter thoroughly and the rest by spot check.
 - [ ] **Attachments are unaffected:** uploading an attachment (Taiga, Stoat)
       still works; its multipart body cannot be repeated and is sent once —
       the timeout still bounds it.
+
+## Taiga: comments by somebody else in the `e e` buffer (`[not yours]`)
+
+Taiga only lets a comment's **author** edit it — a foreign edit is answered
+with `403 PermissionDenied` on `…/history/<type>/<id>/edit_comment`, while the
+item PATCH of the same save still goes through. The buffer therefore marks
+those comments and the adapter refuses the edit before a request goes out.
+Deletion stays open, because Taiga also lets project admins delete a foreign
+comment.
+
+- [ ] `e e` on a ticket that carries comments from two people: the header line
+      of every comment written by somebody else ends in
+      `(id=…) [not yours] ---`, own comments are unmarked.
+- [ ] Change nothing, `:wq` → no `edit_comment` request at all (with
+      `NYD_DEBUG=1` the log shows none), the notification reports no comment
+      operations.
+- [ ] Change a **foreign** comment, `:wq` → the item changes land and the
+      message names the refusal locally: `edit <id>: not authored by you — …`.
+      No 403 in the log, because no request was sent.
+- [ ] Change an **own** comment → it is updated as before, `comments: ~1`.
+- [ ] An editor that strips trailing whitespace on save (`:%s/\s\+$//` before
+      `:wq`, or an autocmd doing it) → no comment is counted as changed, no
+      request, no refusal. This is the case that produced the 403 without
+      anybody touching a comment.
+- [ ] Indentation and blank lines still count: add a blank line inside an own
+      comment, or indent a line by four spaces → the comment is updated.
+- [ ] Delete the ` [not yours]` marker by hand and edit the body → still
+      refused locally: ownership is read from the buffer as it was rendered,
+      not from what the user typed.
+- [ ] `del` as the sole line of a foreign comment → the request goes to Taiga:
+      as a project admin it is deleted, otherwise the server's 403 appears in
+      the message.
 
 ## Refinements / deferred tasks
 
