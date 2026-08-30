@@ -129,6 +129,43 @@ fn is_delete_keyword(body: &str) -> bool {
     first == DELETE_KEYWORD_DEL || first == DELETE_KEYWORD_DELETE
 }
 
+/// Fold the header's outcome and the per-comment tally into the one answer
+/// the caller gets.
+///
+/// A refused comment is news even when nothing else happened: the user asked
+/// for an edit and did not get it. Answering `NoChanges` there would read as
+/// "your buffer held nothing", so a bare `NoChanges` is kept for the case
+/// where there is genuinely nothing to say — no write, no refusal.
+fn assemble_outcome(
+    header: ActionOutcome,
+    n_adds: usize,
+    n_updates: usize,
+    n_deletes: usize,
+    errors: &[String],
+) -> ActionOutcome {
+    let errs = if errors.is_empty() {
+        String::new()
+    } else {
+        format!(" (errors: {})", errors.join("; "))
+    };
+    let tally = if n_updates + n_deletes + n_adds > 0 {
+        format!(", comments: +{n_adds} ~{n_updates} -{n_deletes}")
+    } else {
+        String::new()
+    };
+
+    match header {
+        ActionOutcome::Done { message } => ActionOutcome::Done {
+            message: Some(format!("{}{tally}{errs}", message.unwrap_or_default())),
+        },
+        ActionOutcome::NoChanges if tally.is_empty() && errs.is_empty() => ActionOutcome::NoChanges,
+        ActionOutcome::NoChanges => ActionOutcome::Done {
+            message: Some(format!("unchanged{tally}{errs}")),
+        },
+        other => other,
+    }
+}
+
 fn parse_with_comments(text: &str) -> std::result::Result<ParsedWithComments, Vec<FieldError>> {
     let text = template::strip_cache_section(text);
     let text = template::strip_banner(text);
@@ -396,30 +433,13 @@ impl TaigaItemNode {
             .execute_edit_full_inner(&header_3b, &header_3b, version, Some(&adds))
             .await?;
 
-        let comment_errs_str = if comment_errors.is_empty() {
-            String::new()
-        } else {
-            format!(" (errors: {})", comment_errors.join("; "))
-        };
-        let comment_msg = if n_updates + n_deletes + adds.len() > 0 {
-            format!(", comments: +{} ~{} -{}", adds.len(), n_updates, n_deletes,)
-        } else {
-            String::new()
-        };
-
-        Ok(match header_outcome {
-            ActionOutcome::Done { message } => ActionOutcome::Done {
-                message: Some(format!(
-                    "{}{comment_msg}{comment_errs_str}",
-                    message.unwrap_or_default()
-                )),
-            },
-            ActionOutcome::NoChanges if comment_msg.is_empty() => ActionOutcome::NoChanges,
-            ActionOutcome::NoChanges => ActionOutcome::Done {
-                message: Some(format!("unchanged{comment_msg}{comment_errs_str}")),
-            },
-            other => other,
-        })
+        Ok(assemble_outcome(
+            header_outcome,
+            adds.len(),
+            n_updates,
+            n_deletes,
+            &comment_errors,
+        ))
     }
 
     /// Re-render a 3b-only buffer from the user's parsed header. Re-uses
@@ -548,5 +568,54 @@ mod tests {
         assert_ne!(normalize_body("one\ntwo"), normalize_body("one\n\ntwo"));
         // Leading indentation is significant (code blocks).
         assert_ne!(normalize_body("    code"), normalize_body("code"));
+    }
+
+    #[test]
+    fn a_refusal_is_reported_even_when_nothing_was_written() {
+        let out = assemble_outcome(
+            ActionOutcome::NoChanges,
+            0,
+            0,
+            0,
+            &["edit 7: not authored by you".to_string()],
+        );
+        match out {
+            ActionOutcome::Done { message } => {
+                let m = message.unwrap_or_default();
+                assert!(m.starts_with("unchanged"), "{m}");
+                assert!(m.contains("not authored by you"), "{m}");
+            }
+            _ => panic!("expected Done carrying the refusal"),
+        }
+    }
+
+    #[test]
+    fn an_untouched_buffer_still_answers_no_changes() {
+        assert!(matches!(
+            assemble_outcome(ActionOutcome::NoChanges, 0, 0, 0, &[]),
+            ActionOutcome::NoChanges
+        ));
+    }
+
+    #[test]
+    fn a_written_header_carries_tally_and_errors() {
+        let out = assemble_outcome(
+            ActionOutcome::Done {
+                message: Some("saved".to_string()),
+            },
+            1,
+            0,
+            0,
+            &["edit 7: nope".to_string()],
+        );
+        match out {
+            ActionOutcome::Done { message } => {
+                let m = message.unwrap_or_default();
+                assert!(m.contains("saved"), "{m}");
+                assert!(m.contains("comments: +1 ~0 -0"), "{m}");
+                assert!(m.contains("errors: edit 7: nope"), "{m}");
+            }
+            _ => panic!("expected Done"),
+        }
     }
 }
