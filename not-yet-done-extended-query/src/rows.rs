@@ -160,7 +160,7 @@ mod tests {
     }
 
     fn hits(yaml: &str, fields: &[(&str, &str)]) -> bool {
-        let resolved = query_filter::resolve_dates(serde_yaml::from_str(yaml).unwrap());
+        let resolved = not_yet_done_filter::resolve_dates(serde_yaml::from_str(yaml).unwrap());
         let expr: FilterExpr = serde_yaml::from_value(resolved).unwrap();
         let types = types();
         let summary = summary(fields);

@@ -55,6 +55,11 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
                 }
                 Ok(cond)
             }
+            FilterExpr::Custom { name, .. } => Err(AppError::FilterError(format!(
+                "'{name}' is a predicate SQL cannot express. \
+                 The tree predicates are resolved by resolve_tree_operators(), \
+                 which must run before the filter reaches this builder."
+            ))),
             FilterExpr::Not(inner) => {
                 let inner_cond = self.build_expr(inner)?;
                 Ok(Condition::all().not().add(inner_cond))
@@ -135,12 +140,6 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
             Operator::NotIn => Ok(lhs.is_not_in(self.lit_to_value_list(lit)?)),
             // Null-checks handled above, never reach here
             Operator::IsNull | Operator::IsNotNull => unreachable!(),
-            // Tree operators must be resolved before reaching the builder.
-            Operator::HasAncestor | Operator::InTree => Err(AppError::FilterError(
-                "has_ancestor / in_tree must be resolved before building SQL. \
-                 Call resolve_tree_operators() first."
-                    .to_string(),
-            )),
             // `matches` has no portable SQL form. It exists for in-memory
             // evaluation over adapter rows (highlight rules); written into a
             // saved query against the task DB it fails here, loudly, rather

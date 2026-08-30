@@ -1,22 +1,29 @@
-//! Pre-processing step that resolves `has_ancestor` and `in_tree` operators.
+//! Pre-processing step that resolves the `has_ancestor` and `in_tree`
+//! predicates.
 //!
-//! These operators require a database lookup to find matching task IDs by
-//! description, then rewrite the filter into `path LIKE` conditions.
+//! They are host predicates to the filter language ([`FilterExpr::Custom`]),
+//! which carries them through untouched because only this application knows
+//! what a task hierarchy is. Resolving one means a database lookup for tasks
+//! matching the description, then rewriting the predicate into `path LIKE`
+//! conditions over their short IDs.
 //!
-//! Must be called **before** passing the FilterExpr to the FilterBuilder.
+//! Must be called **before** passing the FilterExpr to the FilterBuilder — it
+//! is the step that turns something SQL cannot express into something it can.
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use crate::entity::task;
 use crate::error::AppError;
 use crate::repository::task_short_id;
-use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+use not_yet_done_filter::{
+    ColRef, FilterExpr, FilterLeaf, HAS_ANCESTOR, IN_TREE, Literal, Operator, Rhs,
+};
 
-/// Resolve all `has_ancestor` and `in_tree` operators in a FilterExpr.
+/// Resolve every `has_ancestor` / `in_tree` predicate in a FilterExpr.
 ///
-/// For each such leaf, queries the database for tasks matching the
-/// description (exact or LIKE), collects their short IDs, and rewrites
-/// the leaf into an OR of `path LIKE` conditions.
+/// For each one, queries the database for tasks matching the description
+/// (exact or LIKE), collects their short IDs, and rewrites the predicate into
+/// an OR of `path LIKE` conditions.
 pub fn resolve_tree_operators<'a>(
     expr: &'a FilterExpr,
     db: &'a DatabaseConnection,
@@ -41,36 +48,39 @@ pub fn resolve_tree_operators<'a>(
             FilterExpr::Not(inner) => Ok(FilterExpr::Not(Box::new(
                 resolve_tree_operators(inner, db).await?,
             ))),
-            FilterExpr::Leaf(leaf) => match leaf.op {
-                Operator::HasAncestor | Operator::InTree => resolve_tree_leaf(leaf, db).await,
-                _ => Ok(expr.clone()),
-            },
+            FilterExpr::Leaf(_) => Ok(expr.clone()),
+            FilterExpr::Custom { name, arg } if name == HAS_ANCESTOR || name == IN_TREE => {
+                resolve_tree_predicate(name, arg, db).await
+            }
+            // Every other predicate is a load error already — `parse` checks
+            // the names against the ones this application implements — so
+            // reaching here means a filter built in code, and passing it on
+            // unchanged lets the builder say what it cannot translate.
+            FilterExpr::Custom { .. } => Ok(expr.clone()),
         }
     })
 }
 
-async fn resolve_tree_leaf(
-    leaf: &FilterLeaf,
+async fn resolve_tree_predicate(
+    name: &str,
+    arg: &Literal,
     db: &DatabaseConnection,
 ) -> Result<FilterExpr, AppError> {
-    let search_str = match &leaf.rhs {
-        Rhs::Lit(Literal::String(s)) => s.clone(),
-        _ => {
-            return Err(AppError::FilterError(
-                "has_ancestor / in_tree requires a string value".into(),
-            ));
-        }
+    let Literal::String(search_str) = arg else {
+        return Err(AppError::FilterError(
+            "has_ancestor / in_tree requires a string value".into(),
+        ));
     };
 
     // Find matching tasks by description — exact or LIKE if contains %.
     let matching_tasks: Vec<task::Model> = if search_str.contains('%') {
         task::Entity::find()
-            .filter(task::Column::Description.like(&search_str))
+            .filter(task::Column::Description.like(search_str))
             .all(db)
             .await?
     } else {
         task::Entity::find()
-            .filter(task::Column::Description.eq(&search_str))
+            .filter(task::Column::Description.eq(search_str))
             .all(db)
             .await?
     };
@@ -88,14 +98,13 @@ async fn resolve_tree_leaf(
     let mut conditions = Vec::new();
     for task in &matching_tasks {
         let sid = task_short_id(task.id);
-        let pattern = match leaf.op {
-            // has_ancestor: task must be BELOW the matched node.
-            // path LIKE '%/<sid>/_%' — the /_ ensures at least one more segment after.
-            Operator::HasAncestor => format!("%/{sid}/_%"),
-            // in_tree: task is the node OR below it.
-            // path LIKE '%/<sid>%'
-            Operator::InTree => format!("%/{sid}%"),
-            _ => unreachable!(),
+        let pattern = if name == HAS_ANCESTOR {
+            // The task must be BELOW the matched node: the trailing `/_`
+            // demands at least one more segment after it.
+            format!("%/{sid}/_%")
+        } else {
+            // in_tree: the node itself, or anything below it.
+            format!("%/{sid}%")
         };
         conditions.push(FilterExpr::Leaf(FilterLeaf {
             lhs: ColRef::unqualified("path"),
@@ -117,15 +126,10 @@ mod tests {
 
     #[test]
     fn has_ancestor_needs_string() {
-        let leaf = FilterLeaf {
-            lhs: ColRef::unqualified("ignored"),
-            op: Operator::HasAncestor,
-            rhs: Rhs::Lit(Literal::Int(42)),
-        };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
             let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-            resolve_tree_leaf(&leaf, &db).await
+            resolve_tree_predicate(HAS_ANCESTOR, &Literal::Int(42), &db).await
         });
         assert!(result.is_err());
     }
