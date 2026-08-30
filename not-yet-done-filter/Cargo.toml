@@ -4,11 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde          = { workspace = true }
-serde_yaml     = { workspace = true }
-chrono         = { workspace = true }
-regex          = { workspace = true }
-natural-date   = { path = "../natural-date" }
+rowsieve   = { path = "../rowsieve", version = "0.1.0", features = ["natural-dates"] }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

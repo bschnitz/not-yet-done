@@ -398,7 +398,7 @@ fn filter(
     }
     let known = known_columns(types, items);
     let borrowed: Vec<&str> = known.iter().map(String::as_str).collect();
-    eval::validate_columns(expr, &borrowed, "column").map_err(|message| ExecError::Filter {
+    eval::validate_fields(expr, &borrowed, "column").map_err(|message| ExecError::Filter {
         what: format!("{path}.local_filter"),
         message,
     })?;

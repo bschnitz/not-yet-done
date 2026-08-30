@@ -10,7 +10,7 @@
 //! adapter the document will run against, so it lives in the separate
 //! [`check_languages`] the executor calls once it does.
 
-use not_yet_done_filter::{FilterExpr, Operator, query_filter};
+use not_yet_done_filter::{FilterExpr, Operator, query_filter, resolve_dates};
 use serde_yaml::Value;
 
 use crate::ast::{Direction, ExtendedQuery, Fetch, FetchSource, Node, NodeKind, OrderKey};
@@ -241,7 +241,7 @@ fn parse_kind(op: &str, value: &Value, path: &str, doc: &Document) -> Result<Nod
 /// operator — because a list of leaves always holds sequences or mappings,
 /// never bare operator strings.
 fn parse_local_filter(value: &Value, path: &str) -> Result<FilterExpr, ParseError> {
-    let resolved = query_filter::resolve_dates(value.clone());
+    let resolved = resolve_dates(value.clone());
     let where_ = format!("{path}.local_filter");
 
     let single = |v: &Value| -> Result<FilterExpr, ParseError> {
@@ -278,7 +278,7 @@ fn looks_like_leaf(items: &[Value]) -> bool {
     items.len() == 3
         && items[1]
             .as_str()
-            .is_some_and(|s| Operator::from_str(s).is_some())
+            .is_some_and(|s| s.parse::<Operator>().is_ok())
 }
 
 fn parse_limit(value: &Value, path: &str) -> Result<usize, ParseError> {

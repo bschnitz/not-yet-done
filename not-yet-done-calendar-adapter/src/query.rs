@@ -109,7 +109,10 @@ fn collect_bounds(
         FilterExpr::And(children) | FilterExpr::Or(children) => {
             children.iter().for_each(|c| collect_bounds(c, lo, hi))
         }
-        FilterExpr::Not(_) => {}
+        // Neither can be widened into a covering window: a negated subtree
+        // says where events are *not*, and a host predicate says nothing this
+        // adapter can read.
+        FilterExpr::Not(_) | FilterExpr::Custom { .. } => {}
         FilterExpr::Leaf(leaf) => {
             if !DATETIME_COLUMNS.contains(&leaf.lhs.column.as_str()) {
                 return;
@@ -142,7 +145,7 @@ const DATETIME_COLUMNS: &[&str] = &["start", "end"];
 /// ones — the calendar's contribution is only *which* columns exist and which
 /// of them are instants.
 fn validate(expr: &FilterExpr) -> Result<(), String> {
-    eval::validate_columns(expr, KNOWN_COLUMNS, "calendar column")?;
+    eval::validate_fields(expr, KNOWN_COLUMNS, "calendar column")?;
     eval::validate_datetime_literals(expr, DATETIME_COLUMNS)
 }
 
