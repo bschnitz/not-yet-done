@@ -92,3 +92,20 @@ auth:
 # on a localised instance, or where several fields share the name. Both
 # spellings are accepted: `customfield_10006` or the bare `10006`.
 # story_points_field: customfield_10006
+
+# How a request that produced no answer at all is sent again — the connection
+# refused, the handshake lost, the answer never arriving. Such a failure says
+# nothing about the server a moment later, so the adapter repeats the call
+# instead of handing the error straight to the user.
+#
+# `attempts` counts the first try; `1` switches repeating off. `backoff_ms` is
+# the wait before the second attempt and doubles before each further one.
+# Defaults: 2 attempts, 250 ms.
+#
+# Only calls without side effects are repeated after a *timeout*, because a
+# timed-out request may well have arrived and run — repeating a transition or
+# a comment there would do it twice. When the connection never came up, every
+# call is repeated: nothing reached the server, so nothing can be doubled.
+# retry:
+#   attempts: 2
+#   backoff_ms: 250

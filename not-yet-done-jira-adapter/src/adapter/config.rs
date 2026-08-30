@@ -13,7 +13,7 @@
 use fieldsmith::Buildable;
 use serde::Deserialize;
 
-use not_yet_done_content::AuthSpec;
+use not_yet_done_content::{AuthSpec, RetryConfig};
 
 #[derive(Deserialize, Buildable)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +50,13 @@ pub struct JiraConfig {
     /// column.
     #[serde(default)]
     pub(super) story_points_field: Option<String>,
+    /// How a request that produced no answer at all — connection refused,
+    /// answer never arrived — is sent again. Defaults to one repeat after a
+    /// quarter second; `attempts: 1` switches repeating off. Only calls
+    /// without side effects are repeated after a timeout (see
+    /// `not_yet_done_content::http_send`).
+    #[serde(default)]
+    pub(super) retry: RetryConfig,
 }
 
 /// Default `bookmarked`-column glyph when `bookmark_marker` is unset.
@@ -156,6 +163,22 @@ foo: bar
             .err()
             .expect("must reject unknown top-level field");
         assert!(err.to_string().contains("foo"), "error mentions foo: {err}");
+    }
+
+    /// A request that produced no answer is repeated per this block; the
+    /// block itself is optional, because an instance that never hiccups
+    /// should not have to say so.
+    #[test]
+    fn parses_a_retry_block_and_defaults_without_one() {
+        let base = "url: https://jira.example.invalid\nauth:\n  mechanism: cookie\n  bindings:\n    - field: cookie\n      provider: { type: literal, value: x }\n";
+        let cfg: JiraConfig = serde_yaml::from_str(base).expect("parses without a retry block");
+        assert_eq!(cfg.retry, RetryConfig::default());
+
+        let cfg: JiraConfig =
+            serde_yaml::from_str(&format!("{base}retry:\n  attempts: 4\n  backoff_ms: 100\n"))
+                .expect("parses with a retry block");
+        assert_eq!(cfg.retry.attempts, 4);
+        assert_eq!(cfg.retry.backoff_ms, 100);
     }
 
     /// The `config_schema()` hook derives its template from the same

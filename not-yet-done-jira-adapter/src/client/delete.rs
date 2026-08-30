@@ -5,8 +5,6 @@
 //! answers 400) instead of quietly taking the children with it. Deleting
 //! the subtasks first is the same action per subtask key.
 
-use not_yet_done_content::http_log;
-
 use super::JiraClient;
 
 impl JiraClient {
@@ -21,13 +19,7 @@ impl JiraClient {
             self.base_url, key
         );
 
-        http_log::log_request("DELETE", &url);
-        let resp = self
-            .http
-            .delete(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+        let resp = self.send("DELETE", &url, self.http.delete(&url)).await?;
         self.check_status("DELETE", &url, resp).await?;
 
         Ok(())

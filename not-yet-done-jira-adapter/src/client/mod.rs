@@ -7,7 +7,8 @@
 
 use std::time::Duration;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -137,9 +138,38 @@ pub struct JiraClient {
     /// Set when the server rejects this client's session; read by the auth
     /// bridge, which then throws the client away and logs in again.
     rejection: http_log::AuthRejection,
+    /// How often a request that produced no answer is sent again. Comes from
+    /// the instance's `retry:` config block.
+    retry: RetryConfig,
 }
 
 impl JiraClient {
+    /// Send a request through this client's retry policy, logging it and
+    /// turning a final transport failure into the usual error string.
+    ///
+    /// Whether a failed request may be sent again follows the HTTP method:
+    /// everything that writes is repeated only when the connection provably
+    /// never came up. A call that *reads* through a non-safe method — the JQL
+    /// search — takes [`JiraClient::send_read`] instead.
+    pub(super) async fn send(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::of_method(method), method, url, req).await
+    }
+
+    /// [`JiraClient::send`] for a call that only reads, whatever its method.
+    pub(super) async fn send_read(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::Safe, method, url, req).await
+    }
+
     /// [`http_log::check_status`] for this client. Every REST call in the
     /// submodules goes through here rather than the free function, so a
     /// rejected session is noticed where it happens instead of being
@@ -212,6 +242,7 @@ impl JiraClient {
             story_points: tokio::sync::OnceCell::new(),
             story_points_override: None,
             rejection: http_log::AuthRejection::new(),
+            retry: RetryConfig::default(),
         })
     }
 
@@ -224,6 +255,13 @@ impl JiraClient {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .and_then(fields::custom_field_from_id);
+        self
+    }
+
+    /// Set how a request that produced no answer is repeated. Without this
+    /// the client uses [`RetryConfig::default`].
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
         self
     }
 
@@ -248,13 +286,7 @@ impl JiraClient {
         self.myself
             .get_or_try_init(|| async {
                 let url = format!("{}/rest/api/2/myself", self.base_url);
-                http_log::log_request("GET", &url);
-                let resp = self
-                    .http
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| http_log::network_error("GET", &url, e))?;
+                let resp = self.send("GET", &url, self.http.get(&url)).await?;
                 let resp = self.check_status("GET", &url, resp).await?;
 
                 let body_text = resp

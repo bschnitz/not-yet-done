@@ -5,7 +5,6 @@
 //! issue, then the user saves to produce a brand-new ticket in the same
 //! project.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::JiraClient;
@@ -78,14 +77,9 @@ impl JiraClient {
 
         let body = serde_json::json!({ "fields": fields });
 
-        http_log::log_request("POST", &url);
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.http.post(&url).json(&body))
+            .await?;
         let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()

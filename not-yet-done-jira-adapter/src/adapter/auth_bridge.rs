@@ -52,6 +52,8 @@ pub(super) struct AuthBridge {
     /// builds so the column skips discovery on an instance where the
     /// lookup would guess wrong.
     story_points_field: Option<String>,
+    /// Config `retry:`, handed to every client this bridge builds.
+    retry: not_yet_done_content::RetryConfig,
     orchestrator: Arc<AuthOrchestrator>,
     client: RwLock<Option<Arc<JiraClient>>>,
     ready: Notify,
@@ -63,6 +65,7 @@ impl AuthBridge {
         accept_invalid_certs: bool,
         spec: AuthSpec,
         story_points_field: Option<String>,
+        retry: not_yet_done_content::RetryConfig,
         session_store: Box<dyn not_yet_done_content::SessionStore>,
     ) -> Result<Arc<Self>, String> {
         let orchestrator = AuthOrchestrator::from_spec(spec, session_store)
@@ -71,6 +74,7 @@ impl AuthBridge {
             base_url,
             accept_invalid_certs,
             story_points_field,
+            retry,
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(None),
             ready: Notify::new(),
@@ -202,7 +206,8 @@ impl AuthBridge {
             serde_json::from_str(blob).map_err(|e| format!("parse session blob: {e}"))?;
         let client = Arc::new(
             JiraClient::from_session(&self.base_url, session, self.accept_invalid_certs)?
-                .with_story_points_field(self.story_points_field.as_deref()),
+                .with_story_points_field(self.story_points_field.as_deref())
+                .with_retry(self.retry.clone()),
         );
         client.current_user().await?;
         Ok(client)

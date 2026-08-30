@@ -1,6 +1,5 @@
 //! Issue search (JQL) + single-issue fetch + field updates.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::fields::number_cell;
@@ -212,14 +211,12 @@ impl JiraClient {
             "fields": fields
         });
 
-        http_log::log_request("POST", &url);
+        // A search has no side effects, so it may be sent again after a
+        // timeout even though it is a POST — and it is the call that hangs
+        // when the network hiccups.
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send_read("POST", &url, self.http.post(&url).json(&body))
+            .await?;
         let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()
@@ -304,13 +301,7 @@ impl JiraClient {
             self.base_url, key, field_list
         );
 
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -434,14 +425,9 @@ impl JiraClient {
 
         let body = serde_json::json!({ "fields": fields });
 
-        http_log::log_request("PUT", &url);
         let resp = self
-            .http
-            .put(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PUT", &url, e))?;
+            .send("PUT", &url, self.http.put(&url).json(&body))
+            .await?;
         self.check_status("PUT", &url, resp).await?;
 
         Ok(())

@@ -36,14 +36,13 @@ impl JiraClient {
         }
 
         let url = format!("{}/rest/api/1.0/labels/suggest", self.base_url);
-        http_log::log_request("GET", &format!("{url}?query={query}"));
         let resp = self
-            .http
-            .get(&url)
-            .query(&[("query", query)])
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &format!("{url}?query={query}"),
+                self.http.get(&url).query(&[("query", query)]),
+            )
+            .await?;
         http_log::log_response("GET", &url, resp.status().as_u16());
         if !resp.status().is_success() {
             return Ok(Vec::new());
@@ -79,14 +78,13 @@ impl JiraClient {
     /// otherwise appeared in any browsed issue / comment yet.
     pub async fn get_user_by_name(&self, username: &str) -> Result<JiraUser, String> {
         let url = format!("{}/rest/api/2/user", self.base_url);
-        http_log::log_request("GET", &format!("{url}?username={username}"));
         let resp = self
-            .http
-            .get(&url)
-            .query(&[("username", username)])
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &format!("{url}?username={username}"),
+                self.http.get(&url).query(&[("username", username)]),
+            )
+            .await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -108,13 +106,7 @@ impl JiraClient {
                 self.base_url
             );
 
-            http_log::log_request("GET", &url);
-            let resp = self
-                .http
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| http_log::network_error("GET", &url, e))?;
+            let resp = self.send("GET", &url, self.http.get(&url)).await?;
             let resp = self.check_status("GET", &url, resp).await?;
             let body = resp.text().await.unwrap_or_default();
 

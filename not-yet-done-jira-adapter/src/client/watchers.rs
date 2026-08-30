@@ -1,6 +1,5 @@
 //! Watcher add/remove + isWatching probe + toggle wrapper.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::JiraClient;
@@ -15,13 +14,7 @@ impl JiraClient {
     /// Whether the authenticated user is currently watching `key`.
     pub async fn is_watching(&self, key: &str) -> Result<bool, String> {
         let url = format!("{}/rest/api/2/issue/{}/watchers", self.base_url, key);
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -37,16 +30,11 @@ impl JiraClient {
     pub async fn add_watcher(&self, key: &str) -> Result<(), String> {
         let username = self.current_username().await?.to_string();
         let url = format!("{}/rest/api/2/issue/{}/watchers", self.base_url, key);
-        http_log::log_request("POST", &url);
         // Server/DC takes the username as a JSON-encoded string literal in the
         // request body — not an object.
         let resp = self
-            .http
-            .post(&url)
-            .json(&username)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.http.post(&url).json(&username))
+            .await?;
         self.check_status("POST", &url, resp).await?;
         Ok(())
     }
@@ -55,14 +43,15 @@ impl JiraClient {
     pub async fn remove_watcher(&self, key: &str) -> Result<(), String> {
         let username = self.current_username().await?.to_string();
         let url = format!("{}/rest/api/2/issue/{}/watchers", self.base_url, key);
-        http_log::log_request("DELETE", &format!("{url}?username={username}"));
         let resp = self
-            .http
-            .delete(&url)
-            .query(&[("username", username.as_str())])
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+            .send(
+                "DELETE",
+                &format!("{url}?username={username}"),
+                self.http
+                    .delete(&url)
+                    .query(&[("username", username.as_str())]),
+            )
+            .await?;
         self.check_status("DELETE", &url, resp).await?;
         Ok(())
     }
