@@ -1535,6 +1535,11 @@ menu and vice versa.
   commits (and only then, if the spec actually changed, reloads and persists).
 - Levels that expose no sortable columns say so via a notification instead of
   opening an empty popup — the same gate `S` uses.
+- **A script can order the rows as well.** A sequence that no column expresses
+  — a rank the script fetched elsewhere, a score over several columns — comes
+  from a `load` hook answering with
+  [`order`](#script-hooks-ctrlh-in-the-menu). It applies only while the pane
+  is unsorted: whatever is committed here wins over it.
 
 ### `highlights:` — painting rows, columns and cells
 
@@ -2894,10 +2899,10 @@ a suffix (`[reload]`). Hooks run **unattended**, so only the two modes that need
 neither the terminal nor an editor may be bound: `background` and `commands`;
 `interactive` and `capture` are refused when binding.
 
-| hook     | fires                                            | payload                    | may answer with       |
-| -------- | ------------------------------------------------ | -------------------------- | --------------------- |
-| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`            |
-| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`, `highlights` |
+| hook     | fires                                            | payload                    | may answer with                |
+| -------- | ------------------------------------------------ | -------------------------- | ------------------------------ |
+| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`                     |
+| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`, `highlights`, `order` |
 
 Both fire on the first load of a view and on every drill-down into a level, and
 neither fires when the fetch failed — an empty view that only looks empty
@@ -2949,6 +2954,37 @@ channel is documented in full. Like `commands` in a `load` hook, `highlights`
 in a **`reload`** hook — or in a manual run from the menu — is refused with a
 message: by then the table is already built from the rows and there is nothing
 left to paint.
+
+**`order` — decide the sequence the rows are shown in.** The same answer may
+carry an `order` key: the row ids in the order the script wants them, sparse
+like `cells`.
+
+```json
+{ "order": ["<row id>", "<row id>", "…"] }
+```
+
+The named rows come first, in exactly that sequence; every row the answer did
+not mention keeps its relative position behind them. A script that only wants
+to pull three rows to the top therefore names three ids, not the whole table.
+Ids that this load does not contain are counted and reported, an id named
+twice keeps its first place.
+
+- **A sort of the user's wins.** The hook runs on _every_ load, so a script
+  that always had the last word would make the sort menu (`c s`) and the sort
+  hint mode (`S`) look broken on its level. The script order is therefore what
+  an **unsorted** pane falls back to; as soon as the pane carries a sort of its
+  own the `order` is ignored, with a message saying so. Clearing the sort
+  (`0` in the menu on every entry) hands the order back to the script.
+- **Only what the script saw.** The rows it is handed are the rows of this
+  load — on a paginated level that is the current page, so a script can order
+  within a page but cannot pull a row onto it from another one.
+- **Ordering and sorting are different questions.** A sort is "by this column,
+  in this direction"; an `order` is a sequence the script derived from anything
+  it liked — a rank fetched elsewhere, a hand-kept list, a scoring function
+  over several columns. When the criterion _is_ a column, sort by the column:
+  it survives the user's next reload and can be turned around.
+- Like `highlights`, `order` in a **`reload`** hook — or in a manual run from
+  the menu — is refused with a message: by then the table is already built.
 
 **Which one to use.** If the value can be computed from the rows themselves plus
 local data, `load` is both cheaper and correct at first sight. If the script has
