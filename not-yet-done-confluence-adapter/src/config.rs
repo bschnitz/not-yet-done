@@ -44,6 +44,13 @@ pub struct ConfluenceConfig {
     /// brick the whole listing.
     #[serde(default)]
     pub(crate) space_keys: Option<Vec<String>>,
+    /// How a request that produced no answer at all — connection refused,
+    /// answer never arrived — is sent again. Defaults to one repeat after a
+    /// quarter second; `attempts: 1` switches repeating off. Only calls
+    /// without side effects are repeated after a timeout (see
+    /// `not_yet_done_content::http_send`).
+    #[serde(default)]
+    pub(crate) retry: not_yet_done_content::RetryConfig,
 }
 
 #[derive(Deserialize, Buildable, Clone, Debug)]

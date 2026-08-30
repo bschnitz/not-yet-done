@@ -15,7 +15,8 @@
 
 use std::time::Duration;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -96,6 +97,9 @@ pub struct HttpTimeouts {
 pub struct KimaiClient {
     base_url: String,
     http: reqwest::Client,
+    /// How often a request that produced no answer is sent again. Comes from
+    /// the instance's `retry:` config block.
+    retry: RetryConfig,
 }
 
 impl KimaiClient {
@@ -139,7 +143,30 @@ impl KimaiClient {
         Ok(Self {
             base_url: url.trim_end_matches('/').to_string(),
             http,
+            retry: RetryConfig::default(),
         })
+    }
+
+    /// Set how a request that produced no answer is repeated. Without this
+    /// the client uses [`RetryConfig::default`].
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Send a request through this client's retry policy, logging it and
+    /// turning a final transport failure into the usual error string.
+    ///
+    /// Whether a failed request may be sent again follows the HTTP method:
+    /// everything that writes is repeated only when the connection provably
+    /// never came up.
+    async fn send(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::of_method(method), method, url, req).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -147,14 +174,9 @@ impl KimaiClient {
         url: &str,
         query: &[(&str, &str)],
     ) -> Result<T, String> {
-        http_log::log_request("GET", url);
         let resp = self
-            .http
-            .get(url)
-            .query(query)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", url, e))?;
+            .send("GET", url, self.http.get(url).query(query))
+            .await?;
         let resp = http_log::check_status("GET", url, resp).await?;
         let body = resp
             .text()
@@ -189,14 +211,9 @@ impl KimaiClient {
                 ("page", page_str.as_str()),
             ];
 
-            http_log::log_request("GET", &url);
             let resp = self
-                .http
-                .get(&url)
-                .query(&query)
-                .send()
-                .await
-                .map_err(|e| http_log::network_error("GET", &url, e))?;
+                .send("GET", &url, self.http.get(&url).query(&query))
+                .await?;
             if page > 1 && resp.status() == StatusCode::NOT_FOUND {
                 break;
             }
@@ -234,14 +251,9 @@ impl KimaiClient {
         body: &serde_json::Value,
     ) -> Result<KimaiTimesheet, String> {
         let url = format!("{}/api/timesheets/{id}", self.base_url);
-        http_log::log_request("PATCH", &url);
         let resp = self
-            .http
-            .patch(&url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+            .send("PATCH", &url, self.http.patch(&url).json(body))
+            .await?;
         let resp = http_log::check_status("PATCH", &url, resp).await?;
         let text = resp
             .text()
@@ -259,14 +271,9 @@ impl KimaiClient {
         body: &serde_json::Value,
     ) -> Result<KimaiTimesheet, String> {
         let url = format!("{}/api/timesheets", self.base_url);
-        http_log::log_request("POST", &url);
         let resp = self
-            .http
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.http.post(&url).json(body))
+            .await?;
         let resp = http_log::check_status("POST", &url, resp).await?;
         let text = resp
             .text()

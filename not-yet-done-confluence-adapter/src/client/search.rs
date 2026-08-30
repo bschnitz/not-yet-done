@@ -20,8 +20,6 @@
 
 use serde::Deserialize;
 
-use not_yet_done_content::http_log;
-
 use super::ConfluenceClient;
 
 /// One row of the `/content/search` envelope. Confluence emits more
@@ -191,19 +189,20 @@ impl ConfluenceClient {
         limit: u32,
     ) -> Result<SearchResults, String> {
         let url_for_log = format!("{}/rest/api/content/search", self.base_url());
-        http_log::log_request("GET", &url_for_log);
         let resp = self
-            .inner_http()
-            .get(format!("{}/rest/api/content/search", self.base_url()))
-            .query(&[
-                ("cql", cql),
-                ("start", &start.to_string()),
-                ("limit", &limit.to_string()),
-                ("expand", "space,version,ancestors"),
-            ])
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url_for_log, e))?;
+            .send(
+                "GET",
+                &url_for_log,
+                self.inner_http()
+                    .get(format!("{}/rest/api/content/search", self.base_url()))
+                    .query(&[
+                        ("cql", cql),
+                        ("start", &start.to_string()),
+                        ("limit", &limit.to_string()),
+                        ("expand", "space,version,ancestors"),
+                    ]),
+            )
+            .await?;
         let resp = self.check_status("GET", &url_for_log, resp).await?;
         let body = resp
             .text()

@@ -926,6 +926,7 @@ pub(in crate::adapter) async fn test_adapter() -> ConfluenceAdapter {
         "https://wiki.example.invalid".to_string(),
         false,
         spec,
+        Default::default(),
         Box::new(InMemorySessionStore::new()),
     )
     .expect("bridge");
@@ -980,6 +981,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             spec,
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge")

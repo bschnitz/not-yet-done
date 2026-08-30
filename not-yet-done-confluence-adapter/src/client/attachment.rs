@@ -15,8 +15,6 @@
 
 use serde::Deserialize;
 
-use not_yet_done_content::http_log;
-
 use super::ConfluenceClient;
 
 /// Subset of one attachment record. Mirrors the fields the adapter
@@ -180,13 +178,7 @@ impl ConfluenceClient {
             "{}/rest/api/content/{page_id}/child/attachment?start={start}&limit={limit}",
             self.base_url()
         );
-        http_log::log_request("GET", &url);
-        let resp = self
-            .inner_http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.inner_http().get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
@@ -231,14 +223,9 @@ impl ConfluenceClient {
             "{}/rest/api/content/{page_id}/child/attachment",
             self.base_url()
         );
-        http_log::log_request("POST", &url);
         let resp = self
-            .inner_http()
-            .post(&url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.inner_http().post(&url).multipart(form))
+            .await?;
         let resp = self.check_status("POST", &url, resp).await?;
         let body = resp
             .text()
@@ -263,13 +250,7 @@ impl ConfluenceClient {
             return Err("Attachment has no download link".to_string());
         }
         let url = format!("{}{}", self.base_url(), download_path);
-        http_log::log_request("GET", &url);
-        let resp = self
-            .inner_http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.inner_http().get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         resp.bytes()
             .await
