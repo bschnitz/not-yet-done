@@ -107,15 +107,16 @@ pub async fn patch_item(
 
     let headers = client.auth_headers()?;
     let payload = Value::Object(body);
-    http_log::log_request("PATCH", &url);
     let resp = client
-        .send_retrying("PATCH", &url, || {
+        .send(
+            "PATCH",
+            &url,
             client
                 .http
                 .patch(&url)
                 .headers(headers.clone())
-                .json(&payload)
-        })
+                .json(&payload),
+        )
         .await?;
 
     let status = resp.status();
@@ -184,11 +185,12 @@ pub async fn delete_comment(
         urlencode(comment_id),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || {
-            client.http.post(&url).headers(headers.clone())
-        })
+        .send(
+            "POST",
+            &url,
+            client.http.post(&url).headers(headers.clone()),
+        )
         .await?;
     http_log::check_status("POST", &url, resp).await?;
     Ok(())

@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 
 /// Persistable login session — what the auth orchestrator writes into
 /// its session blob and reads back on cache hit.
@@ -53,6 +54,7 @@ pub async fn perform_login(
     base_url: &str,
     email: &str,
     password: &str,
+    retry: &RetryConfig,
 ) -> Result<StoatSession, String> {
     let http = reqwest::Client::builder()
         .build()
@@ -64,13 +66,14 @@ pub async fn perform_login(
         password,
         friendly_name: "not-yet-done",
     };
-    http_log::log_request("POST", &url);
-    let resp = http
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| http_log::network_error("POST", &url, e))?;
+    let resp = http_send::send(
+        retry,
+        Repeat::of_method("POST"),
+        "POST",
+        &url,
+        http.post(&url).json(&body),
+    )
+    .await?;
     let resp = http_log::check_status("POST", &url, resp).await?;
     let parsed: LoginResponse = resp
         .json()

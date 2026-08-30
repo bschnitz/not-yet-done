@@ -39,6 +39,8 @@ pub(super) struct AuthBridge {
     orchestrator: Arc<AuthOrchestrator>,
     client: RwLock<Option<Arc<StoatClient>>>,
     ready: Notify,
+    /// How often a request may be repeated after a transport failure.
+    retry: not_yet_done_content::RetryConfig,
 }
 
 impl AuthBridge {
@@ -46,6 +48,7 @@ impl AuthBridge {
         base_url: String,
         store: Box<dyn SessionStore>,
         spec: AuthSpec,
+        retry: not_yet_done_content::RetryConfig,
     ) -> Result<Arc<Self>, String> {
         let orchestrator = AuthOrchestrator::from_spec(spec, store)
             .map_err(|e| format!("auth orchestrator: {e}"))?;
@@ -54,6 +57,7 @@ impl AuthBridge {
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(None),
             ready: Notify::new(),
+            retry,
         }))
     }
 
@@ -139,14 +143,14 @@ impl AuthBridge {
         if email.is_empty() || password.is_empty() {
             return Err("email (username field) and password are required".into());
         }
-        let session = perform_login(&self.base_url, email, password).await?;
+        let session = perform_login(&self.base_url, email, password, &self.retry).await?;
         serde_json::to_string(&session).map_err(|e| format!("serialize session: {e}"))
     }
 
     async fn build_and_validate(&self, blob: &str) -> Result<Arc<StoatClient>, String> {
         let session: StoatSession =
             serde_json::from_str(blob).map_err(|e| format!("parse session blob: {e}"))?;
-        let client = StoatClient::from_session(&self.base_url, session)?;
+        let client = StoatClient::from_session(&self.base_url, session, self.retry.clone())?;
         client.me().await?;
         Ok(client)
     }
@@ -192,6 +196,7 @@ impl AuthBridge {
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(Some(client)),
             ready: Notify::new(),
+            retry: Default::default(),
         })
     }
 }

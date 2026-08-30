@@ -45,11 +45,8 @@ pub async fn fetch_comments(
         item_id,
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || {
-            client.http.get(&url).headers(headers.clone())
-        })
+        .send("GET", &url, client.http.get(&url).headers(headers.clone()))
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let raw: Vec<serde_json::Value> = resp

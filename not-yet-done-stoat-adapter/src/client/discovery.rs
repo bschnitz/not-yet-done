@@ -5,7 +5,8 @@
 
 use serde::Deserialize;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 
 /// The subset of `GET /api/` we consume. The real payload also carries
 /// `app`, `vapid`, … which we ignore for now.
@@ -42,14 +43,13 @@ pub struct AutumnFeature {
 }
 
 /// Fetch the instance config from `{base_url}/api/`.
-pub async fn fetch_root_info(http: &reqwest::Client, base_url: &str) -> Result<RootInfo, String> {
+pub async fn fetch_root_info(
+    http: &reqwest::Client,
+    base_url: &str,
+    retry: &RetryConfig,
+) -> Result<RootInfo, String> {
     let url = format!("{}/api/", base_url.trim_end_matches('/'));
-    http_log::log_request("GET", &url);
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| http_log::network_error("GET", &url, e))?;
+    let resp = http_send::send(retry, Repeat::Safe, "GET", &url, http.get(&url)).await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     resp.json::<RootInfo>()
         .await

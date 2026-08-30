@@ -20,7 +20,8 @@ use reqwest::Client as HttpClient;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 
 pub use auth::{StoatSession, perform_login};
 pub use discovery::{RootInfo, fetch_root_info};
@@ -41,6 +42,9 @@ pub struct MeData {
 pub struct StoatClient {
     base_url: String,
     http: HttpClient,
+    /// How often a request may be repeated after a transport failure,
+    /// from the adapter config. See [`http_send`].
+    retry: RetryConfig,
     token: String,
     user_id: String,
     /// Autumn (file server) base URL, discovered lazily from `GET /api/`
@@ -51,13 +55,18 @@ pub struct StoatClient {
 
 impl StoatClient {
     /// Build a client from a stored session. No HTTP is performed here.
-    pub fn from_session(base_url: &str, session: StoatSession) -> Result<Arc<Self>, String> {
+    pub fn from_session(
+        base_url: &str,
+        session: StoatSession,
+        retry: RetryConfig,
+    ) -> Result<Arc<Self>, String> {
         let http = HttpClient::builder()
             .build()
             .map_err(|e| format!("build http client: {e}"))?;
         Ok(Arc::new(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             http,
+            retry,
             token: session.token,
             user_id: session.user_id,
             autumn_url: OnceLock::new(),
@@ -85,6 +94,36 @@ impl StoatClient {
         &self.user_id
     }
 
+    /// Send a request, repeating it on a transport failure as far as the
+    /// configured [`RetryConfig`] and the HTTP method allow.
+    ///
+    /// The method decides: a connection that was never established can
+    /// always be dialled again, but after a timeout the server may well
+    /// have carried the request out and only the answer was lost — so a
+    /// `POST`/`PATCH`/`DELETE` is repeated only in the first case. A read
+    /// that travels as a POST can say so via [`Self::send_read`].
+    pub(crate) async fn send(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::of_method(method), method, url, req).await
+    }
+
+    /// Like [`Self::send`], but for a call the caller knows has no side
+    /// effects — it is repeated after a timeout as well, whatever the
+    /// method says.
+    #[allow(dead_code)] // for reads that travel as a POST
+    pub(crate) async fn send_read(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::Safe, method, url, req).await
+    }
+
     fn auth_headers(&self) -> Result<HeaderMap, String> {
         let mut h = HeaderMap::new();
         h.insert(
@@ -99,14 +138,13 @@ impl StoatClient {
     /// the auth bridge's signal to drop the cached session and re-login.
     pub async fn me(&self) -> Result<MeData, String> {
         let url = format!("{}/api/users/@me", self.base_url);
-        http_log::log_request("GET", &url);
         let resp = self
-            .http
-            .get(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &url,
+                self.http.get(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         resp.json::<MeData>()
             .await
@@ -119,13 +157,7 @@ impl StoatClient {
     /// is sent (and deliberately so: the token belongs to the API host, not
     /// the file host).
     pub async fn download_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
-        http_log::log_request("GET", url);
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", url, e))?;
+        let resp = self.send("GET", url, self.http.get(url)).await?;
         let resp = http_log::check_status("GET", url, resp).await?;
         resp.bytes()
             .await
@@ -137,7 +169,7 @@ impl StoatClient {
     /// (file server) base URL as a side effect, so later attachment URLs can
     /// be built without a second discovery round-trip.
     pub async fn discover_ws_url(&self) -> Result<String, String> {
-        let info = fetch_root_info(&self.http, &self.base_url).await?;
+        let info = fetch_root_info(&self.http, &self.base_url, &self.retry).await?;
         let autumn = &info.features.autumn;
         if autumn.enabled && !autumn.url.is_empty() {
             // First writer wins; a repeat discovery (reconnect) is a no-op.

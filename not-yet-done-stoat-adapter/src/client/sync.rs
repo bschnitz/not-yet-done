@@ -48,14 +48,13 @@ impl StoatClient {
     /// simply absent from the list.
     pub async fn get_unreads(&self) -> Result<Vec<ChannelUnread>, String> {
         let url = format!("{}/api/sync/unreads", self.base_url());
-        http_log::log_request("GET", &url);
         let resp = self
-            .http
-            .get(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &url,
+                self.http.get(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         resp.json::<Vec<ChannelUnread>>()
             .await
@@ -73,14 +72,13 @@ impl StoatClient {
             channel_id,
             message_id
         );
-        http_log::log_request("PUT", &url);
         let resp = self
-            .http
-            .put(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PUT", &url, e))?;
+            .send(
+                "PUT",
+                &url,
+                self.http.put(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         http_log::check_status("PUT", &url, resp).await?;
         Ok(())
     }

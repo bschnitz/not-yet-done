@@ -9,7 +9,8 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 use reqwest::{
     Client as HttpClient,
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue},
@@ -89,6 +90,9 @@ pub struct TaigaSession {
 pub struct TaigaClient {
     pub(super) base_url: String,
     pub(super) http: HttpClient,
+    /// How often a request may be repeated after a transport failure,
+    /// from the adapter config. See [`http_send`].
+    retry: RetryConfig,
     tokens: StdMutex<Option<Tokens>>,
     myself: OnceCell<MyselfData>,
     pub(super) project_meta: ProjectMetaCache,
@@ -151,6 +155,7 @@ pub async fn perform_login(
     username: &str,
     password: &str,
     timeouts: HttpTimeouts,
+    retry: &RetryConfig,
 ) -> Result<TaigaSession, String> {
     let http = build_http_client(timeouts)?;
     let base = base_url.trim_end_matches('/').to_string();
@@ -160,13 +165,14 @@ pub async fn perform_login(
         password,
     };
     let url = format!("{base}/api/v1/auth");
-    http_log::log_request("POST", &url);
-    let resp = http
-        .post(&url)
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| http_log::network_error("POST", &url, e))?;
+    let resp = http_send::send(
+        retry,
+        Repeat::of_method("POST"),
+        "POST",
+        &url,
+        http.post(&url).json(&req),
+    )
+    .await?;
     let resp = http_log::check_status("POST", &url, resp).await?;
     let body: AuthResponse = resp
         .json()
@@ -194,12 +200,14 @@ impl TaigaClient {
         db: Arc<DatabaseConnection>,
         scope_id: Uuid,
         timeouts: HttpTimeouts,
+        retry: RetryConfig,
     ) -> Result<Arc<Self>, String> {
         let http = build_http_client(timeouts)?;
         let base = base_url.trim_end_matches('/').to_string();
         let client = Arc::new(Self {
             base_url: base,
             http,
+            retry,
             tokens: StdMutex::new(Some(Tokens {
                 auth_token: session.auth_token,
                 refresh_token: session.refresh_token,
@@ -247,40 +255,34 @@ impl TaigaClient {
         Ok(h)
     }
 
-    /// Send a request with one automatic retry on transport failure (the
-    /// adapter-level "reconnect").
+    /// Send a request, repeating it on a transport failure as far as the
+    /// configured [`RetryConfig`] and the HTTP method allow.
     ///
-    /// `build` is invoked afresh for each attempt — a `RequestBuilder` is
-    /// consumed by `send`, and re-issuing the request lets reqwest drop a
-    /// dead keep-alive socket from its pool and open a new connection,
-    /// which is exactly what recovers the "connection silently went away"
-    /// case the user hits. Only *transport* errors (timeout, connection
-    /// reset/refused) trigger the retry; an HTTP status response — even
-    /// 4xx/5xx — is handed back untouched for the caller's
-    /// [`http_log::check_status`], because re-sending wouldn't change it.
-    ///
-    /// The per-request timeout from [`build_http_client`] bounds each of
-    /// the (at most two) attempts, so the worst case is roughly twice the
-    /// configured timeout, then a clean error — never a permanent hang.
-    pub(super) async fn send_retrying(
+    /// The method decides: a connection that was never established can
+    /// always be dialled again, but after a timeout the server may well
+    /// have carried the request out and only the answer was lost — so a
+    /// `POST`/`PATCH`/`DELETE` is repeated only in the first case. A read
+    /// that travels as a POST can say so via [`Self::send_read`].
+    pub(super) async fn send(
         &self,
         method: &str,
         url: &str,
-        build: impl Fn() -> reqwest::RequestBuilder,
+        req: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, String> {
-        match build().send().await {
-            Ok(resp) => Ok(resp),
-            Err(first) => {
-                http_log::log_error(
-                    "taiga http",
-                    &format!("{method} {url}: {first}; reconnecting and retrying once"),
-                );
-                build()
-                    .send()
-                    .await
-                    .map_err(|e| http_log::network_error(method, url, e))
-            }
-        }
+        http_send::send(&self.retry, Repeat::of_method(method), method, url, req).await
+    }
+
+    /// Like [`Self::send`], but for a call the caller knows has no side
+    /// effects — it is repeated after a timeout as well, whatever the
+    /// method says.
+    #[allow(dead_code)] // for reads that travel as a POST
+    pub(super) async fn send_read(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::Safe, method, url, req).await
     }
 
     /// Cached `/users/me` lookup. Used to resolve the `$me` placeholder
@@ -290,9 +292,8 @@ impl TaigaClient {
             .get_or_try_init(|| async {
                 let url = format!("{}/api/v1/users/me", self.base_url);
                 let headers = self.auth_headers()?;
-                http_log::log_request("GET", &url);
                 let resp = self
-                    .send_retrying("GET", &url, || self.http.get(&url).headers(headers.clone()))
+                    .send("GET", &url, self.http.get(&url).headers(headers))
                     .await?;
                 let resp = http_log::check_status("GET", &url, resp).await?;
                 let raw: serde_json::Value = resp

@@ -46,6 +46,8 @@ pub(super) struct AuthBridge {
     /// HTTP timeout budget baked into every client this bridge builds
     /// (login round-trip and session-restored clients alike).
     timeouts: crate::client::HttpTimeouts,
+    /// How often a request may be repeated after a transport failure.
+    retry: not_yet_done_content::RetryConfig,
     orchestrator: Arc<AuthOrchestrator>,
     client: RwLock<Option<Arc<TaigaClient>>>,
     ready: Notify,
@@ -58,6 +60,7 @@ impl AuthBridge {
         scope_id: Uuid,
         spec: AuthSpec,
         timeouts: crate::client::HttpTimeouts,
+        retry: not_yet_done_content::RetryConfig,
     ) -> Result<Arc<Self>, String> {
         let store = SqlAuthSessionStore::new(Arc::clone(&db), scope_id);
         let orchestrator = AuthOrchestrator::from_spec(spec, Box::new(store))
@@ -67,6 +70,7 @@ impl AuthBridge {
             db,
             scope_id,
             timeouts,
+            retry,
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(None),
             ready: Notify::new(),
@@ -153,7 +157,14 @@ impl AuthBridge {
         if username.is_empty() || password.is_empty() {
             return Err("username and password are required".into());
         }
-        let session = perform_login(&self.base_url, username, password, self.timeouts).await?;
+        let session = perform_login(
+            &self.base_url,
+            username,
+            password,
+            self.timeouts,
+            &self.retry,
+        )
+        .await?;
         serde_json::to_string(&session).map_err(|e| format!("serialize session: {e}"))
     }
 
@@ -166,6 +177,7 @@ impl AuthBridge {
             Arc::clone(&self.db),
             self.scope_id,
             self.timeouts,
+            self.retry.clone(),
         )?;
         client.myself().await?;
         Ok(client)

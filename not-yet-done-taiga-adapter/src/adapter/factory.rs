@@ -106,8 +106,15 @@ impl TypedAdapterFactory for TaigaAdapterFactory {
         };
 
         let ticket_workspace = cfg.ticket_workspace;
-        let auth = AuthBridge::new(cfg.url, Arc::clone(&db), scope_id, cfg.auth, timeouts)
-            .map_err(|e| ContentError::Other(e.into()))?;
+        let auth = AuthBridge::new(
+            cfg.url,
+            Arc::clone(&db),
+            scope_id,
+            cfg.auth,
+            timeouts,
+            cfg.retry,
+        )
+        .map_err(|e| ContentError::Other(e.into()))?;
 
         // Auth is exercised lazily by the first `root()` / `get_by_id()`
         // call. Previously the factory spawned an eager `get_client()`

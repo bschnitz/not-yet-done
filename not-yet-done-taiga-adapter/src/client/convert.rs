@@ -29,11 +29,12 @@ pub async fn delete_item(
         item_type.url_segment(),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("DELETE", &url);
     let resp = client
-        .send_retrying("DELETE", &url, || {
-            client.http.delete(&url).headers(headers.clone())
-        })
+        .send(
+            "DELETE",
+            &url,
+            client.http.delete(&url).headers(headers.clone()),
+        )
         .await?;
     http_log::check_status("DELETE", &url, resp).await?;
     Ok(())
@@ -55,11 +56,8 @@ pub async fn fetch_id_name_map(
         Ok(h) => h,
         Err(_) => return HashMap::new(),
     };
-    http_log::log_request("GET", &url);
     let resp = match client
-        .send_retrying("GET", &url, || {
-            client.http.get(&url).headers(headers.clone())
-        })
+        .send("GET", &url, client.http.get(&url).headers(headers.clone()))
         .await
     {
         Ok(r) => r,
@@ -96,11 +94,8 @@ pub async fn fetch_raw_detail(
         item_type.url_segment(),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || {
-            client.http.get(&url).headers(headers.clone())
-        })
+        .send("GET", &url, client.http.get(&url).headers(headers.clone()))
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     resp.json()

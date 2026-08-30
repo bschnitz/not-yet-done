@@ -129,9 +129,8 @@ impl TaigaClient {
         };
         let url = format!("{}/api/v1/{segment}?project={project_id}", self.base_url,);
         let headers = self.auth_headers()?;
-        http_log::log_request("GET", &url);
         let resp = self
-            .send_retrying("GET", &url, || self.http.get(&url).headers(headers.clone()))
+            .send("GET", &url, self.http.get(&url).headers(headers.clone()))
             .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let raw: Vec<serde_json::Value> = resp
@@ -179,9 +178,8 @@ impl TaigaClient {
         // of user objects with `id` / `username` / `full_name_display`.
         let url = format!("{}/api/v1/users?project={project_id}", self.base_url);
         let headers = self.auth_headers()?;
-        http_log::log_request("GET", &url);
         let resp = self
-            .send_retrying("GET", &url, || self.http.get(&url).headers(headers.clone()))
+            .send("GET", &url, self.http.get(&url).headers(headers.clone()))
             .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let raw: Vec<serde_json::Value> =
@@ -230,9 +228,8 @@ impl TaigaClient {
         }
         let url = format!("{}/api/v1/projects/{project_id}", self.base_url);
         let headers = self.auth_headers()?;
-        http_log::log_request("GET", &url);
         let resp = self
-            .send_retrying("GET", &url, || self.http.get(&url).headers(headers.clone()))
+            .send("GET", &url, self.http.get(&url).headers(headers.clone()))
             .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let raw: serde_json::Value = resp

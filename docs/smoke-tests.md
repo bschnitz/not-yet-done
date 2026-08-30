@@ -6260,6 +6260,45 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 - [ ] The same named style used by two rules of different reach behaves
       differently per rule — no duplicate style needed.
 
+## Repeating a request that produced no answer (`retry:` in every adapter)
+
+Jira, Confluence, Kimai, Taiga and Stoat all send their requests through the
+same seam (`not-yet-done-content/src/http_send.rs`). A transport failure — the
+connection refused, reset or timed out — is repeated as far as the adapter's
+`retry:` block and the HTTP method allow; an HTTP status, even 5xx, is never
+repeated. Test one adapter thoroughly and the rest by spot check.
+
+- [ ] **A brief outage heals silently:** cut the connection to the instance
+      (block the tunnel/network), trigger a listing, restore the connection
+      within the backoff → the list appears without an error banner.
+- [ ] **A lasting outage still ends in a clean error:** leave the connection
+      cut → after the attempts are used up a normal error message appears, no
+      hang. With `attempts: 4` the wait is visibly longer than with the
+      default 2.
+- [ ] **`attempts: 1` switches repeating off:** the first failure is the error.
+- [ ] **The log names the repeat:** with `NYD_DEBUG=1`, the log file carries a
+      `RETRY <METHOD> <url>: attempt 1 of 2 failed: …` line before the second
+      request, and the failure line names the _cause_ ("connection refused"),
+      not just "error sending request".
+- [ ] **A write is not doubled after a timeout:** with a very short
+      `request_timeout_secs` (e.g. 3) against a healthy but slow instance,
+      post a comment / transition an issue → it lands **once**. Check the
+      instance: no duplicate comment, no double transition.
+- [ ] **A write is repeated when nothing reached the server:** stop the
+      instance (or block it before the handshake), post a comment, bring it
+      back within the backoff → the comment lands once, no error.
+- [ ] **A read is repeated even as a POST:** the Jira search (`POST
+    /rest/api/2/search`) survives a dropped connection — the very case
+      "error sending request for url …" came from.
+- [ ] **An unknown field in the block is rejected:** `retry:` with
+      `attemps: 3` (typo) makes the adapter fail to load with a config error
+      naming the field, rather than being silently ignored.
+- [ ] **An absent block means the default:** an adapter YAML without `retry:`
+      behaves as before (2 attempts, 250 ms).
+- [ ] **Attachments are unaffected:** uploading an attachment (Taiga, Stoat)
+      still works; its multipart body cannot be repeated and is sent once —
+      the timeout still bounds it.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
