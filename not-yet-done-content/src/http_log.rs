@@ -313,6 +313,18 @@ pub fn log_error(context: &str, message: &str) {
     write_line(&format!("ERROR {context}: {message}"));
 }
 
+/// Log that a failed request is about to be sent again.
+///
+/// Always written when logging is enabled, unlike the request lines: a repeat
+/// that then succeeds leaves no other trace at all, and "the server dropped one
+/// out of every few calls" is exactly the pattern worth seeing in a log.
+pub fn log_retry(method: &str, url: &str, attempt: u32, of: u32, err: &dyn std::error::Error) {
+    write_line(&format!(
+        "RETRY {method} {url}: attempt {attempt} of {of} failed: {}",
+        with_causes(err)
+    ));
+}
+
 /// Log a free-form debug line (verbose).
 pub fn log_debug(context: &str, message: &str) {
     write_verbose(&format!("DEBUG {context}: {message}"));
@@ -618,7 +630,11 @@ mod tests {
                 "error sending request for url (https://jira.example/s)",
             )),
         );
-        assert_eq!(msg.matches("error sending request").count(), 1, "got: {msg}");
+        assert_eq!(
+            msg.matches("error sending request").count(),
+            1,
+            "got: {msg}"
+        );
     }
 
     #[tokio::test]

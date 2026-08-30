@@ -9,7 +9,6 @@
 //! including a negative one, so an instance without the field pays a
 //! single call rather than one per listing.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::JiraClient;
@@ -144,13 +143,7 @@ impl JiraClient {
         self.story_points
             .get_or_try_init(|| async {
                 let url = format!("{}/rest/api/2/field", self.base_url);
-                http_log::log_request("GET", &url);
-                let resp = self
-                    .http
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| http_log::network_error("GET", &url, e))?;
+                let resp = self.send("GET", &url, self.http.get(&url)).await?;
                 let resp = self.check_status("GET", &url, resp).await?;
                 let body_text = resp
                     .text()

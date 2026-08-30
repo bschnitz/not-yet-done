@@ -7,7 +7,6 @@
 //! names the type and which issue sits on the outward vs. inward side:
 //! `outwardIssue "blocks" inwardIssue`.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::{Assignee, JiraClient, NameField};
@@ -163,13 +162,7 @@ impl JiraClient {
     pub async fn get_issue_link_types(&self) -> Result<Vec<JiraLinkType>, String> {
         let url = format!("{}/rest/api/2/issueLinkType", self.base_url);
 
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -200,13 +193,7 @@ impl JiraClient {
             self.base_url, key
         );
 
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -230,13 +217,7 @@ impl JiraClient {
     pub async fn delete_issue_link(&self, link_id: &str) -> Result<(), String> {
         let url = format!("{}/rest/api/2/issueLink/{}", self.base_url, link_id);
 
-        http_log::log_request("DELETE", &url);
-        let resp = self
-            .http
-            .delete(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+        let resp = self.send("DELETE", &url, self.http.delete(&url)).await?;
         self.check_status("DELETE", &url, resp).await?;
 
         Ok(())
@@ -259,14 +240,9 @@ impl JiraClient {
             "inwardIssue": { "key": inward_key },
         });
 
-        http_log::log_request("POST", &url);
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.http.post(&url).json(&body))
+            .await?;
         self.check_status("POST", &url, resp).await?;
 
         Ok(())

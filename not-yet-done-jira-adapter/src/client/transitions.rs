@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::{JiraClient, NameField};
@@ -54,13 +53,7 @@ impl JiraClient {
             self.base_url, key
         );
 
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -107,14 +100,9 @@ impl JiraClient {
             "transition": { "id": transition_id }
         });
 
-        http_log::log_request("POST", &url);
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.http.post(&url).json(&body))
+            .await?;
         self.check_status("POST", &url, resp).await?;
 
         Ok(())

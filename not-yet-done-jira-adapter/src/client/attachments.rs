@@ -1,6 +1,5 @@
 //! Attachments: list per issue + raw byte download via signed `content` URL.
 
-use not_yet_done_content::http_log;
 use serde::Deserialize;
 
 use super::{Assignee, JiraClient};
@@ -47,13 +46,7 @@ impl JiraClient {
             self.base_url, key
         );
 
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body_text = resp
             .text()
@@ -84,13 +77,7 @@ impl JiraClient {
     /// success status; an error string otherwise.
     pub async fn delete_attachment(&self, id: &str) -> Result<(), String> {
         let url = format!("{}/rest/api/2/attachment/{}", self.base_url, id);
-        http_log::log_request("DELETE", &url);
-        let resp = self
-            .http
-            .delete(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+        let resp = self.send("DELETE", &url, self.http.delete(&url)).await?;
         self.check_status("DELETE", &url, resp).await?;
         Ok(())
     }
@@ -99,13 +86,9 @@ impl JiraClient {
     /// (the `content` field on a Jira attachment object — already an
     /// absolute URL, hence no `base_url` prefix).
     pub async fn download_attachment(&self, content_url: &str) -> Result<Vec<u8>, String> {
-        http_log::log_request("GET", content_url);
         let resp = self
-            .http
-            .get(content_url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", content_url, e))?;
+            .send("GET", content_url, self.http.get(content_url))
+            .await?;
         let resp = self.check_status("GET", content_url, resp).await?;
 
         resp.bytes()

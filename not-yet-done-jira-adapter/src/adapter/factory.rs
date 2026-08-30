@@ -103,6 +103,7 @@ impl TypedAdapterFactory for JiraAdapterFactory {
             cfg.accept_invalid_certs,
             cfg.auth,
             cfg.story_points_field,
+            cfg.retry,
             Box::new(store),
         )
         .map_err(|e| ContentError::Other(e.into()))?;

@@ -14,6 +14,7 @@ pub mod describe;
 pub mod download;
 pub mod grouping;
 pub mod http_log;
+pub mod http_send;
 pub mod link_route;
 pub mod node_ref;
 pub mod query_vars;
@@ -40,6 +41,7 @@ pub use auth::{
     InMemorySessionStore, MechanismSpec, ResolvedSession, SessionCachePolicy, SessionEntry,
     SessionStore,
 };
+pub use http_send::{Repeat, RetryConfig};
 pub use link_route::{LinkRoute, LinkRouteError};
 pub use node_ref::{NodeRef, NodeRefParseError};
 

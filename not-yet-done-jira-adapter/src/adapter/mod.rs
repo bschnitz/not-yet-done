@@ -860,6 +860,7 @@ bindings:
         false,
         spec,
         None,
+        Default::default(),
         Box::new(store),
     )
     .expect("auth bridge");
