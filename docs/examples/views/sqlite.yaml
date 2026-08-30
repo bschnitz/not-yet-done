@@ -118,6 +118,10 @@ views:
       - name: Tables
         node_type: "sqlite:tables"
         tree_label: name
+        # `r` re-reads the level under the cursor. Here that is the table
+        # list, so a table created or dropped by another process appears.
+        actions:
+          - { name: refresh, key: r, type: reload }
         columns:
           - key: name
             label: Name
@@ -148,6 +152,7 @@ views:
                 key: n
                 type: edit
                 id: new_row
+              - { name: refresh, key: r, type: reload }
             columns:
               - key: name
                 label: Name
@@ -230,6 +235,9 @@ views:
                     type: edit
                     id: new_row
                   - { key: Q, id: edit_sql, target: parent, force: true }
+                  # `r` re-runs the level's query, so rows another process wrote
+                  # into the file show up without leaving the level.
+                  - { name: refresh, key: r, type: reload }
                 keybindings:
                   back: null
                 # `ctrl+n`/`ctrl+p`: step the parent table cursor and
@@ -245,6 +253,10 @@ views:
       - name: Views
         node_type: "sqlite:views"
         tree_label: name
+        # As under Tables — and the way to pick up a view whose definition
+        # was changed outside the TUI.
+        actions:
+          - { name: refresh, key: r, type: reload }
         columns:
           - key: name
             label: Name
@@ -272,6 +284,7 @@ views:
                 type: edit
                 id: edit_view
               - { key: Q, id: edit_sql, force: true }
+              - { name: refresh, key: r, type: reload }
             columns:
               - key: name
                 label: Name
@@ -305,6 +318,9 @@ views:
                     type: script
                     scope: table
                   - { key: Q, id: edit_sql, target: parent, force: true }
+                  # `r` re-runs the level's query, so rows another process wrote
+                  # into the file show up without leaving the level.
+                  - { name: refresh, key: r, type: reload }
                 keybindings:
                   back: null
                 action_chains:
@@ -321,6 +337,7 @@ views:
         node_type: "sqlite:db_scripts"
         tree_label: name
         actions:
+          - { name: refresh, key: r, type: reload }
           - { key: a, id: add-script }
           - { key: A, id: add-dir }
         columns:
@@ -507,6 +524,9 @@ views:
             type: edit
             id: new_row
           - { key: Q, id: edit_sql, target: parent, force: true }
+          # `r` re-runs the level's query, so rows another process wrote
+          # into the file show up without leaving the level.
+          - { name: refresh, key: r, type: reload }
         keybindings:
           back: null
         action_chains:
@@ -572,6 +592,9 @@ views:
             type: script
             scope: table
           - { key: Q, id: edit_sql, target: parent, force: true }
+          # `r` re-runs the level's query, so rows another process wrote
+          # into the file show up without leaving the level.
+          - { name: refresh, key: r, type: reload }
         keybindings:
           back: null
         action_chains:
