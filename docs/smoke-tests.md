@@ -64,9 +64,10 @@ conflicts end up in the banner reopen.
 
 - [ ] `Shift+e` opens a buffer with the header and all comments in
       newest→oldest order
-- [ ] The header line of a comment by somebody else reads
+- [x] The header line of a comment by somebody else reads
       `--- @author <ts> [not yours] (id=…) ---`; own comments are unmarked.
-      Same wording as the Taiga buffer.
+      Same wording as the Taiga buffer. (Confirmed headless, same `EDITOR`
+      trick as in the Taiga section below.)
 - [ ] `E` (Markdown mode) on the same issue: the heading of a foreign
       comment keeps `[not yours]`, and saving an unrelated change does not
       lose it — the marker sits before the id, so it survives
@@ -5580,6 +5581,56 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
 - [ ] Drill into a child level: the hook stays silent there (its own scope).
 - [ ] Failed load (no connection / adapter error): the hook does not run.
 
+## A load hook decides the row order (`order`)
+
+The third thing a `load` hook may answer with: the sequence the rows are shown
+in. The point of the test is that the script order shows up on the first frame
+and that the user's own sort still wins.
+
+Preparation — a `commands`-mode script on the `load` hook that reverses what the
+adapter delivered:
+
+```python
+#!/usr/bin/env python3
+# mode: commands
+import json, os, sys
+with open(sys.argv[1]) as f:
+    payload = json.load(f)
+order = [row["id"] for row in reversed(payload["rows"])]
+with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+    json.dump({"order": order}, f)
+```
+
+- [ ] Sort menu (`c s`), take **every** column out of the sort (`0`), `Enter`.
+      Then `r`: the rows come up reversed on the first frame — no flicker from
+      the adapter order into the script order.
+- [ ] Shorten the answer to the last row's id only (`{"order": ["<last id>"]}`):
+      that one row sits at the top, everything else keeps its original relative
+      order behind it.
+- [ ] Name an id that is not in this load: one message "… ordered row id(s) not
+      in this load — ignored", the rest still ordered.
+- [ ] Name the same id twice: one message "… named twice in `order` — first
+      mention kept", and the row sits at its first position.
+- [ ] Answer with a malformed `order` (`{"order": {"a": 1}}`, or a list of
+      numbers): one error message, the rows keep the adapter's order.
+- [ ] `c s` → sort by any column → `Enter`: the message "`order` ignored — this
+      view is sorted by column …" appears and the table follows the **column**,
+      not the script. `r` repeats the message; the sort stays.
+- [ ] `c s` → `0` on that column → `Enter`: the script order is back on the
+      next load.
+- [ ] Bind the same script to `reload` instead (or run it by hand from the
+      menu): "Script output has `order` — ignored (only a `load` hook paints
+      and orders rows)", and the order does not change.
+- [ ] One script answering with `cells` **and** `order` (patch a column, then
+      order by the patched value): both land in the same load, one frame.
+- [ ] Two scripts on `load`, both answering with `order`: they run in name
+      order, so the alphabetically last one decides the final sequence.
+- [ ] On a paginated level: the order applies within the page; paging forward
+      re-runs the hook on the new page and does not pull rows across pages.
+- [ ] The cursor after a reload sits on the same **row** (by node id), not on
+      the same index — a reordering load must not silently move the selection
+      to another ticket.
+
 ## A script declares its own payload scope (`# scope:`)
 
 The level's `scope:` setting says what a script is handed; a `# scope:` header
@@ -6319,17 +6370,26 @@ those comments and the adapter refuses the edit before a request goes out.
 Deletion stays open, because Taiga also lets project admins delete a foreign
 comment.
 
-- [ ] `e e` on a ticket that carries comments from two people: the header line
+Points 1, 3 and 5 are confirmed headless: `EDITOR` is pointed at a script that
+prints the prepared buffer and exits non-zero, so the CLI aborts before it
+executes, and the edited buffer is fed back with
+`adapter taiga <type>:<id> edit_with_comments --file <buf>`. A refusal sends no
+request, and an unchanged header sends no PATCH, so the run touches nothing.
+
+- [x] `e e` on a ticket that carries comments from two people: the header line
       of every comment written by somebody else reads
       `--- @author <ts> [not yours] (id=…) ---`, own comments are unmarked.
 - [ ] Change nothing, `:wq` → no `edit_comment` request at all (with
       `NYD_DEBUG=1` the log shows none), the notification reports no comment
       operations.
-- [ ] Change a **foreign** comment, `:wq` → the item changes land and the
+- [x] Change a **foreign** comment, `:wq` → the item changes land and the
       message names the refusal locally: `edit <id>: not authored by you — …`.
       No 403 in the log, because no request was sent.
+- [x] Change **only** a foreign comment and nothing else → the refusal is still
+      reported (`unchanged (errors: edit <id>: …)`). A refusal is news even when
+      no write happened; answering `no changes` would read as an empty buffer.
 - [ ] Change an **own** comment → it is updated as before, `comments: ~1`.
-- [ ] An editor that strips trailing whitespace on save (`:%s/\s\+$//` before
+- [x] An editor that strips trailing whitespace on save (`:%s/\s\+$//` before
       `:wq`, or an autocmd doing it) → no comment is counted as changed, no
       request, no refusal. This is the case that produced the 403 without
       anybody touching a comment.

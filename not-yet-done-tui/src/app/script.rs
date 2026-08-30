@@ -1351,16 +1351,18 @@ impl App {
         };
         // The one refusal this seam has to make. Everything arriving here is
         // either a manual run or a `reload` hook, and both land *after* the
-        // table was built from the rows — there is nothing left to colour.
+        // table was built from the rows — there is nothing left to colour and
+        // nothing left to reorder.
         // Said out loud rather than dropped quietly, so a script bound to the
         // wrong hook reads as refused instead of as half-working.
-        let misplaced = highlights_rejection(&parsed);
+        let misplaced = load_only_key_rejection(&parsed);
         if let Some(reason) = &misplaced {
             self.notify_error(reason.clone());
         }
         let Some(cmds) = parsed.get("commands").and_then(|v| v.as_array()) else {
             // One message per mistake: a script that answered with nothing but
-            // highlights has already been told what was wrong with it.
+            // highlights (or an order) has already been told what was wrong
+            // with it.
             if misplaced.is_none() {
                 self.notify_error("Script output JSON missing `commands` array".to_string());
             }
@@ -1380,17 +1382,27 @@ impl App {
     }
 }
 
-/// Why a script's output file cannot carry `highlights`, or `None` when it
-/// does not try to.
+/// Keys a script's output file may not carry, or `None` when it carries
+/// none of them.
 ///
-/// Colours reach the table through one channel only: the answer of a `load`
-/// hook, read before the rows are handed to the pane (see
+/// Colour and row order reach the table through one channel only: the answer
+/// of a `load` hook, read before the rows are handed to the pane (see
 /// [`crate::app::script_hook::App::run_load_hooks`]). By the time an output
-/// file is read here the table already exists, so the key is refused rather
-/// than silently ignored.
-fn highlights_rejection(parsed: &serde_json::Value) -> Option<String> {
-    parsed.get("highlights")?;
-    Some("Script output has `highlights` — ignored (only a `load` hook paints rows)".to_string())
+/// file is read here the table already exists — there is nothing left to
+/// paint and nothing left to reorder — so the keys are refused rather than
+/// silently ignored.
+fn load_only_key_rejection(parsed: &serde_json::Value) -> Option<String> {
+    let found: Vec<&str> = ["highlights", "order"]
+        .into_iter()
+        .filter(|key| parsed.get(*key).is_some())
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Script output has `{}` — ignored (only a `load` hook paints and orders rows)",
+        found.join("`, `")
+    ))
 }
 
 #[cfg(test)]
@@ -1534,19 +1546,40 @@ mod tests {
         let parsed = serde_json::json!({
             "highlights": {"row-1": {"status": {"bg": "#202020"}}}
         });
-        let reason = highlights_rejection(&parsed).expect("refused");
+        let reason = load_only_key_rejection(&parsed).expect("refused");
         assert!(reason.contains("load"), "{reason}");
+    }
+
+    /// Same seam, same reason for `order`: the table it would reorder has
+    /// already been built.
+    #[test]
+    fn an_output_file_carrying_an_order_is_refused() {
+        let parsed = serde_json::json!({"order": ["row-2", "row-1"]});
+        let reason = load_only_key_rejection(&parsed).expect("refused");
+        assert!(reason.contains("load"), "{reason}");
+    }
+
+    /// Two misplaced keys are one message, not two — the mistake is the same
+    /// one (wrong hook), and it is worth saying once.
+    #[test]
+    fn both_misplaced_keys_are_named_in_one_message() {
+        let parsed = serde_json::json!({"highlights": {}, "order": []});
+        let reason = load_only_key_rejection(&parsed).expect("refused");
+        assert!(
+            reason.contains("highlights") && reason.contains("order"),
+            "{reason}"
+        );
     }
 
     /// The refusal is about the key being there at all, not about what is
     /// under it — an empty map is the same mistake.
     #[test]
     fn even_an_empty_highlights_key_is_refused() {
-        assert!(highlights_rejection(&serde_json::json!({"highlights": {}})).is_some());
+        assert!(load_only_key_rejection(&serde_json::json!({"highlights": {}})).is_some());
     }
 
     #[test]
     fn an_ordinary_commands_answer_is_left_alone() {
-        assert!(highlights_rejection(&serde_json::json!({"commands": [":reload"]})).is_none());
+        assert!(load_only_key_rejection(&serde_json::json!({"commands": [":reload"]})).is_none());
     }
 }

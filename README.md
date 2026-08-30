@@ -2346,7 +2346,9 @@ Colour as part of the view rather than of the theme — rows, columns and cell
 values painted by declarative rules, or by a `load`-hook script that computes
 the colour from the data it just saw — is
 [`highlights:`](docs/generic-view-spec.md#highlights--painting-rows-columns-and-cells)
-in the same spec.
+in the same spec. The same hook can hand back the **order** the rows are shown
+in, for a sequence no column expresses; see
+[script hooks](docs/generic-view-spec.md#script-hooks-ctrlh-in-the-menu).
 
 The original design analysis on whether the (now-removed) native Tasks
 and Trackings tabs could move onto the `ContentAdapter` abstraction —

@@ -22,10 +22,11 @@
 //! would be emitting them into the middle of the load that is running it —
 //! but it can hand back a patch that lands in the rows before anyone sees
 //! them, which costs no second load and never shows a stale value. Colours
-//! (`highlights`) ride that same answer and are therefore a `load`-hook
-//! privilege too: after the table exists there is nothing left to paint, so
-//! a `reload` hook naming the key is refused
-//! ([`crate::app::script::highlights_rejection`]).
+//! (`highlights`) and the row order (`order`) ride that same answer and are
+//! therefore `load`-hook privileges too: after the table exists there is
+//! nothing left to paint and nothing left to reorder, so a `reload` hook
+//! naming either key is refused
+//! ([`crate::app::script::load_only_key_rejection`]).
 //!
 //! **Loop protection.** A hook script may itself ask for a reload — that
 //! is the point of the `commands` mode — so the trigger has to be able to
@@ -258,6 +259,11 @@ impl App {
     /// those are returned rather than applied, because they belong beside the
     /// rows on the pane and not in them (see [`ScriptHighlights`]).
     ///
+    /// And it may answer with `order` — the row ids in the order it wants
+    /// them shown. That one is applied here, on the rows themselves (see
+    /// [`apply_row_order`]), and only while the pane carries no sort of the
+    /// user's own.
+    ///
     /// Runs synchronously, like the reload hook, and for the same reason —
     /// the rows in `items` are on their way to
     /// [`ContentView::set_items_for_pane`](crate::views::content_view::ContentView::set_items_for_pane)
@@ -359,7 +365,57 @@ impl App {
             }
             Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
         }
+        self.apply_script_order(view_index, pane_id, name, items, &answer);
         self.collect_script_highlights(view_index, name, items, &answer, highlights);
+    }
+
+    /// Read the answer's `order` and put the rows in it — unless the user
+    /// has sorted this pane.
+    ///
+    /// A script order and a column sort are the same decision made twice, and
+    /// the hook runs on *every* load, so a script that always won would make
+    /// `c s` look broken on its level. The user's sort therefore wins, and the
+    /// script order is what an unsorted pane falls back to. Said out loud
+    /// rather than dropped quietly: a script whose order goes unused should
+    /// read as refused, not as ineffective.
+    fn apply_script_order(
+        &mut self,
+        view_index: usize,
+        pane_id: PaneId,
+        name: &str,
+        items: &mut [NodeSummary],
+        answer: &serde_json::Value,
+    ) {
+        if answer.get("order").is_none() {
+            return;
+        }
+        let user_sorted = self
+            .content_view(view_index)
+            .and_then(|cv| cv.find_pane(pane_id))
+            .is_some_and(|pane| !pane.current_sort().is_empty());
+        if user_sorted {
+            self.notify(format!(
+                "Load hook '{name}': `order` ignored — this view is sorted by column (clear the sort to let the script order)"
+            ));
+            return;
+        }
+        match apply_row_order(items, answer) {
+            Ok(out) => {
+                if out.unknown > 0 {
+                    self.notify_error(format!(
+                        "Load hook '{name}': {} ordered row id(s) not in this load — ignored",
+                        out.unknown
+                    ));
+                }
+                if out.duplicate > 0 {
+                    self.notify_error(format!(
+                        "Load hook '{name}': {} row id(s) named twice in `order` — first mention kept",
+                        out.duplicate
+                    ));
+                }
+            }
+            Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
+        }
     }
 
     /// Read the answer's `highlights` and fold them into `into`.
@@ -573,6 +629,65 @@ fn apply_cell_patch(
     Ok(out)
 }
 
+/// What one [`apply_row_order`] run did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OrderOutcome {
+    /// Rows the answer named and this load contains — the ones that moved to
+    /// the front, in the order they were named.
+    placed: usize,
+    /// Row ids the answer named that this load does not contain.
+    unknown: usize,
+    /// Ids named more than once. The first mention decides; the repeats are
+    /// counted so a script that built its list from two sources hears about
+    /// it.
+    duplicate: usize,
+}
+
+/// Put the rows in the order a load hook's answer asks for.
+///
+/// Shape: `{"order": ["<row id>", …]}`. Sparse like `cells`: the named rows
+/// come first, in exactly that sequence, and everything the answer did not
+/// mention keeps its relative order behind them. A script that only wants to
+/// pull three rows to the top therefore names three ids, not the whole table.
+///
+/// The sort is stable, which is what makes the tail well-defined — the rows
+/// the script had no opinion about stay in the order the adapter delivered
+/// them.
+fn apply_row_order(
+    items: &mut [NodeSummary],
+    answer: &serde_json::Value,
+) -> Result<OrderOutcome, String> {
+    let Some(order) = answer.get("order") else {
+        return Ok(OrderOutcome::default());
+    };
+    let order = order
+        .as_array()
+        .ok_or_else(|| "`order` must be an array of row ids".to_string())?;
+
+    let mut rank: HashMap<&str, usize> = HashMap::new();
+    let mut out = OrderOutcome::default();
+    for entry in order {
+        let id = entry
+            .as_str()
+            .ok_or_else(|| "`order` entries must be row id strings".to_string())?;
+        if rank.contains_key(id) {
+            out.duplicate += 1;
+            continue;
+        }
+        let next = rank.len();
+        rank.insert(id, next);
+    }
+    let present: std::collections::HashSet<&str> =
+        items.iter().map(|item| item.id.as_str()).collect();
+    out.unknown = rank.keys().filter(|id| !present.contains(*id)).count();
+    out.placed = rank.len() - out.unknown;
+
+    // Unnamed rows sort behind every named one and, the sort being stable,
+    // among themselves as they arrived.
+    items.sort_by_key(|item| rank.get(item.id.as_str()).copied().unwrap_or(usize::MAX));
+    Ok(out)
+}
+
 /// Why `path` cannot run as a hook, or `None` when it can. Hooks run
 /// unattended while a load lands, so only the two modes that need neither
 /// the terminal nor an editor are allowed: `background` and `commands`.
@@ -714,6 +829,72 @@ mod tests {
             serde_json::json!({"cells": {"MOCK-1": {"days": ["1.0"]}}}),
         ] {
             assert!(apply_cell_patch(&mut items, &answer).is_err());
+        }
+    }
+
+    fn ids(items: &[NodeSummary]) -> Vec<&str> {
+        items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn order_puts_the_named_rows_in_front_in_that_sequence() {
+        let mut items = vec![row("A", &[]), row("B", &[]), row("C", &[])];
+        let answer = serde_json::json!({"order": ["C", "A", "B"]});
+        let out = apply_row_order(&mut items, &answer).unwrap();
+        assert_eq!(out.placed, 3);
+        assert_eq!(ids(&items), ["C", "A", "B"]);
+    }
+
+    /// The point of the sparse shape: name the three rows that matter and
+    /// leave the rest of the table where the adapter put it.
+    #[test]
+    fn unnamed_rows_keep_their_relative_order_behind() {
+        let mut items = vec![row("A", &[]), row("B", &[]), row("C", &[]), row("D", &[])];
+        let answer = serde_json::json!({"order": ["C"]});
+        let out = apply_row_order(&mut items, &answer).unwrap();
+        assert_eq!(out.placed, 1);
+        assert_eq!(ids(&items), ["C", "A", "B", "D"]);
+    }
+
+    #[test]
+    fn ordered_ids_outside_this_load_are_counted_not_applied() {
+        let mut items = vec![row("A", &[]), row("B", &[])];
+        let answer = serde_json::json!({"order": ["GONE", "B"]});
+        let out = apply_row_order(&mut items, &answer).unwrap();
+        assert_eq!(out.unknown, 1);
+        assert_eq!(out.placed, 1);
+        assert_eq!(ids(&items), ["B", "A"]);
+    }
+
+    /// A list stitched together from two sources may name a row twice — the
+    /// first mention is its place, the repeat is only counted.
+    #[test]
+    fn a_repeated_id_keeps_its_first_place() {
+        let mut items = vec![row("A", &[]), row("B", &[]), row("C", &[])];
+        let answer = serde_json::json!({"order": ["C", "A", "C"]});
+        let out = apply_row_order(&mut items, &answer).unwrap();
+        assert_eq!(out.duplicate, 1);
+        assert_eq!(ids(&items), ["C", "A", "B"]);
+    }
+
+    #[test]
+    fn an_answer_without_order_leaves_the_rows_alone() {
+        let mut items = vec![row("A", &[]), row("B", &[])];
+        for answer in [serde_json::json!({}), serde_json::json!({"cells": {}})] {
+            let out = apply_row_order(&mut items, &answer).unwrap();
+            assert_eq!(out, OrderOutcome::default());
+        }
+        assert_eq!(ids(&items), ["A", "B"]);
+    }
+
+    #[test]
+    fn malformed_order_shapes_are_rejected() {
+        let mut items = vec![row("A", &[])];
+        for answer in [
+            serde_json::json!({"order": {"A": 0}}),
+            serde_json::json!({"order": [1, 2]}),
+        ] {
+            assert!(apply_row_order(&mut items, &answer).is_err());
         }
     }
 
