@@ -96,7 +96,7 @@ impl TypedAdapterFactory for StoatAdapterFactory {
         let name = cfg.name.unwrap_or_else(|| cfg.url.clone());
 
         let store = SqlAuthSessionStore::new(Arc::clone(&db), scope_id);
-        let auth = AuthBridge::new(cfg.url, Box::new(store), cfg.auth)
+        let auth = AuthBridge::new(cfg.url, Box::new(store), cfg.auth, cfg.retry)
             .map_err(|e| ContentError::Other(e.into()))?;
 
         Ok(Box::new(StoatAdapter::from_parts(

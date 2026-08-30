@@ -239,7 +239,6 @@ impl StoatClient {
     ) -> Result<Vec<MessageView>, String> {
         let limit = limit.clamp(1, MAX_MESSAGE_LIMIT).to_string();
         let url = format!("{}/api/channels/{}/messages", self.base_url(), channel_id);
-        http_log::log_request("GET", &url);
 
         let mut query: Vec<(&str, &str)> = vec![
             ("limit", limit.as_str()),
@@ -251,13 +250,15 @@ impl StoatClient {
         }
 
         let resp = self
-            .http
-            .get(&url)
-            .headers(self.auth_headers()?)
-            .query(&query)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &url,
+                self.http
+                    .get(&url)
+                    .headers(self.auth_headers()?)
+                    .query(&query),
+            )
+            .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let body = resp
             .json::<MessagesWithUsers>()
@@ -303,19 +304,20 @@ impl StoatClient {
         attachment_ids: &[String],
     ) -> Result<String, String> {
         let url = format!("{}/api/channels/{}/messages", self.base_url(), channel_id);
-        http_log::log_request("POST", &url);
         let mut body = serde_json::json!({ "content": content });
         if !attachment_ids.is_empty() {
             body["attachments"] = serde_json::json!(attachment_ids);
         }
         let resp = self
-            .http
-            .post(&url)
-            .headers(self.auth_headers()?)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send(
+                "POST",
+                &url,
+                self.http
+                    .post(&url)
+                    .headers(self.auth_headers()?)
+                    .json(&body),
+            )
+            .await?;
         let resp = http_log::check_status("POST", &url, resp).await?;
         let raw = resp
             .json::<RawMessage>()
@@ -339,15 +341,16 @@ impl StoatClient {
             channel_id,
             message_id
         );
-        http_log::log_request("PATCH", &url);
         let resp = self
-            .http
-            .patch(&url)
-            .headers(self.auth_headers()?)
-            .json(&serde_json::json!({ "content": content }))
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+            .send(
+                "PATCH",
+                &url,
+                self.http
+                    .patch(&url)
+                    .headers(self.auth_headers()?)
+                    .json(&serde_json::json!({ "content": content })),
+            )
+            .await?;
         http_log::check_status("PATCH", &url, resp).await?;
         Ok(())
     }
@@ -360,14 +363,13 @@ impl StoatClient {
             channel_id,
             message_id
         );
-        http_log::log_request("DELETE", &url);
         let resp = self
-            .http
-            .delete(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+            .send(
+                "DELETE",
+                &url,
+                self.http.delete(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         http_log::check_status("DELETE", &url, resp).await?;
         Ok(())
     }
@@ -389,14 +391,13 @@ impl StoatClient {
             message_id,
             percent_encode_segment(emoji)
         );
-        http_log::log_request("PUT", &url);
         let resp = self
-            .http
-            .put(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PUT", &url, e))?;
+            .send(
+                "PUT",
+                &url,
+                self.http.put(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         http_log::check_status("PUT", &url, resp).await?;
         Ok(())
     }
@@ -417,14 +418,13 @@ impl StoatClient {
             channel_id,
             message_id
         );
-        http_log::log_request("GET", &url);
         let resp = self
-            .http
-            .get(&url)
-            .headers(self.auth_headers()?)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &url,
+                self.http.get(&url).headers(self.auth_headers()?),
+            )
+            .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let raw = resp
             .json::<RawMessage>()

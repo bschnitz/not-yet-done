@@ -8,7 +8,7 @@
 use fieldsmith::Buildable;
 use serde::Deserialize;
 
-use not_yet_done_content::AuthSpec;
+use not_yet_done_content::{AuthSpec, RetryConfig};
 
 /// Default per-request timeout (seconds) when `request_timeout_secs` is
 /// not set in the YAML. Chosen as a balance: long enough that a slow but
@@ -68,6 +68,12 @@ pub struct TaigaConfig {
     /// Omit it on a normal LAN/WAN; the derived default is right there.
     #[serde(default)]
     pub(super) connect_timeout_secs: Option<u64>,
+    /// How often a request may be repeated when the transport fails
+    /// (connection refused, reset, timeout) — see
+    /// [`not_yet_done_content::http_send`]. Omit it for one repeat after
+    /// 250 ms.
+    #[serde(default)]
+    pub(super) retry: RetryConfig,
 }
 
 #[derive(Deserialize, Buildable, Clone, Debug)]
@@ -91,6 +97,21 @@ mod tests {
         cfg.auth
             .validate_against(MECHANISMS)
             .expect("example is a valid spec");
+    }
+
+    /// The retry block is optional; leaving it out has to mean the
+    /// default, not "no repeat at all".
+    #[test]
+    fn parses_a_retry_block_and_defaults_without_one() {
+        let base = "url: https://taiga.example.invalid\nauth:\n  mechanism: password-login\n  bindings:\n    - field: username\n      provider: { type: literal, value: alice }\n    - field: password\n      provider: { type: prompt }\n";
+        let cfg: TaigaConfig = serde_yaml::from_str(base).expect("parses without a retry block");
+        assert_eq!(cfg.retry, RetryConfig::default());
+
+        let cfg: TaigaConfig =
+            serde_yaml::from_str(&format!("{base}retry:\n  attempts: 4\n  backoff_ms: 100\n"))
+                .expect("parses with a retry block");
+        assert_eq!(cfg.retry.attempts, 4);
+        assert_eq!(cfg.retry.backoff_ms, 100);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use fieldsmith::Buildable;
 use serde::Deserialize;
 
-use not_yet_done_content::AuthSpec;
+use not_yet_done_content::{AuthSpec, RetryConfig};
 
 #[derive(Deserialize, Buildable, Debug)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +23,12 @@ pub struct StoatConfig {
     /// file under the user's local data dir.
     #[serde(default)]
     pub(super) db: Option<DbConfig>,
+    /// How often a request may be repeated when the transport fails
+    /// (connection refused, reset, timeout) — see
+    /// [`not_yet_done_content::http_send`]. Omit it for one repeat after
+    /// 250 ms.
+    #[serde(default)]
+    pub(super) retry: RetryConfig,
 }
 
 #[derive(Deserialize, Buildable, Clone, Debug)]
@@ -39,6 +45,21 @@ mod tests {
 
     /// The example under `docs/examples/views/` is the first thing a user
     /// copies, so it has to parse and validate like any real config.
+    /// The retry block is optional; leaving it out has to mean the
+    /// default, not "no repeat at all".
+    #[test]
+    fn parses_a_retry_block_and_defaults_without_one() {
+        let base = "url: https://chat.example.invalid\nauth:\n  mechanism: password-login\n  bindings:\n    - field: email\n      provider: { type: literal, value: a@b.c }\n    - field: password\n      provider: { type: prompt }\n";
+        let cfg: StoatConfig = serde_yaml::from_str(base).expect("parses without a retry block");
+        assert_eq!(cfg.retry, RetryConfig::default());
+
+        let cfg: StoatConfig =
+            serde_yaml::from_str(&format!("{base}retry:\n  attempts: 4\n  backoff_ms: 100\n"))
+                .expect("parses with a retry block");
+        assert_eq!(cfg.retry.attempts, 4);
+        assert_eq!(cfg.retry.backoff_ms, 100);
+    }
+
     #[test]
     fn the_shipped_example_config_parses() {
         let yaml = include_str!("../../../docs/examples/views/stoat-adapter.yaml");

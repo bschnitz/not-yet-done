@@ -134,6 +134,7 @@ mod tests {
                 session_id: "S0".into(),
                 session_name: "test".into(),
             },
+            Default::default(),
         )
         .expect("client")
     }

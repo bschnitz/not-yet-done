@@ -68,15 +68,16 @@ pub async fn create_item(
 
     let headers = client.auth_headers()?;
     let payload = Value::Object(body);
-    http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || {
+        .send(
+            "POST",
+            &url,
             client
                 .http
                 .post(&url)
                 .headers(headers.clone())
-                .json(&payload)
-        })
+                .json(&payload),
+        )
         .await?;
 
     let status = resp.status();

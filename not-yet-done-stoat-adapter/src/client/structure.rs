@@ -36,15 +36,16 @@ impl StoatClient {
     /// call (Stoat has no atomic "create in category").
     pub async fn create_channel(&self, server_id: &str, name: &str) -> Result<String, String> {
         let url = format!("{}/api/servers/{}/channels", self.base_url(), server_id);
-        http_log::log_request("POST", &url);
         let resp = self
-            .http
-            .post(&url)
-            .headers(self.auth_headers()?)
-            .json(&serde_json::json!({ "type": "Text", "name": name }))
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send(
+                "POST",
+                &url,
+                self.http
+                    .post(&url)
+                    .headers(self.auth_headers()?)
+                    .json(&serde_json::json!({ "type": "Text", "name": name })),
+            )
+            .await?;
         let resp = http_log::check_status("POST", &url, resp).await?;
         let created = resp
             .json::<CreatedChannel>()
@@ -60,15 +61,16 @@ impl StoatClient {
     /// tree refreshes without a reload.
     pub async fn rename_channel(&self, channel_id: &str, name: &str) -> Result<(), String> {
         let url = format!("{}/api/channels/{}", self.base_url(), channel_id);
-        http_log::log_request("PATCH", &url);
         let resp = self
-            .http
-            .patch(&url)
-            .headers(self.auth_headers()?)
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+            .send(
+                "PATCH",
+                &url,
+                self.http
+                    .patch(&url)
+                    .headers(self.auth_headers()?)
+                    .json(&serde_json::json!({ "name": name })),
+            )
+            .await?;
         http_log::check_status("PATCH", &url, resp).await?;
         Ok(())
     }
@@ -83,15 +85,16 @@ impl StoatClient {
         categories: &[Category],
     ) -> Result<(), String> {
         let url = format!("{}/api/servers/{}", self.base_url(), server_id);
-        http_log::log_request("PATCH", &url);
         let resp = self
-            .http
-            .patch(&url)
-            .headers(self.auth_headers()?)
-            .json(&serde_json::json!({ "categories": categories }))
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("PATCH", &url, e))?;
+            .send(
+                "PATCH",
+                &url,
+                self.http
+                    .patch(&url)
+                    .headers(self.auth_headers()?)
+                    .json(&serde_json::json!({ "categories": categories })),
+            )
+            .await?;
         http_log::check_status("PATCH", &url, resp).await?;
         Ok(())
     }

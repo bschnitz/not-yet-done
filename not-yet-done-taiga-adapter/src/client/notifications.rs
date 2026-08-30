@@ -173,11 +173,8 @@ pub async fn fetch_notifications_page(
         None => format!("{}/api/v1/web-notifications?page={page}", client.base_url),
     };
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || {
-            client.http.get(&url).headers(headers.clone())
-        })
+        .send("GET", &url, client.http.get(&url).headers(headers.clone()))
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let body = resp
@@ -280,15 +277,16 @@ pub async fn mark_notification_as_read(client: &TaigaClient, id: u64) -> Result<
     );
     let headers = client.auth_headers()?;
     let payload = json!({});
-    http_log::log_request("PATCH", &url);
     let resp = client
-        .send_retrying("PATCH", &url, || {
+        .send(
+            "PATCH",
+            &url,
             client
                 .http
                 .patch(&url)
                 .headers(headers.clone())
-                .json(&payload)
-        })
+                .json(&payload),
+        )
         .await?;
     http_log::check_status("PATCH", &url, resp).await?;
     Ok(())

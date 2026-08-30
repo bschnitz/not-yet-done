@@ -27,11 +27,12 @@ pub async fn toggle_watch(
         item_type.url_segment(),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", &detail_url);
     let detail_resp = client
-        .send_retrying("GET", &detail_url, || {
-            client.http.get(&detail_url).headers(headers.clone())
-        })
+        .send(
+            "GET",
+            &detail_url,
+            client.http.get(&detail_url).headers(headers.clone()),
+        )
         .await?;
     let detail_resp = http_log::check_status("GET", &detail_url, detail_resp).await?;
     let detail: serde_json::Value = detail_resp
@@ -49,11 +50,12 @@ pub async fn toggle_watch(
         client.base_url,
         item_type.url_segment(),
     );
-    http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || {
-            client.http.post(&url).headers(headers.clone())
-        })
+        .send(
+            "POST",
+            &url,
+            client.http.post(&url).headers(headers.clone()),
+        )
         .await?;
     http_log::check_status("POST", &url, resp).await?;
     Ok(!was_watching)
@@ -80,15 +82,16 @@ pub async fn edit_comment(
     );
     let headers = client.auth_headers()?;
     let payload = json!({ "comment": new_body });
-    http_log::log_request("POST", &url);
     let resp = client
-        .send_retrying("POST", &url, || {
+        .send(
+            "POST",
+            &url,
             client
                 .http
                 .post(&url)
                 .headers(headers.clone())
-                .json(&payload)
-        })
+                .json(&payload),
+        )
         .await?;
     http_log::check_status("POST", &url, resp).await?;
     Ok(())
@@ -150,11 +153,8 @@ pub async fn list_attachments(
         item_type.url_segment(),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", &url);
     let resp = client
-        .send_retrying("GET", &url, || {
-            client.http.get(&url).headers(headers.clone())
-        })
+        .send("GET", &url, client.http.get(&url).headers(headers.clone()))
         .await?;
     let resp = http_log::check_status("GET", &url, resp).await?;
     let dtos: Vec<AttachmentDto> = resp
@@ -225,15 +225,20 @@ pub async fn upload_attachment_bytes(
         client.base_url,
         item_type.url_segment(),
     );
-    http_log::log_request("POST", &url);
+    // A multipart body cannot be cloned, so this one is sent exactly
+    // once whatever the retry config says — `send` degrades to a single
+    // attempt on its own.
     let resp = client
-        .http
-        .post(&url)
-        .headers(client.auth_headers()?)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| http_log::network_error("POST", &url, e))?;
+        .send(
+            "POST",
+            &url,
+            client
+                .http
+                .post(&url)
+                .headers(client.auth_headers()?)
+                .multipart(form),
+        )
+        .await?;
     let resp = http_log::check_status("POST", &url, resp).await?;
     let dto: AttachmentDto = resp
         .json()
@@ -259,9 +264,8 @@ pub async fn upload_attachment_bytes(
 /// GET the binary content of an attachment.
 pub async fn download_attachment(client: &TaigaClient, url: &str) -> Result<Vec<u8>, String> {
     let headers = client.auth_headers()?;
-    http_log::log_request("GET", url);
     let resp = client
-        .send_retrying("GET", url, || client.http.get(url).headers(headers.clone()))
+        .send("GET", url, client.http.get(url).headers(headers.clone()))
         .await?;
     let resp = http_log::check_status("GET", url, resp).await?;
     let bytes = resp
@@ -285,11 +289,12 @@ pub async fn delete_attachment(
         item_type.url_segment(),
     );
     let headers = client.auth_headers()?;
-    http_log::log_request("DELETE", &url);
     let resp = client
-        .send_retrying("DELETE", &url, || {
-            client.http.delete(&url).headers(headers.clone())
-        })
+        .send(
+            "DELETE",
+            &url,
+            client.http.delete(&url).headers(headers.clone()),
+        )
         .await?;
     http_log::check_status("DELETE", &url, resp).await?;
     Ok(())

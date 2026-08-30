@@ -38,15 +38,16 @@ impl StoatClient {
         server_id: &str,
     ) -> Result<HashMap<String, String>, String> {
         let url = format!("{}/api/servers/{}/members", self.base_url(), server_id);
-        http_log::log_request("GET", &url);
         let resp = self
-            .http
-            .get(&url)
-            .headers(self.auth_headers()?)
-            .query(&[("exclude_offline", "false")])
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+            .send(
+                "GET",
+                &url,
+                self.http
+                    .get(&url)
+                    .headers(self.auth_headers()?)
+                    .query(&[("exclude_offline", "false")]),
+            )
+            .await?;
         let resp = http_log::check_status("GET", &url, resp).await?;
         let body = resp
             .json::<MembersResponse>()

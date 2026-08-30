@@ -431,6 +431,7 @@ mod tests {
                 session_id: "S0".into(),
                 session_name: "test".into(),
             },
+            Default::default(),
         )
         .expect("client");
         let state = Arc::new(RwLock::new(StoatState::default()));

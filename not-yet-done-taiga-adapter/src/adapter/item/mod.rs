@@ -206,18 +206,13 @@ pub(super) async fn fetch_detail(
         ItemType::UserStory => "userstories",
     };
     let url = format!("{}/api/v1/{endpoint}/{id}", client.base_url);
-    http_log::log_request("GET", &url);
+    let headers = client
+        .auth_headers()
+        .map_err(|e| ContentError::Other(e.into()))?;
     let resp = client
-        .http
-        .get(&url)
-        .headers(
-            client
-                .auth_headers()
-                .map_err(|e| ContentError::Other(e.into()))?,
-        )
-        .send()
+        .send("GET", &url, client.http.get(&url).headers(headers))
         .await
-        .map_err(|e| ContentError::Other(http_log::network_error("GET", &url, e).into()))?;
+        .map_err(|e| ContentError::Other(e.into()))?;
     let resp = http_log::check_status("GET", &url, resp)
         .await
         .map_err(|e| ContentError::Other(e.into()))?;

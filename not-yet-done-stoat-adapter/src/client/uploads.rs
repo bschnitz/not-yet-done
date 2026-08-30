@@ -51,15 +51,19 @@ impl StoatClient {
         let form = reqwest::multipart::Form::new().part("file", part);
 
         let url = format!("{autumn}/attachments");
-        http_log::log_request("POST", &url);
+        // A multipart body cannot be cloned, so this one is sent exactly
+        // once whatever the retry config says — `send` degrades to a
+        // single attempt on its own.
         let resp = self
-            .http
-            .post(&url)
-            .headers(self.auth_headers()?)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send(
+                "POST",
+                &url,
+                self.http
+                    .post(&url)
+                    .headers(self.auth_headers()?)
+                    .multipart(form),
+            )
+            .await?;
         let resp = http_log::check_status("POST", &url, resp).await?;
         let uploaded = resp
             .json::<UploadResponse>()

@@ -616,11 +616,8 @@ async fn run_one(client: &TaigaClient, spec: QuerySpec) -> Result<Vec<ItemSummar
         let url = format!("{endpoint}?{}", parts.join("&"));
 
         let headers = client.auth_headers()?;
-        http_log::log_request("GET", &url);
         let resp = client
-            .send_retrying("GET", &url, || {
-                client.http.get(&url).headers(headers.clone())
-            })
+            .send("GET", &url, client.http.get(&url).headers(headers.clone()))
             .await?;
 
         // Some Taiga deployments respond with 404 when paging past the
