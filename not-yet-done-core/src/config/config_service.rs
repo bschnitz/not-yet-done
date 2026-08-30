@@ -87,6 +87,18 @@ impl ConfigServiceImpl {
 }
 
 impl ConfigServiceImpl {
+    /// The config exactly as it stands on disk.
+    ///
+    /// [`get_config`](Self::get_config) is the richer path: it falls back to a
+    /// default, and offers to write one when there is no file yet -- which
+    /// means it can stop and ask the user a question. This one never does.
+    /// Callers that only want to *read* a setting on a path where a prompt
+    /// would be wrong (the CLI installing its logging before it dispatches)
+    /// take this instead, and treat an error as "no config".
+    pub fn read_config() -> Result<Config, ConfigError> {
+        Self::load_config()
+    }
+
     pub async fn get_database_url(&self) -> Result<String, ConfigError> {
         if let Ok(db_url) = std::env::var("DATABASE_URL") {
             return Ok(db_url);

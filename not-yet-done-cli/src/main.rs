@@ -23,6 +23,33 @@ mod config_template;
 
 static MODULE: OnceLock<Arc<TaskDomainModule>> = OnceLock::new();
 
+/// Point the CLI's diagnostics at the same rotating log the TUI writes, read
+/// from the same `config.yaml`.
+///
+/// The CLI is where a TUI failure gets reproduced -- headless, with the same
+/// adapters and the same session -- so it is the last place that should be
+/// logging into the void. It used to: only the TUI called `configure`, and a
+/// CLI run wrote nothing unless `NYD_DEBUG` was set by hand, which one only
+/// remembers to do *after* the interesting run.
+///
+/// First thing in `main`, before the adapter dispatch below, because that is
+/// the path that talks to the network. Read-only and silent: no config, or an
+/// unreadable one, simply leaves logging off rather than failing the command,
+/// and the interactive "shall I create one?" branch of `get_config` is
+/// deliberately not taken -- installing a log file is no reason to stop and
+/// ask a question.
+fn install_logging() {
+    let Ok(config) = ConfigServiceImpl::read_config() else {
+        return;
+    };
+    not_yet_done_content::http_log::configure(not_yet_done_content::http_log::LogSettings {
+        enabled: config.logging.enabled,
+        directory: config.logging.directory.clone(),
+        retention_days: config.logging.retention_days as i64,
+        verbose: config.logging.verbose,
+    });
+}
+
 pub fn run_async<F, Fut, T>(f: F) -> T
 where
     F: FnOnce(Arc<TaskDomainModule>) -> Fut,
@@ -62,6 +89,8 @@ pub mod cli {
 }
 
 fn main() -> std::process::ExitCode {
+    install_logging();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Generic adapter front-end (Block D): if the first argument names a
