@@ -5110,6 +5110,92 @@ write.
 - [ ] **Keep working** after a rejection: a normal query on the same tab still
       runs (no session in aborted state).
 
+## Adding data rows (`e n` → `new_row`, SQLite + Postgres)
+
+`e n` opens the same editor as `e`, but with a **template of the relation's
+columns** instead of a row's cells — one `column: null` line each. Saving
+builds **one** `INSERT` from the lines that are still there; a line you delete
+is left to the column's `DEFAULT`. The columns the database fills itself open
+**commented out**, so the common case is "save straight away and let the
+database do the rest".
+
+Prerequisite: the `new_row` binding from
+`docs/examples/views/{sqlite,postgres}.yaml` (`key: n` there, `e n` in the live
+config), and for SQLite `read_only: false` in `sqlite-adapter.yaml`. Like
+`edit_row` it has to be an `actions:` entry with `type: edit, id: new_row` —
+`type: node` cannot open an editor, and `type: create` resolves its parent from
+the nav stack, which a tree pane does not fill.
+
+The core of the test: it is bound on the **relation** as well as on its rows.
+An empty table has no row to stand on, so without the first binding its first
+row could never be written.
+
+### Common to both adapters
+
+- [ ] `e n` on a table **row** → editor with every column as `column: null`,
+      extension `.yaml`. The header names the relation and lists the columns,
+      marking the ones the database fills.
+- [ ] `e n` on the **table** itself (one level up in the tree) → the same
+      buffer. Do it on a table with **no rows at all** — this is the only way
+      to write its first row.
+- [ ] Fill two columns, save → notice "row added to …", the level reloads and
+      the new row is visible without a manual `r`.
+- [ ] Check from the outside (`sqlite3` / `psql`): exactly one row was
+      inserted, and only the columns you left in the buffer were named.
+- [ ] Leave a line at `null` → the column is SQL NULL. Conversely `"null"` in
+      quotes writes the text.
+- [ ] **Delete** a line entirely → the column's `DEFAULT` applies (not NULL, if
+      it has one). Leaving the line commented out does the same.
+- [ ] Delete **every** line and save → "no changes", nothing is inserted. An
+      emptied buffer is a change of mind, not a request for a row of defaults.
+- [ ] Mistype a column name → rejected in the buffer with the real column names
+      in the message; your own text is preserved.
+- [ ] Name the same column twice → rejected by name, text preserved.
+- [ ] Broken YAML → rejected with a line number, text preserved.
+- [ ] Violate a constraint (NOT NULL, unique, foreign key, a type) → the banner
+      carries the database's message **and** below it "The statement that
+      failed:" with the `INSERT`. Fix it and save → the banner is gone and is
+      not written along.
+- [ ] Multi-line text (block scalar `|`) and special characters (`: `, `#`,
+      leading spaces, emoji) arrive unchanged and come back unchanged on `e`.
+- [ ] Flat `tables` view → `e n` works there in exactly the same way, on both
+      the table and its rows.
+- [ ] `e n` twice in a row → two rows, not one; the second buffer is a fresh
+      template, never the first one's text.
+
+### SQLite only
+
+- [ ] `read_only: true` (the default) → `e n` opens, saving fails with a
+      pointer to `read_only: false`; nothing is inserted.
+- [ ] Table with an `INTEGER PRIMARY KEY` → that column opens commented out
+      ("the database fills it"); saving without it assigns the next rowid.
+- [ ] Table with a `DEFAULT` on a column → same, and deleting the line applies
+      the default.
+- [ ] Table with a **generated** column → it is not offered in the buffer at
+      all (`PRAGMA table_info` does not list it, and an `INSERT` may not name
+      it).
+- [ ] `Rows` of a **view**, or the view itself: `e n` is deliberately **not**
+      bound. If it is bound for a test, the adapter rejects it with "SQLite
+      cannot insert through one" — no editor opens.
+
+### Postgres only
+
+- [ ] Column with `GENERATED … AS IDENTITY` or a `nextval(…)` default → opens
+      commented out; saving without it lets postgres assign the value.
+- [ ] Column with `GENERATED ALWAYS AS (…) STORED` → not offered at all.
+- [ ] Non-text types (`int`, `numeric`, `timestamptz`, `jsonb`, `bytea`,
+      array) → written as text literals and converted by the column type; the
+      inserted row reads back unchanged with `e`.
+- [ ] A **simple view**: `e n` is bound there (unlike in SQLite) and inserts
+      into the relation underneath — postgres auto-updatable views work.
+- [ ] A view that is **not** auto-updatable (a join, an aggregate) → postgres'
+      own refusal lands in the banner together with the `INSERT`. That message
+      is the reason nothing is guessed up front.
+- [ ] A table in a schema whose name needs quoting → the statement names
+      `"schema"."table"`, and the insert works.
+- [ ] **Keep working** after a rejection: a normal query on the same tab still
+      runs (no session in aborted state).
+
 ## View scripts on the SQL row levels (`x`), DB scripts on `X`
 
 Three different notions of "script" meet on the SQL tabs. Above all, the test

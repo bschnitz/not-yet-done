@@ -37,7 +37,7 @@ use not_yet_done_content::{
 };
 
 use not_yet_done_sql_core::db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptTree};
-use not_yet_done_sql_core::row_edit::{self, RowSnapshot};
+use not_yet_done_sql_core::row_edit::{self, NewRowColumn, RowSnapshot};
 use not_yet_done_sql_core::script_completions::{self as completions, Completion};
 use not_yet_done_sql_core::view_ddl;
 
@@ -61,6 +61,10 @@ const EDIT_VIEW_ACTION: &str = "edit_view";
 /// Action id of the row editor. Bound in a view config as
 /// `actions: [{type: edit, id: edit_row}]`.
 const EDIT_ROW_ACTION: &str = "edit_row";
+/// Action id of the insert editor. Bound the same way
+/// (`actions: [{type: edit, id: new_row}]`), and offered on a table as
+/// well as on its rows — see [`NewRow`].
+const NEW_ROW_ACTION: &str = "new_row";
 /// `sqlite_master.type` of the two catalogue objects this adapter lists.
 const KIND_TABLE: &str = "table";
 const KIND_VIEW: &str = "view";
@@ -267,53 +271,76 @@ fn field(key: &str, label: &str, value: &str) -> MetadataField {
     }
 }
 
-/// Actions a table row offers. Only the query editor: the tree is a
-/// browser, and everything else a table could do (drop, rename, …) would
-/// need a writable adapter first.
+/// The query editor, which every catalogue object offers.
 ///
-/// The YAML binds this via `actions:` — `{ key: Q, id: edit_sql }` on the
+/// The YAML binds it via `actions:` — `{ key: Q, id: edit_sql }` on the
 /// `sqlite:table` level, `{ key: Q, id: edit_sql, target: parent }` on
 /// `sqlite:row` so the key keeps working one level deeper.
-fn table_actions() -> Vec<not_yet_done_content::NodeAction> {
-    vec![not_yet_done_content::NodeAction::new(
+fn sql_action() -> not_yet_done_content::NodeAction {
+    not_yet_done_content::NodeAction::new(
         "edit_sql",
         "sql",
         not_yet_done_content::InputSpec::None,
-    )]
+    )
 }
 
-/// Actions a view offers: everything a table has, plus editing the
-/// statement that *is* the view.
+/// Actions a table offers: the query editor, and adding a row.
+///
+/// Adding is offered here as well as on the rows themselves because a
+/// table with no rows has no row to stand on — without this the first row
+/// of an empty table could never be written. Everything else a table
+/// could do (drop, rename, …) is still absent: the tree is a browser.
+fn table_actions() -> Vec<not_yet_done_content::NodeAction> {
+    vec![sql_action(), new_row_action()]
+}
+
+/// Actions a view offers: the query editor, plus editing the statement
+/// that *is* the view. No `new_row` — SQLite cannot insert through a
+/// view, and a key that is always refused is worse than one that is
+/// absent.
 ///
 /// `edit_view` is an [`InputSpec::Editor`](not_yet_done_content::InputSpec)
 /// action, so it has to be bound as an `actions:` entry of `type: edit`
 /// with `id: edit_view` — the default `type: node` routes through
 /// `invoke_action` and cannot open an editor.
 fn view_actions() -> Vec<not_yet_done_content::NodeAction> {
-    let mut actions = table_actions();
-    actions.push(not_yet_done_content::NodeAction::new(
-        EDIT_VIEW_ACTION,
-        "definition",
-        not_yet_done_content::InputSpec::Editor,
-    ));
-    actions
+    vec![
+        sql_action(),
+        not_yet_done_content::NodeAction::new(
+            EDIT_VIEW_ACTION,
+            "definition",
+            not_yet_done_content::InputSpec::Editor,
+        ),
+    ]
 }
 
-/// Actions a data row offers: editing its cells.
+/// Actions a data row offers: editing its cells, and adding a row beside
+/// it.
 ///
-/// Like `edit_view` this is an
-/// [`InputSpec::Editor`](not_yet_done_content::InputSpec) action and has
+/// Like `edit_view` both are
+/// [`InputSpec::Editor`](not_yet_done_content::InputSpec) actions and have
 /// to be bound as `actions: [{type: edit, id: edit_row}]`. Whether the
 /// row can actually be written is not decided here — a view's rows carry
-/// the same action and refuse when the editor opens, with the reason,
+/// the same actions and refuse when the editor opens, with the reason,
 /// because "this is a view" is a far more useful answer than a key that
 /// silently does nothing.
 fn row_actions() -> Vec<not_yet_done_content::NodeAction> {
-    vec![not_yet_done_content::NodeAction::new(
-        EDIT_ROW_ACTION,
-        "row",
+    vec![
+        not_yet_done_content::NodeAction::new(
+            EDIT_ROW_ACTION,
+            "row",
+            not_yet_done_content::InputSpec::Editor,
+        ),
+        new_row_action(),
+    ]
+}
+
+fn new_row_action() -> not_yet_done_content::NodeAction {
+    not_yet_done_content::NodeAction::new(
+        NEW_ROW_ACTION,
+        "new row",
         not_yet_done_content::InputSpec::Editor,
-    )]
+    )
 }
 
 /// Human-readable file size. Binary units, one decimal from KiB up.
@@ -1020,6 +1047,15 @@ impl TableNode {
             node_id,
         }
     }
+
+    fn new_row(&self) -> NewRow<'_> {
+        NewRow {
+            database: &self.database,
+            table: &self.name,
+            client: &self.client,
+            node_id: &self.node_id,
+        }
+    }
 }
 
 #[async_trait]
@@ -1052,6 +1088,27 @@ impl Node for TableNode {
             &self.name,
             &self.client,
         )
+    }
+
+    /// A table's one editor action is adding a row — the key works here
+    /// as well as on the rows so that an empty table can be filled at
+    /// all. See [`NewRow`].
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id != NEW_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a table has no editor action `{action_id}`"
+            )));
+        }
+        self.new_row().prepare().await
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id != NEW_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a table has no editor action `{action_id}`"
+            )));
+        }
+        self.new_row().execute(input).await
     }
 }
 
@@ -1348,6 +1405,126 @@ impl Node for ViewNode {
     }
 }
 
+/// Writing a row that does not exist yet.
+///
+/// Offered on a table *and* on its rows — from the table because an empty
+/// one has no row to stand on, from a row because that is where the row
+/// editor's key already lives — so the work sits here once instead of in
+/// both nodes.
+struct NewRow<'a> {
+    database: &'a str,
+    table: &'a str,
+    client: &'a SqliteClient,
+    /// The node the action ran on, for the `Navigate` outcome. A SQLite
+    /// row has no address of its own — a row id is the offset the row
+    /// happened to be listed at, and an unordered `SELECT` may hand the
+    /// new row any of them — so the outcome names the table the row went
+    /// into rather than inventing an id for it. What the frontend does
+    /// with `Navigate` here is reload the level, which is what makes the
+    /// new row appear.
+    node_id: &'a str,
+}
+
+impl NewRow<'_> {
+    /// Reject the save without losing the user's text, exactly as the row
+    /// editor does: the message becomes a banner above their own buffer.
+    fn reject(buffer: &str, message: &str) -> ActionOutcome {
+        ActionOutcome::Reopen {
+            content: row_edit::render_with_error(buffer, message),
+            new_version: None,
+        }
+    }
+
+    async fn columns(&self) -> std::result::Result<Vec<NewRowColumn>, String> {
+        self.client.new_row_columns(self.database, self.table).await
+    }
+
+    /// A template of the table's columns, `null` each, with the ones the
+    /// database fills commented out.
+    async fn prepare(&self) -> Result<EditorPrep> {
+        let columns = self.columns().await.map_err(ContentError::NotSupported)?;
+        Ok(EditorPrep {
+            template: row_edit::new_row_buffer(
+                &format!("{} in {}", self.table, self.database),
+                SQLITE_INSERT_NOTE,
+                &columns,
+            ),
+            // A row that does not exist yet has nothing to conflict with,
+            // so there is no state for a version token to carry. The
+            // columns are read again on save, against the schema as it is
+            // then rather than as it was when the editor opened.
+            version: String::new(),
+            suffix: ".yaml".into(),
+            file_path: None,
+        })
+    }
+
+    /// Every rejection reopens the editor with a banner rather than
+    /// failing the action — the buffer is the only copy of what the user
+    /// typed. When SQLite itself refuses the statement, the statement is
+    /// shown next to the complaint.
+    async fn execute(&self, input: ActionInput) -> Result<ActionOutcome> {
+        let ActionInput::Edited { text, .. } = input else {
+            return Err(ContentError::NotSupported(
+                "adding a row needs the editor's saved buffer".into(),
+            ));
+        };
+        // A banner from the previous attempt must reach neither the
+        // database nor the next buffer.
+        let buffer = row_edit::strip_error_banner(&text).to_string();
+        // An emptied buffer is a change of mind, not a request for a row
+        // of pure defaults: the user deleted every line, so nothing is
+        // written.
+        if row_edit::has_no_columns(&buffer) {
+            return Ok(ActionOutcome::NoChanges);
+        }
+
+        let columns = match self.columns().await {
+            Ok(columns) => columns,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        let edited = match row_edit::parse_row_buffer(&buffer) {
+            Ok(edited) => edited,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        let cells = match row_edit::new_row_cells(&columns, &edited) {
+            Ok(cells) => cells,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        if self.client.is_read_only() {
+            return Ok(Self::reject(
+                &buffer,
+                &format!(
+                    "this adapter runs read_only, so no row can be added to {} — set \
+                     read_only: false in its config to allow writes",
+                    self.table
+                ),
+            ));
+        }
+
+        let statement =
+            row_edit::build_insert(&not_yet_done_sql_core::quote_ident(self.table), &cells);
+        match self.client.execute_write(self.database, &statement).await {
+            Ok(1) => Ok(ActionOutcome::Navigate {
+                node_id: self.node_id.to_string(),
+                node_type: row_node_type(),
+                message: Some(format!("row added to {}", self.table)),
+            }),
+            // One statement, one row — anything else means the INSERT was
+            // not the one built here, and saying so beats a success
+            // message that does not match what happened.
+            Ok(affected) => Ok(Self::reject(
+                &buffer,
+                &format!("the statement wrote {affected} rows instead of one:\n{statement}"),
+            )),
+            Err(message) => Ok(Self::reject(
+                &buffer,
+                &format!("{message}\n\nThe statement that failed:\n{statement}"),
+            )),
+        }
+    }
+}
+
 /// One data row, editable through the same seam as a view definition:
 /// [`Node::prepare`] renders the row as a YAML mapping,
 /// [`Node::execute`] turns the edited mapping back into one `UPDATE`.
@@ -1405,6 +1582,25 @@ impl RowNode {
             .await
             .map_err(ContentError::NotSupported)
     }
+
+    /// Adding a row is the same action here as on the table — see
+    /// [`NewRow`] — and it reports the *table* rather than this row: the
+    /// new row is not the one under the cursor, and it has no id of its
+    /// own to name.
+    fn new_row(&self) -> NewRow<'_> {
+        let tail = format!("/{ROWS_GROUP_ID}/");
+        let table_node_id = self
+            .node_id
+            .rsplit_once(tail.as_str())
+            .map(|(head, _)| head)
+            .unwrap_or(&self.node_id);
+        NewRow {
+            database: &self.database,
+            table: &self.table,
+            client: &self.client,
+            node_id: table_node_id,
+        }
+    }
 }
 
 #[async_trait]
@@ -1435,6 +1631,9 @@ impl Node for RowNode {
     /// addresses the row that was actually shown, not whatever now sits at
     /// the same offset).
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().prepare().await;
+        }
         if action_id != EDIT_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a row has no editor action `{action_id}`"
@@ -1474,6 +1673,9 @@ impl Node for RowNode {
     /// the statement is shown next to the complaint — an "unknown column"
     /// is far easier to place with the `UPDATE` in front of you.
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().execute(input).await;
+        }
         if action_id != EDIT_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a row has no editor action `{action_id}`"
@@ -1599,6 +1801,10 @@ impl Node for RowNode {
 /// the column, so a number does not have to be spelled a particular way.
 const SQLITE_WRITE_NOTE: &str = "On save one UPDATE is built from the columns that changed and run on its own.\n\
      Values are written as text; the column's type converts them.";
+
+/// The same for a row being added. Only the type-affinity half: what
+/// saving does is already in the insert buffer's own header.
+const SQLITE_INSERT_NOTE: &str = "Values are written as text; the column's type converts them.";
 
 /// How SQLite swaps a definition, for the buffer header. Worth saying
 /// because it sounds more dangerous than it is: there is no `ALTER VIEW`,
@@ -2698,6 +2904,158 @@ mod tests {
             Ok(_) => panic!("expected an error for an unresolved token"),
         }
     }
+    // -----------------------------------------------------------------
+    // Adding a row
+    // -----------------------------------------------------------------
+
+    /// Saving an insert buffer the way `NodeActionEditSession` does. A new
+    /// row has no version token — there is no earlier state to compare
+    /// against.
+    async fn save_new_row(node: &mut dyn Node, text: &str) -> ActionOutcome {
+        node.execute(
+            NEW_ROW_ACTION,
+            ActionInput::Edited {
+                text: text.to_string(),
+                original: String::new(),
+                version: String::new(),
+            },
+        )
+        .await
+        .expect("execute must answer with an outcome, not an error")
+    }
+
+    /// Every body in the fixture, read through an independent connection
+    /// so the assertion sees the committed database.
+    async fn stored_bodies(dir: &Path) -> Vec<Option<String>> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(dir.join("fixture.db"));
+        let pool = sqlx::sqlite::SqlitePool::connect_with(options)
+            .await
+            .expect("open fixture");
+        let bodies = sqlx::query_scalar("SELECT body FROM notes ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("read back");
+        pool.close().await;
+        bodies
+    }
+
+    /// The template offers what the user may write and leaves the rest to
+    /// the database: `id` is an INTEGER PRIMARY KEY, so SQLite assigns it
+    /// and the line opens commented out.
+    #[tokio::test]
+    async fn a_new_row_buffer_offers_the_columns_the_database_does_not_fill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = adapter_for(tmp.path()).await;
+        let table = row_node(&adapter, &format!("{key}/tables/notes")).await;
+
+        let prep = table.prepare(NEW_ROW_ACTION).await.expect("prepare");
+        assert_eq!(prep.suffix, ".yaml");
+        assert!(prep.template.contains("# id: null"), "{}", prep.template);
+        assert!(prep.template.contains("\nbody: null"), "{}", prep.template);
+        assert_eq!(
+            row_edit::parse_row_buffer(&prep.template).expect("the buffer parses back"),
+            vec![("body".to_string(), None)]
+        );
+    }
+
+    /// The same action on a row, which is where the key sits next to the
+    /// row editor's: it adds a row to the table, it does not touch the
+    /// row it was invoked on.
+    #[tokio::test]
+    async fn adding_a_row_from_a_row_inserts_it_into_the_table() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = writable_adapter_for(tmp.path()).await;
+        let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
+        let prep = row.prepare(NEW_ROW_ACTION).await.expect("prepare");
+
+        let edited = prep.template.replace("body: null", "body: 'three'");
+        match save_new_row(row.as_mut(), &edited).await {
+            // The outcome names the table, not a row: an offset-addressed
+            // row that does not exist yet has no id to navigate to.
+            ActionOutcome::Navigate { node_id, .. } => {
+                assert_eq!(node_id, format!("{key}/tables/notes"));
+            }
+            other => panic!("expected Navigate, got {}", outcome_name(&other)),
+        }
+
+        assert_eq!(
+            stored_bodies(tmp.path()).await,
+            vec![
+                Some("one".to_string()),
+                Some("two".to_string()),
+                Some("three".to_string())
+            ]
+        );
+    }
+
+    /// A buffer the user emptied is a change of mind. Nothing is written —
+    /// least of all a row of pure defaults nobody asked for.
+    #[tokio::test]
+    async fn an_emptied_new_row_buffer_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = writable_adapter_for(tmp.path()).await;
+        let mut table = row_node(&adapter, &format!("{key}/tables/notes")).await;
+
+        match save_new_row(table.as_mut(), "# nothing left\n").await {
+            ActionOutcome::NoChanges => {}
+            other => panic!("expected NoChanges, got {}", outcome_name(&other)),
+        }
+        assert_eq!(stored_bodies(tmp.path()).await.len(), 2);
+    }
+
+    /// A typo in a column name is caught here rather than by SQLite, so
+    /// the banner can list the columns the table actually has.
+    #[tokio::test]
+    async fn a_column_the_table_does_not_have_reopens_the_buffer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = writable_adapter_for(tmp.path()).await;
+        let mut table = row_node(&adapter, &format!("{key}/tables/notes")).await;
+
+        match save_new_row(table.as_mut(), "bodie: 'x'\n").await {
+            ActionOutcome::Reopen { content, .. } => {
+                assert!(content.contains("bodie"), "{content}");
+                assert!(content.contains("id, body"), "{content}");
+                // The user's own line survives above the banner.
+                assert!(content.contains("bodie: 'x'"), "{content}");
+            }
+            other => panic!("expected Reopen, got {}", outcome_name(&other)),
+        }
+        assert_eq!(stored_bodies(tmp.path()).await.len(), 2);
+    }
+
+    /// A read-only adapter refuses before the statement runs, and says
+    /// which setting to change.
+    #[tokio::test]
+    async fn a_read_only_adapter_refuses_to_add_a_row() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = adapter_for(tmp.path()).await;
+        let mut table = row_node(&adapter, &format!("{key}/tables/notes")).await;
+
+        match save_new_row(table.as_mut(), "body: 'three'\n").await {
+            ActionOutcome::Reopen { content, .. } => {
+                assert!(content.contains("read_only"), "{content}");
+            }
+            other => panic!("expected Reopen, got {}", outcome_name(&other)),
+        }
+        assert_eq!(stored_bodies(tmp.path()).await.len(), 2);
+    }
+
+    /// A view's rows carry the action (they are `sqlite:row` like any
+    /// other) and refuse when the editor opens, with the reason — SQLite
+    /// cannot insert through a view.
+    #[tokio::test]
+    async fn adding_a_row_to_a_view_is_refused_with_the_reason() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = writable_adapter_for(tmp.path()).await;
+        let row = row_node(&adapter, &format!("{key}/views/recent/rows/0")).await;
+
+        let message = match row.prepare(NEW_ROW_ACTION).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a view cannot be inserted into"),
+        };
+        assert!(message.contains("view"), "{message}");
+        assert!(message.contains("underlying table"), "{message}");
+    }
 }
 
 /// Wiring tests for the Scripts branch: the branch itself (nodes, actions,
@@ -2905,10 +3263,18 @@ mod db_script_tree_tests {
         assert!(ids(&types.dir).iter().any(|n| n == "delete-dir"));
         assert!(ids(&types.script).iter().any(|n| n == "execute"));
         assert!(ids(&table_node_type()).iter().any(|n| n == "edit_sql"));
-        // A row carries exactly one action: its own editor. Not `edit_sql`
+        // A row carries the two editors that write it, and not `edit_sql`
         // — the query editor belongs to the table, and a row config reaches
         // it via `parent:edit_sql`.
-        assert_eq!(ids(&row_node_type()), vec!["edit_row".to_string()]);
+        assert_eq!(
+            ids(&row_node_type()),
+            vec![EDIT_ROW_ACTION.to_string(), NEW_ROW_ACTION.to_string()]
+        );
+        // Adding a row is offered on the table as well, so an empty one
+        // can be filled; a view gets no such action, because SQLite
+        // cannot insert through one.
+        assert!(ids(&table_node_type()).iter().any(|n| n == NEW_ROW_ACTION));
+        assert!(!ids(&view_node_type()).iter().any(|n| n == NEW_ROW_ACTION));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

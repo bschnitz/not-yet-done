@@ -32,7 +32,7 @@ use not_yet_done_content::{
 
 use not_yet_done_sql_core::db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptTree};
 use not_yet_done_sql_core::script_completions as completions;
-use not_yet_done_sql_core::{RowKeySpec, RowSnapshot};
+use not_yet_done_sql_core::{NewRowColumn, RowKeySpec, RowSnapshot};
 use not_yet_done_sql_core::{quote_ident, row_edit, view_ddl};
 
 use crate::client::{DatabaseEntry, PostgresClient, RelationKind, SchemaEntry, TableEntry};
@@ -394,7 +394,25 @@ fn table_actions() -> Vec<NodeAction> {
     // Bound from YAML `actions:` on the `postgres:tables` ChildDef
     // (`{ key: Q, id: edit_sql }`) and on `postgres:rows`
     // (`{ key: Q, id: edit_sql, target: parent }` when drilled in).
-    vec![NodeAction::new("edit_sql", "sql", InputSpec::None)]
+    vec![sql_action(), new_row_action()]
+}
+
+fn sql_action() -> NodeAction {
+    NodeAction::new("edit_sql", "sql", InputSpec::None)
+}
+
+/// Adding a row is offered on the relation itself as well as on its rows.
+/// On the relation because an empty table has no row to stand on, and its
+/// first row would otherwise be unwritable; on a row because that is where
+/// the hand already is when the next one is wanted.
+///
+/// `InputSpec::Editor` has to be bound from YAML as
+/// `actions: [{type: edit, id: new_row}]` — the default `type: node`
+/// routes through `invoke_action` and cannot open an editor. `type: create`
+/// is not an option either: it resolves its parent from the nav stack,
+/// which a tree pane does not fill.
+fn new_row_action() -> NodeAction {
+    NodeAction::new(NEW_ROW_ACTION, "new row", InputSpec::Editor)
 }
 
 /// A view does everything a table does, plus edit its own definition.
@@ -403,23 +421,24 @@ fn table_actions() -> Vec<NodeAction> {
 /// `actions: [{type: edit, id: edit_view}]` — the default `type: node`
 /// routes through `invoke_action` and cannot open an editor.
 fn view_actions() -> Vec<NodeAction> {
-    let mut actions = table_actions();
-    actions.push(NodeAction::new(
-        EDIT_VIEW_ACTION,
-        "definition",
-        InputSpec::Editor,
-    ));
-    actions
+    vec![
+        sql_action(),
+        new_row_action(),
+        NodeAction::new(EDIT_VIEW_ACTION, "definition", InputSpec::Editor),
+    ]
 }
 
-/// One action on a data row: edit it. Like `edit_view` this is an
-/// `InputSpec::Editor` action and has to be bound from YAML as
-/// `actions: [{type: edit, id: edit_row}]`.
+/// Two actions on a data row: edit it, or add another one next to it. Like
+/// `edit_view` both are `InputSpec::Editor` actions and have to be bound
+/// from YAML as `actions: [{type: edit, id: edit_row}]`.
 ///
 /// Deliberately *not* `edit_sql`: the query editor belongs to the relation,
 /// and a row level reaches it through `parent:edit_sql`.
 fn row_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new(EDIT_ROW_ACTION, "row", InputSpec::Editor)]
+    vec![
+        NodeAction::new(EDIT_ROW_ACTION, "row", InputSpec::Editor),
+        new_row_action(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,6 +1173,10 @@ pub(crate) const VIEWS_GROUP_ID: &str = "views";
 const ROWS_GROUP_ID: &str = "rows";
 const EDIT_VIEW_ACTION: &str = "edit_view";
 const EDIT_ROW_ACTION: &str = "edit_row";
+/// Action id of the insert editor. Bound the same way as the other two
+/// (`actions: [{type: edit, id: new_row}]`), and offered on a table and a
+/// view as well as on their rows — see [`NewRow`].
+const NEW_ROW_ACTION: &str = "new_row";
 
 // ---------------------------------------------------------------------------
 // Shared listing logic. Each of these is the single implementation of one
@@ -1588,6 +1611,16 @@ impl TableNode {
             node_id,
         }
     }
+
+    fn new_row(&self) -> NewRow<'_> {
+        NewRow {
+            database: &self.database,
+            schema: &self.schema,
+            table: &self.name,
+            client: &self.client,
+            node_id: &self.node_id,
+        }
+    }
 }
 
 #[async_trait]
@@ -1641,6 +1674,26 @@ impl Node for TableNode {
                 "table node action '{other}' is not supported"
             ))),
         }
+    }
+
+    /// A table's only editor action is adding a row — the query editor is
+    /// `edit_sql`, which goes through `invoke_action` above.
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id != NEW_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a table has no editor action `{action_id}`"
+            )));
+        }
+        self.new_row().prepare().await
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id != NEW_ROW_ACTION {
+            return Err(ContentError::NotSupported(format!(
+                "a table has no editor action `{action_id}`"
+            )));
+        }
+        self.new_row().execute(input).await
     }
 }
 
@@ -1718,6 +1771,125 @@ impl Node for RowsGroupNode {
     }
 }
 
+/// Writing a row that does not exist yet, shared by the three nodes that
+/// offer it: a table, a view, and any row of either.
+///
+/// Everything below is dialect-free except the statement's spelling —
+/// [`row_edit`](not_yet_done_sql_core::row_edit) owns the buffer protocol
+/// and builds the `INSERT`, exactly as it owns the `UPDATE` behind
+/// [`RowNode`].
+struct NewRow<'a> {
+    database: &'a str,
+    schema: &'a str,
+    table: &'a str,
+    client: &'a PostgresClient,
+    /// The node the action ran on, for the `Navigate` outcome. A postgres
+    /// row has no address of its own — a row id is the offset the row
+    /// happened to be listed at, and the listing's `ctid` order may hand
+    /// the new row any of them — so the outcome names the relation the row
+    /// went into rather than inventing an id for it. What the frontend
+    /// does with `Navigate` here is reload the level, which is what makes
+    /// the new row appear.
+    node_id: &'a str,
+}
+
+impl NewRow<'_> {
+    /// Reject the save without losing the user's text, exactly as the row
+    /// editor does: the message becomes a banner above their own buffer.
+    fn reject(buffer: &str, message: &str) -> ActionOutcome {
+        ActionOutcome::Reopen {
+            content: row_edit::render_with_error(buffer, message),
+            new_version: None,
+        }
+    }
+
+    /// `schema.table`, as a statement has to spell it.
+    fn qualified(&self) -> String {
+        format!("{}.{}", quote_ident(self.schema), quote_ident(self.table))
+    }
+
+    async fn columns(&self) -> std::result::Result<Vec<NewRowColumn>, String> {
+        self.client
+            .new_row_columns(self.database, self.schema, self.table)
+            .await
+    }
+
+    /// A template of the relation's columns, `null` each, with the ones the
+    /// database fills commented out.
+    async fn prepare(&self) -> Result<EditorPrep> {
+        let columns = self.columns().await.map_err(ContentError::NotSupported)?;
+        Ok(EditorPrep {
+            template: row_edit::new_row_buffer(
+                &format!("{}.{} in {}", self.schema, self.table, self.database),
+                POSTGRES_INSERT_NOTE,
+                &columns,
+            ),
+            // A row that does not exist yet has nothing to conflict with,
+            // so there is no state for a version token to carry. The
+            // columns are read again on save, against the schema as it is
+            // then rather than as it was when the editor opened.
+            version: String::new(),
+            suffix: ".yaml".into(),
+            file_path: None,
+        })
+    }
+
+    /// Every rejection reopens the editor with a banner rather than
+    /// failing the action — the buffer is the only copy of what the user
+    /// typed. When postgres itself refuses the statement, the statement is
+    /// shown next to the complaint; that is also how a view that is not
+    /// auto-updatable says so, in postgres' own words.
+    async fn execute(&self, input: ActionInput) -> Result<ActionOutcome> {
+        let ActionInput::Edited { text, .. } = input else {
+            return Err(ContentError::NotSupported(
+                "adding a row needs the editor's saved buffer".into(),
+            ));
+        };
+        // A banner from the previous attempt must reach neither the
+        // database nor the next buffer.
+        let buffer = row_edit::strip_error_banner(&text).to_string();
+        // An emptied buffer is a change of mind, not a request for a row
+        // of pure defaults: the user deleted every line, so nothing is
+        // written.
+        if row_edit::has_no_columns(&buffer) {
+            return Ok(ActionOutcome::NoChanges);
+        }
+
+        let columns = match self.columns().await {
+            Ok(columns) => columns,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        let edited = match row_edit::parse_row_buffer(&buffer) {
+            Ok(edited) => edited,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+        let cells = match row_edit::new_row_cells(&columns, &edited) {
+            Ok(cells) => cells,
+            Err(message) => return Ok(Self::reject(&buffer, &message)),
+        };
+
+        let statement = row_edit::build_insert(&self.qualified(), &cells);
+        match self.client.execute_write(self.database, &statement).await {
+            Ok(1) => Ok(ActionOutcome::Navigate {
+                node_id: self.node_id.to_string(),
+                node_type: row_node_type(),
+                message: Some(format!("row added to {}.{}", self.schema, self.table)),
+            }),
+            // One statement, one row — anything else means the INSERT was
+            // not the one built here, and saying so beats a success
+            // message that does not match what happened.
+            Ok(affected) => Ok(Self::reject(
+                &buffer,
+                &format!("the statement wrote {affected} rows instead of one:\n{statement}"),
+            )),
+            Err(message) => Ok(Self::reject(
+                &buffer,
+                &format!("{message}\n\nThe statement that failed:\n{statement}"),
+            )),
+        }
+    }
+}
+
 /// One data row, editable as a YAML mapping of its cells.
 ///
 /// The offset in the id is only how the row was *found* — it is the key
@@ -1787,6 +1959,25 @@ impl RowNode {
             .await
             .map_err(ContentError::NotSupported)
     }
+
+    /// Adding a row from a row: same relation, but the outcome names the
+    /// relation rather than this row, which is only where the hand was.
+    /// The relation's id is this one with the `/rows/<offset>` tail cut
+    /// off — the only place it is written down.
+    fn new_row(&self) -> NewRow<'_> {
+        let table_id = self
+            .node_id
+            .rsplit_once(&format!("/{ROWS_GROUP_ID}/"))
+            .map(|(head, _)| head)
+            .unwrap_or(&self.node_id);
+        NewRow {
+            database: &self.database,
+            schema: &self.schema,
+            table: &self.table,
+            client: &self.client,
+            node_id: table_id,
+        }
+    }
 }
 
 #[async_trait]
@@ -1816,6 +2007,9 @@ impl Node for RowNode {
     /// change on save) and the key values (so the `UPDATE` addresses the row
     /// that was actually shown, not whatever now sits at the same offset).
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().prepare().await;
+        }
         if action_id != EDIT_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a row has no editor action `{action_id}`"
@@ -1861,6 +2055,9 @@ impl Node for RowNode {
     /// is shown next to the complaint — a type or constraint error is far
     /// easier to place with the `UPDATE` in front of you.
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().execute(input).await;
+        }
         if action_id != EDIT_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a row has no editor action `{action_id}`"
@@ -1976,6 +2173,11 @@ impl Node for RowNode {
 const POSTGRES_WRITE_NOTE: &str = "On save one UPDATE is built from the columns that changed and run on its own.\n\
      Values are written as text literals; the column's type converts them.";
 
+/// The same, for the insert buffer — the `INSERT` half of the sentence is
+/// already in the shared header, so only the value spelling is left to say.
+const POSTGRES_INSERT_NOTE: &str =
+    "Values are written as text literals; the column's type converts them.";
+
 // ---------------------------------------------------------------------------
 // "Views" group — children are individual views
 // ---------------------------------------------------------------------------
@@ -2057,6 +2259,19 @@ impl ViewNode {
         }
     }
 
+    /// Inserting through a view is not refused up front: a simple view is
+    /// auto-updatable, and one that is not says so itself when the
+    /// statement runs — in postgres' own, more precise words.
+    fn new_row(&self) -> NewRow<'_> {
+        NewRow {
+            database: &self.database,
+            schema: &self.schema,
+            table: &self.name,
+            client: &self.client,
+            node_id: &self.node_id,
+        }
+    }
+
     async fn stored_definition(&self) -> Result<Option<String>> {
         self.client
             .view_definition(&self.database, &self.schema, &self.name)
@@ -2128,6 +2343,9 @@ impl Node for ViewNode {
     /// by comparison alone, without a modification timestamp postgres does
     /// not keep for a relation.
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().prepare().await;
+        }
         if action_id != EDIT_VIEW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a view has no editor action `{action_id}`"
@@ -2150,6 +2368,9 @@ impl Node for ViewNode {
     /// they wrote, and a rejected definition is usually one edit away from
     /// a good one.
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        if action_id == NEW_ROW_ACTION {
+            return self.new_row().execute(input).await;
+        }
         if action_id != EDIT_VIEW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a view has no editor action `{action_id}`"
@@ -2585,10 +2806,130 @@ mod db_script_tree_tests {
         assert!(ids(&types.dir).iter().any(|n| n == "delete-dir"));
         assert!(ids(&types.script).iter().any(|n| n == "execute"));
         assert!(ids(&table_node_type()).iter().any(|n| n == "edit_sql"));
-        // A row carries exactly one action: its own editor. Not `edit_sql`
-        // — the query editor belongs to the relation, and a row config
-        // reaches it via `parent:edit_sql`.
-        assert_eq!(ids(&row_node_type()), vec![EDIT_ROW_ACTION.to_string()]);
+        // A row carries two actions: edit this one, add another. Not
+        // `edit_sql` — the query editor belongs to the relation, and a row
+        // config reaches it via `parent:edit_sql`.
+        assert_eq!(
+            ids(&row_node_type()),
+            vec![EDIT_ROW_ACTION.to_string(), NEW_ROW_ACTION.to_string()]
+        );
+        // The relation offers it too, or an empty table's first row could
+        // never be written: there would be no row to stand on.
+        assert!(ids(&table_node_type()).iter().any(|n| n == NEW_ROW_ACTION));
+        assert!(ids(&view_node_type()).iter().any(|n| n == NEW_ROW_ACTION));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Adding a row is an editor action wherever it is offered — a
+    /// `type: node` binding would route it through `invoke_action`, which
+    /// cannot open an editor at all.
+    #[tokio::test]
+    async fn adding_a_row_is_an_editor_action_on_every_node_that_offers_it() {
+        let (adapter, tmp) = build_adapter();
+        for nt in [table_node_type(), view_node_type(), row_node_type()] {
+            let action = adapter
+                .actions_for_type(&nt)
+                .into_iter()
+                .find(|a| a.id == NEW_ROW_ACTION)
+                .unwrap_or_else(|| panic!("{} offers new_row", nt.type_id));
+            assert!(matches!(action.input, InputSpec::Editor));
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The `Navigate` outcome of an insert names the *relation*, so the
+    /// frontend reloads the level the new row will appear on. A row id is
+    /// only the offset the row happened to be listed at, and the new row
+    /// may land on any of them — so a row node hands the insert its
+    /// table's id, not its own.
+    #[test]
+    fn adding_a_row_from_a_row_addresses_the_relation() {
+        let (adapter, tmp) = build_adapter();
+        let row = RowNode::new(
+            "mydb".into(),
+            "public".into(),
+            TABLES_GROUP_ID.into(),
+            "users".into(),
+            7,
+            Arc::clone(&adapter.client),
+        );
+        assert_eq!(row.id(), "mydb/schemas/public/tables/users/rows/7");
+        assert_eq!(row.new_row().node_id, "mydb/schemas/public/tables/users");
+        // A row of a *view* points at the view, by the same rule.
+        let view_row = RowNode::new(
+            "mydb".into(),
+            "public".into(),
+            VIEWS_GROUP_ID.into(),
+            "v_balance".into(),
+            0,
+            Arc::clone(&adapter.client),
+        );
+        assert_eq!(
+            view_row.new_row().node_id,
+            "mydb/schemas/public/views/v_balance"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The statement is built from the relation's qualified name, quoted
+    /// on both halves — a schema or table that needs quoting is exactly
+    /// where a hand-spliced name would break.
+    #[test]
+    fn the_insert_names_the_schema_and_the_table_quoted() {
+        let (adapter, tmp) = build_adapter();
+        let table = TableNode::new(
+            "mydb".into(),
+            "my schema".into(),
+            "user\"s".into(),
+            Arc::clone(&adapter.client),
+        );
+        assert_eq!(table.new_row().qualified(), "\"my schema\".\"user\"\"s\"");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An emptied buffer is a change of mind: the user deleted every line,
+    /// so nothing is written — and nothing is sent to the database either,
+    /// which is what makes this testable without one.
+    #[tokio::test]
+    async fn an_emptied_new_row_buffer_writes_nothing() {
+        let (adapter, tmp) = build_adapter();
+        let mut table = TableNode::new(
+            "mydb".into(),
+            "public".into(),
+            "users".into(),
+            Arc::clone(&adapter.client),
+        );
+        let outcome = table
+            .execute(
+                NEW_ROW_ACTION,
+                ActionInput::Edited {
+                    text: "# every column deleted\n\n".into(),
+                    original: String::new(),
+                    version: String::new(),
+                },
+            )
+            .await
+            .expect("an empty buffer is not an error");
+        assert!(matches!(outcome, ActionOutcome::NoChanges));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Neither node answers an editor action it does not have — the
+    /// message names the action so a mistyped YAML binding is placeable.
+    #[tokio::test]
+    async fn an_unknown_editor_action_is_refused_by_name() {
+        let (adapter, tmp) = build_adapter();
+        let table = TableNode::new(
+            "mydb".into(),
+            "public".into(),
+            "users".into(),
+            Arc::clone(&adapter.client),
+        );
+        let message = match table.prepare("edit_row").await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a table has no row editor"),
+        };
+        assert!(message.contains("edit_row"), "{message}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

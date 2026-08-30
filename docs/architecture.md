@@ -312,9 +312,10 @@ tree — each builds the catalogue branch itself:
   compilations per execution, and makes a partial replacement
   (`tt_public__user` inside `tt_public__user_orders`) impossible by
   construction.
-- **The writing editors share the buffer protocol, not the SQL.** Two things
-  are editable: the **view definition** (`E` → `edit_view`, `view_ddl`) and a
-  **data row** (`e` → `edit_row`, `row_edit`). The whole sequence is
+- **The writing editors share the buffer protocol, not the SQL.** Three
+  things are writable: the **view definition** (`E` → `edit_view`,
+  `view_ddl`), an existing **data row** (`e` → `edit_row`, `row_edit`), and a
+  **new one** (`e n` → `new_row`, also `row_edit`). The whole sequence is
   backend-neutral: render the buffer (header comment + content), set an error
   banner and strip it again on the next save, parse the buffer, diff it
   against the state at opening time and build the `UPDATE`. The adapter only
@@ -329,6 +330,15 @@ tree — each builds the catalogue branch itself:
     constraint error is far easier to place with the `UPDATE` right in front
     of it. That is exactly why `build_update` splices literals instead of
     placeholders.
+  - **A new row takes the same buffer, rendered from the table's columns
+    instead of a row's cells.** Every line that survives the edit becomes a
+    column of one `INSERT`; a line the user deletes is left to the column's
+    `DEFAULT`, which is why the columns the database fills itself (a
+    `DEFAULT`, SQLite's `INTEGER PRIMARY KEY`, a Postgres identity) open
+    commented out and generated columns are not offered at all. An emptied
+    buffer means "never mind", not a row of pure defaults. The action is
+    offered on the **relation** as well as on its rows — an empty table has
+    no row to stand on, and its first row would otherwise be unwritable.
   - **The offset in a row ID addresses nothing.** Row IDs are
     `unstable_node_ids`; the offset is only _how_ the row was found. What
     counts are the key and cell values read at opening time; they travel
@@ -336,6 +346,16 @@ tree — each builds the catalogue branch itself:
     later statement uses. A page shifting underneath therefore cannot
     redirect the write, and a cell value comparison detects a foreign change
     instead of silently overwriting it.
+    That is also why an insert reports its success as a `Navigate` to the
+    **relation** rather than to the row it just wrote: the new row has no
+    address to hand back, and what the frontend does with the outcome —
+    reload the level — is exactly what makes it appear.
+  - **Which relations take a new row is a dialect question, not a policy
+    one.** SQLite refuses a view up front, because it cannot insert through
+    one at all. Postgres does not: a simple view is auto-updatable, and one
+    that is not says so itself, in its own words, with the statement it
+    refused in the banner. Guessing that up front would only replace a
+    precise message with a vaguer one.
 - **The catalogue trees differ deliberately**, because the backends differ.
   Postgres: `database → schemas → schema → tables → table → rows`. SQLite has
   no schema namespace, so the tree is one level flatter:

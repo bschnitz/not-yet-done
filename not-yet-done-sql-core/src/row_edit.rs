@@ -1,4 +1,4 @@
-//! Editing one data row through a text editor.
+//! Editing one data row through a text editor — and writing a new one.
 //!
 //! A row has no text form of its own the way a view definition does, so
 //! the editor is handed a *rendering* of it: one YAML mapping,
@@ -14,6 +14,11 @@
 //! `"null"`. YAML answers all three (block scalars, quoting, `null`) with
 //! a parser that already ships with the workspace, and the result is a
 //! format the user can be expected to already know.
+//!
+//! A row that does not exist yet takes the same buffer, only rendered
+//! from the table's columns instead of a row's cells ([`new_row_buffer`]):
+//! every line that survives the edit becomes a column of one `INSERT`,
+//! and a line the user deletes is left to the database's own default.
 //!
 //! Everything here is pure text and dialect-free: which columns identify
 //! a row, how to read one and how to run the statement is the adapter's
@@ -354,10 +359,7 @@ fn quote_scalar(v: &str) -> String {
 /// error banner, so it says what is wrong with *their* text.
 pub fn parse_row_buffer(text: &str) -> Result<Vec<(String, Option<String>)>, String> {
     let body = strip_error_banner(text);
-    if body.lines().all(|l| {
-        let t = l.trim();
-        t.is_empty() || t.starts_with('#')
-    }) {
+    if has_no_columns(text) {
         return Err("nothing to save: the buffer holds no columns, only comments".into());
     }
 
@@ -401,6 +403,20 @@ pub fn parse_row_buffer(text: &str) -> Result<Vec<(String, Option<String>)>, Str
         out.push((column, value));
     }
     Ok(out)
+}
+
+/// Whether the buffer holds no columns at all — only comments and blank
+/// lines.
+///
+/// [`parse_row_buffer`] refuses that: an edit that removed every column
+/// has nothing to say. An insert reads the same buffer as "never mind"
+/// instead, so the two callers share one definition of "empty" rather
+/// than each writing their own.
+pub fn has_no_columns(text: &str) -> bool {
+    strip_error_banner(text).lines().all(|line| {
+        let line = line.trim();
+        line.is_empty() || line.starts_with('#')
+    })
 }
 
 fn scalar_text(value: &serde_yaml::Value) -> Option<String> {
@@ -530,6 +546,160 @@ pub fn quote_literal(value: Option<&str>) -> String {
         None => "NULL".into(),
         Some(v) => format!("'{}'", v.replace('\'', "''")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inserting a row
+// ---------------------------------------------------------------------------
+
+/// One column of the relation a new row is being written into.
+///
+/// The counterpart of [`RowCell`] for a row that does not exist yet:
+/// there is no value to render, so what the buffer can offer instead is
+/// the column's shape — which is exactly what somebody typing a value
+/// needs to know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRowColumn {
+    /// Column name as the backend spells it.
+    pub column: String,
+    /// Type and constraints in the backend's own words (`TEXT NOT NULL`,
+    /// `integer, default nextval(…)`), for the buffer's column list. The
+    /// dialects word this differently on purpose — a Postgres user should
+    /// read Postgres.
+    pub note: String,
+    /// The database fills this column on its own: it has a `DEFAULT`, or
+    /// it is an autoincrement/identity key. Its line opens commented out,
+    /// so an untouched buffer inserts what the table was designed to
+    /// insert instead of overwriting it with `NULL`.
+    pub defaulted: bool,
+}
+
+impl NewRowColumn {
+    pub fn new(column: impl Into<String>, note: impl Into<String>, defaulted: bool) -> Self {
+        Self {
+            column: column.into(),
+            note: note.into(),
+            defaulted,
+        }
+    }
+}
+
+/// The buffer the new-row editor opens with: the same `column: value`
+/// mapping the row editor uses, so both keys behave the same way, but
+/// pre-filled with `null` and with the database-filled columns commented
+/// out.
+///
+/// `title` names the relation for the header and `dialect_note` is any
+/// backend-specific warning worth a line, both as in [`edit_buffer`].
+pub fn new_row_buffer(title: &str, dialect_note: &str, columns: &[NewRowColumn]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# New row in {title}\n"));
+    out.push_str(
+        "# Every column is one YAML key. Saving builds one INSERT from the lines\n\
+         # that are still here; `null` writes SQL NULL — the text \"null\" has to\n\
+         # be quoted. Delete a line, or leave it commented out, and the column is\n\
+         # left to the database: its DEFAULT applies, or NULL when it has none.\n\
+         # Saving with no line left at all inserts nothing.\n",
+    );
+    for line in comment_lines(dialect_note) {
+        out.push_str(&line);
+    }
+
+    // The types go in a comment block rather than at the end of each
+    // line: a trailing `# TEXT` would be swallowed by any value the user
+    // types without quotes that happens to contain a `#`.
+    out.push_str("#\n# Columns:\n");
+    let width = columns
+        .iter()
+        .map(|c| c.column.chars().count())
+        .max()
+        .unwrap_or(0);
+    for column in columns {
+        out.push_str(&format!(
+            "#   {:width$}  {}{}\n",
+            column.column,
+            column.note,
+            if column.defaulted {
+                " — the database fills it"
+            } else {
+                ""
+            },
+        ));
+    }
+
+    out.push('\n');
+    for column in columns {
+        let entry = render_entry(&column.column, None);
+        if column.defaulted {
+            out.push_str(&format!("# {entry}"));
+        } else {
+            out.push_str(&entry);
+        }
+    }
+    out
+}
+
+/// The cells an edited new-row buffer asks to write, checked against the
+/// relation's columns.
+///
+/// Every line that survived is a cell — unlike an edit, where only what
+/// differs from the stored row is written: a `null` the user left in
+/// place means "insert NULL here", and only a *deleted* line means "leave
+/// this to the database".
+pub fn new_row_cells(
+    columns: &[NewRowColumn],
+    edited: &[(String, Option<String>)],
+) -> Result<Vec<CellChange>, String> {
+    let mut cells = Vec::with_capacity(edited.len());
+    let mut seen: Vec<&str> = Vec::new();
+    for (column, value) in edited {
+        if !columns.iter().any(|c| c.column == *column) {
+            return Err(format!(
+                "the table has no column {column} — a new row cannot invent one. \
+                 Columns of this table: {}",
+                columns
+                    .iter()
+                    .map(|c| c.column.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if seen.contains(&column.as_str()) {
+            return Err(format!(
+                "column {column} appears twice — which of the two values should be inserted?"
+            ));
+        }
+        seen.push(column.as_str());
+        cells.push(CellChange {
+            column: column.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(cells)
+}
+
+/// The `INSERT` for a set of cells. `table` is the already-quoted (and,
+/// where a dialect has one, qualified) relation name, as in
+/// [`build_update`], and the values are literals for the same reason:
+/// this statement is shown to the user when the database refuses it.
+///
+/// No cells at all is `DEFAULT VALUES` — the only way to spell "a row of
+/// nothing but defaults" that both dialects accept.
+pub fn build_insert(table: &str, cells: &[CellChange]) -> String {
+    if cells.is_empty() {
+        return format!("INSERT INTO {table} DEFAULT VALUES");
+    }
+    let columns = cells
+        .iter()
+        .map(|c| format!("    {}", crate::quote_ident(&c.column)))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let values = cells
+        .iter()
+        .map(|c| format!("    {}", quote_literal(c.value.as_deref())))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("INSERT INTO {table} (\n{columns}\n  ) VALUES (\n{values}\n  )")
 }
 
 // ---------------------------------------------------------------------------
@@ -970,5 +1140,93 @@ mod tests {
         assert_eq!(plural_columns(1), "1 column");
         assert_eq!(plural_columns(0), "0 columns");
         assert_eq!(plural_columns(3), "3 columns");
+    }
+
+    // -----------------------------------------------------------------
+    // Inserting a row
+    // -----------------------------------------------------------------
+
+    fn new_columns() -> Vec<NewRowColumn> {
+        vec![
+            NewRowColumn::new("id", "INTEGER, primary key", true),
+            NewRowColumn::new("title", "TEXT NOT NULL", false),
+            NewRowColumn::new("note", "TEXT", false),
+        ]
+    }
+
+    /// An untouched buffer offers exactly the columns the database does
+    /// not fill by itself — the key line is there to be uncommented, not
+    /// to be overwritten with NULL.
+    #[test]
+    fn a_new_row_buffer_leaves_the_defaulted_columns_to_the_database() {
+        let buffer = new_row_buffer("t", "", &new_columns());
+        assert!(buffer.contains("# id: null\n"), "{buffer}");
+
+        let parsed = parse(&buffer);
+        assert_eq!(
+            parsed,
+            vec![("title".into(), None), ("note".into(), None)]
+        );
+        assert_eq!(
+            build_insert("\"t\"", &new_row_cells(&new_columns(), &parsed).expect("valid")),
+            "INSERT INTO \"t\" (\n    \"title\",\n    \"note\"\n  ) VALUES (\n    NULL,\n    NULL\n  )"
+        );
+    }
+
+    /// Every column's shape is in the header, and nowhere near a value:
+    /// a trailing `# TEXT` would be eaten by an unquoted value carrying a
+    /// `#` of its own.
+    #[test]
+    fn the_new_row_header_lists_the_columns_it_offers() {
+        let buffer = new_row_buffer("t", "", &new_columns());
+        assert!(buffer.contains("#   id     INTEGER, primary key — the database fills it\n"));
+        assert!(buffer.contains("#   title  TEXT NOT NULL\n"));
+        assert!(!buffer.contains("title: null #"));
+    }
+
+    /// Unlike an edit, a value the user left at `null` is written: they
+    /// are looking at a row that does not exist yet, so "unchanged" has
+    /// nothing to mean.
+    #[test]
+    fn every_surviving_line_becomes_a_column_of_the_insert() {
+        let cells = new_row_cells(
+            &new_columns(),
+            &[
+                ("id".into(), Some("7".into())),
+                ("title".into(), Some("it's here".into())),
+                ("note".into(), None),
+            ],
+        )
+        .expect("valid");
+        assert_eq!(
+            build_insert("\"t\"", &cells),
+            "INSERT INTO \"t\" (\n    \"id\",\n    \"title\",\n    \"note\"\n  ) \
+             VALUES (\n    '7',\n    'it''s here',\n    NULL\n  )"
+        );
+    }
+
+    #[test]
+    fn a_column_the_table_does_not_have_is_refused_by_name() {
+        let message = new_row_cells(&new_columns(), &[("titel".into(), None)])
+            .expect_err("unknown column");
+        assert!(message.contains("titel"), "{message}");
+        assert!(message.contains("id, title, note"), "{message}");
+    }
+
+    #[test]
+    fn a_column_written_twice_is_refused() {
+        let message = new_row_cells(
+            &new_columns(),
+            &[("title".into(), None), ("title".into(), Some("x".into()))],
+        )
+        .expect_err("duplicate column");
+        assert!(message.contains("twice"), "{message}");
+    }
+
+    /// A buffer with nothing but comments left parses as no columns; the
+    /// only INSERT that means anything then is one of pure defaults.
+    #[test]
+    fn no_cells_at_all_inserts_the_defaults() {
+        assert_eq!(build_insert("\"t\"", &[]), "INSERT INTO \"t\" DEFAULT VALUES");
     }
 }

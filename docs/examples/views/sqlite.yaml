@@ -139,6 +139,15 @@ views:
               # mean, so it takes the key over — without `force` the
               # validator reports the collision and refuses the file.
               - { key: Q, id: edit_sql, force: true }
+              # Adding a row is offered on the table as well as on its
+              # rows, and that is the point: an empty table has no row to
+              # stand on, so its first row could not be written otherwise.
+              # `type: edit` for the same reason as `edit_view` below —
+              # it opens an editor, which a `type: node` binding cannot.
+              - name: new row
+                key: n
+                type: edit
+                id: new_row
             columns:
               - key: name
                 label: Name
@@ -209,6 +218,17 @@ views:
                     key: e
                     type: edit
                     id: edit_row
+                  # `n` opens a template of the table's columns instead of
+                  # a row's cells: every line that survives the edit
+                  # becomes a column of one INSERT, a deleted line is left
+                  # to the column's DEFAULT. The columns the database
+                  # fills itself (a DEFAULT, an INTEGER PRIMARY KEY) start
+                  # out commented. Saving reloads the level, so the new
+                  # row appears where the listing puts it.
+                  - name: new row
+                    key: n
+                    type: edit
+                    id: new_row
                   - { key: Q, id: edit_sql, target: parent, force: true }
                 keybindings:
                   back: null
@@ -277,7 +297,8 @@ views:
                 # address a single row by, so the adapter refuses the editor
                 # ("… is a view — edit the row in the underlying table
                 # instead"). Binding it would only put a key in the action
-                # bar that always ends in that message.
+                # bar that always ends in that message. No `n` either:
+                # SQLite cannot insert through a view at all.
                 actions:
                   - name: script
                     key: x
@@ -451,6 +472,12 @@ views:
         search:
           fields: [name, database]
       - { key: Q, id: edit_sql, force: true }
+      # Same as on the tree's `Table` level: the first row of an empty
+      # table has to be writable from the table itself.
+      - name: new row
+        key: n
+        type: edit
+        id: new_row
 
     children:
       - name: Rows
@@ -469,12 +496,16 @@ views:
             key: x
             type: script
             scope: table
-          # Same row editor as in the tree — see the `Rows` level under
-          # `Table` there for what saving does.
+          # Same two row editors as in the tree — see the `Rows` level
+          # under `Table` there for what saving does.
           - name: row
             key: e
             type: edit
             id: edit_row
+          - name: new row
+            key: n
+            type: edit
+            id: new_row
           - { key: Q, id: edit_sql, target: parent, force: true }
         keybindings:
           back: null
@@ -533,7 +564,8 @@ views:
           page_size: 100
         column_cursor: true
         record_detail: true
-        # No `e`: these are a view's rows — see the tree's `Views` branch.
+        # No `e` and no `n`: these are a view's rows — see the tree's
+        # `Views` branch.
         actions:
           - name: script
             key: x
