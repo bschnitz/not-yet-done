@@ -4189,10 +4189,7 @@ dependencies = [
 name = "not-yet-done-filter"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "natural-date",
- "regex",
- "serde",
+ "rowsieve",
  "serde_yaml",
 ]
 
@@ -6156,6 +6153,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rowsieve"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "natural-date",
+ "regex",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
