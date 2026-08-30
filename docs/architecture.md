@@ -180,7 +180,7 @@ without `core`; the _language_ was later lifted one level further out, into
   on this row". It knows no entity, no schema and no database, which is what
   makes the same filter usable against SQL, an API result and a list in memory
   without three implementations disagreeing about what it means. A workspace
-  member with its own README and publish metadata, used from outside this
+  member here, published on crates.io as `rowsieve`, and used from outside this
   repository too (the `tidings` notification bar filters its sections with it).
 - **`not-yet-done-filter`** — what is genuinely about _tasks_, layered on top:
   the saved-query document (`name:` + `query:`), the `has_ancestor`/`in_tree`
