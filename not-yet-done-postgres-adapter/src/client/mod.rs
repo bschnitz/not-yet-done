@@ -13,7 +13,7 @@ pub use not_yet_done_sql_core::sql_shape;
 /// How a row is addressed and what one read of it looks like — the same
 /// vocabulary every SQL adapter's row editor uses, see
 /// [`not_yet_done_sql_core::row_edit`].
-pub use not_yet_done_sql_core::{RowCell, RowKeySource, RowKeySpec, RowRead};
+pub use not_yet_done_sql_core::{NewRowColumn, RowCell, RowKeySource, RowKeySpec, RowRead};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1061,6 +1061,84 @@ impl PostgresClient {
                  columns, so a single row of it cannot be addressed — use a DB script with a \
                  WHERE of your own"
             ))
+        })
+        .await
+    }
+
+    /// The columns a new row of `schema.table` can be written to, in the
+    /// relation's own order.
+    ///
+    /// Read from `pg_attribute` rather than `information_schema.columns`
+    /// because the catalogue is the only place that says whether a column
+    /// fills itself: `attidentity` for `GENERATED … AS IDENTITY`,
+    /// `atthasdef` for a `DEFAULT`. Generated (`attgenerated`) columns are
+    /// dropped — an `INSERT` may not name them at all.
+    ///
+    /// A view is deliberately *not* refused here, unlike in
+    /// [`PostgresClient::row_key_spec`]: a simple view is auto-updatable,
+    /// so inserting through one is a legitimate thing to try. If it is not
+    /// auto-updatable, postgres says so itself when the statement runs,
+    /// and that sentence is more precise than a guess made up front.
+    pub async fn new_row_columns(
+        &self,
+        dbname: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<NewRowColumn>, String> {
+        self.run_with_timeout(&format!("columns of {schema}.{table}"), async {
+            let client = self.client(dbname).await?;
+            let rows = client
+                .query(
+                    "SELECT a.attname, \
+                            format_type(a.atttypid, a.atttypmod), \
+                            a.attnotnull, \
+                            pg_get_expr(d.adbin, d.adrelid), \
+                            a.attidentity::text \
+                       FROM pg_attribute a \
+                       JOIN pg_class c ON c.oid = a.attrelid \
+                       JOIN pg_namespace n ON n.oid = c.relnamespace \
+                       LEFT JOIN pg_attrdef d \
+                         ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                      WHERE n.nspname = $1 AND c.relname = $2 \
+                        AND a.attnum > 0 AND NOT a.attisdropped \
+                        AND a.attgenerated::text = '' \
+                      ORDER BY a.attnum",
+                    &[&schema, &table],
+                )
+                .await
+                .map_err(|e| format!("reading the columns of {schema}.{table} failed: {e}"))?;
+            if rows.is_empty() {
+                return Err(format!(
+                    "no relation named {schema}.{table} in {dbname}, or it has no column a \
+                     row can be written to"
+                ));
+            }
+
+            Ok(rows
+                .iter()
+                .map(|row| {
+                    let name: String = row.get(0);
+                    let declared: String = row.get(1);
+                    let not_null: bool = row.get(2);
+                    let default: Option<String> = row.get(3);
+                    // `a` = ALWAYS, `d` = BY DEFAULT; both fill themselves
+                    // when the INSERT leaves the column out, and an
+                    // ALWAYS column refuses a value outright.
+                    let identity: String = row.get(4);
+                    let identity = !identity.is_empty();
+
+                    let mut note = declared;
+                    if not_null {
+                        note.push_str(" NOT NULL");
+                    }
+                    if identity {
+                        note.push_str(", identity");
+                    } else if let Some(default) = &default {
+                        note.push_str(&format!(", default {default}"));
+                    }
+                    NewRowColumn::new(name, note, default.is_some() || identity)
+                })
+                .collect())
         })
         .await
     }

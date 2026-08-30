@@ -19,7 +19,7 @@ use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use tokio::sync::{Mutex, watch};
 
 use not_yet_done_content::AdapterStatus;
-use not_yet_done_sql_core::{RowCell, quote_ident};
+use not_yet_done_sql_core::{NewRowColumn, RowCell, quote_ident};
 
 use crate::sources::{SourceEntry, resolve_sources};
 
@@ -412,15 +412,7 @@ impl SqliteClient {
     /// editor's banner.
     pub async fn row_key_spec(&self, key: &str, table: &str) -> Result<RowKeySpec, String> {
         let pool = self.pool(key).await?;
-        let kind: Option<String> = self
-            .run(
-                sqlx::query_scalar("SELECT type FROM sqlite_master WHERE name = ?1")
-                    .bind(table)
-                    .fetch_optional(&pool),
-            )
-            .await
-            .map_err(|e| format!("looking '{table}' up failed: {e}"))?;
-        match kind.as_deref() {
+        match self.object_kind(&pool, table).await?.as_deref() {
             Some("view") => {
                 return Err(format!(
                     "{table} is a view, and SQLite cannot write through one — edit the row \
@@ -476,6 +468,93 @@ impl SqliteClient {
             columns: vec!["rowid".into()],
             source: RowKeySource::RowId,
         })
+    }
+
+    /// What `sqlite_master` calls `name` — `table`, `view`, `index`, … —
+    /// or `None` when the database has no object of that name. Each caller
+    /// words its own refusal: "cannot be written through" and "cannot be
+    /// inserted into" are the same fact but not the same sentence.
+    async fn object_kind(&self, pool: &SqlitePool, name: &str) -> Result<Option<String>, String> {
+        self.run(
+            sqlx::query_scalar("SELECT type FROM sqlite_master WHERE name = ?1")
+                .bind(name)
+                .fetch_optional(pool),
+        )
+        .await
+        .map_err(|e| format!("looking '{name}' up failed: {e}"))
+    }
+
+    /// The columns a new row of `table` can be written to, in the table's
+    /// own order.
+    ///
+    /// Generated columns are absent, and not by accident: `PRAGMA
+    /// table_info` lists only the stored ones, which are exactly the ones
+    /// an `INSERT` may name.
+    pub async fn new_row_columns(
+        &self,
+        key: &str,
+        table: &str,
+    ) -> Result<Vec<NewRowColumn>, String> {
+        let pool = self.pool(key).await?;
+        match self.object_kind(&pool, table).await?.as_deref() {
+            Some("view") => {
+                return Err(format!(
+                    "{table} is a view, and SQLite cannot insert through one — add the row \
+                     to the underlying table instead"
+                ));
+            }
+            None => return Err(format!("no table named {table} in this database")),
+            _ => {}
+        }
+
+        // Same PRAGMA (and the same reason for the plain form rather than
+        // `pragma_table_info`) as `row_key_spec`.
+        let sql = format!("PRAGMA table_info({})", quote_ident(table));
+        let rows = self
+            .run(sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(&pool))
+            .await
+            .map_err(|e| format!("reading the columns of '{table}' failed: {e}"))?;
+
+        // An INTEGER PRIMARY KEY is the rowid under another name, so
+        // SQLite assigns it when the INSERT leaves it out — the one case
+        // where a column with no DEFAULT still fills itself.
+        let single_pk = rows
+            .iter()
+            .filter(|row| row.try_get::<i64, _>("pk").unwrap_or(0) > 0)
+            .count()
+            == 1;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let name: String = row.try_get("name").ok()?;
+                let declared: String = row.try_get("type").unwrap_or_default();
+                let not_null = row.try_get::<i64, _>("notnull").unwrap_or(0) != 0;
+                let is_pk = row.try_get::<i64, _>("pk").unwrap_or(0) > 0;
+                let default: Option<String> = row.try_get("dflt_value").ok().flatten();
+                let rowid_alias =
+                    is_pk && single_pk && declared.trim().eq_ignore_ascii_case("INTEGER");
+
+                let mut note = if declared.trim().is_empty() {
+                    "no declared type".to_string()
+                } else {
+                    declared.trim().to_string()
+                };
+                if not_null {
+                    note.push_str(" NOT NULL");
+                }
+                if is_pk {
+                    note.push_str(", primary key");
+                }
+                if let Some(default) = &default {
+                    note.push_str(&format!(", default {default}"));
+                }
+                Some(NewRowColumn::new(
+                    name,
+                    note,
+                    default.is_some() || rowid_alias,
+                ))
+            })
+            .collect())
     }
 
     /// The row at `offset` of the same unordered `SELECT *` the tree pages

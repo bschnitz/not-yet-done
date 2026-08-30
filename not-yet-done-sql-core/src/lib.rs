@@ -6,10 +6,10 @@
 //! [`ScriptStore`](not_yet_done_content::ScriptStore) implementation on
 //! top of that layout, the editor's table-name completions
 //! ([`script_completions`]), the checks an edited view definition has to
-//! pass before it may be run ([`view_ddl`]), the buffer protocol and
-//! `UPDATE` builder behind editing a single data row ([`row_edit`]), and
-//! — in [`db_script_nodes`] — the container-level script branch as
-//! ready-made [`Node`](not_yet_done_content::Node)s.
+//! pass before it may be run ([`view_ddl`]), the buffer protocol and the
+//! `UPDATE`/`INSERT` builders behind editing and adding a single data row
+//! ([`row_edit`]), and — in [`db_script_nodes`] — the container-level
+//! script branch as ready-made [`Node`](not_yet_done_content::Node)s.
 //!
 //! What is *not* here: connecting, dialect-specific catalogue queries,
 //! and the *catalogue* part of the node tree an adapter exposes. Those
@@ -28,7 +28,7 @@ pub mod view_ddl;
 
 pub use db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptNodeTypes, DbScriptTree};
 pub use ident::quote_ident;
-pub use row_edit::{RowCell, RowKeySource, RowKeySpec, RowRead, RowSnapshot};
+pub use row_edit::{NewRowColumn, RowCell, RowKeySource, RowKeySpec, RowRead, RowSnapshot};
 pub use script_completions::{Completion, qualified_table};
 pub use script_store::{NodeScriptLayout, SqlScriptStore};
 pub use view_ddl::{ParsedCreateView, parse_create_view};
