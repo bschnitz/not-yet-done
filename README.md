@@ -816,9 +816,9 @@ query:
 | `in`          |             | `[status, in, [todo, in_progress]]`                |
 | `not_in`      |             | `[status, not_in, [done, cancelled]]`              |
 
-### Tree Operators
+### Tree Predicates
 
-Tree operators use a 2-element shorthand `[op, value]` and query the task hierarchy via the materialized `path` column:
+Tree predicates use a 2-element shorthand `[name, value]` and query the task hierarchy via the materialized `path` column. They are not comparisons — there is no column on the left of them — so they are not part of the filter language proper (`rowsieve`), which carries them through untouched for this project to resolve:
 
 | Operator       | Example                  | Matches                                    |
 | -------------- | ------------------------ | ------------------------------------------ |
@@ -842,7 +842,7 @@ query:
     - [status, =, todo]
 ```
 
-Tree operators work in both task and tracking filters. In tracking filters, they match against the tracked task's tree position.
+Tree predicates work in both task and tracking filters. In tracking filters, they match against the tracked task's tree position. A misspelt name is rejected when the filter is read, rather than becoming a branch that matches nothing.
 
 ### Compound Expressions
 
@@ -2375,7 +2375,8 @@ not-yet-done-stoat-adapter not-yet-done-transport   # SSH tunnel
 # Data core
 not-yet-done-core         # nyd.db: settings, saved queries, links, tags
 not-yet-done-task-core    # tasks.db: task/tracking domain, bootstrap, backup
-not-yet-done-filter       # YAML filter DSL
+not-yet-done-filter       # Saved queries, tree predicates, AST -> SQL
+rowsieve                  # The filter language itself (host-agnostic)
 
 # UI building blocks
 not-yet-done-forest       # Tree rendering with post-order fold
