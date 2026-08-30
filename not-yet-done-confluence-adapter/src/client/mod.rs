@@ -7,7 +7,8 @@
 
 use std::time::Duration;
 
-use not_yet_done_content::http_log;
+use not_yet_done_content::http_send::{Repeat, RetryConfig};
+use not_yet_done_content::{http_log, http_send};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,9 @@ pub struct ConfluenceClient {
     /// Set when the server rejects this client's cookie; read by the auth
     /// bridge, which then throws the client away and logs in again.
     rejection: http_log::AuthRejection,
+    /// How often a request that produced no answer is sent again. Comes from
+    /// the instance's `retry:` config block.
+    retry: RetryConfig,
 }
 
 impl ConfluenceClient {
@@ -102,7 +106,15 @@ impl ConfluenceClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             http,
             rejection: http_log::AuthRejection::new(),
+            retry: RetryConfig::default(),
         })
+    }
+
+    /// Set how a request that produced no answer is repeated. Without this
+    /// the client uses [`RetryConfig::default`].
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Build a client from a stored session. Thin convenience wrapper
@@ -135,6 +147,34 @@ impl ConfluenceClient {
         &self.http
     }
 
+    /// Send a request through this client's retry policy, logging it and
+    /// turning a final transport failure into the usual error string.
+    ///
+    /// Whether a failed request may be sent again follows the HTTP method:
+    /// everything that writes is repeated only when the connection provably
+    /// never came up. A call that *reads* through a non-safe method takes
+    /// [`ConfluenceClient::send_read`] instead.
+    pub(crate) async fn send(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::of_method(method), method, url, req).await
+    }
+
+    /// [`ConfluenceClient::send`] for a call that only reads, whatever its
+    /// method.
+    #[allow(dead_code)]
+    pub(crate) async fn send_read(
+        &self,
+        method: &str,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        http_send::send(&self.retry, Repeat::Safe, method, url, req).await
+    }
+
     /// [`http_log::check_status`] for this client. Every REST call in the
     /// submodules goes through here rather than the free function, so a
     /// rejected session is noticed where it happens instead of being
@@ -161,13 +201,7 @@ impl ConfluenceClient {
     /// CF-2a only exercises it from tests.
     pub async fn current_user(&self) -> Result<ConfluenceUser, String> {
         let url = format!("{}/rest/api/user/current", self.base_url);
-        http_log::log_request("GET", &url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()

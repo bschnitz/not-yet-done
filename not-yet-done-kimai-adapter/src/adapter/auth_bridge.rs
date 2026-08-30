@@ -45,6 +45,8 @@ pub(crate) const MECHANISMS: &[MechanismSpec] = &[
 pub(super) struct AuthBridge {
     base_url: String,
     timeouts: HttpTimeouts,
+    /// Config `retry:`, handed to every client this bridge builds.
+    retry: not_yet_done_content::RetryConfig,
     orchestrator: Arc<AuthOrchestrator>,
     client: RwLock<Option<Arc<KimaiClient>>>,
 }
@@ -55,12 +57,14 @@ impl AuthBridge {
         spec: AuthSpec,
         session_store: Box<dyn not_yet_done_content::SessionStore>,
         timeouts: HttpTimeouts,
+        retry: not_yet_done_content::RetryConfig,
     ) -> Result<Arc<Self>, String> {
         let orchestrator = AuthOrchestrator::from_spec(spec, session_store)
             .map_err(|e| format!("auth orchestrator: {e}"))?;
         Ok(Arc::new(Self {
             base_url,
             timeouts,
+            retry,
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(None),
         }))
@@ -185,11 +189,10 @@ impl AuthBridge {
     async fn build_and_validate(&self, blob: &str) -> Result<Arc<KimaiClient>, String> {
         let session: KimaiSession =
             serde_json::from_str(blob).map_err(|e| format!("parse session blob: {e}"))?;
-        let client = Arc::new(KimaiClient::from_session(
-            &self.base_url,
-            &session,
-            self.timeouts,
-        )?);
+        let client = Arc::new(
+            KimaiClient::from_session(&self.base_url, &session, self.timeouts)?
+                .with_retry(self.retry.clone()),
+        );
         client.version().await?;
         Ok(client)
     }

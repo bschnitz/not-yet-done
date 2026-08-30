@@ -392,13 +392,7 @@ impl ConfluenceClient {
             "{}/rest/api/content/{id}?expand=body.storage,version,ancestors,metadata.labels",
             self.base_url()
         );
-        http_log::log_request("GET", &url);
-        let resp = self
-            .inner_http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.inner_http().get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()
@@ -465,12 +459,9 @@ impl ConfluenceClient {
             },
         };
         let resp = self
-            .inner_http()
-            .put(&url)
-            .json(&body)
-            .send()
+            .send("PUT", &url, self.inner_http().put(&url).json(&body))
             .await
-            .map_err(|e| UpdatePageError::Other(http_log::network_error("PUT", &url, e)))?;
+            .map_err(UpdatePageError::Other)?;
         let status = resp.status();
         http_log::log_response("PUT", &url, status.as_u16());
         if status.as_u16() == 409 {
@@ -533,12 +524,8 @@ impl ConfluenceClient {
             },
         };
         let resp = self
-            .inner_http()
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("POST", &url, e))?;
+            .send("POST", &url, self.inner_http().post(&url).json(&body))
+            .await?;
         let resp = self.check_status("POST", &url, resp).await?;
         let body_text = resp
             .text()
@@ -569,13 +556,9 @@ impl ConfluenceClient {
         } else {
             format!("{}/rest/api/content/{id}", self.base_url())
         };
-        http_log::log_request("DELETE", &url);
         let resp = self
-            .inner_http()
-            .delete(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("DELETE", &url, e))?;
+            .send("DELETE", &url, self.inner_http().delete(&url))
+            .await?;
         let status = resp.status();
         http_log::log_response("DELETE", &url, status.as_u16());
         if !status.is_success() {
@@ -591,13 +574,7 @@ impl ConfluenceClient {
     }
 
     async fn fetch_page_envelope(&self, url: &str) -> Result<PageList, String> {
-        http_log::log_request("GET", url);
-        let resp = self
-            .inner_http()
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", url, e))?;
+        let resp = self.send("GET", url, self.inner_http().get(url)).await?;
         let resp = self.check_status("GET", url, resp).await?;
         let body = resp
             .text()

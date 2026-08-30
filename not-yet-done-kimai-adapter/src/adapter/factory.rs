@@ -64,6 +64,7 @@ impl TypedAdapterFactory for KimaiAdapterFactory {
             cfg.auth,
             Box::new(InMemorySessionStore::new()),
             timeouts,
+            cfg.retry,
         )
         .map_err(|e| ContentError::Other(e.into()))?;
 

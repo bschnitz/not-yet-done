@@ -38,6 +38,8 @@ pub(crate) const MECHANISMS: &[MechanismSpec] = &[MechanismSpec {
 pub(super) struct AuthBridge {
     base_url: String,
     accept_invalid_certs: bool,
+    /// Config `retry:`, handed to every client this bridge builds.
+    retry: not_yet_done_content::RetryConfig,
     orchestrator: Arc<AuthOrchestrator>,
     client: RwLock<Option<Arc<ConfluenceClient>>>,
     ready: Notify,
@@ -48,6 +50,7 @@ impl AuthBridge {
         base_url: String,
         accept_invalid_certs: bool,
         spec: AuthSpec,
+        retry: not_yet_done_content::RetryConfig,
         session_store: Box<dyn not_yet_done_content::SessionStore>,
     ) -> Result<Arc<Self>, String> {
         let orchestrator = AuthOrchestrator::from_spec(spec, session_store)
@@ -55,6 +58,7 @@ impl AuthBridge {
         Ok(Arc::new(Self {
             base_url,
             accept_invalid_certs,
+            retry,
             orchestrator: Arc::new(orchestrator),
             client: RwLock::new(None),
             ready: Notify::new(),
@@ -168,11 +172,10 @@ impl AuthBridge {
     async fn build_and_validate(&self, blob: &str) -> Result<Arc<ConfluenceClient>, String> {
         let session: ConfluenceSession =
             serde_json::from_str(blob).map_err(|e| format!("parse session blob: {e}"))?;
-        let client = Arc::new(ConfluenceClient::from_session(
-            &self.base_url,
-            session,
-            self.accept_invalid_certs,
-        )?);
+        let client = Arc::new(
+            ConfluenceClient::from_session(&self.base_url, session, self.accept_invalid_certs)?
+                .with_retry(self.retry.clone()),
+        );
         client.current_user().await?;
         Ok(client)
     }
@@ -214,6 +217,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             cookie_spec_literal("JSESSIONID=synthetic; crowd.token_key=abc"),
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge");
@@ -239,6 +243,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             cookie_spec_literal("placeholder"),
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge");
@@ -279,6 +284,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             spec,
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge");
@@ -302,6 +308,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             cookie_spec_literal("JSESSIONID=x"),
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge");
@@ -327,6 +334,7 @@ mod tests {
             "https://wiki.example.invalid".to_string(),
             false,
             cookie_spec_literal("JSESSIONID=x"),
+            Default::default(),
             Box::new(InMemorySessionStore::new()),
         )
         .expect("bridge");

@@ -105,6 +105,7 @@ impl TypedAdapterFactory for ConfluenceAdapterFactory {
             cfg.url.clone(),
             cfg.accept_invalid_certs,
             cfg.auth,
+            cfg.retry,
             Box::new(store),
         )
         .map_err(|e| ContentError::Other(e.into()))?;

@@ -160,12 +160,12 @@ impl ConfluenceClient {
             query.push(("spaceKey", key.as_str()));
         }
         let resp = self
-            .inner_http()
-            .get(&url_for_log)
-            .query(&query)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url_for_log, e))?;
+            .send(
+                "GET",
+                &url_for_log,
+                self.inner_http().get(&url_for_log).query(&query),
+            )
+            .await?;
         let resp = self.check_status("GET", &url_for_log, resp).await?;
         let body = resp
             .text()
@@ -189,13 +189,7 @@ impl ConfluenceClient {
     /// list endpoint, so callers get the same [`SpaceMeta`] shape.
     pub async fn get_space(&self, key: &str) -> Result<SpaceMeta, String> {
         let url = format!("{}/rest/api/space/{key}?expand=homepage", self.base_url());
-        http_log::log_request("GET", &url);
-        let resp = self
-            .inner_http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| http_log::network_error("GET", &url, e))?;
+        let resp = self.send("GET", &url, self.inner_http().get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
             .text()

@@ -44,6 +44,13 @@ pub struct KimaiConfig {
     /// Derived as `min(request_timeout_secs, 10)` when absent.
     #[serde(default)]
     pub(super) connect_timeout_secs: Option<u64>,
+    /// How a request that produced no answer at all — connection refused,
+    /// answer never arrived — is sent again. Defaults to one repeat after a
+    /// quarter second; `attempts: 1` switches repeating off. Only calls
+    /// without side effects are repeated after a timeout (see
+    /// `not_yet_done_content::http_send`).
+    #[serde(default)]
+    pub(super) retry: not_yet_done_content::RetryConfig,
 }
 
 #[cfg(test)]
