@@ -234,6 +234,10 @@ views:
                     key: n
                     type: edit
                     id: new_row
+                    # Addressed to the table, not to the row under the
+                    # cursor: the new row is not that row, and an empty
+                    # table has no row to stand on at all.
+                    target: parent
                   - { key: Q, id: edit_sql, target: parent, force: true }
                   # `r` re-runs the level's query, so rows another process wrote
                   # into the file show up without leaving the level.
@@ -523,6 +527,10 @@ views:
             key: n
             type: edit
             id: new_row
+            # Addressed to the table, not to the row under the
+            # cursor: the new row is not that row, and an empty
+            # table has no row to stand on at all.
+            target: parent
           - { key: Q, id: edit_sql, target: parent, force: true }
           # `r` re-runs the level's query, so rows another process wrote
           # into the file show up without leaving the level.

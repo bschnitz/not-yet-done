@@ -758,10 +758,13 @@ fn check_action(
         }
         _ => {}
     }
-    if a.target == ActionTarget::Parent && a.action_type != "node" {
+    // `node` and `edit` are the two types that fire on a *node*; only they
+    // can be re-addressed to the parent. Everything else resolves its target
+    // from the nav stack on its own.
+    if a.target == ActionTarget::Parent && !matches!(a.action_type.as_str(), "node" | "edit") {
         errors.push(format!(
-            "{scope}: `target: parent` only applies to type='node' (this is \
-             type='{}') — other types resolve their target from the nav stack",
+            "{scope}: `target: parent` only applies to type='node' or type='edit' \
+             (this is type='{}') — other types resolve their target from the nav stack",
             a.action_type
         ));
     }
@@ -5478,6 +5481,29 @@ views:
                 .any(|e| e.contains("views.v") && e.contains("type='node' requires")),
             "expected a missing-id error for the node action, got: {errs:?}"
         );
+    }
+
+    /// An `InputSpec::Editor` action has to be bound as `type: edit`, and it
+    /// is exactly the kind that needs the parent: "add a row" on a rows level
+    /// is addressed to the table, which is also the only way it stays
+    /// reachable when the table is empty and there is no row to stand on.
+    #[test]
+    fn validate_accepts_parent_target_on_edit_action() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: new row, key: n, type: edit, id: new_row, target: parent }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("`target: parent` should be allowed on an edit action");
     }
 
     #[test]
