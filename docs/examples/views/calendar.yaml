@@ -29,13 +29,16 @@
 # config) and, when it detects an externally-made change, refreshes the view on
 # its own — no key press needed. `r` forces an immediate refresh.
 #
-# Load mode — two choices, set by `adapter.manual_connect` below:
-#   * `false`: the calendar loads as soon as the app starts, opening the
+# Load mode — three choices, set by `adapter.auto_connect` below:
+#   * `startup`: the calendar loads as soon as the app starts, opening the
 #     connection(s) up front. The background poll then keeps it fresh. Best
 #     when connecting is cheap and you always want it live — but a backend
 #     that needs an answer to log in will raise its dialog at startup, over
 #     whatever tab you are on.
-#   * omitted / `true` (default): nothing connects until you focus the tab and press `r` (the
+#   * `on_open`: it connects the first time you switch to this tab — the same
+#     up-front load, but only for a day you actually open the calendar, and any
+#     login dialog lands on the tab it belongs to.
+#   * omitted / `never` (default): nothing connects until you focus the tab and press `r` (the
 #     `reload` action). Until then the tab shows a "press r to connect" banner
 #     and no connection — and no browser, for the browser-backed backends — is
 #     opened. The background poll also stays dormant until that first load, so
@@ -52,9 +55,9 @@ adapter:
   type: calendar
   config: calendar-adapter.yaml
   # Load only when you focus the tab and press `r` — this is the default, and
-  # spelled out here because it is the interesting half of the choice above.
-  # Set it to `false` to load the calendar immediately at startup instead.
-  manual_connect: true
+  # spelled out here because it is the interesting end of the choice above.
+  # Set it to `on_open` or `startup` to load the calendar without the keypress.
+  auto_connect: never
 
 # Reminders (optional). The adapter decides *when* a reminder fires — a fixed
 # lead time before each timed event's start (`reminder_lead_minutes` in the

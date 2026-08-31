@@ -38,8 +38,8 @@ use not_yet_done_table::{
 };
 
 use not_yet_done_content::{
-    AdapterStatus, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo, PageRequest,
-    QueryKind, SortDirection, SortKey, Subtree, TreeFindHit,
+    AdapterStatus, AutoConnect, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo,
+    PageRequest, QueryKind, SortDirection, SortKey, Subtree, TreeFindHit,
 };
 
 use crate::active_surface::ActiveSurface;
@@ -1333,10 +1333,15 @@ pub struct ContentView {
     /// the slot to replace by matching this path.
     pub source_path: Option<std::path::PathBuf>,
 
-    /// Mirrors `AdapterConfig.manual_connect`. When `true`, App-level
-    /// auto-load and subtab-switch loads are suppressed for this tab;
-    /// the user must trigger a `reload` action to populate the pane.
-    pub manual_connect: bool,
+    /// When this tab's adapter may connect on its own, resolved from the view
+    /// file's `adapter.auto_connect` (or its legacy `manual_connect`) by
+    /// [`AdapterConfig::connect_mode`].
+    ///
+    /// [`AutoConnect::Startup`] loads while the app comes up, unvisited;
+    /// [`AutoConnect::OnOpen`] the first time the tab is opened;
+    /// [`AutoConnect::Never`] suppresses every implicit load — including the
+    /// subtab-switch one — until the user has triggered a `reload` action.
+    pub auto_connect: AutoConnect,
 
     /// Mirrors `AdapterConfig.auto_reload`: how long this tab's data may sit
     /// before the App refreshes it by itself. `None` (the default) → never.
@@ -1363,10 +1368,10 @@ pub struct ContentView {
     /// Set once any pane in this view has completed a load without an
     /// error — i.e. the (single, shared) adapter connection has been
     /// established. After that, switching to a sibling subtab auto-loads
-    /// it instead of showing the `manual_connect` "press … to connect"
+    /// it instead of showing the [`AutoConnect::Never`] "press … to connect"
     /// banner: it is one adapter instance, so one connection serves every
     /// subtab. Only gates the *implicit* subtab-switch load; the first
-    /// connect on a `manual_connect` tab still requires the explicit
+    /// connect on an `auto_connect: never` tab still requires the explicit
     /// reload action.
     connected_once: bool,
 
@@ -4392,7 +4397,7 @@ impl ContentPane {
         // Active level's own actions, resolved via the cursor row's chain
         // so a multi-branch level dispatches its own actions. When the
         // tree is empty there is no cursor row (e.g. the initial load
-        // failed, or `manual_connect` hasn't loaded yet) — fall back to
+        // failed, or an `auto_connect: never` tab hasn't loaded yet) — fall back to
         // the root (depth-0) level so its actions stay reachable. Without
         // this the `reload` action vanishes on an empty tree and the user
         // can't retry a failed load.
@@ -5592,8 +5597,8 @@ impl ContentPane {
             // Still record the width we were asked to build for: the
             // post-draw re-fit pass (`refit_tables_if_needed`) compares it
             // against the widget's render width and rebuilds on mismatch —
-            // without this stamp a column-less pane (e.g. `manual_connect`
-            // before the first load) re-fits forever and the render loop
+            // without this stamp a column-less pane (e.g. one that has not
+            // connected yet) re-fits forever and the render loop
             // spins at 100 % CPU.
             self.built_table_width = self.table.last_render_width();
             return;
@@ -7752,7 +7757,7 @@ impl ContentView {
             query_scope,
             header_overlay: crate::components::sort_header::HeaderOverlay::default(),
             source_path: None,
-            manual_connect: config.adapter.manual_connect,
+            auto_connect: config.adapter.connect_mode(),
             auto_reload: config.adapter.auto_reload,
             last_load_at: Cell::new(None),
             reminder: config.reminder.clone(),
@@ -9969,7 +9974,7 @@ impl ContentView {
         };
         // A result without an error means the shared adapter connection is
         // live — record it so a later subtab switch auto-loads instead of
-        // showing the `manual_connect` connect banner (one instance, one
+        // showing the `auto_connect: never` connect banner (one instance, one
         // connection serves every subtab).
         if error.is_none() {
             self.connected_once = true;
@@ -10134,6 +10139,40 @@ impl ContentView {
         self.last_load_at.set(Some(Instant::now()));
     }
 
+    /// May an implicit load — the one that fires when a subtab the user
+    /// switched to has never been populated — start on this tab?
+    ///
+    /// Yes unless the tab is `auto_connect: never` and has never connected:
+    /// there, the very first connection is the user's to trigger, and a
+    /// subtab key must not be the thing that opens the tunnel. Once any pane
+    /// has connected, the one shared adapter instance serves every sibling,
+    /// so switching loads them transparently.
+    ///
+    /// `on_open` and `startup` say yes throughout — by the time a subtab key
+    /// can be pressed the tab is open, which is exactly the moment both of
+    /// them were willing to connect anyway.
+    fn may_auto_load_a_fresh_pane(&self) -> bool {
+        !self.auto_connect.is_manual() || self.connected_once
+    }
+
+    /// Should opening this tab start a load right now?
+    ///
+    /// True only for `auto_connect: on_open`, and only while there is
+    /// something to load and nothing already loading: a pane that has never
+    /// been populated, with no fetch in flight. Both guards matter — the App
+    /// asks on *every* switch to the tab, so without them a tab away and back
+    /// would refetch (that is `auto_reload`'s job, not this one) or stack a
+    /// second load on top of the first.
+    ///
+    /// A load that failed leaves the pane unloaded on purpose: the next visit
+    /// retries, which is the behaviour a flaky VPN wants.
+    pub fn wants_load_on_open(&self) -> bool {
+        self.auto_connect.is_on_open()
+            && self.adapter.is_some()
+            && !self.active_pane().loaded
+            && self.loads_in_flight.get() == 0
+    }
+
     /// This tab's `auto_reload` interval in the spelling the config takes
     /// (`10m`), or `None` when it refreshes only on demand. Rendered into
     /// the tab bar so a tab that refetches on its own says so; it reports
@@ -10149,8 +10188,8 @@ impl ContentView {
     ///
     /// `None` covers the four ways a tab has nothing to refresh: no
     /// `auto_reload` configured, no adapter, nothing loaded yet (the timer
-    /// refreshes, it never connects — a `manual_connect` tab still waits for
-    /// the user's first `reload`), and a fetch already in flight (whose
+    /// refreshes, it never connects — an `auto_connect: never` tab still
+    /// waits for the user's first `reload`), and a fetch already in flight (whose
     /// completion re-arms the clock anyway).
     pub fn auto_reload_due_at(&self) -> Option<Instant> {
         let interval = self.auto_reload?;
@@ -10302,15 +10341,17 @@ impl ContentView {
         }
     }
 
-    /// Banner shown when `manual_connect: true` and the active pane
-    /// has not yet been loaded. Tells the user which key triggers
-    /// the connection (the first `type: reload` action of the active
-    /// subtab's ViewDef). Falls back to a generic message when no
-    /// reload action is configured — the YAML is still consistent
-    /// (the user can connect via the cmdline-equivalent), but the
-    /// banner can't name a specific key.
+    /// Banner shown when `auto_connect: never` and the active pane has not
+    /// yet been loaded. Tells the user which key triggers the connection (the
+    /// first `type: reload` action of the active subtab's ViewDef). Falls back
+    /// to a generic message when no reload action is configured — the YAML is
+    /// still consistent (the user can connect via the cmdline-equivalent), but
+    /// the banner can't name a specific key.
+    ///
+    /// The other two modes never show it: they connect by themselves, so
+    /// telling the user to press a key would be wrong the moment they read it.
     fn manual_connect_banner(&self) -> Option<String> {
-        if !self.manual_connect {
+        if !self.auto_connect.is_manual() {
             return None;
         }
         // The shared connection is already up (a sibling subtab connected) —
@@ -11457,7 +11498,7 @@ impl ContentView {
             (self.active_subtab + n - 1) % n
         };
         let needs_load = self.switch_to_view(target);
-        if needs_load && (!self.manual_connect || self.connected_once) {
+        if needs_load && self.may_auto_load_a_fresh_pane() {
             let pane_id = self.active_pane_id();
             Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
                 view_index: self.view_index,
@@ -11478,7 +11519,7 @@ impl ContentView {
             return None;
         }
         let needs_load = self.switch_to_view(target);
-        if needs_load && (!self.manual_connect || self.connected_once) {
+        if needs_load && self.may_auto_load_a_fresh_pane() {
             let pane_id = self.active_pane_id();
             Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
                 view_index: self.view_index,
@@ -11625,7 +11666,7 @@ impl ContentView {
                 // not connected yet. Once any subtab has connected, the shared
                 // adapter connection serves every sibling, so switching loads
                 // them transparently (no second "press … to connect").
-                if needs_load && (!self.manual_connect || self.connected_once) {
+                if needs_load && self.may_auto_load_a_fresh_pane() {
                     let pane_id = self.active_pane_id();
                     Some(SubViewMessage::Request(ViewRequest::SpawnContentLoad {
                         view_index: self.view_index,
@@ -14524,6 +14565,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -15419,6 +15461,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -15987,6 +16030,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -16269,6 +16313,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -16444,6 +16489,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -17578,6 +17624,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -19520,6 +19567,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -21191,7 +21239,7 @@ mod tests {
     #[test]
     fn loading_beats_the_manual_connect_hint() {
         let mut view = loading_view(LoadBannerRoute::Tab, 2_000);
-        view.manual_connect = true;
+        view.auto_connect = AutoConnect::Never;
         let banner = view.auth_status_banner().expect("banner while loading");
         assert!(
             banner.contains("Loading"),
@@ -21337,7 +21385,7 @@ mod tests {
 
     fn manual_connect_config_with_reload_key(reload_key: Option<&str>) -> ViewFileConfig {
         let mut config = test_config_with_children();
-        config.adapter.manual_connect = true;
+        config.adapter.auto_connect = Some(AutoConnect::Never);
         if let Some(k) = reload_key {
             config.views[0].actions.push(ActionDef {
                 label: Some("refresh".into()),
@@ -21401,8 +21449,68 @@ mod tests {
     fn manual_connect_off_keeps_legacy_behaviour() {
         let config = test_config_with_children();
         assert!(!config.adapter.manual_connect, "fixture sanity");
+        assert_eq!(config.adapter.connect_mode(), AutoConnect::Startup);
         let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         assert!(view.auth_status_banner().is_none());
+    }
+
+    #[test]
+    fn an_on_open_tab_never_tells_the_user_to_press_connect() {
+        // It connects the moment the tab is opened — which is the moment the
+        // banner would be read. Naming a key there would be advice that is
+        // already stale.
+        let mut config = manual_connect_config_with_reload_key(Some("r"));
+        config.adapter.auto_connect = Some(AutoConnect::OnOpen);
+        let view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        assert!(view.auth_status_banner().is_none());
+    }
+
+    #[test]
+    fn only_an_on_open_tab_asks_to_be_loaded_when_it_is_opened() {
+        for (mode, expected) in [
+            (AutoConnect::Never, false),
+            (AutoConnect::OnOpen, true),
+            (AutoConnect::Startup, false),
+        ] {
+            let mut config = test_config_with_children();
+            config.adapter.auto_connect = Some(mode);
+            let mut view =
+                ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+            view.adapter = Some(std::sync::Arc::new(
+                not_yet_done_content::mock::MockAdapterBuilder::new("mock").build(),
+            ));
+            assert_eq!(view.wants_load_on_open(), expected, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn an_opened_tab_that_already_holds_data_is_not_reloaded() {
+        // Tabbing away and back must not refetch — keeping a tab fresh is
+        // `auto_reload`'s job, and it has its own interval.
+        let mut config = test_config_with_children();
+        config.adapter.auto_connect = Some(AutoConnect::OnOpen);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.adapter = Some(std::sync::Arc::new(
+            not_yet_done_content::mock::MockAdapterBuilder::new("mock").build(),
+        ));
+        assert!(view.wants_load_on_open(), "nothing loaded yet");
+        view.set_items(Vec::new(), Vec::new(), None, Vec::new(), None);
+        assert!(!view.wants_load_on_open(), "the pane holds a result now");
+    }
+
+    #[test]
+    fn a_load_already_in_flight_is_not_doubled_by_reopening_the_tab() {
+        let mut config = test_config_with_children();
+        config.adapter.auto_connect = Some(AutoConnect::OnOpen);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.adapter = Some(std::sync::Arc::new(
+            not_yet_done_content::mock::MockAdapterBuilder::new("mock").build(),
+        ));
+        view.begin_load();
+        assert!(
+            !view.wants_load_on_open(),
+            "a second spawn would stack two fetches on one pane"
+        );
     }
 
     // ── Shortcut Hints (SH-1..SH-7) ─────────────────────────────────
@@ -21446,6 +21554,7 @@ mod tests {
                 id: None,
                 config: None,
                 config_inline: None,
+                auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
             },
@@ -24690,6 +24799,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             id: None,
             config: None,
             config_inline: None,
+            auto_connect: None,
             manual_connect: false,
             auto_reload: None,
         },

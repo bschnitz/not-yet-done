@@ -178,7 +178,7 @@ fn build_adapter_and_meta(
             adapter_id: inst.id.clone(),
             config: inst.config.clone(),
             config_inline: inst.config_inline.clone(),
-            manual_connect: inst.manual_connect,
+            auto_connect: inst.connect_mode(),
         };
         Ok((adapter, meta))
     } else {
@@ -203,7 +203,7 @@ fn build_adapter_and_meta(
             // A brand-new instance follows the field's default: wait for an
             // explicit reload rather than connect (and possibly ask for
             // credentials) the first time the TUI starts.
-            manual_connect: true,
+            auto_connect: not_yet_done_content::AutoConnect::Never,
         };
         Ok((adapter, meta))
     }

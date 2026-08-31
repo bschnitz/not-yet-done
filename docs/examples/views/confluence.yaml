@@ -76,8 +76,9 @@ adapter:
   # when the cookie-extracting command pops a browser auth dialog and you
   # don't want it firing every time the TUI launches. Press `r` (reload)
   # to fetch when you're ready. This is the default; it is written out
-  # because it matters most for this adapter.
-  manual_connect: true
+  # because it matters most for this adapter. (`on_open` would fetch on your
+  # first switch to the tab — the dialog then at least lands on this tab.)
+  auto_connect: never
 
 views:
   # CF-8 — CQL search view. Hits `/rest/api/content/search?cql=...`. The

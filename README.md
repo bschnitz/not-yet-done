@@ -1319,14 +1319,22 @@ once on a transport failure before giving up. A separate
 the derived 10s cap would abort a healthy-but-slow connect. See
 `docs/examples/views/taiga-adapter.yaml`.
 
-## Manual Connect
+## Auto Connect
 
-`adapter.manual_connect` decides whether an adapter-backed tab spawns
-its initial `list()` call by itself. **It defaults to `true`**: an
-adapter that says nothing waits for an explicit `reload` action.
-Connecting is the side-effecting choice — it can open an SSH tunnel,
-spend a VPN round-trip, or put a login dialog in front of you before
-you have asked for anything — so it is the one you opt into.
+`adapter.auto_connect` decides **when** an adapter-backed tab spawns its
+initial `list()` call — i.e. when the adapter connects. Connecting is the
+side-effecting step: it can open an SSH tunnel, spend a VPN round-trip, or
+put a login dialog in front of you before you have asked for anything. So
+it is a per-instance decision with three answers:
+
+| Value     | The tab connects …                                       |
+| --------- | -------------------------------------------------------- |
+| `never`   | only when you press its `reload` key — **the default**   |
+| `on_open` | the first time you open the tab                          |
+| `startup` | while the TUI comes up, whether you visit the tab or not |
+
+Only the TUI has a notion of "opening a tab", so only the TUI tells the
+three apart; the CLI and Waybar run one request and connect regardless.
 
 ```yaml
 tab:
@@ -1336,7 +1344,7 @@ tab:
 adapter:
   type: postgres
   config: postgres-adapter.yaml
-  # manual_connect: true is the default — nothing to write here
+  # auto_connect: never is the default — nothing to write here
 
 views:
   - name: databases
@@ -1347,8 +1355,13 @@ views:
         type: reload
 ```
 
-While unloaded the view's banner reads
-`Auto-connect disabled — press \`r\` to connect`(it names the first`type: reload`action of the active subtab). After the user presses`r` the adapter connects and behaves normally; switching back to an
+### `never` — wait for a keypress
+
+The default, because an instance that says nothing must not be the one
+that opens a tunnel or asks for a password unasked. While the tab is
+unloaded its banner reads
+`Auto-connect disabled — press \`r\` to connect`(it names the first`type: reload`action of the active subtab). After you press`r` the
+adapter connects and behaves normally; switching back to an
 already-loaded subtab shows the cached data without re-fetching.
 
 If the active view has no `type: reload` action configured, the banner
@@ -1356,16 +1369,39 @@ degrades to
 `Auto-connect disabled — no \`reload\` action configured for this view`
 so the misconfiguration is visible at a glance.
 
-### Connecting on startup
+### `on_open` — connect on the first visit
+
+The middle answer, and the right one for a remote instance you open most
+days but not every day: no keypress, no work done for a tab you never
+looked at.
+
+```yaml
+adapter:
+  type: taiga
+  config: taiga-adapter.yaml
+  auto_connect: on_open # connect the first time I switch to this tab
+```
+
+The load starts the moment the tab becomes active — including at startup,
+if it happens to be the tab the TUI opens on. It runs **once**: leaving
+the tab and coming back shows the data that is already there rather than
+re-fetching (keeping a tab fresh is `auto_reload`'s job, below). A load
+that _failed_ leaves the tab unloaded on purpose, so the next visit
+retries — which is what a flaky VPN wants. And because the tab is by
+definition in front of you when it connects, any credential dialog it
+raises appears on the tab it belongs to.
+
+### `startup` — connect before you ask
 
 Tabs whose connection is cheap and local — the task and tracking DB, a
-SQLite file, the projects list — are better off loading right away.
-They opt back in explicitly:
+SQLite file, the projects list — are better off loading right away, and
+so is the one remote tab whose data should be there the instant you
+switch to it.
 
 ```yaml
 adapter:
   type: tasks
-  manual_connect: false # cheap and local: connect on startup
+  auto_connect: startup # cheap and local: connect while the TUI starts
 ```
 
 One consequence is worth knowing before you set it on a tab that logs
@@ -1376,7 +1412,22 @@ startup, over whatever tab is in front**, rather than waiting until you
 switch to the tab it belongs to. Its title leads with the tab name so
 it is clear who is asking. Only one such dialog is shown at a time;
 if a second adapter asks meanwhile, its form is kept and shown when you
-open its tab.
+open its tab. `on_open` is the answer that avoids all of this at the
+cost of one tab switch.
+
+### The older `manual_connect` boolean
+
+`auto_connect` replaces `adapter.manual_connect`, which is still read so
+that view files written before it keep working:
+
+| Old                     | Means                   |
+| ----------------------- | ----------------------- |
+| `manual_connect: true`  | `auto_connect: never`   |
+| `manual_connect: false` | `auto_connect: startup` |
+
+An explicit `auto_connect:` wins when a file carries both — the newer key
+is the more specific statement, and it is the only one that can say
+`on_open` at all. New files should write `auto_connect:` only.
 
 ## Auto Reload
 
@@ -1386,7 +1437,7 @@ open its tab.
 adapter:
   type: jira
   config: jira-adapter.yaml
-  manual_connect: true
+  auto_connect: startup
   auto_reload: 10m # refresh every ten minutes once the tab has loaded
 ```
 
@@ -1402,7 +1453,7 @@ tell a five-minute-old table from a five-hour-old one.
 
 **The timer refreshes; it never connects.** It only starts running once
 the instance has loaded at least once, so it composes with
-`manual_connect` instead of defeating it: a tab you never open stays
+`auto_connect` instead of defeating it: a tab you never open stays
 unconnected, and no credential dialog appears because of a timer. Every
 completed load re-arms the clock, so pressing `r` also postpones the
 next automatic reload by a full interval.

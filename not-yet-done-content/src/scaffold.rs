@@ -56,8 +56,8 @@ pub struct FileMeta {
     pub config: Option<String>,
     /// `adapter.config_inline` — inline adapter config string.
     pub config_inline: Option<String>,
-    /// `adapter.manual_connect`.
-    pub manual_connect: bool,
+    /// `adapter.auto_connect` — when the instance may connect on its own.
+    pub auto_connect: crate::AutoConnect,
 }
 
 /// Which child types to include, per level. The caller resolves this however it
@@ -400,17 +400,17 @@ fn render(meta: &FileMeta, views: &[GenLevel]) -> String {
             "  # config: <adapter-config>.yaml  # or config_inline: '<...>'"
         );
     }
-    // `manual_connect` defaults to true, so only the eager choice needs to be
-    // written out — spelled explicitly, because "this instance is cheap enough
-    // to connect unasked" is a decision worth seeing in the file. The default
-    // case still gets a commented hint so the knob is discoverable.
-    if meta.manual_connect {
+    // `auto_connect` defaults to `never`, so only a non-default answer needs
+    // to be written out — spelled explicitly, because "this instance is cheap
+    // enough to connect unasked" is a decision worth seeing in the file. The
+    // default case still gets a commented hint so the knob is discoverable.
+    if meta.auto_connect == crate::AutoConnect::Never {
         let _ = writeln!(
             out,
-            "  # manual_connect: false  # connect on startup instead of waiting for reload"
+            "  # auto_connect: on_open  # or startup; default never = wait for reload"
         );
     } else {
-        let _ = writeln!(out, "  manual_connect: false");
+        let _ = writeln!(out, "  auto_connect: {}", meta.auto_connect);
     }
     let _ = writeln!(out);
 
@@ -573,7 +573,7 @@ mod tests {
             adapter_id: None,
             config: None,
             config_inline: Some("{}".to_string()),
-            manual_connect: false,
+            auto_connect: crate::AutoConnect::Startup,
         }
     }
 

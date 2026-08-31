@@ -806,9 +806,9 @@ postgres:
 - [ ] **`retries: 0` (the default)**: the same setup without
       `retries:` — the banner shows only one attempt and goes straight
       to "Fetch failed: …" without any `Retrying`.
-- [ ] **Manual connect (`adapter.manual_connect: true`, the default)**:
-      in `views/postgres.yaml`, either omit `manual_connect` in the
-      `adapter:` block **or** set it to `true`. Start the TUI. Expected:
+- [ ] **Manual connect (`adapter.auto_connect: never`, the default)**:
+      in `views/postgres.yaml`, either omit `auto_connect` in the
+      `adapter:` block **or** set it to `never`. Start the TUI. Expected:
       the Postgres tab immediately shows the banner "Auto-connect
       disabled — press `r` to connect"; **no** connection attempts, no
       timeouts in the logs and no waiting. Switching subtabs with
@@ -819,11 +819,11 @@ postgres:
       an already-loaded subtab shows the cache; switching to one that
       has not been loaded shows "Auto-connect disabled …" again.
 - [ ] **Manual connect without a reload action**: on a view with
-      `manual_connect: true` but **without** a `type: reload` in
+      `auto_connect: never` but **without** a `type: reload` in
       `actions:`. The banner reads "Auto-connect disabled — no `reload`
       action configured for this view"; the tab stays empty permanently
       (a soft error, no crash).
-- [ ] **Manual connect off**: `manual_connect: false` → the tab loads
+- [ ] **Manual connect off**: `auto_connect: startup` → the tab loads
       automatically at start; no regression.
 - [ ] **Without `query_timeout_secs`**: the previous behaviour — the
       banner shows only the elapsed time (`… (3s)`), no auto reset.
@@ -2251,7 +2251,7 @@ comes later).
       'foobar' for tab 'Taiga' (available: items, notifications)".
 - [ ] `:focus-node -x Taiga:items /ref|x` (an unknown flag) → the modal
       "unknown flag '-x' (only -i is supported)".
-- [ ] If the items view has never been loaded (`manual_connect`):
+- [ ] If the items view has never been loaded (`auto_connect: never`):
       `:focus-node Taiga:items /ref|acme#42` finds 0 rows → the modal "no
       row matching …"; the user has to trigger `r` (reload) first.
 
@@ -2577,7 +2577,7 @@ is queried when editor and script child processes are spawned; the TUI passes
 the content on opaquely via `Command::envs(...)`. The Postgres adapter supplies
 `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` and `PGSSLMODE`.
 
-**Setup**: an active Postgres adapter with `manual_connect: false` (auto
+**Setup**: an active Postgres adapter with `auto_connect: startup` (auto
 warm-up); `transport.mode: ssh_tunnel` is the interesting case. In nvim,
 `postgres_lsp` active according to `:LspInfo`. The jsonc next to the scripts
 may only contain the schema line — remove all `db` keys.
@@ -2628,7 +2628,7 @@ branches on every page. All actions are bound through the adapter-side
   seed:
   [`docs/examples/views/saved/confluence/recent-pages.yaml`](examples/views/saved/confluence/recent-pages.yaml).
 - Start the TUI → tab `Confluence` (default subtab `spaces`); with
-  `manual_connect: true` nothing loads automatically, `r` triggers the first
+  `auto_connect: never` nothing loads automatically, `r` triggers the first
   fetch.
 
 ### CF-3 — spaces
@@ -3629,9 +3629,9 @@ Prerequisite: make the Postgres tab reachable or unreachable so that the first
 - [ ] `f` (fuzzy filter) and `/` (search) are usable in the empty tree as well
       (the same root fallback logic).
 
-## Postgres — `manual_connect` (no auto-connect, only `r`)
+## Postgres — `auto_connect: never` (no auto-connect, only `r`)
 
-`adapter.manual_connect: true` in `postgres.yaml` — that is the default, so
+`adapter.auto_connect: never` in `postgres.yaml` — that is the default, so
 the test holds without the line as well.
 
 - [ ] App start: the Postgres tab does **not** load automatically; banner
@@ -3640,19 +3640,24 @@ the test holds without the line as well.
       load either.
 - [ ] `r` establishes the connection and the SSH tunnel and loads.
 
-## `manual_connect` — default and startup login
+## `auto_connect` — the three load modes
 
-`adapter.manual_connect` defaults to `true`. The test covers the default itself
-and what an explicit `false` triggers at startup.
+`adapter.auto_connect` says when an instance may connect: `never` (the
+default), `on_open` (the first time its tab is opened) or `startup` (while the
+app comes up, unvisited). The older boolean `manual_connect: true|false` still
+reads as `never`|`startup`.
 
-- [ ] **The default applies**: **remove** the `manual_connect` line entirely
-      from a view file that has an adapter. Start the TUI → the tab does not
-      load, banner "Auto-connect disabled — press `r` to connect".
+### `never` — the default, and the startup login `startup` triggers
+
+- [ ] **The default applies**: **remove** both the `auto_connect` and the
+      `manual_connect` line from a view file that has an adapter. Start the TUI
+      → the tab does not load, banner "Auto-connect disabled — press `r` to
+      connect".
 - [ ] **Local tabs opt back in**: `views/tasks.yaml`, `trackings.yaml`,
-      `projects.yaml` and `sqlite.yaml` carry `manual_connect: false`; those
+      `projects.yaml` and `sqlite.yaml` carry `auto_connect: startup`; those
       tabs are populated immediately at startup, as before.
 - [ ] **An eager tab's login arrives immediately**: set
-      `manual_connect: false` in a view that requires a login (e.g.
+      `auto_connect: startup` in a view that requires a login (e.g.
       `kimai.yaml`), lock the password store (`gpgconf --kill gpg-agent`) and
       start the TUI. Expected: the credential popup is there **immediately**,
       even though the Tasks tab is active; its title starts with the tab name
@@ -3661,13 +3666,55 @@ and what an explicit `false` triggers at startup.
 - [ ] **Escape**: press `Esc` instead of Enter → the popup goes away, no second
       popup pops up behind it, the TUI is usable normally. The Kimai tab shows
       the error/connect banner when opened; `r` restarts the login.
-- [ ] **Two eager logins**: set `manual_connect: false` on two views that
+- [ ] **Two eager logins**: set `auto_connect: startup` on two views that
       require a login. Expected: **one** popup at a time, the second does not
       overwrite it. After the first is answered or cancelled, the second
       arrives at the latest when its tab is opened.
-- [ ] **A manual-connect tab stays quiet**: a tab with `manual_connect: true`
+- [ ] **A manual-connect tab stays quiet**: a tab with `auto_connect: never`
       (or without the line) shows **no** popup at app start — only `r` on that
       tab asks.
+
+### `on_open` — connect on the first visit
+
+Set `auto_connect: on_open` on a remote view (e.g. `taiga.yaml`) that is
+**not** the tab the TUI starts on.
+
+- [ ] **Nothing at startup**: start the TUI. The tab shows **no** banner about
+      connecting, no request goes out (check `f10` / the adapter log), and no
+      credential dialog appears over the tab you are on.
+- [ ] **The first switch loads it**: switch to the tab. Expected: the load
+      starts right away without pressing `r` — the `Connecting/Busy` banner,
+      then the table. Never the "Auto-connect disabled — press `r`" banner:
+      an `on_open` tab must not tell you to press a key it does not need.
+- [ ] **Its login lands on its own tab**: with the password store locked, the
+      credential popup appears only when you switch to the tab, and its title
+      names that tab.
+- [ ] **Going back does not refetch**: switch away and back several times.
+      Expected: the cached table each time, **no** new request. (Only
+      `auto_reload` or an explicit `r` refetches.)
+- [ ] **A failed load retries on the next visit**: break the connection (VPN
+      off), switch to the tab → error banner. Switch away, restore the
+      connection, switch back → it tries again by itself and loads.
+- [ ] **No double load**: switch to the tab and immediately away and back
+      while the first fetch is still running. Expected: one load, not two —
+      the banner keeps a single elapsed counter.
+- [ ] **Subtabs follow along**: once the tab has loaded, switching subtabs
+      loads them transparently (one adapter, one connection) — no second
+      "press `r` to connect".
+- [ ] **The tab the app starts on**: make an `on_open` view the _first_ tab
+      (lowest `tab.order`). Start the TUI → it loads at startup, because it is
+      open from the first frame.
+
+### Compatibility with the old boolean
+
+- [ ] `manual_connect: true` alone still behaves exactly like
+      `auto_connect: never`; `manual_connect: false` alone like
+      `auto_connect: startup`.
+- [ ] A file carrying **both** `manual_connect: true` and
+      `auto_connect: startup` connects at startup — the newer key wins.
+- [ ] A typo (`auto_connect: on-open`) fails the view file at load with a
+      message naming `never`, `on_open` and `startup` — it does not silently
+      fall back to the default.
 
 ## Postgres — an `auth:` block instead of the gpg pinentry
 
@@ -5739,7 +5786,7 @@ watch.
       bar with the tab's name in front, and two tabs loading at once collapse
       to `2 tabs loading… (4s)`. With `off`, no line appears anywhere while the
       load still runs normally.
-- [ ] A `manual_connect: true` tab shows `Loading…` while connecting, not the
+- [ ] An `auto_connect: never` tab shows `Loading…` while connecting, not the
       "press the key to connect" hint, and reverts to the hint if the load
       fails.
 

@@ -27,7 +27,9 @@ adapter:
   # SSH tunnel) is only established when you trigger the `r` reload action.
   # Avoids hanging/timeouts when the tunnel target is unreachable. This is
   # the default; it is written out because it matters most for this adapter.
-  manual_connect: true
+  # (`on_open` would connect on the first switch to this tab — reasonable
+  # once the tunnel is reliable; `startup` connects before you ask.)
+  auto_connect: never
 
 views:
   # ── Tree view: database → schemas → tables → rows (+ scripts) ──────────

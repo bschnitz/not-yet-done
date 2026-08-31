@@ -61,10 +61,11 @@ adapter:
   type: stoat
   id: chat
   config: stoat-adapter.yaml
-  # `manual_connect` defaults to true: the adapter logs in and opens its
-  # socket only after you press `r`. Set it to false to connect at startup —
-  # note that a login needing an answer then raises its dialog right away,
-  # over whatever tab you happen to be on.
+  # `auto_connect` defaults to `never`: the adapter logs in and opens its
+  # socket only after you press `r`. `on_open` connects on your first switch
+  # to this tab instead; `startup` connects before you ask — note that a login
+  # needing an answer then raises its dialog right away, over whatever tab you
+  # happen to be on.
 
 views:
   - name: chats

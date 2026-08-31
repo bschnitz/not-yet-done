@@ -37,8 +37,13 @@ adapter:
   # config_inline: |
   #   url: https://jira.example.com
   #   session_id: abc123
-  # Wait for an explicit `reload` action before connecting (the default).
-  manual_connect: true
+  # When this instance may connect on its own:
+  #   never    — only on an explicit `reload` action (the default)
+  #   on_open  — the first time the tab is opened
+  #   startup  — while the app comes up, whether the tab is visited or not
+  # (The older boolean `manual_connect: true|false` still reads as
+  # `never`|`startup`; an explicit `auto_connect:` wins over it.)
+  auto_connect: never
   # Refresh on a timer once the tab has loaded: number + s/m/h/d.
   # Absent = never. Refreshes only — it never connects by itself.
   auto_reload: 10m
@@ -1198,7 +1203,7 @@ table: the level load behind a reload, a drill-down into a child level, and the
 eager subtree fetch. Lazily expanding a single tree node is not — it has its own
 inline marker and does not make the tab as a whole busy.
 
-While loading, the line also outranks the `manual_connect` hint and the previous
+While loading, the line also outranks the `auto_connect: never` hint and the previous
 attempt's error: telling the user to press the connect key while that very load
 is running, or showing an error a running fetch may be about to replace, is
 worse than saying nothing.
