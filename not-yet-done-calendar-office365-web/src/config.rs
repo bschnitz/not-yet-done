@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use not_yet_done_content::CredentialProvider;
-use not_yet_done_content::auth::CredentialResolver;
+use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
 use not_yet_done_office365_web::{SessionConfig, SidecarConfig};
 
 /// Prompt text shown to the user when the sign-in raises an MFA challenge, when
@@ -113,16 +113,32 @@ fn default_true() -> bool {
 impl Office365WebConfig {
     /// Build the credential resolvers from this config's providers. Called
     /// before [`into_session_config`], while the providers are still available.
-    pub(crate) fn build_credential_resolvers(&self) -> Result<CredentialResolvers, String> {
+    ///
+    /// `prompts` is what a `script` provider asks the user through, so a
+    /// locked password store raises a form in the frontend rather than
+    /// `gpg`'s own `pinentry` window.
+    pub(crate) fn build_credential_resolvers(
+        &self,
+        prompts: Option<&CredentialPrompts>,
+    ) -> Result<CredentialResolvers, String> {
         let build = |p: &Option<CredentialProvider>| -> Result<_, String> {
             p.as_ref()
-                .map(CredentialProvider::build_resolver)
+                .map(|p| p.build_resolver_with(prompts))
                 .transpose()
         };
         Ok(CredentialResolvers {
             username: build(&self.username)?,
             password: build(&self.password)?,
         })
+    }
+
+    /// Whether any configured provider may raise a dialog while it
+    /// resolves — the cue for the backend to offer a prompt stream at all.
+    pub(crate) fn can_prompt(&self) -> bool {
+        [&self.username, &self.password]
+            .into_iter()
+            .flatten()
+            .any(CredentialProvider::can_prompt)
     }
 
     /// The prompt text to show when this connection raises an MFA challenge,
@@ -211,7 +227,7 @@ password:
             Some(CredentialProvider::Command { .. })
         ));
         assert!(cfg.username.is_none(), "username provider is optional");
-        let resolvers = cfg.build_credential_resolvers().expect("builds");
+        let resolvers = cfg.build_credential_resolvers(None).expect("builds");
         assert!(resolvers.password.is_some());
         assert!(
             resolvers.username.is_none(),

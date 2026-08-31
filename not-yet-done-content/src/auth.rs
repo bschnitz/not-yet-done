@@ -34,8 +34,8 @@ mod session_store;
 pub use credential_script::{ScriptForm, ScriptFormField, ScriptRequest, ScriptRound};
 pub use orchestrator::{AuthError, AuthOrchestrator, Clock, ResolvedSession, SystemClock};
 pub use resolver::{
-    CommandResolver, CredentialError, CredentialResolver, EnvResolver, FileResolver,
-    KeyringResolver, LiteralResolver,
+    CommandResolver, CredentialError, CredentialPrompts, CredentialResolver, EnvResolver,
+    FileResolver, KeyringResolver, LiteralResolver, ScriptResolver,
 };
 pub use session_store::{InMemorySessionStore, SessionEntry, SessionStore};
 
@@ -181,6 +181,31 @@ pub enum CredentialProvider {
     /// fields therefore cost one invocation, not one each — which is the
     /// whole point when every invocation unlocks a password store.
     ScriptResult,
+    /// Run a credential script for *this one slot*, speaking the same
+    /// round protocol as [`ScriptResult`](Self::ScriptResult) (see the
+    /// [`credential_script`](crate::auth) module).
+    ///
+    /// The difference is where it may be written: `script-result` needs
+    /// an `auth:` block whose orchestrator owns the dialog, this one
+    /// needs nothing but a provider slot — so a connection config that
+    /// has no auth block (a calendar backend, an SSH hop) can still ask
+    /// the user for the password store's passphrase instead of letting
+    /// `gpg` open its own `pinentry` window behind the frontend's back.
+    ///
+    /// The question travels as a [`PromptRequest`](crate::PromptRequest)
+    /// on the adapter's prompt stream, so it needs an adapter that wired
+    /// one up. Without a stream an *unlocked* store still resolves; a
+    /// locked one fails loudly rather than hanging.
+    Script {
+        script: String,
+        /// Which key of the script's `result` this slot takes. May be
+        /// omitted when the script returns exactly one value — with
+        /// several, naming one is the only way to say which.
+        #[serde(default)]
+        field: Option<String>,
+        #[serde(default = "default_script_timeout")]
+        timeout_secs: u64,
+    },
     /// OS keyring entry. On Linux this maps to the secret-service /
     /// libsecret backend (kwallet, gnome-keyring, …); on macOS to the
     /// Keychain; on Windows to Credential Manager.
@@ -200,6 +225,16 @@ impl CredentialProvider {
             self,
             CredentialProvider::Prompt { .. } | CredentialProvider::ScriptResult
         )
+    }
+
+    /// Whether this provider may raise a dialog of its own while it
+    /// resolves. Unlike [`needs_frontend`](Self::needs_frontend) this is
+    /// not a demand for the orchestrator — the resolver is built like any
+    /// other — but the cue for an adapter to offer a
+    /// [`PromptRequest`](crate::PromptRequest) stream at all, so a
+    /// connection that never asks contributes no stream.
+    pub fn can_prompt(&self) -> bool {
+        matches!(self, CredentialProvider::Script { .. })
     }
 }
 
@@ -888,5 +923,34 @@ bindings:
             }
             other => panic!("unexpected provider: {other:?}"),
         }
+    }
+
+    /// The shape a connection config writes when it has no `auth:` block
+    /// at all: one slot, one script, everything else defaulted.
+    #[test]
+    fn standalone_script_provider_parses_with_defaults() {
+        let yaml = r#"
+type: script
+script: >-
+  ~/.config/not_yet_done/scripts/pass_credentials.py
+  password=example/service/pass
+"#;
+        let provider: CredentialProvider = serde_yaml::from_str(yaml).expect("yaml parses");
+        match &provider {
+            CredentialProvider::Script {
+                script,
+                field,
+                timeout_secs,
+            } => {
+                assert!(script.ends_with("password=example/service/pass"));
+                assert!(field.is_none(), "one value needs no name");
+                assert_eq!(*timeout_secs, 120);
+            }
+            other => panic!("unexpected provider: {other:?}"),
+        }
+        // It may ask, but an unlocked store answers without anyone
+        // listening — so it is not in the "needs a frontend" set.
+        assert!(provider.can_prompt());
+        assert!(!provider.needs_frontend());
     }
 }

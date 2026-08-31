@@ -19,10 +19,10 @@ use not_yet_done_calendar_core::{
     TimeRange,
 };
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
-use not_yet_done_content::auth::CredentialResolver;
-use not_yet_done_content::{BusEvent, HostEventBus, publish_event, subscribe_events};
+use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
+use not_yet_done_content::{BusEvent, HostEventBus, PromptRequest, publish_event, subscribe_events};
 use not_yet_done_office365_web::{
     LoginCredentials, MsCalEvent, MsOfficeError, MsOfficeWeb, MsShowAs, MsTimeRange, PromptKind,
     SessionConfig, SessionHandle,
@@ -91,6 +91,12 @@ pub struct Office365WebBackend {
     /// binding can drive the UI, and subscribes for the answer — without this
     /// backend depending on the TUI.
     event_bus: Arc<dyn HostEventBus>,
+    /// The end of the credential prompt stream the adapter takes once,
+    /// present only when a provider of this connection can actually ask
+    /// something — today: a `script` provider unlocking a password store.
+    /// The MFA challenges of the sign-in itself travel over `event_bus`
+    /// instead; this one is about getting *into* the credential.
+    prompts: Mutex<Option<mpsc::Receiver<PromptRequest>>>,
 }
 
 impl Office365WebBackend {
@@ -314,6 +320,16 @@ impl CalendarBackend for Office365WebBackend {
     fn subscribe_ready(&self) -> Option<broadcast::Receiver<LoadProgress>> {
         Some(self.ready_tx.subscribe())
     }
+
+    /// The stream a `script` credential provider asks through — the
+    /// password store's passphrase, before the sign-in can even start.
+    /// `None` when no provider of this connection asks anything.
+    fn take_prompt_requests(&self) -> Option<mpsc::Receiver<PromptRequest>> {
+        self.prompts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
 }
 
 /// Registers as backend type `office365-web`.
@@ -346,8 +362,17 @@ impl CalendarBackendFactory for Office365WebBackendFactory {
             .unwrap_or_else(|| connection_id.to_string());
         // Build the credential resolvers while the providers are still on `cfg`
         // (the resolvers themselves hold no secret until first resolved).
+        // Only a provider that can raise a dialog earns a stream; without
+        // one the adapter offers the frontend nothing to service.
+        let interactive = cfg.can_prompt();
+        let (prompts, prompt_rx) = if interactive {
+            let (tx, rx) = mpsc::channel::<PromptRequest>(8);
+            (Some(CredentialPrompts::new(label.clone(), tx)), Some(rx))
+        } else {
+            (None, None)
+        };
         let resolvers = cfg
-            .build_credential_resolvers()
+            .build_credential_resolvers(prompts.as_ref())
             .map_err(|e| CalendarError::Config(format!("office365-web credentials: {e}")))?;
         let (ready_tx, _) = broadcast::channel(16);
         Ok(Box::new(Office365WebBackend {
@@ -359,6 +384,7 @@ impl CalendarBackendFactory for Office365WebBackendFactory {
             session: Mutex::new(None),
             ready_tx,
             event_bus: ctx.event_bus.clone(),
+            prompts: Mutex::new(prompt_rx),
         }))
     }
 }

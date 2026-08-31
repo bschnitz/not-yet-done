@@ -6426,6 +6426,46 @@ request, and an unchanged header sends no PATCH, so the run touches nothing.
       as a project admin it is deleted, otherwise the server's 403 appears in
       the message.
 
+## A credential slot that may ask (`type: script`)
+
+A provider slot that has no `auth:` block behind it — a calendar connection's
+`password:`, an SSH hop's — can still run the credential script that speaks the
+round protocol, and its form is put in front of the user over the adapter's
+prompt stream. So a locked password store asks _inside_ the TUI instead of
+letting `gpg` open a `pinentry` window the frontend knows nothing about.
+
+Arrange the two states with the agent, not with the config: `gpg-connect-agent
+reloadagent /bye` drops the cached passphrase (locked), any successful decrypt
+warms it again (unlocked). `pgrep -a pinentry` while a dialog is up is the
+check that nothing opened behind the TUI.
+
+- [ ] **Warm agent**: open the tab whose connections use the script → the rows
+      arrive with no dialog at all. The script is still run; it just has
+      nothing to ask.
+- [ ] **Locked agent**: reload the agent, then reconnect → the TUI's own
+      credential form appears, titled by the script's `header`, the passphrase
+      field masked. `pgrep -a pinentry` finds nothing.
+- [ ] Answer it correctly → the connection completes and the following
+      connections come up silently (the agent is warm now).
+- [ ] **Wrong passphrase** → the same form comes back, this time with the
+      script's `error` line above it. Answering correctly on the retry still
+      completes.
+- [ ] Keep answering wrong → after the round cap the connection fails with
+      `still asked for input after 5 rounds`, and the TUI stays usable.
+- [ ] **Dismiss** the form (`esc`) → the connection reports the credential as
+      unavailable and names the script. No hang, no second dialog, the tab can
+      be reloaded to try again.
+- [ ] **Several slots, one script**: with a cold agent, reconnect a tab whose
+      connections all read from the same script → **one** dialog, not one per
+      connection; the others wait for it and then resolve.
+- [ ] **No listener** (CLI): with a warm agent `adapter <inst> ls` works as
+      before. With a cold one it fails loudly — the message names the script
+      and says there is no interactive frontend — instead of hanging or
+      opening a `pinentry` window in a headless run.
+- [ ] A script that returns **several** values into a slot without `field:` →
+      the error names the keys it got and asks for `field:`. Adding
+      `field: <key>` resolves it.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

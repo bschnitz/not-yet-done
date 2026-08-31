@@ -1705,20 +1705,22 @@ with the ids that adapter does support — instead of failing at the first login
 
 #### Credential providers
 
-| `type:`         | Value comes from                                           | Keys                                         |
-| --------------- | ---------------------------------------------------------- | -------------------------------------------- |
-| `literal`       | the YAML itself                                            | `value`                                      |
-| `prompt`        | the user, on first use                                     | `prefill` (optional)                         |
-| `env`           | an environment variable (empty counts as missing)          | `var`                                        |
-| `file`          | a file's contents                                          | `path`, `trim` (default `true`)              |
-| `command`       | a shell command's stdout                                   | `script`, `timeout_secs` (30), `retries` (3) |
-| `script-result` | the auth block's `script` (see below)                      | — (the field name is the key)                |
-| `keyring`       | the OS keyring (secret-service / Keychain / Cred. Manager) | `service`, `account`                         |
+| `type:`         | Value comes from                                           | Keys                                               |
+| --------------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| `literal`       | the YAML itself                                            | `value`                                            |
+| `prompt`        | the user, on first use                                     | `prefill` (optional)                               |
+| `env`           | an environment variable (empty counts as missing)          | `var`                                              |
+| `file`          | a file's contents                                          | `path`, `trim` (default `true`)                    |
+| `command`       | a shell command's stdout                                   | `script`, `timeout_secs` (30), `retries` (3)       |
+| `script-result` | the auth block's `script` (see below)                      | — (the field name is the key)                      |
+| `script`        | a credential script run for this one slot (see below)      | `script`, `field` (optional), `timeout_secs` (120) |
+| `keyring`       | the OS keyring (secret-service / Keychain / Cred. Manager) | `service`, `account`                               |
 
 `prompt` and `script-result` need a frontend: the TUI shows the credential
 popup, the CLI asks on the terminal, and a command with no terminal (a pipe, a
-cron job) fails with "no terminal to ask on" rather than hanging. Everything
-else resolves headlessly.
+cron job) fails with "no terminal to ask on" rather than hanging. `script` only
+_may_ need one — it asks nothing while the store it reads is unlocked.
+Everything else resolves headlessly.
 
 #### Script-driven credentials (`script` + `script-result`)
 
@@ -1834,6 +1836,47 @@ else:
 Plain `prompt` bindings are asked **before** the script runs, in one dialog:
 they are known from the config, while a script's form is only known once it has
 run.
+
+##### One slot on its own (`type: script`)
+
+`script-result` needs an `auth:` block, because the orchestrator that owns the
+dialog lives there. Not every secret has one: a calendar connection configures
+its password right in the backend block, and there is no login for it to hang
+off. Left alone such a slot falls back to `command`, and a locked store answers
+it with gpg's own pinentry window — outside the app, once per secret.
+
+`type: script` is the same round protocol for exactly that case. It is written
+in the slot itself, needs no auth block, and asks through the adapter's prompt
+stream:
+
+```yaml
+# views/calendar-adapter.yaml — one connection, no `auth:` anywhere
+- id: private
+  backend: caldav
+  config:
+    url: https://calendar.example.invalid/principals/jane@example.invalid
+    username: { type: literal, value: jane@example.invalid }
+    password:
+      type: script
+      script: ~/.config/not_yet_done/scripts/pass_credentials.py password=example/calendar
+      field: password # optional; needed once the script returns several values
+```
+
+The script is the same one an auth block would use — `request` carries the
+`field` name (or nothing, when the slot did not name one), and the answer is
+`result`, `form` or `error` as above.
+
+Two limits are worth knowing:
+
+- **Someone has to be listening.** The question travels on the adapter's prompt
+  stream, so the adapter must offer one (the calendar's `caldav` and
+  `office365-web` backends do). With no stream an unlocked store still
+  resolves; a locked one fails with "no interactive frontend" instead of
+  hanging on a dialog nobody will show.
+- **One dialog, not one per slot.** Slots pointing at the same script are
+  serialised on its path, so the first invocation unlocks the store and the
+  rest find the agent warm — without that, four calendar connections fetching
+  in parallel would raise four passphrase forms.
 
 #### Secrets that are not part of a login (Postgres)
 
