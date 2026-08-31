@@ -37,6 +37,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::CredentialError;
+
+/// How often a credential script may come back asking for more input
+/// before the caller gives up. A script that has not converged by then is
+/// looping, and the user is the one paying for it. Shared by both callers
+/// of the protocol — the auth block's orchestrator and the standalone
+/// `script` provider.
+pub(super) const MAX_SCRIPT_ROUNDS: usize = 5;
 use super::title_case;
 
 /// What the runtime writes to the script's stdin, once per round.

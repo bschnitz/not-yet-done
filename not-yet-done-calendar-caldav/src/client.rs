@@ -15,7 +15,7 @@ use reqwest::{Method, StatusCode, Url, header};
 use tokio::sync::Mutex;
 
 use not_yet_done_calendar_core::{CalEvent, CalendarError, CalendarRef, EventDraft, TimeRange};
-use not_yet_done_content::auth::CredentialResolver;
+use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
 
 use crate::config::{CalDavConfig, DEFAULT_REQUEST_TIMEOUT_SECS};
 use crate::ical;
@@ -60,7 +60,14 @@ pub(crate) struct CalDavClient {
 }
 
 impl CalDavClient {
-    pub(crate) fn from_config(cfg: &CalDavConfig) -> Result<Self, CalendarError> {
+    /// `prompts`, when the connection offers one, is what a `script`
+    /// credential provider asks the user through — a locked password
+    /// store then raises a form in the frontend instead of `gpg`'s own
+    /// `pinentry` window.
+    pub(crate) fn from_config(
+        cfg: &CalDavConfig,
+        prompts: Option<&CredentialPrompts>,
+    ) -> Result<Self, CalendarError> {
         let base = Url::parse(cfg.url.trim())
             .map_err(|e| CalendarError::Config(format!("invalid url '{}': {e}", cfg.url)))?;
         let secs = cfg
@@ -73,11 +80,11 @@ impl CalDavClient {
             .map_err(|e| CalendarError::Other(format!("build HTTP client: {e}")))?;
         let user = cfg
             .username
-            .build_resolver()
+            .build_resolver_with(prompts)
             .map_err(|e| CalendarError::Config(format!("username provider: {e}")))?;
         let pass = cfg
             .password
-            .build_resolver()
+            .build_resolver_with(prompts)
             .map_err(|e| CalendarError::Config(format!("password provider: {e}")))?;
         Ok(Self {
             http,

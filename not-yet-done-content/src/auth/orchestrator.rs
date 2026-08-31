@@ -33,18 +33,13 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, oneshot, watch};
 
-use super::credential_script::{self, ScriptRound};
+use super::credential_script::{self, MAX_SCRIPT_ROUNDS, ScriptRound};
 use super::session_store::{SessionEntry, SessionStore};
 use super::{
     AuthSpec, CredentialBinding, CredentialError, CredentialProvider, CredentialResolver,
     SessionCachePolicy,
 };
 use crate::{AdapterStatus, AuthField};
-
-/// How often the credential script may come back asking for more input
-/// before the login gives up. A script that has not converged by then is
-/// looping, and the user is the one paying for it.
-const MAX_SCRIPT_ROUNDS: usize = 5;
 
 #[derive(Debug, Error)]
 pub enum AuthError {

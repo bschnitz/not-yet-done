@@ -18,11 +18,16 @@ mod client;
 mod config;
 mod ical;
 
+use std::sync::Mutex;
+
 use async_trait::async_trait;
 use not_yet_done_calendar_core::{
     CalEvent, CalendarBackend, CalendarBackendFactory, CalendarError, CalendarRef, EventDraft,
     TimeRange,
 };
+use not_yet_done_content::PromptRequest;
+use not_yet_done_content::auth::CredentialPrompts;
+use tokio::sync::mpsc;
 
 use client::CalDavClient;
 use config::CalDavConfig;
@@ -32,6 +37,11 @@ pub struct CalDavBackend {
     connection_id: String,
     label: String,
     client: CalDavClient,
+    /// The end of the credential prompt stream the adapter takes once,
+    /// present only when a provider of this connection can actually ask
+    /// something (see [`CredentialProvider::can_prompt`]). Taken out on
+    /// the first call, hence the `Option`.
+    prompts: Mutex<Option<mpsc::Receiver<PromptRequest>>>,
 }
 
 #[async_trait]
@@ -60,6 +70,18 @@ impl CalendarBackend for CalDavBackend {
         self.client
             .create_event(calendar_id, draft, &self.label)
             .await
+    }
+
+    /// The stream a `script` credential provider asks through — the
+    /// password store's passphrase, mid-`list_events`. `None` for a
+    /// connection whose providers never ask (a literal, a plain
+    /// `command`), so the adapter can tell "nothing to service" from
+    /// "someone might".
+    fn take_prompt_requests(&self) -> Option<mpsc::Receiver<PromptRequest>> {
+        self.prompts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 }
 
@@ -90,11 +112,21 @@ impl CalendarBackendFactory for CalDavBackendFactory {
             .name
             .clone()
             .unwrap_or_else(|| connection_id.to_string());
-        let client = CalDavClient::from_config(&cfg)?;
+        // Only a provider that can raise a dialog earns a stream; without
+        // one the adapter offers the frontend nothing to service.
+        let interactive = cfg.username.can_prompt() || cfg.password.can_prompt();
+        let (prompts, rx) = if interactive {
+            let (tx, rx) = mpsc::channel::<PromptRequest>(8);
+            (Some(CredentialPrompts::new(label.clone(), tx)), Some(rx))
+        } else {
+            (None, None)
+        };
+        let client = CalDavClient::from_config(&cfg, prompts.as_ref())?;
         Ok(Box::new(CalDavBackend {
             connection_id: connection_id.to_string(),
             label,
             client,
+            prompts: Mutex::new(rx),
         }))
     }
 }
