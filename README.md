@@ -1412,7 +1412,16 @@ adapter drops its caches and re-fetches, since an automatic refresh
 that re-served the warm cache would keep showing exactly the rows it
 was meant to replace. It refreshes the tab's **active pane** at its
 current level (a drilled-in level reloads that level, not the root),
-and it holds off while a fetch is already in flight.
+and it holds off while a fetch is already in flight. A tab does not have
+to be the visible one: every loaded tab keeps its own clock and refetches
+in the background, so switching to one shows data that is already fresh.
+
+The tab bar says so. A tab with an interval carries it next to its
+name — `3 Jira (10m)` — because the setting otherwise lives only in the
+view file, and a table that moves on its own with nothing on screen to
+explain it reads as a glitch. The hint states what is _configured_, so
+it does not appear and disappear around each load; set
+`tabs.auto_reload_hint: false` in `tui.yaml` to drop it.
 
 **Trade-off**: every interval is a real round-trip to the backend, in
 the background, whether or not you are looking at the tab. On a paged

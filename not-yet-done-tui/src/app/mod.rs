@@ -8347,11 +8347,19 @@ impl App {
                                 )
                             })
                             .unwrap_or_default();
-                        let view = self
-                            .content_views
-                            .get(idx)
-                            .and_then(|s| s.as_view())
-                            .filter(|cv| cv.has_unread());
+                        let slot = self.content_views.get(idx).and_then(|s| s.as_view());
+                        // The interval a tab refreshes itself on rides with
+                        // its name — the setting lives in the view file, so
+                        // without it nothing on screen says the table moves
+                        // on its own.
+                        let name = match slot
+                            .filter(|_| self.config.tabs.auto_reload_hint)
+                            .and_then(|cv| cv.auto_reload_label())
+                        {
+                            Some(every) => format!("{name} ({every})"),
+                            None => name,
+                        };
+                        let view = slot.filter(|cv| cv.has_unread());
                         let marker = view.map(|cv| cv.unread_tab_marker()).unwrap_or_default();
                         (
                             crate::tabs::tab_label_with_marker(marker, &icon, &key, &name),

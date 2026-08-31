@@ -277,6 +277,21 @@ pub fn parse_interval(raw: &str) -> std::result::Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
+/// Render an interval back in the spelling [`parse_interval`] accepts: the
+/// largest unit that divides it evenly — `600s` comes back as `10m`, `5400s`
+/// as `90m` (not `1.5h`, which is not a spelling we take). Used for the UI
+/// hints that tell the user an interval is set, so what the screen shows can
+/// be pasted straight back into the config.
+pub fn format_interval(d: Duration) -> String {
+    let secs = d.as_secs();
+    for (unit, size) in [("d", 86_400u64), ("h", 3_600), ("m", 60)] {
+        if secs >= size && secs % size == 0 {
+            return format!("{}{unit}", secs / size);
+        }
+    }
+    format!("{secs}s")
+}
+
 /// YAML scalar an interval may be written as. `10m` parses as a string, but a
 /// unit-less `600` parses as a number — accepting both here lets
 /// [`parse_interval`] answer it with "has no unit" instead of serde answering
@@ -621,6 +636,24 @@ adapter:
         assert!(parse_interval("10").is_err(), "a unit is required");
         assert!(parse_interval("").is_err());
         assert!(parse_interval("soon").is_err());
+    }
+
+    #[test]
+    fn format_interval_gives_back_a_spelling_we_accept() {
+        for raw in ["45s", "10m", "90m", "2h", "7d"] {
+            let parsed = parse_interval(raw).unwrap();
+            assert_eq!(format_interval(parsed), raw, "round trip of {raw}");
+        }
+    }
+
+    #[test]
+    fn format_interval_picks_the_largest_whole_unit() {
+        // 90 minutes is not a whole number of hours, so it stays minutes
+        // rather than becoming a spelling `parse_interval` would reject.
+        assert_eq!(format_interval(Duration::from_secs(5_400)), "90m");
+        assert_eq!(format_interval(Duration::from_secs(3_600)), "1h");
+        assert_eq!(format_interval(Duration::from_secs(30)), "30s");
+        assert_eq!(format_interval(Duration::from_secs(0)), "0s");
     }
 
     #[test]
