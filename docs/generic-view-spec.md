@@ -37,6 +37,11 @@ adapter:
   # config_inline: |
   #   url: https://jira.example.com
   #   session_id: abc123
+  # Wait for an explicit `reload` action before connecting (the default).
+  manual_connect: true
+  # Refresh on a timer once the tab has loaded: number + s/m/h/d.
+  # Absent = never. Refreshes only — it never connects by itself.
+  auto_reload: 10m
 
 views:
   # Every entry is a subtab or a navigable level.

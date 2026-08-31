@@ -111,25 +111,13 @@ pub struct HookWhen {
     pub throttle: Option<String>,
 }
 
-/// Parse a throttle duration: an integer followed by a unit `s`/`m`/`h`/`d`.
+/// Parse a throttle duration through the crate's one interval spelling
+/// ([`crate::parse_interval`]): an integer followed by `s`/`m`/`h`/`d`. Only
+/// the type differs — hook state is timestamped with chrono, so the std
+/// duration is converted here.
 fn parse_throttle(spec: &str) -> Result<Duration, String> {
-    let spec = spec.trim();
-    let (num, unit) = spec.split_at(
-        spec.find(|c: char| !c.is_ascii_digit())
-            .ok_or_else(|| format!("throttle '{spec}' has no unit (expected s/m/h/d)"))?,
-    );
-    let n: i64 = num
-        .parse()
-        .map_err(|_| format!("throttle '{spec}' has no leading number"))?;
-    match unit {
-        "s" => Ok(Duration::seconds(n)),
-        "m" => Ok(Duration::minutes(n)),
-        "h" => Ok(Duration::hours(n)),
-        "d" => Ok(Duration::days(n)),
-        other => Err(format!(
-            "throttle '{spec}': unknown unit '{other}' (expected s/m/h/d)"
-        )),
-    }
+    let std = crate::parse_interval(spec)?;
+    Duration::from_std(std).map_err(|_| format!("throttle '{spec}' is out of range"))
 }
 
 // ---------------------------------------------------------------------------

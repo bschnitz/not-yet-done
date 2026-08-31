@@ -259,6 +259,11 @@ async fn run_loop(
         // `None` disarms the branch (parks on a never-resolving future).
         let which_key_deadline = app.which_key_deadline();
 
+        // Earliest moment some tab's `adapter.auto_reload` interval runs out.
+        // Same shape as the which-key deadline: no armed tab, no timer, and
+        // the loop stays parked instead of waking up to poll.
+        let auto_reload_deadline = app.auto_reload_deadline();
+
         tokio::select! {
             // Background-loaded results (tasks, content items, adapter
             // status, …). `recv()` consumes one; handle it, then drain any
@@ -290,6 +295,18 @@ async fn run_loop(
                 }
             } => {
                 dirty |= app.reveal_which_key();
+            }
+
+            // Per-adapter auto-reload: refresh a tab whose data has sat
+            // for its configured interval. Fires only for tabs that have
+            // already loaded once, so this never *connects* an adapter.
+            _ = async {
+                match auto_reload_deadline {
+                    Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                dirty |= app.poll_auto_reload();
             }
 
             // Poll-backed change sources, serviced only while one is

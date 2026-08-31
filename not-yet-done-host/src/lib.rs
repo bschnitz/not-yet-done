@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -219,12 +220,89 @@ pub struct AdapterInstance {
     /// an explicit `manual_connect: false`.
     #[serde(default = "manual_connect_default")]
     pub manual_connect: bool,
+    /// Refresh this instance's tabs on a timer: `auto_reload: 10m` re-fetches
+    /// every ten minutes. Written as a number plus a unit (`s`, `m`, `h`,
+    /// `d`) — the same spelling as a hook's `throttle:`. Absent (the default)
+    /// means never.
+    ///
+    /// The timer only ever *refreshes* — it never *connects*. It starts
+    /// running once the instance has loaded at least once, so a
+    /// `manual_connect` adapter still waits for the user's first `reload`
+    /// and an adapter that is only configured, never opened, stays quiet.
+    /// Each completed load re-arms it, so a manual `r` also resets the clock.
+    ///
+    /// Only the TUI honours it — the CLI and Waybar run one request and exit,
+    /// so there is nothing to keep fresh.
+    #[serde(default, deserialize_with = "deserialize_interval")]
+    pub auto_reload: Option<Duration>,
 }
 
 /// Serde default for [`AdapterInstance::manual_connect`] — see the field's
 /// docs for why an unconfigured instance waits for `reload`.
 fn manual_connect_default() -> bool {
     true
+}
+
+/// Parse an interval the way the config files spell one: an integer plus a
+/// unit — `90s`, `10m`, `2h`, `7d`. The single spelling used across the
+/// config surface; a hook's `when.throttle` parses through here too.
+///
+/// A unit is required on purpose. `24` is ambiguous — the user who writes it
+/// under `throttle:` means hours at least as often as seconds — so it is an
+/// error rather than a guess. Zero is rejected as well: an interval of
+/// nothing is a busy loop, not a setting.
+pub fn parse_interval(raw: &str) -> std::result::Result<Duration, String> {
+    let text = raw.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| format!("interval `{raw}` has no unit (expected s/m/h/d)"))?;
+    let (digits, unit) = text.split_at(split);
+    let value: u64 = digits
+        .parse()
+        .map_err(|_| format!("interval `{raw}` has no leading number"))?;
+    let secs = match unit {
+        "s" => value,
+        "m" => value * 60,
+        "h" => value * 3600,
+        "d" => value * 86_400,
+        other => {
+            return Err(format!(
+                "interval `{raw}`: unknown unit `{other}` (expected s/m/h/d)"
+            ));
+        }
+    };
+    if secs == 0 {
+        return Err(format!("interval `{raw}` is zero — it must be positive"));
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+/// YAML scalar an interval may be written as. `10m` parses as a string, but a
+/// unit-less `600` parses as a number — accepting both here lets
+/// [`parse_interval`] answer it with "has no unit" instead of serde answering
+/// with "invalid type: integer".
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IntervalSpec {
+    Number(u64),
+    Text(String),
+}
+
+/// Serde bridge for [`AdapterInstance::auto_reload`]: an absent key is `None`,
+/// anything else must parse as an interval or the whole view file fails to
+/// load with the reason in the message.
+fn deserialize_interval<'de, D>(de: D) -> std::result::Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = match Option::<IntervalSpec>::deserialize(de)? {
+        None => return Ok(None),
+        Some(IntervalSpec::Number(n)) => n.to_string(),
+        Some(IntervalSpec::Text(text)) => text,
+    };
+    parse_interval(&raw)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 impl AdapterInstance {
@@ -421,6 +499,7 @@ mod tests {
             config: None,
             config_inline: None,
             manual_connect: false,
+            auto_reload: None,
         };
         assert_eq!(inst.effective_instance_id(), "tasks");
     }
@@ -433,6 +512,7 @@ mod tests {
             config: None,
             config_inline: None,
             manual_connect: false,
+            auto_reload: None,
         };
         assert_eq!(inst.effective_instance_id(), "analytics");
     }
@@ -475,6 +555,75 @@ adapter:
     }
 
     #[test]
+    fn auto_reload_is_off_unless_the_instance_asks_for_it() {
+        let yaml = r#"
+adapter:
+  type: jira
+  config_inline: "x"
+"#;
+        let head: ViewFileHead = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(head.adapter.auto_reload, None);
+    }
+
+    #[test]
+    fn auto_reload_reads_a_human_interval() {
+        let yaml = r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  auto_reload: 10m
+"#;
+        let head: ViewFileHead = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(head.adapter.auto_reload, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_unit_less_auto_reload_is_told_what_it_is_missing() {
+        let yaml = r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  auto_reload: 90
+"#;
+        let err = serde_yaml::from_str::<ViewFileHead>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("has no unit"),
+            "a bare number should be told to add s/m/h/d, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_typo_in_auto_reload_fails_the_view_file_instead_of_disabling_it() {
+        let yaml = r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  auto_reload: 10x
+"#;
+        let err = serde_yaml::from_str::<ViewFileHead>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown unit"),
+            "the reason should name the unit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_interval_understands_every_unit() {
+        assert_eq!(parse_interval("45s").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_interval("10m").unwrap(), Duration::from_secs(600));
+        assert_eq!(parse_interval("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_interval("7d").unwrap(), Duration::from_secs(604_800));
+    }
+
+    #[test]
+    fn parse_interval_rejects_zero_and_nonsense() {
+        assert!(parse_interval("0m").is_err(), "zero is a busy loop");
+        assert!(parse_interval("10").is_err(), "a unit is required");
+        assert!(parse_interval("").is_err());
+        assert!(parse_interval("soon").is_err());
+    }
+
+    #[test]
     fn read_config_string_prefers_inline() {
         let inst = AdapterInstance {
             adapter_type: "jira".into(),
@@ -482,6 +631,7 @@ adapter:
             config: Some("does-not-exist.yaml".into()),
             config_inline: Some("inline-cfg".into()),
             manual_connect: false,
+            auto_reload: None,
         };
         let got = read_config_string(&inst, Path::new("/tmp/view.yaml")).unwrap();
         assert_eq!(got, "inline-cfg");
@@ -495,6 +645,7 @@ adapter:
             config: None,
             config_inline: None,
             manual_connect: false,
+            auto_reload: None,
         };
         assert!(read_config_string(&inst, Path::new("/tmp/view.yaml")).is_err());
     }

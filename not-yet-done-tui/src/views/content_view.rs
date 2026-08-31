@@ -15,6 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -1336,6 +1337,21 @@ pub struct ContentView {
     /// auto-load and subtab-switch loads are suppressed for this tab;
     /// the user must trigger a `reload` action to populate the pane.
     pub manual_connect: bool,
+
+    /// Mirrors `AdapterConfig.auto_reload`: how long this tab's data may sit
+    /// before the App refreshes it by itself. `None` (the default) → never.
+    pub auto_reload: Option<Duration>,
+
+    /// When this tab last finished a load — the instant the `auto_reload`
+    /// clock runs from. Stamped by [`Self::end_load`], so *any* completed
+    /// fetch (including a manual `r`) postpones the next automatic one, and
+    /// by the App when it fires an automatic reload.
+    ///
+    /// A [`Cell`] for the same reason as `loads_in_flight`: the App drives
+    /// loads from `&self` methods, and this is bookkeeping about the view
+    /// rather than a change to what it shows. `None` until the first load
+    /// lands — an adapter nobody has opened has nothing to keep fresh.
+    last_load_at: Cell<Option<Instant>>,
 
     /// Per-tab reminder handling, mirrored from `ViewFileConfig.reminder`.
     /// When present and `enabled`, the App subscribes to this tab's adapter
@@ -7737,6 +7753,8 @@ impl ContentView {
             header_overlay: crate::components::sort_header::HeaderOverlay::default(),
             source_path: None,
             manual_connect: config.adapter.manual_connect,
+            auto_reload: config.adapter.auto_reload,
+            last_load_at: Cell::new(None),
             reminder: config.reminder.clone(),
             connected_once: false,
             pending_cursor_closes: Vec::new(),
@@ -10103,6 +10121,34 @@ impl ContentView {
     pub fn end_load(&self) {
         self.loads_in_flight
             .set(self.loads_in_flight.get().saturating_sub(1));
+        // The data is as fresh as it will get right now — restart the
+        // `auto_reload` clock from here, so a manual reload counts as one.
+        self.mark_data_fetched();
+    }
+
+    /// Restart the `auto_reload` clock. Called whenever this tab's data was
+    /// (re)fetched, and by the App the moment it *starts* an automatic
+    /// reload — without that stamp the same due deadline would fire again on
+    /// the next loop iteration, before the load it just spawned can land.
+    pub fn mark_data_fetched(&self) {
+        self.last_load_at.set(Some(Instant::now()));
+    }
+
+    /// When this tab is next due for an automatic reload, or `None` if it
+    /// never is.
+    ///
+    /// `None` covers the four ways a tab has nothing to refresh: no
+    /// `auto_reload` configured, no adapter, nothing loaded yet (the timer
+    /// refreshes, it never connects — a `manual_connect` tab still waits for
+    /// the user's first `reload`), and a fetch already in flight (whose
+    /// completion re-arms the clock anyway).
+    pub fn auto_reload_due_at(&self) -> Option<Instant> {
+        let interval = self.auto_reload?;
+        self.adapter.as_ref()?;
+        if !self.connected_once || self.has_live_load_banner() {
+            return None;
+        }
+        Some(self.last_load_at.get()? + interval)
     }
 
     /// True while this tab has a banner whose text advances with wall-clock
@@ -14469,6 +14515,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -14667,6 +14714,103 @@ mod tests {
                 has_children: None,
             },
         ]
+    }
+
+    /// A view wired to an adapter, with `auto_reload` set to `interval`.
+    fn auto_reloading_view(interval: Option<Duration>) -> ContentView {
+        let mut config = test_config_with_children();
+        config.adapter.auto_reload = interval;
+        let adapter: Arc<dyn ContentAdapter> = Arc::new(MockAdapterBuilder::new("mock").build());
+        ContentView::new(
+            test_theme(),
+            &config,
+            Some(adapter),
+            &KeyBindingConfig::default(),
+        )
+    }
+
+    /// Pretend a load has landed: that is what arms the auto-reload clock.
+    fn finish_a_load(view: &mut ContentView) {
+        view.set_items(Vec::new(), Vec::new(), None, Vec::new(), None);
+        view.end_load();
+    }
+
+    #[test]
+    fn a_view_without_auto_reload_is_never_due() {
+        let mut view = auto_reloading_view(None);
+        finish_a_load(&mut view);
+        assert_eq!(view.auto_reload_due_at(), None);
+    }
+
+    #[test]
+    fn auto_reload_waits_for_the_first_load() {
+        // The timer refreshes; it never connects. Until something has been
+        // fetched there is nothing to refresh — a `manual_connect` tab the
+        // user has not opened must stay quiet.
+        let view = auto_reloading_view(Some(Duration::from_secs(600)));
+        assert_eq!(view.auto_reload_due_at(), None);
+    }
+
+    #[test]
+    fn auto_reload_arms_once_a_load_has_landed() {
+        let mut view = auto_reloading_view(Some(Duration::from_secs(600)));
+        finish_a_load(&mut view);
+        let due = view.auto_reload_due_at().expect("armed after a load");
+        assert!(
+            due > Instant::now(),
+            "a tab loaded a moment ago is not due yet"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_does_not_arm_the_timer() {
+        // `connected_once` stays false: there is no established connection to
+        // refresh, only an error to retry — which is the user's call.
+        let mut view = auto_reloading_view(Some(Duration::from_secs(600)));
+        view.set_items(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+            Some("boom".to_string()),
+        );
+        view.end_load();
+        assert_eq!(view.auto_reload_due_at(), None);
+    }
+
+    #[test]
+    fn an_elapsed_interval_makes_the_tab_due() {
+        // A zero interval stands in for "the interval has passed" — the
+        // config parser rejects zero, so it cannot mean anything else.
+        let mut view = auto_reloading_view(Some(Duration::ZERO));
+        finish_a_load(&mut view);
+        let due = view.auto_reload_due_at().expect("armed");
+        assert!(due <= Instant::now(), "the interval has run out");
+    }
+
+    #[test]
+    fn a_load_in_flight_disarms_the_timer() {
+        // Its completion re-arms the clock, so there is nothing to fire
+        // meanwhile — and firing would abort the fetch that is already out.
+        let mut view = auto_reloading_view(Some(Duration::ZERO));
+        finish_a_load(&mut view);
+        view.begin_load();
+        assert_eq!(view.auto_reload_due_at(), None);
+        view.end_load();
+        assert!(view.auto_reload_due_at().is_some());
+    }
+
+    #[test]
+    fn every_completed_load_postpones_the_next_automatic_one() {
+        let mut view = auto_reloading_view(Some(Duration::from_secs(600)));
+        finish_a_load(&mut view);
+        let first = view.auto_reload_due_at().expect("armed");
+        finish_a_load(&mut view);
+        let second = view.auto_reload_due_at().expect("still armed");
+        assert!(
+            second > first,
+            "a manual reload counts as a refresh and resets the clock"
+        );
     }
 
     #[test]
@@ -15253,6 +15397,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -15820,6 +15965,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -16101,6 +16247,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -16275,6 +16422,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -17408,6 +17556,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -19349,6 +19498,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -21274,6 +21424,7 @@ mod tests {
                 config: None,
                 config_inline: None,
                 manual_connect: false,
+                auto_reload: None,
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -24517,6 +24668,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             config: None,
             config_inline: None,
             manual_connect: false,
+            auto_reload: None,
         },
         views: vec![ViewDef {
             highlights: Vec::new(),

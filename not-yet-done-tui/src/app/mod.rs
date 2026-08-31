@@ -12280,6 +12280,55 @@ impl App {
         true
     }
 
+    // -----------------------------------------------------------------------
+    // Auto-reload (`adapter.auto_reload`)
+    // -----------------------------------------------------------------------
+
+    /// The next moment at which *some* tab is due for an automatic reload, or
+    /// `None` when no tab has `adapter.auto_reload` armed.
+    ///
+    /// The main loop sleeps on this instead of polling: one timer for the
+    /// whole App, re-derived on every loop iteration, so a tab that finishes
+    /// a load (or gets its config reloaded) pushes the deadline out without
+    /// anything having to cancel a timer.
+    pub fn auto_reload_deadline(&self) -> Option<Instant> {
+        self.content_views_indexed()
+            .filter_map(|(_, cv)| cv.auto_reload_due_at())
+            .min()
+    }
+
+    /// Reload every tab whose `auto_reload` interval has run out. Returns
+    /// `true` when at least one reload was started (the load banner it raises
+    /// needs a repaint).
+    ///
+    /// A *hard* reload, like the `r` action: an automatic refresh that
+    /// re-served the adapter's warm cache would keep showing exactly the rows
+    /// it was supposed to replace. Only the tab's active pane is refetched —
+    /// the same pane `r` would hit — because a hard reload asks the adapter to
+    /// drop in-flight work, and firing that once per pane would have the
+    /// panes abort each other.
+    pub fn poll_auto_reload(&mut self) -> bool {
+        let now = Instant::now();
+        let due: Vec<(usize, crate::views::content_view::PaneId)> = self
+            .content_views_indexed()
+            .filter(|(_, cv)| cv.auto_reload_due_at().is_some_and(|at| at <= now))
+            .map(|(i, cv)| (i, cv.active_pane_id()))
+            .collect();
+        if due.is_empty() {
+            return false;
+        }
+        for (view_index, pane_id) in due {
+            // Stamp before spawning: the load's own stamp only lands when it
+            // returns, and until then this deadline would stay due and fire
+            // again on every pass through the loop.
+            if let Some(cv) = self.content_view(view_index) {
+                cv.mark_data_fetched();
+            }
+            self.spawn_content_reload(view_index, pane_id);
+        }
+        true
+    }
+
     /// True while any tab shows a load banner whose text advances purely with
     /// wall-clock time — an adapter `Busy` or a load this App is counting
     /// itself. A tab with `load_banner: off` has nothing to repaint, so it
