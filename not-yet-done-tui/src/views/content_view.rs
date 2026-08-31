@@ -10134,6 +10134,16 @@ impl ContentView {
         self.last_load_at.set(Some(Instant::now()));
     }
 
+    /// This tab's `auto_reload` interval in the spelling the config takes
+    /// (`10m`), or `None` when it refreshes only on demand. Rendered into
+    /// the tab bar so a tab that refetches on its own says so; it reports
+    /// what is *configured*, not whether the clock is currently running, so
+    /// the bar keeps its width instead of twitching around every load.
+    pub fn auto_reload_label(&self) -> Option<String> {
+        self.auto_reload
+            .map(not_yet_done_host::format_interval)
+    }
+
     /// When this tab is next due for an automatic reload, or `None` if it
     /// never is.
     ///
@@ -14733,6 +14743,19 @@ mod tests {
     fn finish_a_load(view: &mut ContentView) {
         view.set_items(Vec::new(), Vec::new(), None, Vec::new(), None);
         view.end_load();
+    }
+
+    #[test]
+    fn the_tab_label_hint_reads_back_as_the_configured_interval() {
+        // Nothing configured, nothing to say.
+        assert_eq!(auto_reloading_view(None).auto_reload_label(), None);
+
+        // Configured: the hint spells the interval the way the view file
+        // does, before the first load has armed anything — the bar states
+        // the setting, not the state of the clock.
+        let view = auto_reloading_view(Some(Duration::from_secs(600)));
+        assert_eq!(view.auto_reload_label().as_deref(), Some("10m"));
+        assert_eq!(view.auto_reload_due_at(), None, "not armed yet");
     }
 
     #[test]

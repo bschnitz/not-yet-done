@@ -6489,7 +6489,12 @@ Set on the Jira instance as `auto_reload: 10m`. For a quicker round use
       interval, switch back → the data is fresh (the fetch ran without the
       tab being visible), no dialog stole the focus meanwhile.
 - [ ] **No auto reload configured** (any other tab): sits there unchanged
-      for as long as you like; only `r` fetches.
+      for as long as you like; only `r` fetches, and its tab bar entry
+      carries no interval.
+- [ ] **The bar says so**: the Jira entry reads `3 Jira (10m)` — already
+      before the tab has ever loaded, and unchanged while a load runs.
+      `tabs.auto_reload_hint: false` in `tui.yaml` removes it from every tab
+      and the bar keeps its layout (no second line appearing).
 - [ ] **Bad interval**: write `auto_reload: 10` (no unit) into the view file
       and save it from `:config` → the write is rejected with
       `view-config parse: … has no unit (expected s/m/h/d)` and the editor
