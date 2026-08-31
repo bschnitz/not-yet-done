@@ -26,6 +26,20 @@ use std::sync::Arc;
 pub struct NotificationRecord {
     pub at: chrono::DateTime<chrono::Local>,
     pub message: String,
+    /// What the sender called it. The bar itself draws every message the
+    /// same; the notification centre uses this to mark the errors and to
+    /// filter down to them, which is the whole reason a log is kept.
+    pub level: NoticeLevel,
+}
+
+/// How bad a logged message is. Only the *sender* knows — `notify_error` says
+/// error, `notify` says message — so it is recorded when the message is
+/// pushed rather than guessed from its wording afterwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NoticeLevel {
+    #[default]
+    Info,
+    Error,
 }
 
 /// What a message *is* — the order in which the bar resolves scarcity.
@@ -126,7 +140,17 @@ impl NotificationBarComponent {
     }
 
     pub fn push(&mut self, msg: String) {
-        self.log(&msg);
+        self.push_at(msg, NoticeLevel::Info);
+    }
+
+    /// Push a message the sender considers a failure. Identical on the bar —
+    /// only the log tells the two apart (see [`NoticeLevel`]).
+    pub fn push_error(&mut self, msg: String) {
+        self.push_at(msg, NoticeLevel::Error);
+    }
+
+    fn push_at(&mut self, msg: String, level: NoticeLevel) {
+        self.log(&msg, level);
         self.messages.push(Notice {
             key: None,
             class: NoticeClass::Message,
@@ -153,7 +177,7 @@ impl NotificationBarComponent {
                 .iter()
                 .all(|n| n.key.as_deref() != Some(key) || n.text != text)
         {
-            self.log(&text);
+            self.log(&text, NoticeLevel::Info);
         }
         if let Some(slot) = self
             .messages
@@ -178,10 +202,11 @@ impl NotificationBarComponent {
         self.messages.retain(|n| n.key.as_deref() != Some(key));
     }
 
-    fn log(&mut self, msg: &str) {
+    fn log(&mut self, msg: &str, level: NoticeLevel) {
         self.history.push(NotificationRecord {
             at: chrono::Local::now(),
             message: msg.to_string(),
+            level,
         });
         self.trim_history();
     }

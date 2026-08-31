@@ -4531,7 +4531,7 @@ formatting survive in the affected YAML (`git diff`).
 - [ ] Different tabs never collide (the same key in tab A and tab B → no
       prompt).
 
-## The notification bar — display limit + the log in the editor (`f10`)
+## The notification bar — display limit + the notification centre (`f10`)
 
 `notifications.max_messages` limits how many messages the **bottom** bar shows
 at once (`0` = unlimited); `notifications.history_limit` limits the running log
@@ -4541,22 +4541,46 @@ of both bars.
       the **newer** one is at the bottom; the older one has been displaced.
 - [ ] The upper alert bar is untouched: several `prominent` messages still sit
       up there all at once.
-- [ ] `f10` opens the log read-only in the editor: all messages of both bars
-      in chronological order, with timestamps, alert lines marked with `!`;
+- [ ] `f10` opens the notification centre: both bars' messages on one page,
+      **newest first**, each with an `HH:MM:SS` stamp and a marker — `✖` for a
+      message from `notify_error`, `▲` for one of the top bar's, `●` otherwise.
+      The heading counts them (`5 messages, 1 error`).
+- [ ] `j`/`k` move the cursor (a `▍` bar in front of the row); the entry under
+      it is unfolded in place, wrapped over the full width, with its line
+      breaks kept. A message that already fitted is **not** repeated below
+      itself.
+- [ ] `Ctrl+D`/`Ctrl+U` and the page keys move a screen, `g`/`G` to the ends;
+      more entries than fit show a scroll bar on the right edge.
+- [ ] `y` copies the message under the cursor **without** its timestamp; the
+      page confirms it (`✓ message copied (N chars)`) and the notification bar
+      stays out of it — nothing about the copy appears in the log.
+- [ ] `Y` copies everything listed as a timestamped log, alert lines marked
+      with `!`, continuation lines indented — the same text `o` opens.
+- [ ] `e` narrows the page to the errors (`3 of 12 — errors only` in the
+      heading) and back; the entry under the cursor keeps its place across the
+      toggle. With the filter on, `Y` and `o` leave the other messages out too.
+- [ ] `e` with no error in the log → "No errors in the log — press e for
+      everything."
+- [ ] `o` closes the page and opens the same log read-only in the editor;
       saving or closing changes nothing.
+- [ ] `Esc`/`q` close the page; every other key is swallowed rather than
+      closing it (unlike the `f1` overview).
 - [ ] `Z` (dismiss) clears the bars, the log stays: `f10` still shows the
       dismissed messages.
-- [ ] With no message at all: `f10` → "No notifications yet", no editor.
+- [ ] With no message at all: `f10` opens the page reading "Nothing has been
+      reported yet." — not a notification.
+- [ ] A log spanning two days (leave the TUI open overnight, or set the clock)
+      shows a dated rule where the day turns.
 - [ ] The hint in the bottom right names the actual keys
       (`[Z] dismiss  [f10] open`) and follows a rebind of the two actions.
 - [ ] A `:config` reload (saving tui.yaml) loses neither the open messages nor
       the log.
 - [ ] Rebind both to a **chord** (`show_notifications: z l`,
-      `dismiss_notifications: z c`) and reload: `z l` opens the log in a
-      `pause_tui` editor profile just like `f10` did. This is the regression —
-      the chord branch used to swallow the editor request, so every
-      editor-opening global action was a silent no-op on a chord while the
-      same action worked on a single key.
+      `dismiss_notifications: z c`) and reload: `z l` opens the notification
+      centre just like `f10` did, and `o` from there still opens a `pause_tui`
+      editor profile. This is the regression — the chord branch used to swallow
+      the editor request, so every editor-opening global action was a silent
+      no-op on a chord while the same action worked on a single key.
 
 ## The builtin editor (`builtin: true`, the `vimrealm` crate)
 
