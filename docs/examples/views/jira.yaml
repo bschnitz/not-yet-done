@@ -11,6 +11,11 @@ tab:
 adapter:
   type: jira
   config: jira-adapter.yaml
+  # Refresh the tab every ten minutes -- a board other people work on goes
+  # stale while you look at it. Only ever refreshes: the timer starts after
+  # the tab's first load, so it never connects (or asks for credentials) on
+  # its own. See the README section "Auto Reload".
+  auto_reload: 10m
 
 views:
   # This tab has two subtabs: the normal ticket list (`key: i`) and the

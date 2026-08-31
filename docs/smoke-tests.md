@@ -6466,6 +6466,37 @@ check that nothing opened behind the TUI.
       the error names the keys it got and asks for `field:`. Adding
       `field: <key>` resolves it.
 
+## Per-adapter auto reload (`adapter.auto_reload`)
+
+Set on the Jira instance as `auto_reload: 10m`. For a quicker round use
+`auto_reload: 30s` while testing and put it back afterwards.
+
+- [ ] **It fires**: open Jira, let it load, note the top row, change a ticket
+      in the browser so the order or a cell must change, wait out the
+      interval → the table refreshes by itself; the load banner appears
+      briefly, the selected row is kept.
+- [ ] **It refreshes, it does not connect**: restart the TUI and do _not_
+      open the Jira tab. After more than one interval nothing has been
+      fetched — no credential dialog, no banner on the tab bar. Only after
+      the first `r` does the timer start running.
+- [ ] **A manual reload resets the clock**: press `r` shortly before the
+      interval runs out → the automatic reload does not come right after it,
+      but a full interval later.
+- [ ] **Drilled in**: drill into a ticket's comments and wait out the
+      interval → the _comment_ level reloads, the pane does not jump back to
+      the ticket list.
+- [ ] **A background tab too**: switch to another tab, wait out the
+      interval, switch back → the data is fresh (the fetch ran without the
+      tab being visible), no dialog stole the focus meanwhile.
+- [ ] **No auto reload configured** (any other tab): sits there unchanged
+      for as long as you like; only `r` fetches.
+- [ ] **Bad interval**: write `auto_reload: 10` (no unit) into the view file
+      and `:config` reload it → the view file is rejected with a message
+      naming the missing unit, and the editor reopens on it. `10m` loads
+      again.
+- [ ] The CLI ignores it: `nyd adapter jira ls -q '<JQL>'` runs one request
+      and exits as before.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

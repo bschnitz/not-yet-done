@@ -1378,6 +1378,51 @@ it is clear who is asking. Only one such dialog is shown at a time;
 if a second adapter asks meanwhile, its form is kept and shown when you
 open its tab.
 
+## Auto Reload
+
+`adapter.auto_reload` re-fetches a tab's data on a timer:
+
+```yaml
+adapter:
+  type: jira
+  config: jira-adapter.yaml
+  manual_connect: true
+  auto_reload: 10m # refresh every ten minutes once the tab has loaded
+```
+
+The interval is a number plus a unit — `s`, `m`, `h`, `d` (the same
+spelling a hook's `when.throttle` uses). A unit is required: a bare
+`10` is rejected rather than guessed at. Absent, the default, means
+never.
+
+It exists for the adapters whose data changes behind your back: a Jira
+board other people work on, a chat, a queue. Without it a tab shows
+whatever it fetched when you last pressed `r`, and there is no way to
+tell a five-minute-old table from a five-hour-old one.
+
+**The timer refreshes; it never connects.** It only starts running once
+the instance has loaded at least once, so it composes with
+`manual_connect` instead of defeating it: a tab you never open stays
+unconnected, and no credential dialog appears because of a timer. Every
+completed load re-arms the clock, so pressing `r` also postpones the
+next automatic reload by a full interval.
+
+A reload it fires is the _hard_ kind — the one `r` performs: the
+adapter drops its caches and re-fetches, since an automatic refresh
+that re-served the warm cache would keep showing exactly the rows it
+was meant to replace. It refreshes the tab's **active pane** at its
+current level (a drilled-in level reloads that level, not the root),
+and it holds off while a fetch is already in flight.
+
+**Trade-off**: every interval is a real round-trip to the backend, in
+the background, whether or not you are looking at the tab. On a paged
+or rate-limited API pick an interval you would be willing to press `r`
+at by hand — `10m` for a ticket board is cheap, `30s` for the same
+board is not.
+
+Only the TUI honours it. The CLI and Waybar run one request and exit,
+so they have nothing to keep fresh.
+
 ## Confluence Adapter
 
 Read/write adapter for Atlassian Confluence Server / Data-Center
