@@ -43,10 +43,10 @@ tab:
 adapter:
   type: sqlite
   config: sqlite-adapter.yaml
-  # `manual_connect` defaults to true (nothing connects until you press the
+  # `auto_connect` defaults to `never` (nothing connects until you press the
   # reload key). A local SQLite file is cheap to open and never logs in, so
   # this tab opts back into loading at startup.
-  manual_connect: false
+  auto_connect: startup
 
 views:
   # ── Tree view: database → tables → rows ────────────────────────────────

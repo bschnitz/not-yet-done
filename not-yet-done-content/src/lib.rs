@@ -9,6 +9,7 @@ pub mod mock;
 
 pub mod anonymize;
 pub mod auth;
+pub mod auto_connect;
 pub mod children;
 pub mod describe;
 pub mod download;
@@ -27,6 +28,7 @@ pub mod text;
 pub mod workspace;
 
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
+pub use auto_connect::AutoConnect;
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
 pub use describe::{
     HELP_ACTION_ID, TypeNode, child_types_of_type, help_action, is_builtin, level_actions,

@@ -5681,7 +5681,7 @@ views:
             adapter_id: Some("mock-1".to_string()),
             config: None,
             config_inline: Some("{}".to_string()),
-            manual_connect: false,
+            auto_connect: not_yet_done_content::AutoConnect::Startup,
         };
 
         let yaml = generate_scaffold(&adapter, &meta, &ScaffoldSelection::all())
@@ -5698,6 +5698,11 @@ views:
         assert_eq!(cfg.tab.order, 3);
         assert_eq!(cfg.adapter.adapter_type, "mock");
         assert_eq!(cfg.adapter.id.as_deref(), Some("mock-1"));
+        assert_eq!(
+            cfg.adapter.connect_mode(),
+            not_yet_done_content::AutoConnect::Startup,
+            "the generated `auto_connect:` line must parse back to what was asked for"
+        );
         let view = cfg
             .views
             .iter()

@@ -1604,19 +1604,23 @@ impl App {
 
     /// Auto-load the content view in `view_index` if it has an adapter from
     /// YAML config. The watchers are always spawned (they only subscribe to
-    /// a channel, no I/O); the load itself is skipped for tabs flagged
-    /// `adapter.manual_connect: true` so they wait for an explicit
-    /// user-triggered `reload` action.
+    /// a channel, no I/O); the load itself belongs to
+    /// `adapter.auto_connect: startup` alone — that is the one mode that
+    /// connects without its tab ever being opened — plus the `on_open` tab
+    /// the app happens to *start* on, which is open from the first frame and
+    /// would otherwise wait for the user to leave it and come back.
+    /// Every other `on_open` tab waits for [`Self::set_active_tab`], and a
+    /// `never` tab for a `reload` the user presses.
     ///
     /// Called from [`Self::wire_content_view`] *after* the DB-persisted
     /// default query has been stamped onto the pane, so the first fetch
     /// already uses it — that ordering is why the wiring lives outside
     /// [`App::new`], which has no repositories to read yet.
     pub fn start_content_load(&mut self, view_index: usize) {
-        let Some((pane_id, manual)) = self
+        let Some((pane_id, mode)) = self
             .content_view(view_index)
             .filter(|cv| cv.adapter.is_some())
-            .map(|cv| (cv.active_pane_id(), cv.manual_connect))
+            .map(|cv| (cv.active_pane_id(), cv.auto_connect))
         else {
             return;
         };
@@ -1624,7 +1628,8 @@ impl App {
         self.spawn_content_invalidation_watcher(view_index);
         self.spawn_content_reminder_watcher(view_index);
         self.spawn_content_prompt_watcher(view_index);
-        if !manual {
+        let starts_open = mode.is_on_open() && self.active_tab == Tab::Content(view_index);
+        if mode.is_eager() || starts_open {
             self.spawn_content_load(view_index, pane_id);
         }
     }
@@ -8118,11 +8123,12 @@ fn split_leading_token(s: &str) -> (String, &str) {
 /// May the view at `view_index` put a credential form in front of the user?
 ///
 /// The active tab always may — the user is looking at it. Beyond that, a tab
-/// that loads eagerly (`adapter.manual_connect: false`) may too: it starts
+/// that loads eagerly (`adapter.auto_connect: startup`) may too: it starts
 /// connecting the moment the app comes up, without the user ever visiting it,
 /// so deferring its login to the first tab switch would park it on an answer
-/// nobody can see. A `manual_connect` tab has no such problem — its load only
-/// ever starts from a `reload` the user pressed on that very tab.
+/// nobody can see. The other two modes have no such problem — an `on_open`
+/// tab is the active one when it connects, and a `never` tab only ever
+/// connects from a `reload` the user pressed on that very tab.
 ///
 /// `popup_owner` is the view a form is already open for, if any. It is never
 /// taken away: that login waits for its answer, and dropping its form is the
@@ -8131,13 +8137,13 @@ fn split_leading_token(s: &str) -> (String, &str) {
 fn credential_form_allowed(
     active_view: usize,
     view_index: usize,
-    manual_connect: bool,
+    connects_unvisited: bool,
     popup_owner: Option<usize>,
 ) -> bool {
     if popup_owner.is_some_and(|owner| owner != view_index) {
         return false;
     }
-    active_view == view_index || !manual_connect
+    active_view == view_index || connects_unvisited
 }
 
 /// Title for the credential form. A credential script names what it is asking
@@ -8281,6 +8287,19 @@ impl App {
         self.active_tab = tab;
         {
             let Tab::Content(idx) = tab;
+            // `adapter.auto_connect: on_open`: opening the tab *is* the
+            // trigger. Asked here rather than at startup because that is the
+            // whole point of the mode — the connection (and any credential
+            // dialog it drags along) happens on a tab the user is looking at.
+            // The view answers `false` once its pane holds data or a fetch is
+            // already out, so tabbing away and back does not refetch.
+            if let Some(pane_id) = self
+                .content_view(idx)
+                .filter(|cv| cv.wants_load_on_open())
+                .map(|cv| cv.active_pane_id())
+            {
+                self.spawn_content_load(idx, pane_id);
+            }
             if let Some(cv) = self.content_view(idx) {
                 // Cheap staleness probe: adapters over stores that change
                 // outside the process (local task/tracking DB written by
@@ -8496,11 +8515,11 @@ impl App {
                 error,
             } => {
                 let Tab::Content(active) = self.active_tab;
-                let manual = self
+                let unvisited = self
                     .content_view(view_index)
-                    .is_none_or(|cv| cv.manual_connect);
+                    .is_some_and(|cv| cv.auto_connect.is_eager());
                 let owner = self.adapter_creds_popup.as_ref().map(|p| p.view_index());
-                if !credential_form_allowed(active, view_index, manual, owner) {
+                if !credential_form_allowed(active, view_index, unvisited, owner) {
                     return;
                 }
                 let tab_name = self.content_view(view_index).map(|cv| cv.tab_name.clone());
@@ -12799,25 +12818,34 @@ mod tests {
 
     #[test]
     fn an_eager_background_tab_may_ask_at_startup() {
-        // manual_connect: false — it connects without the user visiting it,
+        // auto_connect: startup — it connects without the user visiting it,
         // so its form has to be visible from wherever the user is.
-        assert!(credential_form_allowed(0, 3, false, None));
+        assert!(credential_form_allowed(0, 3, true, None));
     }
 
     #[test]
     fn a_manual_connect_background_tab_stays_quiet() {
         // Its load only starts from a `reload` pressed on that tab, so the
         // form waits until the tab is opened.
-        assert!(!credential_form_allowed(0, 3, true, None));
+        assert!(!credential_form_allowed(0, 3, false, None));
+    }
+
+    #[test]
+    fn an_on_open_background_tab_stays_quiet_too() {
+        // `on_open` connects on the first visit, so a form for it can only
+        // ever be raised while its own tab is the active one — a background
+        // `on_open` tab has nothing in flight to ask about.
+        assert!(!credential_form_allowed(0, 3, false, None));
+        assert!(credential_form_allowed(3, 3, false, None));
     }
 
     #[test]
     fn an_open_form_is_never_taken_from_another_view() {
-        assert!(!credential_form_allowed(1, 1, false, Some(4)));
-        assert!(!credential_form_allowed(0, 3, false, Some(4)));
+        assert!(!credential_form_allowed(1, 1, true, Some(4)));
+        assert!(!credential_form_allowed(0, 3, true, Some(4)));
         // …but the owner may keep refreshing its own form (new error, new
         // round of a multi-step script).
-        assert!(credential_form_allowed(0, 4, false, Some(4)));
+        assert!(credential_form_allowed(0, 4, true, Some(4)));
     }
 
     #[test]

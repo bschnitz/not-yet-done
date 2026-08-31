@@ -33,6 +33,8 @@ use serde::Deserialize;
 
 use not_yet_done_content::{AdapterFactory, ContentAdapter, HostContext, InMemoryHostBus};
 
+pub use not_yet_done_content::AutoConnect;
+
 pub mod hooks;
 pub use hooks::{
     HookBinding, HookConfig, HookInputs, HookOutcome, HookReport, HookTarget, HookWhen,
@@ -207,17 +209,30 @@ pub struct AdapterInstance {
     /// precedence over [`Self::config`] when both are present.
     #[serde(default)]
     pub config_inline: Option<String>,
-    /// When `true`, no load is spawned automatically for this instance —
-    /// the user must trigger a `reload` action to make the adapter connect.
-    /// Used for adapters whose connection is expensive or unreliable
-    /// (Postgres-over-SSH-tunnel, slow VPN-gated APIs). Front-ends that always
-    /// connect (the CLI, Waybar) ignore it; only the TUI defers the load.
+    /// When this instance is allowed to connect on its own: `never` (the
+    /// default), `on_open` (the first time its tab is opened) or `startup`
+    /// (while the app comes up, unvisited). See [`AutoConnect`].
+    ///
+    /// Absent means "not stated here" rather than "never": the answer then
+    /// comes from the older [`Self::manual_connect`] boolean. Read the
+    /// resolved value through [`Self::connect_mode`], never this field.
+    ///
+    /// Only the TUI knows what opening a tab means, so only the TUI tells the
+    /// three apart; the CLI and Waybar run one request and connect regardless.
+    #[serde(default)]
+    pub auto_connect: Option<AutoConnect>,
+    /// The older boolean spelling of [`Self::auto_connect`]: `true` means
+    /// [`AutoConnect::Never`], `false` means [`AutoConnect::Startup`]. Kept
+    /// because every view file written before `auto_connect` existed says it.
     ///
     /// **Defaults to `true`.** Connecting is the side-effecting choice: it can
     /// open a tunnel, spend a VPN round-trip or put a credential dialog in
     /// front of the user before they have asked for anything. An instance that
-    /// is cheap and local (the task DB, a local SQLite file) opts back in with
-    /// an explicit `manual_connect: false`.
+    /// is cheap and local (the task DB, a local SQLite file) opts back in.
+    ///
+    /// An explicit `auto_connect:` wins when both keys are present — the
+    /// newer key is the more specific statement, and it is the only one that
+    /// can say `on_open` at all.
     #[serde(default = "manual_connect_default")]
     pub manual_connect: bool,
     /// Refresh this instance's tabs on a timer: `auto_reload: 10m` re-fetches
@@ -324,6 +339,20 @@ impl AdapterInstance {
     /// Effective instance id — explicit `id:` if given, else `adapter_type`.
     pub fn effective_instance_id(&self) -> &str {
         self.id.as_deref().unwrap_or(&self.adapter_type)
+    }
+
+    /// When this instance may connect on its own — the resolved answer of the
+    /// two keys that can state it.
+    ///
+    /// An explicit [`Self::auto_connect`] wins; otherwise the legacy
+    /// [`Self::manual_connect`] boolean answers, and its default (`true`)
+    /// makes an instance that states neither [`AutoConnect::Never`].
+    pub fn connect_mode(&self) -> AutoConnect {
+        match self.auto_connect {
+            Some(mode) => mode,
+            None if self.manual_connect => AutoConnect::Never,
+            None => AutoConnect::Startup,
+        }
     }
 }
 
@@ -513,6 +542,7 @@ mod tests {
             id: None,
             config: None,
             config_inline: None,
+            auto_connect: None,
             manual_connect: false,
             auto_reload: None,
         };
@@ -526,6 +556,7 @@ mod tests {
             id: Some("analytics".into()),
             config: None,
             config_inline: None,
+            auto_connect: None,
             manual_connect: false,
             auto_reload: None,
         };
@@ -567,6 +598,103 @@ adapter:
 "#;
         let head: ViewFileHead = serde_yaml::from_str(yaml).unwrap();
         assert!(!head.adapter.manual_connect);
+    }
+
+    #[test]
+    fn the_legacy_boolean_still_answers_when_it_is_the_only_key() {
+        let manual: ViewFileHead = serde_yaml::from_str(
+            r#"
+adapter:
+  type: tasks
+  config_inline: "x"
+  manual_connect: true
+"#,
+        )
+        .unwrap();
+        assert_eq!(manual.adapter.connect_mode(), AutoConnect::Never);
+
+        let eager: ViewFileHead = serde_yaml::from_str(
+            r#"
+adapter:
+  type: tasks
+  config_inline: "x"
+  manual_connect: false
+"#,
+        )
+        .unwrap();
+        assert_eq!(eager.adapter.connect_mode(), AutoConnect::Startup);
+    }
+
+    #[test]
+    fn an_instance_that_states_nothing_waits_for_a_reload() {
+        let head: ViewFileHead = serde_yaml::from_str(
+            r#"
+adapter:
+  type: jira
+  config_inline: "x"
+"#,
+        )
+        .unwrap();
+        assert_eq!(head.adapter.connect_mode(), AutoConnect::Never);
+    }
+
+    #[test]
+    fn auto_connect_reads_all_three_answers() {
+        for (written, expected) in [
+            ("never", AutoConnect::Never),
+            ("on_open", AutoConnect::OnOpen),
+            ("startup", AutoConnect::Startup),
+        ] {
+            let head: ViewFileHead = serde_yaml::from_str(&format!(
+                r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  auto_connect: {written}
+"#
+            ))
+            .unwrap();
+            assert_eq!(
+                head.adapter.connect_mode(),
+                expected,
+                "auto_connect: {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_connect_wins_over_the_legacy_boolean() {
+        // The old key cannot say `on_open` at all, so a file that has been
+        // migrated must not be dragged back by a `manual_connect:` line its
+        // author forgot to delete.
+        let head: ViewFileHead = serde_yaml::from_str(
+            r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  manual_connect: true
+  auto_connect: startup
+"#,
+        )
+        .unwrap();
+        assert_eq!(head.adapter.connect_mode(), AutoConnect::Startup);
+    }
+
+    #[test]
+    fn a_typo_in_auto_connect_fails_the_view_file_instead_of_disabling_it() {
+        let err = serde_yaml::from_str::<ViewFileHead>(
+            r#"
+adapter:
+  type: jira
+  config_inline: "x"
+  auto_connect: on-open
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("on_open"),
+            "the error should name the values it takes, got: {err}"
+        );
     }
 
     #[test]
@@ -663,6 +791,7 @@ adapter:
             id: None,
             config: Some("does-not-exist.yaml".into()),
             config_inline: Some("inline-cfg".into()),
+            auto_connect: None,
             manual_connect: false,
             auto_reload: None,
         };
@@ -677,6 +806,7 @@ adapter:
             id: None,
             config: None,
             config_inline: None,
+            auto_connect: None,
             manual_connect: false,
             auto_reload: None,
         };
