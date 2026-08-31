@@ -6491,11 +6491,14 @@ Set on the Jira instance as `auto_reload: 10m`. For a quicker round use
 - [ ] **No auto reload configured** (any other tab): sits there unchanged
       for as long as you like; only `r` fetches.
 - [ ] **Bad interval**: write `auto_reload: 10` (no unit) into the view file
-      and `:config` reload it → the view file is rejected with a message
-      naming the missing unit, and the editor reopens on it. `10m` loads
-      again.
-- [ ] The CLI ignores it: `nyd adapter jira ls -q '<JQL>'` runs one request
-      and exits as before.
+      and save it from `:config` → the write is rejected with
+      `view-config parse: … has no unit (expected s/m/h/d)` and the editor
+      reopens on it. `10m` saves again. Beware: a bad view file that reaches
+      disk any other way is skipped silently by instance discovery — the tab
+      is simply gone, and the CLI then only says it knows no such instance.
+- [x] The CLI ignores it: `nyd adapter jira help --full` prints the level with
+      `auto_reload: 10m` set (checked headless, 2026-08-31); a real
+      `nyd adapter jira ls -q '<JQL>'` still runs one request and exits.
 
 ## Refinements / deferred tasks
 
