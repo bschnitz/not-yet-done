@@ -2099,6 +2099,47 @@ The grouping reads `which_key.groups` directly, so sections work even with
 `which_key.enabled: false` or `collapse_in_bars: false` — naming a group is
 enough.
 
+### Notification centre
+
+```yaml
+notifications:
+  max_messages: 5 # messages the bottom bar shows at once (0 = unlimited)
+  history_limit: 200 # entries the log keeps (0 = unlimited)
+```
+
+`F10` (the `show_notifications` action) opens every message both bars have
+shown on one page, newest first — each stamped and marked by what it is: `✖` an
+error, `▲` an alert from the top bar, `●` an ordinary message. The log outlives
+both the display cap and a `Z` dismiss, so an error that scrolled past three
+loads ago is still there, and a log spanning several days gets a dated rule
+where the day turns.
+
+The page exists to get a message **out** of the app:
+
+| Key                                 | Does                                         |
+| ----------------------------------- | -------------------------------------------- |
+| `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` | move the cursor, a screen, to the ends       |
+| `y`                                 | copy the message under the cursor, verbatim  |
+| `Y`                                 | copy everything listed, as a timestamped log |
+| `e`                                 | errors only, and back                        |
+| `o`                                 | hand the log to `$EDITOR` (read-only)        |
+| `Esc` / `q`                         | close                                        |
+
+The entry under the cursor is **unfolded in place** — wrapped over the full
+width, line breaks kept — so a stack trace or a long adapter error can be read
+without leaving the app; the other entries stay one line each.
+
+**What the page shows is what it copies.** With `e` on, `Y` and `o` leave the
+ordinary messages out too. `y` copies the message alone, without its timestamp:
+it is the text you paste into a ticket. Both confirm on the page itself rather
+than on the notification bar — a "copied" notification would land in the very
+log being copied.
+
+**Why the copy is the point:** the bars are a glance. `max_messages: 1` keeps
+the bottom bar to the newest message, and `Z` wipes it — but an error is
+usually wanted _after_ it has gone, with its wording intact. `o` stays for what
+only an editor solves: searching a long log, or saving it somewhere.
+
 ### Popups
 
 ```yaml

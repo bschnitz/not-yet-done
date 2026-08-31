@@ -11,6 +11,7 @@ pub mod data_table;
 pub mod key_conflict;
 pub mod key_recorder;
 pub mod notification_bar;
+pub mod notification_center;
 pub mod option_menu;
 pub mod query_error_bar;
 pub mod query_menu;

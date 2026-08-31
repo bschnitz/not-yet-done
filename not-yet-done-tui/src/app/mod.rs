@@ -1144,6 +1144,10 @@ pub struct App {
     /// plus one section per which-key group.
     pub shortcut_overview: crate::components::shortcut_overview::ShortcutOverview,
 
+    /// The notification centre (`global.show_notifications`, default `f10`):
+    /// both bars' logs on one page, with copy.
+    pub notification_center: crate::components::notification_center::NotificationCenter,
+
     /// Adapter credentials popup (login form for adapters that surface
     /// `AdapterStatus::NeedsCreds`).
     pub adapter_creds_popup: Option<crate::components::adapter_creds_popup::AdapterCredsPopup>,
@@ -1461,6 +1465,10 @@ impl App {
                 shortcut_overview_min,
                 shortcut_overview_max,
             ),
+            notification_center:
+                crate::components::notification_center::NotificationCenter::new(Arc::clone(
+                    &shared_theme,
+                )),
             adapter_creds_popup: None,
             adapter_prompt_popup: None,
             adapter_prompt_queue: std::collections::VecDeque::new(),
@@ -5162,6 +5170,14 @@ impl App {
             return EditorRequest::None;
         }
 
+        // The notification centre intercepts all keys while open: it scrolls,
+        // filters and copies, and `o` hands the log on to the editor.
+        if self.notification_center.is_open() {
+            let req = self.handle_notification_center_key(key);
+            self.sync_components();
+            return req;
+        }
+
         // Shortcut overview intercepts all keys while open: it scrolls on the
         // navigation keys and closes on anything else.
         if self.shortcut_overview.is_open() {
@@ -5602,6 +5618,7 @@ impl App {
             || self.config_picker_popup.is_some()
             || self.shortcut_menu.is_open()
             || self.shortcut_overview.is_open()
+            || self.notification_center.is_open()
             || self.shortcut_capture.is_some()
     }
 
@@ -5691,7 +5708,7 @@ impl App {
             GlobalAction::SubtabNext => return self.cycle_active_subtab(true),
             GlobalAction::SubtabPrev => return self.cycle_active_subtab(false),
             GlobalAction::DismissNotifications => self.dismiss_notifications(),
-            GlobalAction::ShowNotifications => return self.open_notifications_editor(),
+            GlobalAction::ShowNotifications => self.open_notification_center(),
             GlobalAction::ShowLastError => return self.open_last_error_editor(),
             GlobalAction::ShortcutMenu => self.open_shortcut_menu(),
             GlobalAction::ShortcutOverview => self.open_shortcut_overview(),
@@ -8162,40 +8179,6 @@ fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
     }
 }
 
-/// Render notification-log records as one `[timestamp] message` block, oldest
-/// first regardless of which bar they came from. Entries flagged `true` came
-/// from the loud top alert bar and carry a `!` marker so they stay
-/// distinguishable. Continuation lines of a multi-line message are indented so
-/// entry boundaries stay readable. Empty input yields an empty string.
-fn format_notification_log<'a>(
-    records: impl Iterator<
-        Item = (
-            &'a crate::components::notification_bar::NotificationRecord,
-            bool,
-        ),
-    >,
-) -> String {
-    let mut entries: Vec<_> = records.collect();
-    entries.sort_by_key(|(r, _)| r.at);
-
-    let mut out = String::new();
-    for (record, alert) in entries {
-        let stamp = record.at.format("%Y-%m-%d %H:%M:%S");
-        let marker = if alert { "! " } else { "" };
-        if record.message.is_empty() {
-            out.push_str(&format!("[{stamp}] {marker}\n"));
-            continue;
-        }
-        for (i, line) in record.message.lines().enumerate() {
-            if i == 0 {
-                out.push_str(&format!("[{stamp}] {marker}{line}\n"));
-            } else {
-                out.push_str(&format!("    {line}\n"));
-            }
-        }
-    }
-    out
-}
 
 /// The right-aligned hint both notification bars render, built from the live
 /// bindings of the two actions that act on them: dismiss, and open the log in
@@ -8233,12 +8216,35 @@ impl App {
         self.open_session(Box::new(session))
     }
 
-    /// Open the notification log in `$EDITOR` (read-only) — both bars' messages
-    /// merged chronologically, so nothing the short bottom bar pushed out (or a
-    /// `Z` dismissed) is lost. Falls back to a notification when nothing has
-    /// been shown yet.
-    fn open_notifications_editor(&mut self) -> EditorRequest {
-        let text = self.notification_log_text();
+    /// Open the notification centre: both bars' logs on one page, newest
+    /// first, with per-message and whole-log copy. Opens even when nothing
+    /// has been reported — the page says so, which is an answer too.
+    fn open_notification_center(&mut self) {
+        let entries = self.notification_entries();
+        self.notification_center.open(entries);
+    }
+
+    /// Keys pressed while the notification centre is open. `o` is the one
+    /// that leaves it: the log goes to `$EDITOR` for what only an editor can
+    /// do — search it, save it, page through a huge payload.
+    fn handle_notification_center_key(&mut self, key: &str) -> EditorRequest {
+        use crate::components::notification_center::CenterOutcome;
+        match self.notification_center.handle_key(key) {
+            CenterOutcome::Consumed => EditorRequest::None,
+            CenterOutcome::Close => {
+                self.notification_center.close();
+                EditorRequest::None
+            }
+            CenterOutcome::OpenEditor => {
+                let text = self.notification_center.log_text();
+                self.notification_center.close();
+                self.open_notifications_editor(text)
+            }
+        }
+    }
+
+    /// Open `text` — the notification log — read-only in `$EDITOR`.
+    fn open_notifications_editor(&mut self, text: String) -> EditorRequest {
         if text.is_empty() {
             self.notify("No notifications yet".to_string());
             return EditorRequest::None;
@@ -8250,16 +8256,13 @@ impl App {
         self.open_session(Box::new(session))
     }
 
-    /// Both bars' notification logs merged into one text block — see
-    /// [`format_notification_log`].
-    fn notification_log_text(&self) -> String {
-        format_notification_log(
-            self.notification_bar
-                .history()
-                .iter()
-                .map(|r| (r, false))
-                .chain(self.alert_bar.history().iter().map(|r| (r, true))),
-        )
+    /// Both bars' logs as one list of entries, tagged with which bar pushed
+    /// them. The order is the centre's business, not this function's.
+    fn notification_entries(&self) -> Vec<crate::components::notification_center::Entry> {
+        use crate::components::notification_center::Entry;
+        let mut entries = Entry::from_records(self.notification_bar.history(), false);
+        entries.extend(Entry::from_records(self.alert_bar.history(), true));
+        entries
     }
 
     fn set_active_tab(&mut self, tab: Tab) {
@@ -8547,7 +8550,7 @@ impl App {
     pub fn notify_error(&mut self, message: String) {
         not_yet_done_content::http_log::log_error("notify", &message);
         self.last_error = Some(message.clone());
-        self.notification_bar.push(message);
+        self.notification_bar.push_error(message);
     }
 
     /// Sync all component state from App. Called once after each dispatch.
@@ -12726,9 +12729,9 @@ fn load_content_views(
 #[cfg(test)]
 mod tests {
     use super::{
-        App, credential_form_allowed, credential_form_title, format_notification_log,
-        image_temp_filename, notification_bar_hint, parse_query_apply_args,
-        render_payload_template, split_leading_token, which_key_filter, which_key_prefix_allowed,
+        App, credential_form_allowed, credential_form_title, image_temp_filename,
+        notification_bar_hint, parse_query_apply_args, render_payload_template,
+        split_leading_token, which_key_filter, which_key_prefix_allowed,
     };
 
     #[test]
@@ -12774,52 +12777,6 @@ mod tests {
         assert_eq!(credential_form_title(None, None), "Login");
     }
 
-    /// Build a log record at a fixed local time so the rendered stamp is
-    /// deterministic.
-    fn record(
-        hour: u32,
-        minute: u32,
-        message: &str,
-    ) -> crate::components::notification_bar::NotificationRecord {
-        use chrono::TimeZone;
-        crate::components::notification_bar::NotificationRecord {
-            at: chrono::Local
-                .with_ymd_and_hms(2026, 8, 3, hour, minute, 0)
-                .unwrap(),
-            message: message.to_string(),
-        }
-    }
-
-    #[test]
-    fn notification_log_merges_both_bars_chronologically() {
-        let bottom = [record(9, 5, "second"), record(9, 20, "fourth")];
-        let top = [record(9, 0, "first"), record(9, 10, "third")];
-        let text = format_notification_log(
-            bottom
-                .iter()
-                .map(|r| (r, false))
-                .chain(top.iter().map(|r| (r, true))),
-        );
-        assert_eq!(
-            text,
-            "[2026-08-03 09:00:00] ! first\n\
-             [2026-08-03 09:05:00] second\n\
-             [2026-08-03 09:10:00] ! third\n\
-             [2026-08-03 09:20:00] fourth\n"
-        );
-    }
-
-    #[test]
-    fn notification_log_indents_continuation_lines() {
-        let rec = [record(9, 0, "headline\ndetail")];
-        let text = format_notification_log(rec.iter().map(|r| (r, false)));
-        assert_eq!(text, "[2026-08-03 09:00:00] headline\n    detail\n");
-    }
-
-    #[test]
-    fn notification_log_is_empty_without_records() {
-        assert!(format_notification_log(std::iter::empty()).is_empty());
-    }
 
     #[test]
     fn bar_hint_names_the_bound_keys() {

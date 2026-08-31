@@ -246,6 +246,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.shortcut_overview.render(frame, popup_area);
     }
 
+    // Overlay: notification centre (f10) — the log with copy.
+    if app.notification_center.is_open() {
+        app.notification_center.render(frame, popup_area);
+    }
+
     // Overlay: which-key chord-completion preview (passive; mirrors the
     // half-typed chord).
     if app.which_key.is_open() {
