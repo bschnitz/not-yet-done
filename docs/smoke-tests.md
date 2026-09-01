@@ -3716,6 +3716,38 @@ Set `auto_connect: on_open` on a remote view (e.g. `taiga.yaml`) that is
       message naming `never`, `on_open` and `startup` — it does not silently
       fall back to the default.
 
+## Connect progress — what the login is doing, and for how long
+
+The connect banner names the step it is in and counts its seconds
+(`StatusReporter`, `docs/content-adapter-spec.md`). Best seen on a view whose
+login runs an SSO script: `jira.yaml` with `auth.bindings[].provider.type:
+command`.
+
+- [ ] **The counter moves**: start the TUI with the Jira tab visible. The
+      banner reads `Connecting… running the cookie script (1/3) (0s/120s)` and
+      the first number counts up once a second. The limits are the ones from
+      the config (`retries:` and `timeout_secs:` of the provider), not a fixed 30.
+- [ ] **The steps change**: after the browser login finishes, the banner walks
+      on through `signing in` and `checking the session`, each restarting the
+      counter at `0s` — the clock measures the current step.
+- [ ] **The load says what it loads**: once connected, the banner reads
+      `Loading issues… (Ns)` (not the unnamed `Loading… (Ns)` of the frontend's
+      own counter) and disappears when the rows arrive.
+- [ ] **A drill-down names itself too**: open a ticket (`o`) and switch to its
+      comments → `Loading comments… (Ns)`; attachments and links likewise.
+- [ ] **A second attempt is visible**: point the provider at a script that
+      exits non-zero (`script: false`) with `retries: 3`. The banner counts
+      `(1/3)` → `(2/3)` → `(3/3)`, each with its own restarted clock, then the
+      login fails with `Connection failed: …`.
+- [ ] **A tab nobody is watching**: with `auto_connect: startup` on a
+      background tab, switch to that tab mid-login → the banner is there with a
+      counter that matches how long the login has really been running.
+- [ ] **No banner when nothing is happening**: after a successful load the
+      banner is gone and the CPU stays quiet (the periodic redraw is armed only
+      while a live banner exists — `App::needs_periodic_tick`).
+- [ ] **CLI parity**: `nyd cli adapter jira ls` prints one `nyd: Connecting… …`
+      line per step on stderr (not one per second), then the rows on stdout.
+
 ## Postgres — an `auth:` block instead of the gpg pinentry
 
 Prerequisite: switch `postgres-adapter.yaml` to the delegating form (see

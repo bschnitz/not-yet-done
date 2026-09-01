@@ -176,11 +176,7 @@ impl StoatAdapter {
         // the CLI cannot distinguish the two and prints an empty list as if
         // the account had no servers.
         if matches!(*self.status_tx.borrow(), AdapterStatus::Idle) {
-            let _ = self.status_tx.send(AdapterStatus::Connecting {
-                retry: 1,
-                max_retries: 1,
-                timeout_secs: 0,
-            });
+            let _ = self.status_tx.send(AdapterStatus::connecting(1, 1, 0));
         }
         let auth = Arc::clone(&self.auth);
         let state = Arc::clone(&self.state);

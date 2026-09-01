@@ -2,7 +2,8 @@
 //! the TUI's auth banner and credential popup.
 //!
 //! The TUI watches [`AdapterStatus`] for the whole session: it renders
-//! "Connecting… (1/3) Timeout: 30s", opens a form when the adapter asks for
+//! "Connecting… running the cookie script (1/3) (12s/120s)", opens a form
+//! when the adapter asks for
 //! credentials, and shows the data once the adapter reports `Ready`. The CLI
 //! needs exactly the same three things, minus the keypress — a command
 //! connects immediately instead of waiting for `r`:
@@ -330,11 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn waits_for_connecting_to_become_ready() {
-        let (tx, rx) = watch::channel(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 1,
-            timeout_secs: 0,
-        });
+        let (tx, rx) = watch::channel(AdapterStatus::connecting(1, 1, 0));
         let a = StatusOnly { rx };
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -345,11 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn failure_while_connecting_is_reported() {
-        let (tx, rx) = watch::channel(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 1,
-            timeout_secs: 0,
-        });
+        let (tx, rx) = watch::channel(AdapterStatus::connecting(1, 1, 0));
         let a = StatusOnly { rx };
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;

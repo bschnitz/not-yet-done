@@ -54,6 +54,15 @@ pub trait CredentialResolver: Send + Sync {
 
     /// Drops any cached value so the next `resolve()` re-fetches.
     async fn invalidate(&self);
+
+    /// Where to report what this resolver is doing, when it does something
+    /// long enough to be worth reporting. Default: nowhere.
+    ///
+    /// The caller can name the *slot* it is resolving on its own; what only
+    /// the resolver knows is what happens inside one `resolve()` — which of
+    /// its retries is running. A resolver that finishes in microseconds
+    /// ignores this and stays as it was.
+    fn report_to(&mut self, _status: crate::StatusReporter) {}
 }
 
 /// A resolver's way back to the user: the adapter's
@@ -270,6 +279,9 @@ pub struct CommandResolver {
     timeout: Duration,
     retries: u32,
     cache: RwLock<Option<String>>,
+    /// Set by the auth orchestrator; `None` everywhere the resolver is used
+    /// standalone (an SSH tunnel's password, a calendar backend's token).
+    status: Option<crate::StatusReporter>,
 }
 
 impl CommandResolver {
@@ -279,6 +291,7 @@ impl CommandResolver {
             timeout,
             retries: retries.max(1),
             cache: RwLock::new(None),
+            status: None,
         }
     }
 
@@ -327,7 +340,13 @@ impl CredentialResolver for CommandResolver {
             return Ok(v);
         }
         let mut last_err = String::new();
-        for _ in 0..self.retries {
+        for attempt in 1..=self.retries {
+            // A second attempt is invisible from outside — the script may
+            // even open a second browser window — so say which one is
+            // running rather than letting the wait look like one long one.
+            if let Some(status) = &self.status {
+                status.connect_attempt(attempt, self.retries, self.timeout.as_secs());
+            }
             match self.run_once().await {
                 Ok(v) => {
                     *self.cache.write().await = Some(v.clone());
@@ -344,6 +363,10 @@ impl CredentialResolver for CommandResolver {
 
     async fn invalidate(&self) {
         *self.cache.write().await = None;
+    }
+
+    fn report_to(&mut self, status: crate::StatusReporter) {
+        self.status = Some(status);
     }
 }
 

@@ -24,6 +24,7 @@ pub mod scaffold;
 pub mod script_buffer;
 pub mod slug;
 pub mod sort_serde;
+pub mod status_reporter;
 pub mod text;
 pub mod workspace;
 
@@ -48,6 +49,7 @@ pub use editor_marks::NOT_YOURS_MARKER;
 pub use http_send::{Repeat, RetryConfig};
 pub use link_route::{LinkRoute, LinkRouteError};
 pub use node_ref::{NodeRef, NodeRefParseError};
+pub use status_reporter::{BusyGuard, StatusReporter, elapsed_secs, now_unix_ms};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -1712,13 +1714,29 @@ pub struct AuthField {
 pub enum AdapterStatus {
     /// Auth has not started yet.
     Idle,
-    /// Auth is in progress. `retry` is 1-based; `max_retries` and
-    /// `timeout_secs` come from the adapter's config so the view can
-    /// render "Connecting… (retry/max_retries) Timeout: timeout_secs".
+    /// Auth is in progress.
+    ///
+    /// `retry` is 1-based; `max_retries` and `timeout_secs` come from the
+    /// config of whatever is currently running (the login script's own
+    /// retries and deadline, say). Both are optional information: `1` and
+    /// `0` mean "no such limit", and a frontend then prints no bound rather
+    /// than inventing one.
+    ///
+    /// `step` names what the login is doing right now ("running the login
+    /// script"), and `started_at_unix_ms` is when *that step* started — so a
+    /// frontend can count the seconds it has been stuck in it. A login is
+    /// not one wait but a sequence of them, and the step that is taking the
+    /// time is the one the user needs to see.
+    ///
+    /// Published through [`StatusReporter`], which keeps the parts
+    /// consistent; adapters rarely build this variant by hand (see
+    /// [`AdapterStatus::connecting`] for the ones that do).
     Connecting {
         retry: u32,
         max_retries: u32,
         timeout_secs: u64,
+        started_at_unix_ms: u64,
+        step: Option<String>,
     },
     /// Adapter needs interactive credentials. The frontend renders a form
     /// for `fields` and submits the collected values via
@@ -1765,6 +1783,20 @@ pub enum AdapterStatus {
 }
 
 impl AdapterStatus {
+    /// A connect that has just started: the clock stamped now, no step named
+    /// yet. For adapters that publish the variant directly instead of going
+    /// through a [`StatusReporter`]; pass `max_retries: 1` / `timeout_secs: 0`
+    /// for the limits that do not apply.
+    pub fn connecting(retry: u32, max_retries: u32, timeout_secs: u64) -> Self {
+        Self::Connecting {
+            retry,
+            max_retries,
+            timeout_secs,
+            started_at_unix_ms: now_unix_ms(),
+            step: None,
+        }
+    }
+
     /// One-line rendering of a *transient* connection state, for frontends
     /// that only need to tell the user what the adapter is doing right now.
     /// `None` for the two resting states (`Idle`, `Ready`) — there is
@@ -1780,17 +1812,28 @@ impl AdapterStatus {
                 retry,
                 max_retries,
                 timeout_secs,
+                started_at_unix_ms,
+                step,
             } => {
-                // Both details are optional in the status: an adapter with a
-                // single, open-ended attempt reports `1/1` and `0` — printing
-                // "(1/1) Timeout: 0s" would state a limit that isn't there.
+                // Every part is optional in the status: an adapter with a
+                // single, open-ended, unnamed attempt reports `1/1`, `0` and
+                // no step — printing "(1/1) Timeout: 0s" would state limits
+                // that aren't there.
                 let mut line = "Connecting…".to_string();
+                if let Some(step) = step {
+                    line.push_str(&format!(" {step}"));
+                }
                 if *max_retries > 1 {
                     line.push_str(&format!(" ({retry}/{max_retries})"));
                 }
-                if *timeout_secs > 0 {
-                    line.push_str(&format!(" Timeout: {timeout_secs}s"));
-                }
+                // The elapsed seconds are the point: a login that hangs looks
+                // exactly like one that is about to succeed, until the counter
+                // says otherwise.
+                let elapsed = elapsed_secs(*started_at_unix_ms);
+                line.push_str(&match timeout_secs {
+                    0 => format!(" ({elapsed}s)"),
+                    limit => format!(" ({elapsed}s/{limit}s)"),
+                });
                 Some(line)
             }
             Self::NeedsCreds { .. } => Some("Login required".into()),
@@ -3809,20 +3852,44 @@ mod adapter_status_tests {
             retry: 2,
             max_retries: 5,
             timeout_secs: 30,
+            started_at_unix_ms: now_unix_ms(),
+            step: Some("running the cookie script".into()),
         }
         .banner_text()
         .unwrap();
-        assert_eq!(bounded, "Connecting… (2/5) Timeout: 30s");
+        assert_eq!(
+            bounded,
+            "Connecting… running the cookie script (2/5) (0s/30s)"
+        );
 
-        // A single open-ended attempt: no retry budget, no deadline to name.
+        // A single open-ended, unnamed attempt: no retry budget, no deadline
+        // to name — but always the elapsed seconds, which is the one number
+        // that is never unknown and never irrelevant.
         let open = AdapterStatus::Connecting {
             retry: 1,
             max_retries: 1,
             timeout_secs: 0,
+            started_at_unix_ms: now_unix_ms(),
+            step: None,
         }
         .banner_text()
         .unwrap();
-        assert_eq!(open, "Connecting…");
+        assert_eq!(open, "Connecting… (0s)");
+    }
+
+    #[test]
+    fn the_connect_clock_counts_the_seconds_that_have_passed() {
+        let started = now_unix_ms() - 42_000;
+        let text = AdapterStatus::Connecting {
+            retry: 1,
+            max_retries: 1,
+            timeout_secs: 120,
+            started_at_unix_ms: started,
+            step: Some("running the cookie script".into()),
+        }
+        .banner_text()
+        .unwrap();
+        assert_eq!(text, "Connecting… running the cookie script (42s/120s)");
     }
 
     #[test]

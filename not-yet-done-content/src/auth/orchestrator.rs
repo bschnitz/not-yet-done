@@ -39,7 +39,7 @@ use super::{
     AuthSpec, CredentialBinding, CredentialError, CredentialProvider, CredentialResolver,
     SessionCachePolicy,
 };
-use crate::{AdapterStatus, AuthField};
+use crate::{AdapterStatus, AuthField, StatusReporter};
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -97,7 +97,10 @@ pub struct AuthOrchestrator {
     /// concurrent callers don't race the prompt form.
     auth_mutex: Mutex<()>,
     session_store: Box<dyn SessionStore>,
-    status_tx: watch::Sender<AdapterStatus>,
+    /// Where the login says what it is doing. Shared with the adapter when
+    /// the adapter passed one in, so its own `Busy` lines and these arrive
+    /// on one channel in the order they happened.
+    status: StatusReporter,
     clock: Arc<dyn Clock>,
 }
 
@@ -105,6 +108,17 @@ impl AuthOrchestrator {
     pub fn from_spec(
         spec: AuthSpec,
         session_store: Box<dyn SessionStore>,
+    ) -> Result<Self, AuthError> {
+        Self::from_spec_with_status(spec, session_store, StatusReporter::new())
+    }
+
+    /// Same, but reporting onto a channel the adapter already owns — for an
+    /// adapter that also announces its *requests* (`Busy`) and wants one
+    /// status stream, not two that a frontend would have to merge.
+    pub fn from_spec_with_status(
+        spec: AuthSpec,
+        session_store: Box<dyn SessionStore>,
+        status: StatusReporter,
     ) -> Result<Self, AuthError> {
         // Mechanism and field coverage are checked against the adapter's
         // own descriptors (`AuthSpec::validate_against`) while its config
@@ -131,7 +145,10 @@ impl AuthOrchestrator {
                 CredentialProvider::Prompt { .. } => prompt_fields.push(binding.clone()),
                 CredentialProvider::ScriptResult => script_fields.push(binding.field.clone()),
                 other => {
-                    let r = other.build_resolver().map_err(AuthError::Misconfigured)?;
+                    let mut r = other.build_resolver().map_err(AuthError::Misconfigured)?;
+                    // A resolver that retries or waits internally is the one
+                    // that knows which attempt it is on; let it say so.
+                    r.report_to(status.clone());
                     resolvers.insert(binding.field.clone(), r);
                 }
             }
@@ -144,7 +161,6 @@ impl AuthOrchestrator {
                 "bindings use `script-result` but the auth block names no `script`".into(),
             ));
         }
-        let (status_tx, _) = watch::channel(AdapterStatus::Idle);
         Ok(Self {
             spec,
             resolvers,
@@ -154,7 +170,7 @@ impl AuthOrchestrator {
             pending_prompt: Mutex::new(None),
             auth_mutex: Mutex::new(()),
             session_store,
-            status_tx,
+            status,
             clock: Arc::new(SystemClock),
         })
     }
@@ -172,7 +188,7 @@ impl AuthOrchestrator {
     /// Subscribe to live status updates. Adapters forward this through
     /// `ContentAdapter::subscribe_status`.
     pub fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
-        self.status_tx.subscribe()
+        self.status.subscribe()
     }
 
     /// Return a fresh session, reusing the cached one if the policy and
@@ -187,7 +203,7 @@ impl AuthOrchestrator {
         let _guard = self.auth_mutex.lock().await;
         if let Some(entry) = self.session_store.load().await {
             if self.is_session_valid(&entry) {
-                let _ = self.status_tx.send(AdapterStatus::Ready);
+                self.status.ready();
                 return Ok(ResolvedSession {
                     blob: entry.blob,
                     from_cache: true,
@@ -306,12 +322,11 @@ impl AuthOrchestrator {
         F: FnOnce(HashMap<String, String>) -> Fut,
         Fut: std::future::Future<Output = Result<String, String>>,
     {
-        let _ = self.status_tx.send(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 1,
-            timeout_secs: 30,
-        });
+        self.status.begin_connect();
         let credentials = self.resolve_credentials().await?;
+        // Whatever turning the credentials into a session takes — for most
+        // mechanisms nothing, for a token exchange a round trip.
+        self.status.connect_step("signing in");
         let blob = login(credentials).await.map_err(AuthError::LoginFailed)?;
         if !matches!(self.spec.session_cache, SessionCachePolicy::None) {
             self.session_store
@@ -321,7 +336,7 @@ impl AuthOrchestrator {
                 })
                 .await;
         }
-        let _ = self.status_tx.send(AdapterStatus::Ready);
+        self.status.ready();
         Ok(ResolvedSession {
             blob,
             from_cache: false,
@@ -339,6 +354,15 @@ impl AuthOrchestrator {
                 .resolvers
                 .get(&binding.field)
                 .expect("non-interactive resolver registered");
+            // Name the slot before asking for it: this loop is where a login
+            // spends its minutes, and which slot it is stuck on is the one
+            // thing the user cannot guess.
+            let (max_retries, timeout_secs) = binding.provider.progress_limits();
+            self.status.connect_phase(
+                binding.provider.progress_step(&binding.field),
+                max_retries,
+                timeout_secs,
+            );
             let v = r.resolve().await?;
             values.insert(binding.field.clone(), v);
         }
@@ -429,7 +453,7 @@ impl AuthOrchestrator {
     ) -> Result<HashMap<String, String>, AuthError> {
         let (tx, rx) = oneshot::channel();
         *self.pending_prompt.lock().await = Some(tx);
-        let _ = self.status_tx.send(AdapterStatus::NeedsCreds {
+        self.status.send(AdapterStatus::NeedsCreds {
             fields,
             header,
             error,
@@ -446,6 +470,11 @@ impl AuthOrchestrator {
             AuthError::Misconfigured("no `script` for the `script-result` bindings".into())
         })?;
         let timeout = Duration::from_secs(self.spec.script_timeout_secs);
+        self.status.connect_phase(
+            format!("asking the credential script `{script}`"),
+            1,
+            self.spec.script_timeout_secs,
+        );
         let request: Vec<&str> = self.script_fields.iter().map(String::as_str).collect();
         let mut input: BTreeMap<String, String> = BTreeMap::new();
 

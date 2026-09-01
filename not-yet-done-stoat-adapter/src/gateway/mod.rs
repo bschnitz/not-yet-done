@@ -76,11 +76,7 @@ async fn run(
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        let _ = status_tx.send(AdapterStatus::Connecting {
-            retry: attempt,
-            max_retries: attempt,
-            timeout_secs: 0,
-        });
+        let _ = status_tx.send(AdapterStatus::connecting(attempt, attempt, 0));
 
         match connect_once(&ws_url, &client, &state, &status_tx, &inv_tx).await {
             // Clean close → reset backoff and reconnect promptly.

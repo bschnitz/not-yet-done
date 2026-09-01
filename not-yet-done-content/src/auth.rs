@@ -213,6 +213,42 @@ pub enum CredentialProvider {
 }
 
 impl CredentialProvider {
+    /// What to tell the user while this provider is being asked for
+    /// `field` — the login's slowest step is usually one of these, and
+    /// "Connecting…" alone does not say which.
+    ///
+    /// Worded from the user's side: they know they configured a script for
+    /// their cookie, not that a `CommandResolver` is spawning a shell.
+    pub fn progress_step(&self, field: &str) -> String {
+        match self {
+            Self::Literal { .. } => format!("reading {field} from the config"),
+            Self::Prompt { .. } => format!("waiting for {field}"),
+            Self::Env { var } => format!("reading {field} from ${var}"),
+            Self::File { .. } => format!("reading {field} from its file"),
+            Self::Command { .. } => format!("running the {field} script"),
+            Self::ScriptResult | Self::Script { .. } => {
+                format!("asking the credential script for {field}")
+            }
+            Self::Keyring { .. } => format!("reading {field} from the keyring"),
+        }
+    }
+
+    /// The attempt count and deadline this provider runs under, as
+    /// `(max_retries, timeout_secs)`. `(1, 0)` means neither limit exists —
+    /// reading a file has no deadline worth showing, while a script that may
+    /// wait minutes for a browser login has both.
+    pub fn progress_limits(&self) -> (u32, u64) {
+        match self {
+            Self::Command {
+                timeout_secs,
+                retries,
+                ..
+            } => ((*retries).max(1), *timeout_secs),
+            Self::Script { timeout_secs, .. } => (1, *timeout_secs),
+            _ => (1, 0),
+        }
+    }
+
     /// Whether resolving this provider needs the orchestrator rather than
     /// a standalone [`CredentialResolver`]: `prompt` because only the
     /// frontend can answer it, `script-result` because the script is
