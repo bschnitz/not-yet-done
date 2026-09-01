@@ -31,6 +31,11 @@
 //! that form, and there the dotted spelling is simply unavailable to string
 //! literals.
 //!
+//! A qualifier is a join alias only to a host that has joins. To one that
+//! evaluates rows in memory, `tags.sender` is a single dotted path into a
+//! single row, and that is the whole name the row is asked for — see
+//! [`ColRef::path`], which both halves read the left-hand side through.
+//!
 //! # Examples
 //!
 //! ```yaml
@@ -51,6 +56,7 @@
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -129,6 +135,27 @@ impl ColRef {
             table: Some(table.into()),
             column: column.into(),
         }
+    }
+
+    /// The reference as it was written on the left-hand side: `table.column`
+    /// when qualified, the bare column otherwise.
+    ///
+    /// This is the name a row is asked for, and the name to match against a
+    /// host's vocabulary. A qualifier means a join alias to a host that builds
+    /// SQL, but rows in memory have no joins: to them `tags.sender_pids` is one
+    /// dotted path into one row. Reading only [`ColRef::column`] would look up
+    /// `sender_pids` there and quietly find nothing.
+    pub fn path(&self) -> Cow<'_, str> {
+        match &self.table {
+            Some(table) => Cow::Owned(format!("{table}.{}", self.column)),
+            None => Cow::Borrowed(&self.column),
+        }
+    }
+}
+
+impl fmt::Display for ColRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.path())
     }
 }
 
@@ -525,7 +552,7 @@ impl Serialize for FilterExpr {
             FilterExpr::Not(inner) => single_key(s, "not", inner),
             FilterExpr::Leaf(leaf) => {
                 let mut seq = s.serialize_seq(Some(if leaf.op.needs_rhs() { 3 } else { 2 }))?;
-                seq.serialize_element(&col_ref_string(&leaf.lhs))?;
+                seq.serialize_element(&leaf.lhs.path())?;
                 seq.serialize_element(leaf.op.as_str())?;
                 match &leaf.rhs {
                     Rhs::Lit(lit) => seq.serialize_element(lit)?,
@@ -554,18 +581,10 @@ fn single_key<S: Serializer, T: Serialize + ?Sized>(
     map.end()
 }
 
-/// The left-hand side, where a bare name is unambiguous.
-fn col_ref_string(col: &ColRef) -> String {
-    match &col.table {
-        Some(table) => format!("{table}.{}", col.column),
-        None => col.column.clone(),
-    }
-}
-
 /// The right-hand side, where a leading dot is what marks a field reference.
 fn dotted(col: &ColRef) -> String {
-    match &col.table {
-        Some(table) => format!("{table}.{}", col.column),
+    match col.table {
+        Some(_) => col.path().into_owned(),
         None => format!(".{}", col.column),
     }
 }
