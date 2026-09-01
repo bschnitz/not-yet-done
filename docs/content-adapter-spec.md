@@ -438,6 +438,57 @@ Two rules make the status usable by a frontend that cannot ask twice:
 Adapters that authenticate synchronously inside their calls need none of this:
 the default `subscribe_status()` reports `Ready` forever.
 
+#### Saying what it is doing — `StatusReporter`
+
+`Connecting` and `Busy` both carry a clock (`started_at_unix_ms`) and a name
+(`step` / `label`), because "the tab is still empty" is not information. A
+login that waits three minutes for a browser SSO round and one that has hung
+look identical without them.
+
+Adapters do not build those variants by hand. `StatusReporter`
+(`not-yet-done-content`) owns the channel and keeps the parts consistent:
+
+| Call                                    | Says                                                     |
+| --------------------------------------- | -------------------------------------------------------- |
+| `begin_connect()`                       | a login has started; the clock is reset                  |
+| `connect_phase(step, retries, timeout)` | which step it is in, and the limits that step runs under |
+| `connect_attempt(n, of, timeout)`       | which attempt of the current step is running             |
+| `ready()` / `failed(reason)`            | the login ended                                          |
+| `busy(label, timeout) -> BusyGuard`     | a request against the live connection is out             |
+
+The clock on `Connecting` measures the **current step**, not the whole login:
+the step that is taking the time is the one worth showing, and a login made of
+many quick steps then visibly moves instead of sitting on one number.
+
+`busy()` returns a guard rather than needing a matching "done" call — the
+announcement ends when the guard drops, including through the `?` of a failed
+request. Announcements nest (an inner one restores its caller's line, not a
+blank one), and a status that arrived _during_ the request — a `Failed` from a
+mid-flight rejection — outranks the restore.
+
+The auth layer reports the login by itself, so an adapter that uses
+`AuthOrchestrator` gets the connect steps (`running the cookie script`,
+`asking the credential script`, `signing in`) for free, including the retry
+count and deadline the resolver actually runs under. What only the adapter can
+name is what its own requests are for; pass the orchestrator a shared reporter
+(`AuthOrchestrator::from_spec_with_status`) so both land on one channel:
+
+```rust
+let status = StatusReporter::new();
+let orchestrator = AuthOrchestrator::from_spec_with_status(spec, store, status.clone())?;
+// …later, per request:
+let client = self.auth.get_client().await?;      // login steps report themselves
+let _busy = self.status.busy("Loading issues", 0);
+```
+
+Order matters: connect first, announce after. A "Loading issues" line drawn
+over a running login replaces what _is_ happening with what happens next.
+
+None of this reaches a frontend directly — it is one channel of values that a
+TUI, the CLI, or nobody at all reads. An adapter that reports nothing still
+works; the frontend then counts its own in-flight loads, which can say "still
+loading" but never what for.
+
 ### Authentication — the adapter publishes its mechanisms
 
 An **authentication mechanism** is what the adapter speaks against its remote

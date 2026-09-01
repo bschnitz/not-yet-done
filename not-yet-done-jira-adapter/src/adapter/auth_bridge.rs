@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock, watch};
 
 use not_yet_done_content::{
-    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec,
+    AdapterStatus, AuthFieldSpec, AuthOrchestrator, AuthSpec, MechanismSpec, StatusReporter,
 };
 
 use crate::client::{JiraClient, JiraSession};
@@ -55,6 +55,11 @@ pub(super) struct AuthBridge {
     /// Config `retry:`, handed to every client this bridge builds.
     retry: not_yet_done_content::RetryConfig,
     orchestrator: Arc<AuthOrchestrator>,
+    /// The one status channel of this connection: the orchestrator's login
+    /// steps and the adapter's own request announcements both go here, so a
+    /// frontend follows a single line from "running the cookie script" to
+    /// "Loading issues" without stitching two streams together.
+    status: StatusReporter,
     client: RwLock<Option<Arc<JiraClient>>>,
     ready: Notify,
 }
@@ -68,21 +73,30 @@ impl AuthBridge {
         retry: not_yet_done_content::RetryConfig,
         session_store: Box<dyn not_yet_done_content::SessionStore>,
     ) -> Result<Arc<Self>, String> {
-        let orchestrator = AuthOrchestrator::from_spec(spec, session_store)
-            .map_err(|e| format!("auth orchestrator: {e}"))?;
+        let status = StatusReporter::new();
+        let orchestrator =
+            AuthOrchestrator::from_spec_with_status(spec, session_store, status.clone())
+                .map_err(|e| format!("auth orchestrator: {e}"))?;
         Ok(Arc::new(Self {
             base_url,
             accept_invalid_certs,
             story_points_field,
             retry,
             orchestrator: Arc::new(orchestrator),
+            status,
             client: RwLock::new(None),
             ready: Notify::new(),
         }))
     }
 
     pub(super) fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
-        self.orchestrator.subscribe_status()
+        self.status.subscribe()
+    }
+
+    /// The connection's status channel, for the adapter's own reports about
+    /// the requests it sends once the login is behind it.
+    pub(super) fn status(&self) -> StatusReporter {
+        self.status.clone()
     }
 
     #[allow(dead_code)]
@@ -209,6 +223,9 @@ impl AuthBridge {
                 .with_story_points_field(self.story_points_field.as_deref())
                 .with_retry(self.retry.clone()),
         );
+        // A restored cookie is only as good as Jira says it is, and asking
+        // costs a round trip the user is otherwise left guessing about.
+        self.status.connect_step("checking the session");
         client.current_user().await?;
         Ok(client)
     }

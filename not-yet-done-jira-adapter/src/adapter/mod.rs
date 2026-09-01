@@ -48,6 +48,10 @@ const QUERY_BODY_SUFFIX: &str = ".jql";
 
 pub struct JiraAdapter {
     auth: Arc<AuthBridge>,
+    /// This connection's status channel — the same one the login reports on
+    /// (see [`AuthBridge::status`]), so what the adapter says about its
+    /// requests continues the same line rather than starting a second.
+    status: StatusReporter,
     connection_name: String,
     instance_id: String,
     cache: Arc<Mutex<JiraCache>>,
@@ -105,6 +109,7 @@ impl JiraAdapter {
             Arc::new(SqlBookmarkStore::new(Arc::clone(&db), scope_id));
 
         Self {
+            status: auth.status(),
             auth,
             connection_name,
             instance_id,
@@ -115,6 +120,22 @@ impl JiraAdapter {
             bookmark_marker,
             workspace_base,
         }
+    }
+}
+
+impl JiraAdapter {
+    /// A live client plus an announcement of what it is about to be used
+    /// for. The guard travels with the caller: it ends when the fetch
+    /// returns, including through the `?` of a failed one.
+    ///
+    /// The client comes first on purpose. Connecting has its own reporting
+    /// (the login's steps, published by the auth layer), and a "Loading
+    /// issues" line drawn over it would replace what is actually happening
+    /// with what will happen afterwards.
+    async fn fetching(&self, what: &str) -> Result<(Arc<JiraClient>, BusyGuard)> {
+        let client = self.auth.get_client().await.map_err(other_err)?;
+        let busy = self.status.busy(what, 0);
+        Ok((client, busy))
     }
 }
 
@@ -139,7 +160,7 @@ impl ContentAdapter for JiraAdapter {
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
-        let client = self.auth.get_client().await.map_err(other_err)?;
+        let (client, _busy) = self.fetching("Opening ticket").await?;
         // Composite IDs: "{issue_key}/comment/{comment_id}",
         //                "{issue_key}/attachment/{attachment_id}" or
         //                "{issue_key}/link/{link_id}"
@@ -221,7 +242,7 @@ impl ContentAdapter for JiraAdapter {
                     columns: jql::issue_columns(),
                     list: Box::new(move |params| {
                         Box::pin(async move {
-                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            let (client, _busy) = self.fetching("Loading issues").await?;
                             list_issues(&client, &self.bookmarks, &self.bookmark_marker, params)
                                 .await
                         })
@@ -232,7 +253,7 @@ impl ContentAdapter for JiraAdapter {
                     columns: jql::bookmark_columns(),
                     list: Box::new(move |params| {
                         Box::pin(async move {
-                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            let (client, _busy) = self.fetching("Loading bookmarks").await?;
                             list_bookmarked_issues(
                                 &client,
                                 &self.bookmarks,
@@ -248,7 +269,7 @@ impl ContentAdapter for JiraAdapter {
                     columns: Vec::new(),
                     list: Box::new(move |_params| {
                         Box::pin(async move {
-                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            let (client, _busy) = self.fetching("Loading labels").await?;
                             list_labels(&client, &self.cache).await
                         })
                     }),
@@ -258,7 +279,7 @@ impl ContentAdapter for JiraAdapter {
                     columns: Vec::new(),
                     list: Box::new(move |_params| {
                         Box::pin(async move {
-                            let client = self.auth.get_client().await.map_err(other_err)?;
+                            let (client, _busy) = self.fetching("Loading users").await?;
                             list_users(&client, &self.cache).await
                         })
                     }),
@@ -277,7 +298,7 @@ impl ContentAdapter for JiraAdapter {
                         columns: Vec::new(),
                         list: Box::new(move |_params| {
                             Box::pin(async move {
-                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                let (client, _busy) = self.fetching("Loading comments").await?;
                                 issue::list_comments(&client, &self.cache, &key).await
                             })
                         }),
@@ -287,7 +308,7 @@ impl ContentAdapter for JiraAdapter {
                         columns: Vec::new(),
                         list: Box::new(move |_params| {
                             Box::pin(async move {
-                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                let (client, _busy) = self.fetching("Loading attachments").await?;
                                 issue::list_attachments(&client, &key2).await
                             })
                         }),
@@ -297,7 +318,7 @@ impl ContentAdapter for JiraAdapter {
                         columns: link::link_columns(),
                         list: Box::new(move |params| {
                             Box::pin(async move {
-                                let client = self.auth.get_client().await.map_err(other_err)?;
+                                let (client, _busy) = self.fetching("Loading links").await?;
                                 link::list_links(&client, &key3, params).await
                             })
                         }),

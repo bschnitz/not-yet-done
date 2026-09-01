@@ -10093,6 +10093,13 @@ impl ContentView {
         matches!(self.auth_status, AdapterStatus::Busy { .. })
     }
 
+    /// True while the adapter is logging in. Like [`Self::is_busy`] this
+    /// drives the redraw nudge — the connect banner counts the seconds the
+    /// current login step has been running.
+    pub fn is_connecting(&self) -> bool {
+        matches!(self.auth_status, AdapterStatus::Connecting { .. })
+    }
+
     /// Apply the global `notifications.load_banner` to this tab, unless its
     /// view file overrode it. Called by App when it wires the view, because
     /// [`Self::new`] sees only the view file and not the TUI config.
@@ -10201,11 +10208,15 @@ impl ContentView {
     }
 
     /// True while this tab has a banner whose text advances with wall-clock
-    /// time — an adapter `Busy` or a load the frontend is counting itself.
-    /// The main loop polls this to keep the second counter ticking when
-    /// nothing else would repaint.
+    /// time — a login in progress, an adapter `Busy`, or a load the frontend
+    /// is counting itself. The main loop polls this to keep the second
+    /// counter ticking when nothing else would repaint.
+    ///
+    /// The login belongs here even though nothing about it *changes*: a
+    /// browser SSO round can take minutes, and a frozen counter is exactly
+    /// how a working login looks like a hung one.
     pub fn has_live_load_banner(&self) -> bool {
-        self.is_busy() || self.loads_in_flight.get() > 0
+        self.is_connecting() || self.is_busy() || self.loads_in_flight.get() > 0
     }
 
     /// The banner for a load the *frontend* knows about, as opposed to one the
@@ -21052,18 +21063,19 @@ mod tests {
             view.is_busy(),
             "Busy drives the ~1 Hz live-banner redraw nudge"
         );
-        // Connecting counts as a static banner, not a wall-clock one.
-        view.set_auth_status(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 3,
-            timeout_secs: 30,
-        });
+        // Connecting is a different state, but just as live: its banner
+        // counts the seconds the current login step has taken.
+        view.set_auth_status(AdapterStatus::connecting(1, 3, 30));
+        assert!(!view.is_busy(), "connecting is not a request in flight");
+        assert!(view.is_connecting());
         assert!(
-            !view.is_busy(),
-            "Connecting banner text is static, not live"
+            view.has_live_load_banner(),
+            "a login in progress must keep the counter ticking"
         );
         view.set_auth_status(AdapterStatus::Ready);
         assert!(!view.is_busy());
+        assert!(!view.is_connecting());
+        assert!(!view.has_live_load_banner());
     }
 
     #[test]
@@ -21300,11 +21312,7 @@ mod tests {
     fn auth_status_banner_shows_connecting_with_retry_and_timeout() {
         let config = test_config_with_children();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
-        view.set_auth_status(AdapterStatus::Connecting {
-            retry: 2,
-            max_retries: 5,
-            timeout_secs: 30,
-        });
+        view.set_auth_status(AdapterStatus::connecting(2, 5, 30));
         let banner = view.auth_status_banner().unwrap();
         assert!(banner.contains("(2/5)"), "got: {banner}");
         assert!(banner.contains("30s"), "got: {banner}");
@@ -21360,11 +21368,7 @@ mod tests {
             Vec::new(),
             Some("stale".into()),
         );
-        view.set_auth_status(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 3,
-            timeout_secs: 30,
-        });
+        view.set_auth_status(AdapterStatus::connecting(1, 3, 30));
         let banner = view.auth_status_banner().unwrap();
         assert!(banner.starts_with("Connecting"), "got: {banner}");
     }
@@ -21374,11 +21378,7 @@ mod tests {
         let config = test_config_with_children();
         let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         view.set_adapter_init_error("bad yaml".into());
-        view.set_auth_status(AdapterStatus::Connecting {
-            retry: 1,
-            max_retries: 3,
-            timeout_secs: 30,
-        });
+        view.set_auth_status(AdapterStatus::connecting(1, 3, 30));
         let banner = view.auth_status_banner().unwrap();
         assert!(banner.starts_with("Configuration error"), "got: {banner}");
     }
