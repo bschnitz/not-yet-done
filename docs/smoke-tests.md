@@ -3733,6 +3733,11 @@ command`.
 - [ ] **The load says what it loads**: once connected, the banner reads
       `Loading issues… (Ns)` (not the unnamed `Loading… (Ns)` of the frontend's
       own counter) and disappears when the rows arrive.
+- [ ] **The connect banner is gone when the data is there**: with the rows on
+      screen, no `Connecting…` line is left standing — neither during the load
+      nor after it. (A `Connecting` that is never ended keeps counting and
+      reappears under every finished request, because that is what the request
+      restored to.)
 - [ ] **A drill-down names itself too**: open a ticket (`o`) and switch to its
       comments → `Loading comments… (Ns)`; attachments and links likewise.
 - [ ] **A second attempt is visible**: point the provider at a script that

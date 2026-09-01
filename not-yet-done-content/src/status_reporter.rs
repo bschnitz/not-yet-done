@@ -199,6 +199,23 @@ impl StatusReporter {
         let _ = self.inner.tx.send(AdapterStatus::Ready);
     }
 
+    /// The connect phase is over: the adapter has a usable connection.
+    ///
+    /// The counterpart of [`begin_connect`](Self::begin_connect), and the
+    /// call every login path owes: a `Connecting` nobody ends keeps its
+    /// clock running forever, and — because it is what an announcement
+    /// restores to — reappears under every finished request.
+    ///
+    /// Unlike [`ready`](Self::ready) this only ends a *connect*. A status
+    /// that arrived after the last connect report (a request already
+    /// announcing itself, an auth rejection) is newer and stays.
+    pub fn connected(&self) {
+        let connecting = matches!(*self.inner.tx.borrow(), AdapterStatus::Connecting { .. });
+        if connecting {
+            let _ = self.inner.tx.send(AdapterStatus::Ready);
+        }
+    }
+
     /// The login gave up. `reason` is shown to the user as-is.
     pub fn failed(&self, reason: impl Into<String>) {
         let _ = self.inner.tx.send(AdapterStatus::Failed {
@@ -396,6 +413,43 @@ mod tests {
         assert!(
             matches!(&*rx.borrow(), AdapterStatus::Failed { .. }),
             "a failure that landed mid-request must not be overwritten by Ready"
+        );
+    }
+
+    #[test]
+    fn a_finished_connect_stops_the_clock() {
+        let r = StatusReporter::new();
+        let rx = r.subscribe();
+        r.begin_connect();
+        r.connect_step("checking the session");
+        r.connected();
+        assert_eq!(
+            *rx.borrow(),
+            AdapterStatus::Ready,
+            "a connect nobody ends keeps counting and reappears under every request"
+        );
+    }
+
+    #[test]
+    fn a_finished_connect_does_not_overwrite_newer_news() {
+        let r = StatusReporter::new();
+        let rx = r.subscribe();
+        r.begin_connect();
+        r.failed("session rejected");
+        r.connected();
+        assert!(
+            matches!(&*rx.borrow(), AdapterStatus::Failed { .. }),
+            "the connect is over either way, but the reason must survive"
+        );
+
+        let r = StatusReporter::new();
+        let rx = r.subscribe();
+        r.begin_connect();
+        let _busy = r.busy("Loading issues", 0);
+        r.connected();
+        assert!(
+            matches!(&*rx.borrow(), AdapterStatus::Busy { label, .. } if label == "Loading issues"),
+            "a request that already announced itself is the newer line"
         );
     }
 

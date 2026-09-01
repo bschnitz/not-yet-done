@@ -139,11 +139,29 @@ impl AuthBridge {
     /// Return a live client. Fast path on cache hit; slow path drives
     /// the orchestrator and validates restored sessions, retrying with
     /// `re_authenticate` if the cached blob no longer works.
+    ///
+    /// The slow path is also where this connection's `Connecting` line
+    /// ends — on either outcome. Nothing below reports a terminal status:
+    /// the orchestrator is done once it has a session blob, while the
+    /// connection is only usable after the validation round trip here.
     pub(super) async fn get_client(self: &Arc<Self>) -> Result<Arc<JiraClient>, String> {
         if let Some(c) = self.live_client().await {
             return Ok(c);
         }
+        match self.connect().await {
+            Ok(client) => {
+                self.status.connected();
+                Ok(client)
+            }
+            Err(e) => {
+                self.status.failed(e.clone());
+                Err(e)
+            }
+        }
+    }
 
+    /// Drive the orchestrator until a validated client exists.
+    async fn connect(self: &Arc<Self>) -> Result<Arc<JiraClient>, String> {
         let me = Arc::clone(self);
         let resolved = self
             .orchestrator
