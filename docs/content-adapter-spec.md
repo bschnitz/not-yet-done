@@ -453,8 +453,18 @@ Adapters do not build those variants by hand. `StatusReporter`
 | `begin_connect()`                       | a login has started; the clock is reset                  |
 | `connect_phase(step, retries, timeout)` | which step it is in, and the limits that step runs under |
 | `connect_attempt(n, of, timeout)`       | which attempt of the current step is running             |
-| `ready()` / `failed(reason)`            | the login ended                                          |
+| `connected()` / `failed(reason)`        | the login ended, either way                              |
 | `busy(label, timeout) -> BusyGuard`     | a request against the live connection is out             |
+
+Every `Connecting` needs one of the two endings. An adapter that keeps
+validating after the orchestrator hands it a session — a round trip to check a
+restored cookie, say — owns that ending itself: the orchestrator is finished
+once it has a session blob, but the _connection_ is only usable afterwards.
+A `Connecting` nobody ends keeps counting forever, and, because it is what a
+finished announcement restores to, reappears under every request that
+follows. `connected()` ends the connect without overwriting news that is newer
+than it (a rejection, a request that has already announced itself); `ready()`
+publishes unconditionally.
 
 The clock on `Connecting` measures the **current step**, not the whole login:
 the step that is taking the time is the one worth showing, and a login made of
@@ -477,7 +487,7 @@ name is what its own requests are for; pass the orchestrator a shared reporter
 let status = StatusReporter::new();
 let orchestrator = AuthOrchestrator::from_spec_with_status(spec, store, status.clone())?;
 // …later, per request:
-let client = self.auth.get_client().await?;      // login steps report themselves
+let client = self.auth.get_client().await?;      // reports its steps, and ends them
 let _busy = self.status.busy("Loading issues", 0);
 ```
 
