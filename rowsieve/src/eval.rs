@@ -19,6 +19,9 @@
 //! - **Any comparison against a null is false**, including `!=`. A missing
 //!   value is not "different from X", it is unknown — the same three-valued
 //!   logic SQL applies. `is_null` / `is_not_null` are the way to ask.
+//! - **A dotted field name is passed through whole.** `tags.sender` reaches
+//!   [`RowFields::field`] as `"tags.sender"`: rows in memory have no joins, so
+//!   a qualifier is part of the path rather than a table to resolve.
 //! - **Host predicates evaluate to false.** A `[name, argument]` leaf means
 //!   something only the host can resolve; see [`crate::FilterExpr::Custom`].
 //! - **Field-vs-field comparison is not supported** here and evaluates to
@@ -86,7 +89,9 @@ pub fn matches<R: RowFields + ?Sized>(expr: &FilterExpr, row: &R) -> bool {
 }
 
 fn matches_leaf<R: RowFields + ?Sized>(leaf: &FilterLeaf, row: &R) -> bool {
-    let field = row.field(&leaf.lhs.column);
+    // The whole written path, not just the column: a row in memory has no
+    // joins, so `tags.sender_pids` names one field of it. See [`ColRef::path`].
+    let field = row.field(&leaf.lhs.path());
     match leaf.op {
         Operator::IsNull => field == Field::Null,
         Operator::IsNotNull => field != Field::Null,
@@ -300,8 +305,8 @@ pub fn like_match(text: &str, pattern: &str) -> bool {
 /// "column").
 pub fn validate_fields(expr: &FilterExpr, known: &[&str], noun: &str) -> Result<(), String> {
     for_each_leaf(expr, &mut |leaf| {
-        let col = leaf.lhs.column.as_str();
-        if known.contains(&col) {
+        let col = leaf.lhs.path();
+        if known.contains(&col.as_ref()) {
             return Ok(());
         }
         Err(format!(
@@ -321,7 +326,7 @@ pub fn validate_datetime_literals(
     datetime_columns: &[&str],
 ) -> Result<(), String> {
     for_each_leaf(expr, &mut |leaf| {
-        let col = leaf.lhs.column.as_str();
+        let col = leaf.lhs.path();
         let is_comparison = matches!(
             leaf.op,
             Operator::Eq
@@ -331,7 +336,7 @@ pub fn validate_datetime_literals(
                 | Operator::Lt
                 | Operator::Lte
         );
-        if !datetime_columns.contains(&col) || !is_comparison {
+        if !datetime_columns.contains(&col.as_ref()) || !is_comparison {
             return Ok(());
         }
         let Rhs::Lit(Literal::String(s)) = &leaf.rhs else {
@@ -392,6 +397,25 @@ mod tests {
             ("done", Field::Bool(false)),
             ("note", Field::Null),
         ])
+    }
+
+    /// A dotted name is one field of one row, not a join.
+    #[test]
+    fn dotted_field_reaches_the_row() {
+        let row = TestRow(vec![
+            ("tags.sender", Field::Text(Cow::Borrowed("kitty"))),
+            ("sender", Field::Text(Cow::Borrowed("wrong one"))),
+        ]);
+        assert!(matches(&expr("[tags.sender, '=', kitty]"), &row));
+        assert!(!matches(&expr("[tags.sender, '=', 'wrong one']"), &row));
+    }
+
+    /// And the vocabulary is checked against the same written name.
+    #[test]
+    fn dotted_field_validates_against_the_written_name() {
+        let e = expr("[tags.sender, is_not_null]");
+        assert!(validate_fields(&e, &["tags.sender"], "field").is_ok());
+        assert!(validate_fields(&e, &["sender"], "field").is_err());
     }
 
     fn expr(yaml: &str) -> FilterExpr {

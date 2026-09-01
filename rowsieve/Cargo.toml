@@ -1,6 +1,6 @@
 [package]
 name = "rowsieve"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A small YAML filter language over rows: an AST, a parser, and an in-memory evaluator over any type that can answer \"what is the value of field X\". Host-agnostic."
 license = "MIT OR Apache-2.0"

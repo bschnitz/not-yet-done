@@ -75,6 +75,9 @@ Three rules are worth knowing before writing a filter:
 - **A field name is never guessed.** An unknown one reads as null and matches
   nothing; `eval::validate_fields` turns that into a load-time error, with the
   known names in the message.
+- **A dotted name stays whole.** `tags.sender` reaches `RowFields::field` as
+  `"tags.sender"`. A qualifier is a join alias only to a host that has joins;
+  a row in memory has none, so the dot is part of the path into it.
 
 ## Extending it
 

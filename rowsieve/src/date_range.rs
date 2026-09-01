@@ -131,7 +131,7 @@ pub fn extract_date_bounds(expr: &FilterExpr, date_fields: &[&str]) -> DateBound
 }
 
 fn extract_leaf_bounds(leaf: &FilterLeaf, date_fields: &[&str]) -> DateBounds {
-    if !date_fields.contains(&leaf.lhs.column.as_str()) {
+    if !date_fields.contains(&leaf.lhs.path().as_ref()) {
         return DateBounds::unbounded();
     }
 
