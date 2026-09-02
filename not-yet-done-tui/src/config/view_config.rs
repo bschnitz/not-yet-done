@@ -756,6 +756,11 @@ fn check_action(
                 "{scope}: type='text_search' requires `text_search.query_template`"
             ));
         }
+        "apply_query" if a.apply_query.is_none() => {
+            errors.push(format!(
+                "{scope}: type='apply_query' requires `apply_query.query_template`"
+            ));
+        }
         _ => {}
     }
     // `node` and `edit` are the two types that fire on a *node*; only they
@@ -1993,6 +1998,10 @@ pub struct ActionDef {
     /// by the escaped user input).
     #[serde(default)]
     pub text_search: Option<TextSearchConfig>,
+    /// For "apply_query" actions — how the rows' values become a root query.
+    /// Required for that type, ignored otherwise.
+    #[serde(default)]
+    pub apply_query: Option<ApplyQueryConfig>,
     /// For "tree_find" actions — optional UI prompt (CT-10). The
     /// query itself is passed unmodified to
     /// [`not_yet_done_content::ContentAdapter::search_in_tree`], so
@@ -2407,6 +2416,54 @@ pub struct TextSearchConfig {
     /// not set.
     #[serde(default)]
     pub prompt: Option<String>,
+}
+
+/// Config for a `type: apply_query` action — turn values read off the rows of
+/// the *current* level into a query for the view's **root** level, then jump
+/// back there and load it.
+///
+/// Why it exists: a child level often lists things that are really rows of the
+/// root level seen from the side — Jira's `jira:link` rows carry the key of the
+/// linked ticket, a notification carries the key of the ticket it is about.
+/// Drilling in shows them, but none of the root level's own bindings (edit,
+/// transition, columns, sort, …) apply there. This action closes that loop
+/// without any adapter involvement: it reads one field off the rows, renders a
+/// query in the adapter's own language, and hands it to the root list.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyQueryConfig {
+    /// Adapter query template. `{q}` is replaced by the joined, rendered
+    /// values (see `item_template`/`separator`) — e.g.
+    /// `issuekey in ({q}) ORDER BY updated DESC`.
+    #[serde(deserialize_with = "deserialize_query_source")]
+    pub query_template: String,
+    /// Metadata field to read off each row. Absent → the row's own node id.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// Which rows contribute: the one under the cursor (default) or every row
+    /// the level currently shows.
+    #[serde(default)]
+    pub scope: ApplyQueryScope,
+    /// Per-value template, `{v}` being the (escaped) field value. Default
+    /// `{v}` — quote it here when the query language needs a string literal:
+    /// `item_template: '"{v}"'`.
+    #[serde(default)]
+    pub item_template: Option<String>,
+    /// Glue between rendered values in `{q}`. Default `", "`.
+    #[serde(default)]
+    pub separator: Option<String>,
+}
+
+/// Which rows a [`ApplyQueryConfig`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyQueryScope {
+    /// Only the row under the cursor.
+    #[default]
+    Row,
+    /// Every row the level currently shows — after a fuzzy filter, and only
+    /// the pages already loaded.
+    Level,
 }
 
 // ---------------------------------------------------------------------------
@@ -3353,6 +3410,7 @@ views:
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -3401,6 +3459,7 @@ views:
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: true,
             in_action_bar: false,
@@ -4143,6 +4202,57 @@ views:
             .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("text_search") && errs[0].contains("query_template"));
+    }
+
+    #[test]
+    fn validate_apply_query_requires_template() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: open all, key: a, type: apply_query }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("apply_query") && errs[0].contains("query_template"));
+    }
+
+    #[test]
+    fn apply_query_action_parses_its_config() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - name: open all in search
+        key: a
+        type: apply_query
+        apply_query:
+          field: key
+          scope: level
+          item_template: '"{v}"'
+          query_template: 'issuekey in ({q})'
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = &cfg.views[0].actions[0];
+        let aq = action.apply_query.as_ref().expect("apply_query config");
+        assert_eq!(aq.field.as_deref(), Some("key"));
+        assert_eq!(aq.scope, ApplyQueryScope::Level);
+        assert_eq!(aq.item_template.as_deref(), Some(r#""{v}""#));
+        assert_eq!(aq.query_template, "issuekey in ({q})");
+        // Default scope is the cursor row.
+        assert_eq!(ApplyQueryScope::default(), ApplyQueryScope::Row);
     }
 
     #[test]
