@@ -56,10 +56,10 @@ use crate::config::keybindings::{
 };
 use crate::config::tui_config::LoadBannerRoute;
 use crate::config::view_config::{
-    ActionDef, ActionTarget, AggregateDef, CardBorderMode, CardConfig, CardLabelMode, ChildDef,
-    ColumnDef, ColumnKind, CursorOnOpen, DateBucket, ExpandDepth, GroupBy, GroupHeadersDef,
-    GroupOrder, LineLayout, PaginationMode, PreviewConfig, ReminderConfig, SplitDirection,
-    TreeAggregateDefault, ViewDef, ViewFileConfig,
+    ActionDef, ActionTarget, AggregateDef, ApplyQueryConfig, ApplyQueryScope, CardBorderMode,
+    CardConfig, CardLabelMode, ChildDef, ColumnDef, ColumnKind, CursorOnOpen, DateBucket,
+    ExpandDepth, GroupBy, GroupHeadersDef, GroupOrder, LineLayout, PaginationMode, PreviewConfig,
+    ReminderConfig, SplitDirection, TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
@@ -4810,6 +4810,62 @@ impl ContentPane {
         Some(item.id.clone())
     }
 
+    /// The values a `type: apply_query` action feeds into its template:
+    /// one field off the cursor row, or off every row the level shows.
+    /// Blank values are dropped and duplicates collapse — Jira happily
+    /// lists the same ticket twice if the query does.
+    fn apply_query_values(&self, cfg: &ApplyQueryConfig) -> Vec<String> {
+        let field = cfg.field.as_deref();
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |value: Option<String>| {
+            if let Some(v) = value {
+                if !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+        };
+        let row = self.table.selected_row();
+        if let Some(tree) = self.tree.as_ref() {
+            match cfg.scope {
+                ApplyQueryScope::Row => {
+                    if let Some(entry) = self.tree_entry_at_row(row) {
+                        if !entry.is_more_placeholder {
+                            push(node_field_value(&entry.node, field));
+                        }
+                    }
+                }
+                ApplyQueryScope::Level => {
+                    for &eidx in &self.tree_visible_indices {
+                        let Some(entry) = tree.entries.get(eidx) else {
+                            continue;
+                        };
+                        if entry.is_more_placeholder {
+                            continue;
+                        }
+                        push(node_field_value(&entry.node, field));
+                    }
+                }
+            }
+            return out;
+        }
+        match cfg.scope {
+            ApplyQueryScope::Row => {
+                let idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                if let Some(item) = self.items.get(idx) {
+                    push(node_field_value(item, field));
+                }
+            }
+            ApplyQueryScope::Level => {
+                for &idx in &self.filtered_indices {
+                    if let Some(item) = self.items.get(idx) {
+                        push(node_field_value(item, field));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     // ── Navigation (drill-down / back) ──────────────────────────────
 
     /// Prepare drill-down: snapshot current level, set child config.
@@ -4894,6 +4950,13 @@ impl ContentPane {
         self.preview_scroll = 0;
         self.preview_loading = false;
         self.drill_down_prepare(item_id, item_label, child_def, view_defs)
+    }
+
+    /// Walk the whole nav stack back out to the root level. Reuses
+    /// [`Self::nav_back`] frame by frame so every level restores exactly as
+    /// it would have when stepped out of by hand.
+    fn reset_to_root(&mut self, view_defs: &[ViewDef]) {
+        while self.nav_back(view_defs) {}
     }
 
     fn nav_back(&mut self, view_defs: &[ViewDef]) -> bool {
@@ -7562,6 +7625,58 @@ impl ContentPane {
                 self.search.clear();
                 self.search.open();
                 return SubViewMessage::SelectionChanged(None);
+            }
+            // Read a field off the rows of *this* level, render it into a
+            // query for the view's root list, and go show it there. The
+            // level a user drilled into often lists rows that are really
+            // root rows seen from the side (a Jira link carries the linked
+            // ticket's key) — this is how they get the root level's own
+            // bindings back for them.
+            "apply_query" => {
+                let Some(cfg) = action.apply_query.as_ref() else {
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "apply_query action '{}' missing `apply_query` config",
+                        action.name()
+                    )));
+                };
+                // The query lands on the root level, so that level must have
+                // one at all — the Jira bookmarks list, say, *is* its own
+                // filter and would silently ignore what we set.
+                if self
+                    .view_def(view_defs)
+                    .map(|vd| vd.query.is_none())
+                    .unwrap_or(true)
+                {
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "{}: this list takes no query",
+                        action.name()
+                    )));
+                }
+                let values = self.apply_query_values(cfg);
+                if values.is_empty() {
+                    return SubViewMessage::Request(ViewRequest::Notify(format!(
+                        "{}: nothing to search for on this level",
+                        action.name()
+                    )));
+                }
+                let query = render_apply_query(cfg, &values);
+                // `SpawnContentLoad` re-lists the *root* level, so the pane
+                // has to be standing there when the rows land — otherwise
+                // they would be poured into the drilled-into child level.
+                self.reset_to_root(view_defs);
+                self.set_query(query, None);
+                // A different result set makes the old offset meaningless —
+                // the same reason a sort change resets it. Without this, a
+                // pane left on page 3 would ask Jira for rows 100+ of a
+                // handful of tickets and come back empty.
+                self.current_page = self.current_page.map(|p| PageRequest {
+                    offset: 0,
+                    limit: p.limit,
+                });
+                return SubViewMessage::Request(ViewRequest::SpawnContentLoad {
+                    view_index,
+                    pane_id,
+                });
             }
             "tree_find" => {
                 // CT-7: open the search input in tree-find mode.
@@ -13270,6 +13385,54 @@ fn render_text_search(template: &str, input: &str) -> String {
     subst.apply_to_text(template)
 }
 
+/// Render an `apply_query` action's template: each value escaped for a query
+/// string literal, wrapped in `item_template`, joined by `separator`, and
+/// substituted for `{q}` in `query_template`.
+///
+/// Deliberately textual, unlike [`render_text_search`]'s YAML path: the values
+/// come from rows, not from a user's keystrokes, and the templates that need
+/// this are JQL-shaped (`issuekey in ({q})`).
+fn render_apply_query(cfg: &ApplyQueryConfig, values: &[String]) -> String {
+    let item_template = cfg.item_template.as_deref().unwrap_or("{v}");
+    let separator = cfg.separator.as_deref().unwrap_or(", ");
+    let joined = values
+        .iter()
+        .map(|v| item_template.replace("{v}", &escape_query_literal(v)))
+        .collect::<Vec<_>>()
+        .join(separator);
+    cfg.query_template.replace("{q}", &joined)
+}
+
+/// `\` and `"` escaped, so a value can sit inside a quoted query literal.
+/// Same rule [`TextSearchSubstitutions`] applies to typed input.
+fn escape_query_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// One row's value for a config-named metadata field, or its node id when no
+/// field is named. `None` for a missing or blank value — a row that carries
+/// nothing must not widen the query.
+fn node_field_value(node: &NodeSummary, field: Option<&str>) -> Option<String> {
+    let value = match field {
+        Some(key) => node
+            .metadata
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.trim().to_string())?,
+        None => node.id.trim().to_string(),
+    };
+    (!value.is_empty()).then_some(value)
+}
+
 /// The four placeholder expansions of [`render_text_search`], resolved once
 /// so the textual and the YAML path cannot drift apart.
 struct TextSearchSubstitutions {
@@ -13284,14 +13447,7 @@ struct TextSearchSubstitutions {
 
 impl TextSearchSubstitutions {
     fn new(input: &str) -> Self {
-        let mut escaped = String::with_capacity(input.len());
-        for ch in input.chars() {
-            match ch {
-                '\\' => escaped.push_str("\\\\"),
-                '"' => escaped.push_str("\\\""),
-                other => escaped.push(other),
-            }
-        }
+        let escaped = escape_query_literal(input);
         let trimmed = input.trim();
         let key_or = if looks_like_issue_key(trimmed) {
             format!(r#"issuekey = "{}" OR "#, escaped.trim())
@@ -14421,6 +14577,94 @@ mod tests {
     }
 
     #[test]
+    fn apply_query_joins_rendered_values_into_the_template() {
+        let cfg = ApplyQueryConfig {
+            query_template: "issuekey in ({q}) ORDER BY updated DESC".into(),
+            field: Some("key".into()),
+            scope: ApplyQueryScope::Level,
+            item_template: Some(r#""{v}""#.into()),
+            separator: None,
+        };
+        let values = vec!["ABC-1".to_string(), "ABC-2".to_string()];
+        assert_eq!(
+            render_apply_query(&cfg, &values),
+            r#"issuekey in ("ABC-1", "ABC-2") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn apply_query_escapes_values_for_a_query_literal() {
+        let cfg = ApplyQueryConfig {
+            query_template: r#"summary ~ "{q}""#.into(),
+            field: None,
+            scope: ApplyQueryScope::Row,
+            item_template: None,
+            separator: None,
+        };
+        assert_eq!(
+            render_apply_query(&cfg, &[r#"the "real" issue"#.to_string()]),
+            r#"summary ~ "the \"real\" issue""#
+        );
+    }
+
+    #[test]
+    fn apply_query_values_row_scope_reads_the_cursor_row() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let cfg = ApplyQueryConfig {
+            query_template: "issuekey = \"{q}\"".into(),
+            field: Some("key".into()),
+            scope: ApplyQueryScope::Row,
+            item_template: None,
+            separator: None,
+        };
+        assert_eq!(
+            view.active_pane().apply_query_values(&cfg),
+            vec!["ISS-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_query_values_level_scope_skips_rows_without_the_field() {
+        // The second mock issue carries no `key` metadata field. A blank
+        // value must not reach the query — `issuekey in ("ISS-1", "")`
+        // would be a syntax error, not a narrower search.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let cfg = ApplyQueryConfig {
+            query_template: "issuekey in ({q})".into(),
+            field: Some("key".into()),
+            scope: ApplyQueryScope::Level,
+            item_template: None,
+            separator: None,
+        };
+        assert_eq!(
+            view.active_pane().apply_query_values(&cfg),
+            vec!["ISS-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_query_values_without_a_field_fall_back_to_the_node_id() {
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let cfg = ApplyQueryConfig {
+            query_template: "issuekey in ({q})".into(),
+            field: None,
+            scope: ApplyQueryScope::Level,
+            item_template: None,
+            separator: None,
+        };
+        assert_eq!(
+            view.active_pane().apply_query_values(&cfg),
+            vec!["ISS-1".to_string(), "ISS-2".to_string()]
+        );
+    }
+
+    #[test]
     fn render_text_search_escapes_quotes_and_backslashes() {
         let tpl = r#"text ~ "{q}" ORDER BY updated DESC"#;
         assert_eq!(
@@ -14646,6 +14890,7 @@ mod tests {
                     fuzzy_filter: None,
                     search: None,
                     text_search: None,
+                    apply_query: None,
                     tree_find: None,
                     hide_from_bar: false,
                     in_action_bar: false,
@@ -15312,6 +15557,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -18614,6 +18860,7 @@ mod tests {
             }),
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19195,6 +19442,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19226,6 +19474,7 @@ mod tests {
             }),
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19257,6 +19506,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: Some(crate::config::view_config::TreeFindActionConfig { prompt: None }),
             hide_from_bar: false,
             in_action_bar: false,
@@ -19287,6 +19537,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19386,6 +19637,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19422,6 +19674,7 @@ mod tests {
                 prev_key: None,
             }),
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -19451,6 +19704,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -20704,6 +20958,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -20748,6 +21003,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -20798,6 +21054,7 @@ mod tests {
             fuzzy_filter: None,
             search: None,
             text_search: None,
+            apply_query: None,
             tree_find: None,
             hide_from_bar: false,
             in_action_bar: false,
@@ -21398,6 +21655,7 @@ mod tests {
                 fuzzy_filter: None,
                 search: None,
                 text_search: None,
+                apply_query: None,
                 tree_find: None,
                 hide_from_bar: false,
                 in_action_bar: false,
@@ -24918,6 +25176,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     fuzzy_filter: None,
                     search: None,
                     text_search: None,
+                    apply_query: None,
                     tree_find: None,
                     hide_from_bar: false,
                     in_action_bar: false,
@@ -24947,6 +25206,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     fuzzy_filter: None,
                     search: None,
                     text_search: None,
+                    apply_query: None,
                     tree_find: None,
                     hide_from_bar: false,
                     in_action_bar: false,

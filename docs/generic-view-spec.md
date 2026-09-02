@@ -2656,6 +2656,7 @@ The view YAML knows the following generic action types:
 | `edit`         | editor template from the adapter, external editor | ✅ (modal) |
 | `create`       | create a new child node (schema from the adapter) | ✅ (modal) |
 | `query_edit`   | edit the query in the editor                      | ✅ (modal) |
+| `apply_query`  | rows of this level → a query for the root level   | ❌         |
 | `reload`       | reload the list                                   | ❌         |
 | `navigate`     | switch into the child node level                  | ❌         |
 | `open_url`     | open a URL from the metadata in the browser       | ❌         |
@@ -3139,6 +3140,68 @@ The menu shares its key bindings with the tag menu (`tag_menu` section: toggle /
 create / edit / delete / next / prev / close), because the menu shape is
 identical. A `create`/`rename`/`delete` field without an action set leaves the
 respective key inactive.
+
+### Open rows in the root list (`type: apply_query`)
+
+```yaml
+actions:
+  - name: open all in search
+    key: A
+    type: apply_query
+    apply_query:
+      field: key # metadata field read off each row (omit → the node id)
+      scope: level # every row the level shows (default: `row` = the cursor row)
+      item_template: '"{v}"' # per value; `{v}` is the escaped field value
+      separator: ", " # glue between values (this is the default)
+      query_template: "issuekey in ({q}) ORDER BY updated DESC"
+  - name: open ticket in search
+    key: t
+    type: apply_query
+    apply_query:
+      field: key
+      query_template: 'issuekey = "{q}"'
+```
+
+Reads one field off the rows of the **current** level, renders it into a query
+in the adapter's own language, and jumps back to the view's **root** level
+showing that query's result.
+
+**Why it exists:** a child level frequently lists things that are really rows of
+the root level seen from the side — Jira's `jira:link` rows carry the key of the
+linked ticket, a notification row the key of the ticket it is about. Drilling in
+shows them, but _none_ of the root level's own bindings apply there: no edit, no
+transition, no column config, no sort, no preview. Rebuilding all of that on the
+child level would mean duplicating the ticket level in YAML (and asking the
+adapter for a second listing that returns the same nodes). `apply_query` instead
+closes the loop with the machinery that already exists: the root list plus a
+query. No adapter involvement — it is the same query path `text_search` and the
+q-menu use.
+
+How the query is built: each value is escaped for a query string literal (`\`
+and `"`), wrapped by `item_template`, joined with `separator`, and substituted
+for `{q}` in `query_template`. Blank values are dropped and duplicates collapse,
+so a level with two links to the same ticket still lists it once.
+
+Fields:
+
+| Field            | Required | Meaning                                                         |
+| ---------------- | -------- | --------------------------------------------------------------- |
+| `query_template` | yes      | Adapter query; `{q}` is replaced by the joined values.          |
+| `field`          | no       | Metadata field to read per row. Absent → the row's own node id. |
+| `scope`          | no       | `row` (default, the cursor row) or `level` (every row shown).   |
+| `item_template`  | no       | Per-value template, `{v}` = escaped value. Default `{v}`.       |
+| `separator`      | no       | Glue between values inside `{q}`. Default `", "`.               |
+
+Limits worth knowing before binding it:
+
+- `scope: level` sees what the level **currently shows** — after a fuzzy filter,
+  and only the pages already loaded. A paginated level contributes the rows on
+  screen, not the whole server-side result.
+- The query replaces the root level's active query (the same as typing one in
+  the query editor); the q-menu brings a saved query back.
+- The root level must accept a query at all. A view without a `query:` block —
+  the Jira bookmarks subtab, where the bookmark set _is_ the filter — reports
+  "this list takes no query" instead of setting one that would be ignored.
 
 ### Custom actions
 

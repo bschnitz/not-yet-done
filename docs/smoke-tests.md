@@ -6206,6 +6206,41 @@ example they sit on a bare `l`, in a which-key setup on `o l`.
 - [ ] Anon mode: keys, summaries and assignees appear replaced, the relation
       phrases (Jira-defined, e.g. "relates to") verbatim.
 
+## Jira: linked tickets back into the ticket list (`apply_query`, `o a` / `o t`)
+
+Two `type: apply_query` actions on the link level. They read the `key` cell off
+the rows, render it into JQL and show the result in the **tickets** list — which
+is what gets the ticket level's own bindings (edit, transition, `c c`, `S`,
+preview) back for a linked ticket. `o a` takes every link of the issue, `o t`
+only the row under the cursor. Prerequisite: both actions are in the private
+`views/jira.yaml` (the repo example binds them to `A` / `t` on the link level).
+
+- [ ] On a ticket with several links: `o l`, then `o a` → the pane is back at
+      the tickets level (breadcrumb gone), showing exactly the linked tickets
+      and nothing else. The query line reads
+      `issuekey in ("KEY-1", "KEY-2", …) ORDER BY updated DESC`.
+- [ ] Those rows are ordinary tickets: `e e` edits, `a t` transitions, `p`
+      previews, `c c` and `S` work — the level is the ticket level, not a
+      leftover child level.
+- [ ] `o l`, cursor on one link, `o t` → the tickets list holds that **one**
+      ticket (query `issuekey = "KEY-n"`) — the linked one, not the parent.
+- [ ] After either: `q` (the query menu) picks a saved query again and the list
+      returns to it — the applied query is an ordinary active query, not a mode.
+- [ ] Fuzzy-filter the link level first (`f f`, e.g. by a project prefix), then
+      `o a`: only the **visible** rows are in the query. This is by design (the
+      level's rows are what it reads), so it is a check on the filter, not a bug.
+- [ ] `o a` on a ticket **without** links → the notification says nothing was
+      found on this level, and the list stays where it is.
+- [ ] From the **bookmarks** subtab's link level the two keys are not bound (it
+      has no query of its own). If you do bind them there, the action reports
+      "this list takes no query" rather than silently listing the bookmarks.
+- [ ] The jump really re-lists: the rows are the query's result from Jira, not
+      the pane's previous ticket list. (It is a soft load like any other, so a
+      repeated `o a` may come from the cache — `r` forces a fresh fetch.)
+- [ ] Page the ticket list forward first (a `>`/next-page step), then `o l` and
+      `o a`: the result starts at page 1 instead of asking for rows past the end
+      of a much shorter list.
+
 ## HTML preview on `o p` — one engine, one profile per adapter (Jira + Taiga)
 
 The preview script was split: the whole pipeline (export the workspace, build

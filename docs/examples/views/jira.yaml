@@ -400,6 +400,32 @@ views:
             key: o
             type: custom
             id: open_in_browser # opens the *linked* ticket in the browser
+          # `apply_query`: read the `key` cell off these rows, render it into
+          # a JQL query, and go back to the *tickets* level showing exactly
+          # those issues. That is what gets the ticket level's own bindings
+          # (edit, transition, columns, sort, preview) back for a linked
+          # ticket — a link row has none of them.
+          #
+          # `a` takes every link of this issue (`scope: level` — the rows the
+          # level currently shows, after a fuzzy filter and only from the
+          # pages already loaded), `t` only the row under the cursor
+          # (`scope: row`, the default).
+          - name: open all in search
+            key: A
+            type: apply_query
+            apply_query:
+              field: key # the linked ticket's key, not the link's node id
+              scope: level
+              # Each value is escaped and wrapped by `item_template` (`{v}`),
+              # then joined with `separator` (default `", "`) into `{q}`.
+              item_template: '"{v}"'
+              query_template: 'issuekey in ({q}) ORDER BY updated DESC'
+          - name: open ticket in search
+            key: t
+            type: apply_query
+            apply_query:
+              field: key
+              query_template: 'issuekey = "{q}"'
           # Like the attachment `delete` above: a node action, not
           # `type: custom`, so the TUI can ask `(y/n)` first. It unlinks only
           # — the ticket stays.
@@ -583,7 +609,11 @@ views:
           - { key: d, id: delete }
 
       # Same level as in the tickets subtab above — see there for why the
-      # ticket-level bindings carry `node_id_from: key`.
+      # ticket-level bindings carry `node_id_from: key`. What is deliberately
+      # missing here is that subtab's `apply_query` pair: this view has no
+      # `query:` block (the bookmark set is the filter), so there is no root
+      # query to hand a key list to — the action would only report
+      # "this list takes no query".
       - name: Links
         node_type: "jira:link"
         columns:
