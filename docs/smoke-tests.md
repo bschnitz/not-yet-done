@@ -6937,8 +6937,15 @@ shortcuts, so a **restart** is part of the preparation.
 - [ ] **A folder row does nothing**: the hook is bound on the message level, so
       moving in the folder tree leaves the preview where it was.
 - [ ] **Closing the window ends it**: close the preview, move the cursor over
-      several messages → nothing is rendered, nothing is logged, no
-      notification. Re-open with `o p`.
+      several messages → after at most `NYD_PREVIEW_FOLLOW_TTL_H` (half an
+      hour, and immediately when the closed window was the one Sway could
+      see by title) nothing is rendered any more and no notification appears.
+      `<preview dir>/follow.log` says which of the two it was for every run.
+      Re-open with `o p`.
+- [ ] **A preview in a background tab still follows**: put the preview into a
+      tab of a window whose other tab is in front → Sway sees no title of
+      ours, and the page still updates, because the last `o p` counts as
+      evidence too.
 - [ ] **A message read twice costs no login**: go back to a message you have
       already previewed → the page updates from
       `~/.local/share/not_yet_done/mail/<instance>/preview/bodies/<key>.md`,
