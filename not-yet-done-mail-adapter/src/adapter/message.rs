@@ -10,9 +10,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ColumnSchema, Content, Metadata, Node, NodeSummary, NodeType, Result};
+use not_yet_done_content::{
+    ActionInput, ActionOutcome, ColumnSchema, Content, ContentError, InputSpec, Metadata, Node,
+    NodeAction, NodeSummary, NodeType, Result,
+};
 
 use super::field;
+use super::files::message_dir;
+use super::other_err;
 use super::types::message_type;
 use crate::ids::MessageId;
 use crate::imap::conn::Connection;
@@ -105,6 +110,31 @@ pub(super) fn columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("to", "To"),
         ColumnSchema::new("account", "Account"),
     ]
+}
+
+/// What an exported message is called on disk. These names are the whole
+/// contract with whoever renders the mail: a viewer looks for them, and
+/// `message.json` is written **last**, so a half-finished export is never
+/// mistaken for a complete one.
+const HTML_FILE: &str = "message.html";
+const TEXT_FILE: &str = "message.txt";
+const META_FILE: &str = "message.json";
+const INLINE_DIR: &str = "inline";
+
+/// What a message offers.
+///
+/// *Reading* it is not an action — the body is [`Content`], which is what
+/// lets the preview pane follow the cursor. But a mail is more than the text
+/// that pane can show: an HTML mail is markup, and its images are parts of
+/// the message rather than files anyone lists. Handing that to an external
+/// viewer means writing files, and the adapter is the only place that can:
+/// the markup never leaves it otherwise.
+pub(super) fn actions() -> Vec<NodeAction> {
+    vec![NodeAction::new(
+        "export_html",
+        "export html",
+        InputSpec::None,
+    )]
 }
 
 /// The one cell a slot contributes: its glyph when the flag is set, its
@@ -311,6 +341,71 @@ impl MailMessageNode {
     }
 }
 
+impl MailMessageNode {
+    /// Write this message into its own directory and say where it is.
+    ///
+    /// One directory per message, the same one an opened attachment lands in,
+    /// holding at most four things: the sender's markup (`message.html`), the
+    /// plain-text alternative (`message.txt`), the images that markup points
+    /// at (`inline/`), and the headers a renderer needs for its own layout
+    /// (`message.json`). A message carries what it carries — a plain mail
+    /// gets no `message.html` — and the metadata says which of them exist, so
+    /// nothing has to guess from a missing file.
+    ///
+    /// The markup is written **unsanitised**, exactly as it arrived. Deciding
+    /// what may run in a renderer is the renderer's job and depends on what
+    /// it is: a browser and a terminal are not in the same danger. Filtering
+    /// here would give every viewer a false guarantee — that whatever comes
+    /// out of this directory is safe to display — and quietly change the
+    /// message on the way.
+    async fn export_html(&self) -> Result<ActionOutcome> {
+        let dir = message_dir(&self.id).map_err(|e| other_err(e.to_string()))?;
+        let export = crate::mime::export(&self.body.raw().await?);
+
+        if let Some(body) = &export.html {
+            if !body.inline.is_empty() {
+                let inline = dir.join(INLINE_DIR);
+                tokio::fs::create_dir_all(&inline)
+                    .await
+                    .map_err(|e| other_err(format!("create {}: {e}", inline.display())))?;
+                for part in &body.inline {
+                    write(&inline.join(&part.file_name), &part.bytes).await?;
+                }
+            }
+            let html = crate::mime::link_inline(&body.html, &body.inline, INLINE_DIR);
+            write(&dir.join(HTML_FILE), html.as_bytes()).await?;
+        }
+        if let Some(text) = &export.text {
+            write(&dir.join(TEXT_FILE), text.as_bytes()).await?;
+        }
+
+        let meta = serde_json::json!({
+            "id": self.id,
+            "subject": export.subject,
+            "from": export.from,
+            "to": export.to,
+            "cc": export.cc,
+            "date": export.date,
+            "attachments": export.attachments,
+            "html": export.html.as_ref().map(|_| HTML_FILE),
+            "text": export.text.as_ref().map(|_| TEXT_FILE),
+            "inline": export.html.as_ref().map(|b| b.inline.len()).unwrap_or(0),
+        });
+        let meta = serde_json::to_vec_pretty(&meta).map_err(|e| other_err(e.to_string()))?;
+        write(&dir.join(META_FILE), &meta).await?;
+
+        Ok(ActionOutcome::Done {
+            message: Some(format!("exported message to {}", dir.display())),
+        })
+    }
+}
+
+async fn write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    tokio::fs::write(path, bytes)
+        .await
+        .map_err(|e| other_err(format!("write {}: {e}", path.display())))
+}
+
 /// The readable form of one message: a header block over the text part.
 ///
 /// A `Content` and not an action, so the frontend's preview pane can show it
@@ -342,6 +437,18 @@ impl MessageBody {
         ));
         self.cache.put(&key, Arc::clone(&text));
         Ok(text)
+    }
+}
+
+impl MessageBody {
+    /// The message exactly as it travelled. Not cached: the cache holds the
+    /// *rendered* text, and the one caller that needs the source writes what
+    /// it makes of it to disk, where a second look finds it without a fetch.
+    async fn raw(&self) -> Result<Vec<u8>> {
+        self.conn
+            .body(&self.id.folder, self.id.uid_validity, self.id.uid)
+            .await
+            .map_err(super::mail_err)
     }
 }
 
@@ -387,6 +494,15 @@ impl Node for MailMessageNode {
 
     fn content(&self) -> Option<&dyn Content> {
         Some(&self.body)
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("export_html", ActionInput::None) => self.export_html().await,
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "`{other}` is not an action of a mail message"
+            ))),
+        }
     }
 }
 

@@ -9,7 +9,7 @@
 //! The module deliberately knows nothing about IMAP: it takes bytes and
 //! returns text or bytes, which is what makes it testable without a server.
 
-use mail_parser::{MessageParser, PartType};
+use mail_parser::{Address, Message, MessageParser, MimeHeaders, PartType};
 
 /// The readable text of a whole message source.
 ///
@@ -27,6 +27,200 @@ pub(crate) fn body_text(raw: &[u8]) -> String {
         .and_then(|msg| msg.body_text(0).map(|t| t.into_owned()))
         .map(|text| text.replace("\r\n", "\n"))
         .unwrap_or_default()
+}
+
+/// One part the HTML body points at with `cid:` — the sender's own images: a
+/// logo under a signature, a screenshot pasted into the text. They are not
+/// attachments (they have no filename and nothing lists them), they are the
+/// body, and without them half an HTML mail is boxes with crosses in.
+pub(crate) struct InlinePart {
+    /// The `Content-ID`, angle brackets stripped — what the markup spells
+    /// after `cid:`.
+    pub id: String,
+    /// The name the part is written under. Derived from the id, so the
+    /// markup can be pointed at it, prefixed with the part's number because
+    /// two ids may sanitise down to the same string.
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The HTML half of a message: the markup exactly as the sender wrote it,
+/// plus the parts it references.
+///
+/// *Exactly as the sender wrote it* is the point. [`body_text`] hands back
+/// the HTML flattened to text, which is right for a terminal pane and wrong
+/// for a browser — the tables, the headings and the images are the message.
+/// Nothing here sanitises: this module knows MIME, not what is safe to put
+/// in front of a renderer, and a viewer that trusts unfiltered mail markup
+/// would be wrong whether the filtering happened here or not.
+pub(crate) struct HtmlBody {
+    pub html: String,
+    pub inline: Vec<InlinePart>,
+}
+
+/// The message's own `text/html` part, or `None` when it has none.
+///
+/// Deliberately *not* mail-parser's `body_html(0)`: that one converts a
+/// plain-text body to markup when there is no HTML part, so it can never
+/// answer "this message is plain text" — which is exactly the question the
+/// caller has to ask before deciding what to render.
+fn html_of(msg: &Message) -> Option<HtmlBody> {
+    let html = msg
+        .html_bodies()
+        .find(|part| part.is_text_html())
+        .and_then(|part| part.text_contents())?
+        .to_string();
+    let inline = msg
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| {
+            let id = part.content_id()?.trim().trim_matches(['<', '>']).trim();
+            if id.is_empty() || part.is_text_html() {
+                return None;
+            }
+            Some(InlinePart {
+                file_name: inline_file_name(index, id, part.content_type()),
+                id: id.to_string(),
+                bytes: part.contents().to_vec(),
+            })
+        })
+        .collect();
+    Some(HtmlBody { html, inline })
+}
+
+/// Everything an external viewer needs from one message, from one parse.
+///
+/// The header fields are here rather than taken from the row the listing
+/// already holds because that row is an IMAP envelope: it has no `Cc`, and it
+/// counts attachments instead of naming them. A reader wants both.
+pub(crate) struct Export {
+    pub subject: String,
+    pub from: String,
+    pub to: String,
+    pub cc: String,
+    /// RFC 3339, or empty when the message carries no readable `Date`.
+    pub date: String,
+    pub attachments: Vec<String>,
+    pub html: Option<HtmlBody>,
+    /// The plain-text alternative, when the message has one. Never the HTML
+    /// flattened down: a viewer that got both would have no way to tell a
+    /// real text part from a generated one.
+    pub text: Option<String>,
+}
+
+/// One message, taken apart for a renderer.
+pub(crate) fn export(raw: &[u8]) -> Export {
+    let Some(msg) = MessageParser::default().parse(raw) else {
+        return Export {
+            subject: String::new(),
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            date: String::new(),
+            attachments: Vec::new(),
+            html: None,
+            text: None,
+        };
+    };
+    let text = msg
+        .text_bodies()
+        .find(|part| part.is_text() && !part.is_text_html())
+        .and_then(|part| part.text_contents())
+        .map(|text| text.replace("\r\n", "\n"));
+    Export {
+        subject: msg.subject().unwrap_or_default().to_string(),
+        from: addresses(msg.from()),
+        to: addresses(msg.to()),
+        cc: addresses(msg.cc()),
+        date: msg.date().map(|d| d.to_rfc3339()).unwrap_or_default(),
+        attachments: msg
+            .attachments()
+            .filter_map(|part| part.attachment_name().map(str::to_string))
+            .collect(),
+        html: html_of(&msg),
+        text,
+    }
+}
+
+/// An address header as a reader writes it: `Name <local@host>`, joined with
+/// commas. A group (`undisclosed-recipients:;`) contributes its members, which
+/// is what [`Address::iter`] already walks.
+fn addresses(addr: Option<&Address>) -> String {
+    let Some(addr) = addr else {
+        return String::new();
+    };
+    addr.iter()
+        .map(|one| match (one.name(), one.address()) {
+            (Some(name), Some(address)) => format!("{name} <{address}>"),
+            (Some(name), None) => name.to_string(),
+            (None, Some(address)) => address.to_string(),
+            (None, None) => String::new(),
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `<index>-<id>.<ext>`, with everything a file system objects to folded
+/// away. The extension comes from the part's MIME subtype so the browser and
+/// the image viewer recognise the file; a part without a usable type gets
+/// none rather than a made-up one.
+fn inline_file_name(index: usize, id: &str, ctype: Option<&mail_parser::ContentType>) -> String {
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ext = ctype
+        .and_then(|c| c.subtype())
+        .map(|s| {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(".{s}"))
+        .unwrap_or_default();
+    format!("{index}-{safe}{ext}")
+}
+
+/// Point the markup at the files instead of at the message: every
+/// `cid:<id>` an inline part answers to becomes `<dir>/<file name>`.
+///
+/// A reference nothing answers to is left alone. It cannot be resolved
+/// either way, and rewriting it to a path that does not exist would only
+/// hide that from whoever has to explain the missing image.
+pub(crate) fn link_inline(html: &str, inline: &[InlinePart], dir: &str) -> String {
+    // Lowered once, and only to find the scheme: `to_ascii_lowercase` keeps
+    // every byte where it was, so an index into the copy indexes the original.
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut pos = 0;
+    while let Some(offset) = lower[pos..].find("cid:") {
+        let at = pos + offset;
+        out.push_str(&html[pos..at]);
+        let after = &html[at + 4..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '>' | ')' | '\\'))
+            .unwrap_or(after.len());
+        let reference = &after[..end];
+        match inline
+            .iter()
+            .find(|part| part.id.eq_ignore_ascii_case(reference))
+        {
+            Some(part) => out.push_str(&format!("{dir}/{}", part.file_name)),
+            None => out.push_str(&html[at..at + 4 + end]),
+        }
+        pos = at + 4 + end;
+    }
+    out.push_str(&html[pos..]);
+    out
 }
 
 /// The decoded bytes of one MIME part, from the two things a
@@ -115,6 +309,116 @@ mod tests {
         assert!(!text.contains("<b>"), "the markup must not reach the pane");
     }
 
+    /// The whole reason `body_html` exists: the browser must get the sender's
+    /// markup, not the flattened text the terminal pane shows.
+    #[test]
+    fn an_html_alternative_arrives_as_markup() {
+        let raw = concat!(
+            "Content-Type: multipart/alternative; boundary=\"b\"\r\n",
+            "\r\n",
+            "--b\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "the plain one\r\n",
+            "--b\r\n",
+            "Content-Type: text/html\r\n\r\n",
+            "<p>the <b>html</b> one</p>\r\n",
+            "--b--\r\n"
+        );
+        let body = export(raw.as_bytes()).html.expect("an html part");
+        assert!(body.html.contains("<b>html</b>"), "{:?}", body.html);
+        assert!(body.inline.is_empty());
+    }
+
+    /// A plain-text mail must say it has no HTML rather than hand back a
+    /// converted body — the caller renders text differently on purpose.
+    #[test]
+    fn a_plain_mail_has_no_html_body() {
+        let raw = "Content-Type: text/plain\r\n\r\nnothing but text\r\n";
+        assert!(export(raw.as_bytes()).html.is_none());
+    }
+
+    /// The signature logo: carried as a part, referenced as `cid:`, and
+    /// nowhere in the attachment list.
+    #[test]
+    fn an_inline_image_comes_along_and_the_markup_points_at_the_file() {
+        let raw = concat!(
+            "Content-Type: multipart/related; boundary=\"r\"\r\n",
+            "\r\n",
+            "--r\r\n",
+            "Content-Type: text/html\r\n\r\n",
+            "<img src=3D\"cid:logo@example\"><img src=\"CID:logo@example\">\r\n",
+            "--r\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-ID: <logo@example>\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "aGk=\r\n",
+            "--r--\r\n"
+        );
+        let body = export(raw.as_bytes()).html.expect("an html part");
+        assert_eq!(body.inline.len(), 1);
+        let part = &body.inline[0];
+        assert_eq!(part.id, "logo@example");
+        assert!(
+            part.file_name.ends_with("-logo_example.png"),
+            "{}",
+            part.file_name
+        );
+        assert_eq!(part.bytes, b"hi");
+        let linked = link_inline(&body.html, &body.inline, "inline");
+        assert_eq!(
+            linked
+                .matches(&format!("inline/{}", part.file_name))
+                .count(),
+            2
+        );
+        assert!(!linked.to_ascii_lowercase().contains("cid:"), "{linked}");
+    }
+
+    /// One parse has to answer every question a viewer asks — including the
+    /// two the envelope row cannot: who was copied in, and what the files are
+    /// called.
+    #[test]
+    fn an_export_carries_the_headers_the_row_does_not() {
+        let raw = concat!(
+            "From: Ada <ada@example.org>\r\n",
+            "To: Bob <bob@example.org>, carol@example.org\r\n",
+            "Cc: Dan <dan@example.org>\r\n",
+            "Subject: Angebot\r\n",
+            "Date: Tue, 1 Sep 2026 10:00:00 +0200\r\n",
+            "Content-Type: multipart/mixed; boundary=\"m\"\r\n",
+            "\r\n",
+            "--m\r\n",
+            "Content-Type: text/plain\r\n\r\n",
+            "hello\r\n",
+            "--m\r\n",
+            "Content-Type: application/pdf; name=\"offer.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"offer.pdf\"\r\n\r\n",
+            "%PDF\r\n",
+            "--m--\r\n"
+        );
+        let export = export(raw.as_bytes());
+        assert_eq!(export.subject, "Angebot");
+        assert_eq!(export.from, "Ada <ada@example.org>");
+        assert_eq!(export.to, "Bob <bob@example.org>, carol@example.org");
+        assert_eq!(export.cc, "Dan <dan@example.org>");
+        assert!(
+            export.date.starts_with("2026-09-01T10:00:00"),
+            "{}",
+            export.date
+        );
+        assert_eq!(export.attachments, ["offer.pdf"]);
+        assert_eq!(export.text.as_deref(), Some("hello"));
+        assert!(export.html.is_none(), "a plain mail has no markup to show");
+    }
+
+    /// A reference nothing answers to stays as it is: a path that resolves to
+    /// nothing would hide the missing part instead of showing it.
+    #[test]
+    fn an_unanswered_cid_reference_is_left_alone() {
+        let html = "<img src=\"cid:gone@example\"> and cid: on its own";
+        assert_eq!(link_inline(html, &[], "inline"), html);
+    }
+
     /// A message that is only an attachment has no body — and an empty pane
     /// is a truer answer than a made-up one.
     #[test]
@@ -134,7 +438,10 @@ mod tests {
     fn a_part_is_decoded_from_its_own_headers() {
         let headers = b"Content-Type: application/pdf; name=\"x.pdf\"\r\n\
                         Content-Transfer-Encoding: base64\r\n";
-        assert_eq!(decode_part(headers, b"aGVsbG8gd29ybGQ=\r\n"), b"hello world");
+        assert_eq!(
+            decode_part(headers, b"aGVsbG8gd29ybGQ=\r\n"),
+            b"hello world"
+        );
     }
 
     /// A part with no encoding at all is passed through byte for byte — an

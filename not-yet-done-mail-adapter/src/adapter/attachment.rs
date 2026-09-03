@@ -16,6 +16,7 @@ use not_yet_done_content::{
     Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
+use super::files::{message_dir, safe_file_name, sanitize_component};
 use super::types::attachment_type;
 use super::{field, form_field, other_err};
 use crate::ids::{MessageId, attachment_id};
@@ -95,36 +96,6 @@ pub(super) fn list(msg: &MessageId, attachments: &[AttachmentInfo]) -> ListResul
     }
 }
 
-/// Reduce a string to a safe single path component.
-fn sanitize_component(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Strip directory parts off a server-supplied filename and make it safe to
-/// write. A filename is the *sender's* text: it may name `../` or a drive,
-/// and it reaches disk here.
-fn safe_file_name(filename: &str) -> String {
-    let base = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("file");
-    let safe = sanitize_component(base);
-    if safe.chars().all(|c| c == '.') {
-        return "file".to_string();
-    }
-    safe
-}
-
 /// Expand a leading `~`, create the directory, and refuse an existing
 /// non-directory *before* anything is fetched.
 fn prepare_target_dir(dir_input: &str) -> Result<PathBuf> {
@@ -148,17 +119,6 @@ fn prepare_target_dir(dir_input: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&expanded)
         .map_err(|e| other_err(format!("create {}: {e}", expanded.display())))?;
     Ok(expanded)
-}
-
-/// Per-message temp directory for opened attachments, so every file of one
-/// mail lands together — the viewer's next/previous then pages through the
-/// message — and re-opening reuses the bytes already fetched.
-fn temp_dir(message_id: &str) -> std::io::Result<PathBuf> {
-    let mut dir = std::env::temp_dir();
-    dir.push("not_yet_done_mail");
-    dir.push(sanitize_component(message_id));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 /// The name one part is written under. Prefixed with its section path so two
@@ -216,7 +176,7 @@ impl MailAttachmentNode {
     /// the system viewer. The adapter says *what* to open, the frontend
     /// *how*.
     async fn open_external(&self) -> Result<ActionOutcome> {
-        let dir = temp_dir(&self.msg.encode()).map_err(|e| other_err(e.to_string()))?;
+        let dir = message_dir(&self.msg.encode()).map_err(|e| other_err(e.to_string()))?;
         let path = dir.join(file_name_for(&self.att));
         if !path.exists() {
             let bytes = self.bytes(&self.att.part).await?;
@@ -390,18 +350,13 @@ mod tests {
         }
     }
 
-    /// A filename comes from the sender. It must not be able to name a path.
+    /// Two parts of one message regularly share a filename — `image001.png`
+    /// twice in a forwarded thread — so the section path prefixes it.
+    /// (That the name itself cannot be a path is `files`' own test.)
     #[test]
-    fn a_hostile_filename_cannot_escape_the_target_directory() {
-        assert_eq!(safe_file_name("../../etc/passwd"), "passwd");
-        assert_eq!(safe_file_name("a/b\\c d.pdf"), "c_d.pdf");
-        assert_eq!(safe_file_name("   "), "file");
-        assert_eq!(safe_file_name(".."), "file");
-        assert_eq!(
-            file_name_for(&att("2.1", "invoice.pdf")),
-            "2.1_invoice.pdf",
-            "the section path prefixes the name so two `image001.png` do not collide"
-        );
+    fn a_part_is_named_after_its_section_and_its_file() {
+        assert_eq!(file_name_for(&att("2.1", "invoice.pdf")), "2.1_invoice.pdf");
+        assert_eq!(file_name_for(&att("2", "../../etc/passwd")), "2_passwd");
     }
 
     #[test]

@@ -109,7 +109,7 @@ pub(crate) const MAILS: &[FakeMessage] = &[
         size: 512,
         flags: "\\Seen \\Answered",
         attachment: false,
-        source: PLAIN_SOURCE,
+        source: HTML_SOURCE,
         parts: &[],
     },
 ];
@@ -124,6 +124,29 @@ pub(crate) const PLAIN_SOURCE: &str = concat!(
     "Content-Transfer-Encoding: quoted-printable\r\n",
     "\r\n",
     "Gr=FC=DFe aus M=FCnchen\r\n"
+);
+
+/// The half of every mailbox a text pane cannot show: markup, with the
+/// sender's own image carried alongside it and referenced by `cid:`. Its
+/// `BODYSTRUCTURE` says `attachment: false` — an inline logo is body, not a
+/// file anybody lists, which is exactly why exporting it needs its own seam.
+pub(crate) const HTML_SOURCE: &str = concat!(
+    "From: news@example.com\r\n",
+    "Subject: Newsletter\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: multipart/related; boundary=\"r\"\r\n",
+    "\r\n",
+    "--r\r\n",
+    "Content-Type: text/html; charset=utf-8\r\n",
+    "\r\n",
+    "<h1>Neues</h1><img src=\"cid:logo@example\">\r\n",
+    "--r\r\n",
+    "Content-Type: image/png\r\n",
+    "Content-ID: <logo@example>\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "aGVsbG8gd29ybGQ=\r\n",
+    "--r--\r\n"
 );
 
 /// A `multipart/mixed`: text and one base64 attachment.
@@ -280,12 +303,7 @@ impl FakeServer {
     }
 }
 
-async fn serve(
-    sock: tokio::net::TcpStream,
-    script: Script,
-    nth: usize,
-    counters: Arc<Counters>,
-) {
+async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters: Arc<Counters>) {
     let (rx, mut tx) = sock.into_split();
     let mut lines = BufReader::new(rx).lines();
     if tx
@@ -384,11 +402,8 @@ async fn serve(
                 match (selected, sub.as_str()) {
                     (None, _) => format!("{tag} BAD no mailbox selected\r\n"),
                     (Some(folder), "SEARCH") => {
-                        let uids: Vec<String> = folder
-                            .mails
-                            .iter()
-                            .map(|m| m.uid.to_string())
-                            .collect();
+                        let uids: Vec<String> =
+                            folder.mails.iter().map(|m| m.uid.to_string()).collect();
                         format!(
                             "* SEARCH {}\r\n{tag} OK SEARCH completed\r\n",
                             uids.join(" ")
@@ -399,7 +414,9 @@ async fn serve(
                         let wanted: Vec<u32> = args
                             .get(1)
                             .map(|set| {
-                                set.split(',').filter_map(|u| u.parse::<u32>().ok()).collect()
+                                set.split(',')
+                                    .filter_map(|u| u.parse::<u32>().ok())
+                                    .collect()
                             })
                             .unwrap_or_default();
                         // Which sections the client asked for. A real server
@@ -525,7 +542,10 @@ fn body_line(seq: usize, mail: &FakeMessage, sections: &[String]) -> String {
         let payload: Option<&str> = if section.is_empty() {
             Some(mail.source)
         } else if let Some(part) = section.strip_suffix(".MIME") {
-            mail.parts.iter().find(|(p, _, _)| *p == part).map(|(_, h, _)| *h)
+            mail.parts
+                .iter()
+                .find(|(p, _, _)| *p == part)
+                .map(|(_, h, _)| *h)
         } else {
             mail.parts
                 .iter()
