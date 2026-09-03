@@ -71,6 +71,32 @@ fn other_err(e: impl std::fmt::Display) -> ContentError {
     ContentError::Other(e.to_string().into())
 }
 
+/// A declared child whose listing cannot happen, because the level's own id
+/// could not be read.
+///
+/// The child *types* must not depend on an id. A frontend resolves a type
+/// path (`mail:folder:message`) by walking [`ContentAdapter::childs`] on an
+/// **id-less prototype** node, so a level that answers with nothing there
+/// describes itself as a leaf: `nyd adapter mail:folder:message <id> cat`
+/// fails with "no child 'message'" before it ever gets near a message, and
+/// `mail:folder help` reports the folder as the bottom of the tree. The types
+/// are therefore always declared and only the *listing* refuses, naming the id
+/// it could not read.
+fn unlistable<'a>(
+    node_type: NodeType,
+    columns: Vec<ColumnSchema>,
+    expected: &'static str,
+    id: String,
+) -> Child<'a> {
+    Child {
+        node_type,
+        columns,
+        list: Box::new(move |_params| {
+            Box::pin(async move { Err(other_err(format!("not a mail {expected} id: '{id}'"))) })
+        }),
+    }
+}
+
 /// One value out of a form action's input, refused when it is blank. A
 /// download into `""` would silently land in the process's working
 /// directory, which is not where the user meant.
@@ -595,7 +621,23 @@ impl ContentAdapter for MailAdapter {
             }
             "mail:folder" => {
                 let Some((account, path)) = crate::ids::split_folder_id(node.id()) else {
-                    return Vec::new();
+                    // No id to build a listing from — but the types below a
+                    // folder are the same either way, and a caller walking the
+                    // tree needs to see them. See [`unlistable`].
+                    return vec![
+                        unlistable(
+                            types::folder_type().clone(),
+                            folder::columns(),
+                            "folder",
+                            node.id().to_string(),
+                        ),
+                        unlistable(
+                            types::message_type().clone(),
+                            message::columns(),
+                            "folder",
+                            node.id().to_string(),
+                        ),
+                    ];
                 };
                 let (account, path) = (account.to_string(), path.to_string());
                 let (msg_account, msg_path) = (account.clone(), path.clone());
@@ -622,7 +664,12 @@ impl ContentAdapter for MailAdapter {
             }
             "mail:message" => {
                 let Some(msg) = crate::ids::parse_message_id(node.id()) else {
-                    return Vec::new();
+                    return vec![unlistable(
+                        types::attachment_type().clone(),
+                        attachment::columns(),
+                        "message",
+                        node.id().to_string(),
+                    )];
                 };
                 vec![Child {
                     node_type: types::attachment_type().clone(),
@@ -788,6 +835,44 @@ accounts:
             .find(|f| f.key == key)
             .map(|f| f.value.as_str())
             .unwrap_or("<missing>")
+    }
+
+    /// A frontend resolves the type path `mail:folder:message` by walking
+    /// `childs()` on an **id-less prototype** node. When the folder built its
+    /// children out of its own id, that walk stopped dead at the folder —
+    /// `mail:folder help` reported a leaf and `mail:folder:message <id> cat`
+    /// failed with "no child 'message'" before it ever reached a message.
+    #[tokio::test]
+    async fn the_type_tree_holds_without_an_id() {
+        let adapter = adapter_for(1);
+        let kids = |nt: &NodeType| -> Vec<String> {
+            not_yet_done_content::child_types_of_type(&adapter, nt)
+                .into_iter()
+                .map(|t| t.type_id)
+                .collect()
+        };
+
+        assert_eq!(kids(types::folder_type()), ["mail:folder", "mail:message"]);
+        assert_eq!(kids(types::message_type()), ["mail:attachment"]);
+    }
+
+    /// Declaring the types is not promising a listing: asked to actually list
+    /// under an id it cannot read, the level says so instead of coming back
+    /// empty.
+    #[tokio::test]
+    async fn listing_under_an_unreadable_id_refuses() {
+        let adapter = adapter_for(1);
+        let proto = not_yet_done_content::TypeNode::new(types::folder_type().clone());
+
+        let Err(err) = children::list(&adapter, &proto, params(types::message_type(), None)).await
+        else {
+            panic!("no id, no listing");
+        };
+
+        assert!(
+            err.to_string().contains("not a mail folder id"),
+            "the message names what could not be read: {err}"
+        );
     }
 
     /// The shape the shipped view uses: a subtab pinned to one account with
