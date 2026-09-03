@@ -1269,8 +1269,17 @@ pub struct ContentView {
     /// even after siblings close.
     next_pane_id: PaneId,
 
-    /// Live auth/connection status pushed by the App's status watcher.
-    pub auth_status: AdapterStatus,
+    /// Live auth/connection status pushed by the App's status watcher, one
+    /// per subtab.
+    ///
+    /// Not one per view: an adapter instance may serve several subtabs at
+    /// once and the mail adapter does — six IMAP accounts, one per subtab.
+    /// Kept in a single slot, the account you just visited left its failure
+    /// on the screen of the account you came back to, and nothing published
+    /// again to clear it (a subtab that is already loaded asks for nothing).
+    /// Each subtab subscribes under its own level query instead; see
+    /// `ContentAdapter::subscribe_status_for`.
+    auth_statuses: Vec<AdapterStatus>,
     /// Permanent error captured at adapter-construction time.
     pub adapter_init_error: Option<String>,
 
@@ -7883,7 +7892,7 @@ impl ContentView {
             pane_trees,
             active_subtab,
             next_pane_id,
-            auth_status: AdapterStatus::Ready,
+            auth_statuses: vec![AdapterStatus::Ready; config.views.len().max(1)],
             adapter_init_error: None,
             query_menu,
             group_menu,
@@ -10241,22 +10250,38 @@ impl ContentView {
         })
     }
 
+    /// The status of the subtab on screen.
+    pub fn auth_status(&self) -> &AdapterStatus {
+        static READY: AdapterStatus = AdapterStatus::Ready;
+        self.auth_statuses.get(self.active_subtab).unwrap_or(&READY)
+    }
+
+    /// Record the status of one subtab, whether or not it is the one on
+    /// screen — a subtab that logs in while the user is elsewhere must show
+    /// what it found when they come back, not what it showed when they left.
+    pub fn set_auth_status_for(&mut self, subtab: usize, status: AdapterStatus) {
+        if let Some(slot) = self.auth_statuses.get_mut(subtab) {
+            *slot = status;
+        }
+    }
+
     pub fn set_auth_status(&mut self, status: AdapterStatus) {
-        self.auth_status = status;
+        let active = self.active_subtab;
+        self.set_auth_status_for(active, status);
     }
 
     /// True while the adapter is `Busy` — the only banner state whose
     /// text advances purely with wall-clock time. The main loop polls
     /// this to keep the elapsed-seconds counter ticking when idle.
     pub fn is_busy(&self) -> bool {
-        matches!(self.auth_status, AdapterStatus::Busy { .. })
+        matches!(*self.auth_status(), AdapterStatus::Busy { .. })
     }
 
     /// True while the adapter is logging in. Like [`Self::is_busy`] this
     /// drives the redraw nudge — the connect banner counts the seconds the
     /// current login step has been running.
     pub fn is_connecting(&self) -> bool {
-        matches!(self.auth_status, AdapterStatus::Connecting { .. })
+        matches!(*self.auth_status(), AdapterStatus::Connecting { .. })
     }
 
     /// Apply the global `notifications.load_banner` to this tab, unless its
@@ -10412,7 +10437,7 @@ impl ContentView {
         if self.load_banner_route != LoadBannerRoute::Global {
             return None;
         }
-        match &self.auth_status {
+        match self.auth_status() {
             AdapterStatus::Busy {
                 label,
                 started_at_unix_ms,
@@ -10450,10 +10475,10 @@ impl ContentView {
         if let Some(err) = &self.adapter_init_error {
             return Some(format!("Configuration error: {err}"));
         }
-        match &self.auth_status {
+        match self.auth_status() {
             // Shared with the CLI's progress line so the wording cannot drift.
             AdapterStatus::Connecting { .. } | AdapterStatus::Failed { .. } => {
-                self.auth_status.banner_text()
+                self.auth_status().banner_text()
             }
             AdapterStatus::NeedsCreds { .. } => {
                 Some("Login required (press the action key to enter credentials)".into())
@@ -12408,7 +12433,7 @@ impl Component for ContentView {
         if let (Some(bn_area), Some(text)) = (banner_area, banner_text) {
             let t = &*self.theme;
             let is_failure = self.adapter_init_error.is_some()
-                || matches!(self.auth_status, AdapterStatus::Failed { .. })
+                || matches!(*self.auth_status(), AdapterStatus::Failed { .. })
                 || self.active_pane().fetch_error.is_some();
             let style = if is_failure {
                 Style::default().fg(t.error())
@@ -21443,6 +21468,44 @@ mod tests {
     }
 
     // -- Auth-status banner --
+
+    #[test]
+    fn a_subtab_shows_its_own_status_and_not_a_siblings() {
+        // The reported bug: visiting one mail account, getting "connection
+        // refused", and finding it still on screen after switching back to
+        // the account that was working.
+        let mut config = test_config_with_children();
+        let mut second = config.views[0].clone();
+        second.name = "Second".into();
+        second.default = false;
+        config.views.push(second);
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+
+        view.set_auth_status_for(
+            1,
+            AdapterStatus::Failed {
+                reason: "connection refused".into(),
+            },
+        );
+        assert!(
+            view.auth_status_banner().is_none(),
+            "the failure belongs to the other subtab"
+        );
+
+        view.activate_subtab(1);
+        assert!(
+            view.auth_status_banner()
+                .is_some_and(|b| b.contains("connection refused")),
+            "the subtab that failed says so"
+        );
+
+        view.activate_subtab(0);
+        assert!(
+            view.auth_status_banner().is_none(),
+            "switching back does not carry the failure along"
+        );
+    }
 
     #[test]
     fn auth_status_banner_hidden_when_ready() {

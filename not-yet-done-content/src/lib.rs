@@ -2291,6 +2291,28 @@ pub trait ContentAdapter: Send + Sync {
         tx.subscribe()
     }
 
+    /// Subscribe to the status of the part of the adapter a view actually
+    /// shows, named by that view's own level query.
+    ///
+    /// One instance may serve several views at once — the mail adapter is one
+    /// instance holding six IMAP accounts, one per subtab, each subtab pinned
+    /// by `account:<id>`. On a single instance-wide channel every account's
+    /// state lands on every subtab: a `Failed` from the account you just
+    /// visited stays on the screen of the account you came back to, because a
+    /// `watch` keeps its last value and a view that is already loaded asks for
+    /// nothing new. Handing out one channel per scope is what stops that.
+    ///
+    /// The default ignores the query and returns
+    /// [`subscribe_status`](Self::subscribe_status) — an adapter that is one
+    /// connection has one status, and nothing to tell apart.
+    fn subscribe_status_for(
+        &self,
+        query: Option<&str>,
+    ) -> tokio::sync::watch::Receiver<AdapterStatus> {
+        let _ = query;
+        self.subscribe_status()
+    }
+
     /// Subscribe to out-of-band [`Invalidation`] signals. A `broadcast`
     /// receiver (not `watch`) because invalidations are discrete *events*,
     /// not a latest-value state — coalescing them would drop intermediate
