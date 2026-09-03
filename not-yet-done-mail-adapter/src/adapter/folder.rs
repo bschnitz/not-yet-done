@@ -20,7 +20,7 @@ use crate::model::FolderInfo;
 pub(super) fn columns() -> Vec<ColumnSchema> {
     vec![
         ColumnSchema::new("name", "Folder"),
-        ColumnSchema::new("unread", "Unread").typed("number"),
+        ColumnSchema::new("unread_count", "Unread").typed("number"),
         ColumnSchema::new("total", "Total").typed("number"),
         ColumnSchema::new("path", "Path"),
     ]
@@ -36,14 +36,16 @@ pub(super) fn metadata_of(account: &str, info: &FolderInfo) -> Metadata {
     Metadata {
         fields: vec![
             field("name", info.name.clone(), "Folder"),
-            field("unread", count(info.unread), "Unread"),
+            field("unread_count", count(info.unread), "Unread"),
             field("total", count(info.total), "Total"),
             field("path", info.path.clone(), "Path"),
             field("account", account.to_string(), "Account"),
-            // The unread *marker* the styling layer paints from, mirroring
-            // the Stoat rows: non-empty means "highlight this row".
+            // The flag the styling layer paints from — `unread` is the key
+            // the frontend looks under, the same one the Stoat rows carry,
+            // which is why the COUNT above had to be called something else.
+            // "true" means "highlight this row"; empty means it is read.
             field(
-                "unread_marker",
+                "unread",
                 match info.unread {
                     Some(n) if n > 0 => "true".to_string(),
                     _ => String::new(),

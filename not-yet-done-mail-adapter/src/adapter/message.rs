@@ -75,11 +75,11 @@ pub(super) fn metadata_of(account: &str, row: &EnvelopeRow) -> Metadata {
             field("attachments", row.attachments.to_string(), "Att"),
             field("to", row.to.clone(), "To"),
             field("account", account.to_string(), "Account"),
-            // The unread marker the styling layer paints from — the same
-            // field the folder rows and the Stoat messages carry, so an
+            // The flag the styling layer paints from — the same `unread`
+            // key the folder rows and the Stoat messages carry, so an
             // unread mail lights up with no frontend work.
             field(
-                "unread_marker",
+                "unread",
                 if row.seen { String::new() } else { "true".into() },
                 "Unread",
             ),
@@ -192,6 +192,26 @@ mod tests {
                 column.key
             );
         }
+    }
+
+    /// The highlight the frontend paints reads exactly one key — `unread`,
+    /// with the value `"true"`. It is deliberately NOT a declared column
+    /// (nothing renders it as text), so a test is the only thing that keeps
+    /// it from disappearing unnoticed and taking the highlight with it.
+    #[test]
+    fn an_unseen_message_carries_the_unread_flag() {
+        let flag = |r: &EnvelopeRow| {
+            metadata_of("work", r)
+                .fields
+                .iter()
+                .find(|f| f.key == "unread")
+                .map(|f| f.value.clone())
+                .unwrap_or_default()
+        };
+        let mut r = row();
+        assert_eq!(flag(&r), "true", "unseen by default");
+        r.seen = true;
+        assert_eq!(flag(&r), "");
     }
 
     #[test]

@@ -3411,7 +3411,7 @@ impl ContentPane {
         view_defs: &[ViewDef],
     ) -> Option<SubViewMessage> {
         let row = self.table.selected_row();
-        let (depth, parent_path, node_id, node_label, node_type_chain, is_placeholder) = {
+        let (depth, parent_path, node_id, node_label, node_type_chain, is_placeholder, can_expand) = {
             let entry = self.tree_entry_at_row(row)?;
             (
                 entry.depth,
@@ -3420,6 +3420,7 @@ impl ContentPane {
                 entry.node.label.clone(),
                 entry.node_type_chain.clone(),
                 entry.is_more_placeholder,
+                entry.has_children,
             )
         };
         let view_def = self.view_def(view_defs)?;
@@ -3490,11 +3491,25 @@ impl ContentPane {
             .filter(|c| c.tree_label.is_some())
             .collect();
 
+        // A row the tree cannot unfold must not be claimed by the expand
+        // branch while there is something to drill into. The expand arrow
+        // is already gated on this same `has_children` (see
+        // `TreeState::flatten_into`), so leaving Enter ungated makes the
+        // two disagree: the row shows no arrow, and Enter still runs an
+        // expand that loads nothing — a key that visibly does nothing.
+        // The mail folder tree is what needs this: every folder carries a
+        // recursive subfolder branch AND a message level, so `INBOX` (a
+        // folder the server says has nothing below it) would otherwise be
+        // undrillable. A row with no drill child keeps the old behaviour —
+        // with nothing else to open, attempting the expand is still the
+        // honest answer.
+        let drillable = kids.iter().any(|c| c.tree_label.is_none());
+
         // Branch 1: there is at least one tree-continuing child at
         // this entry — expand/collapse. With one tree-continuing
         // sibling: single load (legacy path). With N > 1: fan out
         // N loads via ExpandTreeNodeMulti.
-        if !tree_children.is_empty() {
+        if !tree_children.is_empty() && (can_expand || !drillable) {
             let need_load: bool;
             {
                 let tree = self.tree.as_mut()?;
@@ -7421,14 +7436,27 @@ impl ContentPane {
                 if let Some(ref target) = action.navigate_to {
                     let children = self.current_children(view_defs).to_vec();
                     if let Some(child_def) = children.into_iter().find(|c| c.node_type == *target) {
+                        // In a tree the rows are the tree's entries, not
+                        // `items` — that field still holds the last flat
+                        // listing, and indexing it by the cursor row would
+                        // navigate away from whichever node happens to sit
+                        // at that offset. `tree_entry_at_row` returns `None`
+                        // outside tree mode, so the flat path is unchanged.
+                        // The mail folder tree needs this: a folder that has
+                        // subfolders keeps Enter for expanding, so its
+                        // messages are reached by a `navigate` key instead.
                         let row = self.table.selected_row();
-                        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
-                        if let Some(item) = self.items.get(item_idx) {
-                            let id = item.id.clone();
-                            let label = item.label.clone();
+                        let selected = match self.tree_entry_at_row(row) {
+                            Some(entry) => Some((entry.node.id.clone(), entry.node.label.clone())),
+                            None => {
+                                let idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                                self.items.get(idx).map(|i| (i.id.clone(), i.label.clone()))
+                            }
+                        };
+                        if let Some((item_id, item_label)) = selected {
                             return SubViewMessage::ContentDrill {
-                                item_id: id,
-                                item_label: label,
+                                item_id,
+                                item_label,
                                 child_def: Box::new(child_def),
                             };
                         }
@@ -19194,6 +19222,108 @@ mod tests {
             "freshly loaded schemas must be filtered: private is hidden, \
              and db2 (no match) is pruned with path-pruning semantics"
         );
+    }
+
+    /// The drill child a tree level offers next to its tree-continuing
+    /// branch, for the two tests below: same shape as the mail folder tree,
+    /// where every folder carries BOTH a recursive subfolder branch and a
+    /// message level.
+    fn with_a_drill_child(config: &mut ViewFileConfig) {
+        let mut rows = config.views[0].children[0].clone();
+        rows.name = "Rows".into();
+        rows.node_type = "mock:row".into();
+        rows.tree_label = None;
+        rows.children = Vec::new();
+        rows.split = Some(SplitDef {
+            direction: SplitDirection::Right,
+            ratio: 0.5,
+            coupled: true,
+        });
+        config.views[0].children.push(rows);
+    }
+
+    /// A row the adapter says has nothing below it must not have its Enter
+    /// swallowed by the expand branch while the level also offers something
+    /// to drill into. The expand arrow is gated on the same `has_children`,
+    /// so an ungated Enter makes the two disagree: no arrow on the row, and
+    /// a keypress that expands nothing. `INBOX` is exactly that row — a
+    /// folder with no subfolders that still has to open its messages.
+    #[test]
+    fn a_tree_row_that_cannot_unfold_drills_instead_of_expanding() {
+        let mut config = test_config_with_tree();
+        with_a_drill_child(&mut config);
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut dbs = mock_dbs();
+        dbs[0].has_children = Some(true);
+        dbs[1].has_children = Some(false);
+        view.set_items(dbs, Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        // db1 can be unfolded — Enter stays with the expand branch.
+        view.active_pane_mut().table.set_selected(0);
+        let msg = view
+            .active_pane_mut()
+            .try_tree_open(view_index, pane_id, &view_defs);
+        assert!(
+            !matches!(msg, Some(SubViewMessage::ContentDrill { .. })),
+            "a row with children still expands, got {msg:?}"
+        );
+
+        // db2 has nothing to unfold — Enter drills into the leaf child.
+        view.active_pane_mut().table.set_selected(1);
+        let msg = view
+            .active_pane_mut()
+            .try_tree_open(view_index, pane_id, &view_defs)
+            .expect("a leaf row with a drill child yields a drill message");
+        match msg {
+            SubViewMessage::ContentDrill {
+                item_id, child_def, ..
+            } => {
+                assert_eq!(item_id, "db2");
+                assert_eq!(child_def.node_type, "mock:row");
+            }
+            other => panic!("expected ContentDrill, got {other:?}"),
+        }
+    }
+
+    /// `type: navigate` on a tree pane reads the node under the cursor from
+    /// the tree, not from `items` — that field still holds the last flat
+    /// listing, so indexing it by the cursor row navigates away from
+    /// whichever node happens to sit at that offset. This is the second key
+    /// a folder WITH subfolders needs: Enter belongs to expanding, so the
+    /// message level is reached by naming it.
+    #[test]
+    fn navigate_in_a_tree_takes_the_row_under_the_cursor() {
+        let mut config = test_config_with_tree();
+        with_a_drill_child(&mut config);
+
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        let view_defs = view.view_defs.clone();
+        let pane_id = view.active_pane_id();
+        let view_index = view.view_index;
+
+        let action: ActionDef = serde_yaml::from_str(
+            "{ name: rows, key: m, type: navigate, navigate_to: \"mock:row\" }",
+        )
+        .expect("the navigate action should deserialize");
+
+        view.active_pane_mut().table.set_selected(1);
+        let msg = view
+            .active_pane_mut()
+            .execute_action(&action, view_index, pane_id, &view_defs);
+        match msg {
+            SubViewMessage::ContentDrill {
+                item_id, child_def, ..
+            } => {
+                assert_eq!(item_id, "db2", "the SECOND tree row is under the cursor");
+                assert_eq!(child_def.node_type, "mock:row");
+            }
+            other => panic!("expected ContentDrill, got {other:?}"),
+        }
     }
 
     #[test]

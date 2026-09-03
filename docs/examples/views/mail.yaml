@@ -26,17 +26,23 @@
 # That is why `auto_connect:` below is a single decision for the whole tab
 # without dragging every mailbox onto the network at once.
 #
-# Folder counts (`unread` / `total`) come from an IMAP `STATUS` call — one
-# round trip PER FOLDER. They are therefore fetched for the folders of the
+# Folder counts (`unread_count` / `total`) come from an IMAP `STATUS` call —
+# one round trip PER FOLDER. They are therefore fetched for the folders of the
 # level being shown, not for the whole tree; a `\Noselect` folder (a pure
 # container, e.g. `Archive` above `Archive/2019`) has no counts at all and
 # leaves the cells EMPTY rather than showing `0` — "cannot be counted" and
 # "counted zero" are different answers.
 #
-# SCOPE: this file covers what the adapter implements today — the folder
-# tree. The message level (`mail:message`), its preview and its attachments
-# arrive with phase 2; the sketch at the end of this file shows where they
-# will hang.
+# The count is `unread_count`, not `unread`, and that is not cosmetic: rows
+# carry a separate `unread` field holding `"true"`, and THAT is the key the
+# frontend paints `unread_style` / `unread_marker` from — here, in the tree
+# and in the tab bar. A count column sitting on the same name would take it
+# over and leave the highlight permanently dark.
+#
+# SCOPE: this file covers what the adapter implements today — the folder tree
+# and the messages under a folder. Reading a message BODY (the preview pane)
+# and its attachments arrive with phase 2b; until then a message row shows its
+# envelope, which is all one `FETCH` per page costs.
 
 tab:
   name: Mail
@@ -81,7 +87,7 @@ views:
     unread_marker: "●"
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }
-      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: unread_count, label: Unread, kind: number, sizing: "fixed(7)" }
       - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
       # The server-side path (`Archive/2019`, IMAP's own spelling) — what
       # `SELECT` uses and what `exclude_folders:` matches against. Off by
@@ -91,6 +97,12 @@ views:
       - { key: path, label: Path, sizing: "flex(1)", hidden: true }
     actions:
       - { name: refresh, key: r, type: reload }
+      # Enter on a folder that HAS subfolders expands it — that is what the
+      # arrow in front of it promises — so the messages of such a folder need
+      # a key of their own. On a folder with nothing below it Enter opens the
+      # messages directly, and `m` does the same; one key that always works
+      # beats a key that works most of the time.
+      - { name: messages, key: m, type: navigate, navigate_to: "mail:message" }
       # Filters the folders already on screen by name. A plain local filter,
       # not an IMAP search: it needs no round trip and, in a lazily expanded
       # tree, it can only match what is expanded.
@@ -104,6 +116,78 @@ views:
     # subfolder at once is worth the extra round trips:
     #   expand_depth: 1
     children:
+      # ── Messages under a folder ──────────────────────────────────────────
+      # Listed before `subfolders` only so the YAML anchor is defined before
+      # the aliases reuse it; the order of sibling children means nothing on
+      # its own.
+      #
+      # One page costs a `UID SEARCH` for the matching set plus a `UID FETCH`
+      # of exactly the window on screen — so a mailbox holding 40 000 mails
+      # opens as fast as one holding 40. No body is read here: a row is the
+      # envelope, and reading the mail itself is a separate fetch (phase 2b).
+      #
+      # This level's QUERY is handed to the server verbatim as IMAP SEARCH
+      # (`UNSEEN`, `FROM boss`, `SINCE 1-Sep-2026`, `TEXT invoice`) — unlike
+      # the folder level, nothing is parsed out of it first. It does not need
+      # to be: the account and the mailbox are already fixed by the folder
+      # this level hangs under.
+      - &messages
+        name: messages
+        node_type: "mail:message"
+        # The folder tree stays on the left and the list opens beside it.
+        # `coupled: true` makes that pane the tree's own: opening another
+        # folder REPLACES the list instead of stacking a third pane, and
+        # closing the tree takes the list with it.
+        split: { direction: right, ratio: 0.65, coupled: true }
+        # `>` / `<` page through the mailbox ON THE SERVER — the next page is
+        # another window of the same search, not a slice of something already
+        # downloaded. Drop `page_size` to take the account's own `page_size:`
+        # from mail-adapter.yaml.
+        pagination: { mode: server, page_size: 50 }
+        # Open on the first mail not yet read, anchored at the top so the
+        # unread run reads downward from the cursor; with nothing unread it
+        # falls back to the newest. Only *opening* applies it — a reload never
+        # yanks the cursor away from where you scrolled.
+        cursor_on_open: first_unread
+        columns:
+          # The flag glyphs, in a fixed order so the column does not jitter
+          # from row to row: ● unread, ↩ answered, ★ flagged, ✎ draft,
+          # 📎 carries an attachment.
+          - { key: flags, label: "", sizing: "fixed(6)" }
+          - { key: from, label: From, sizing: "flex(1)" }
+          # `source: label` rather than the raw subject: a mail whose
+          # `Subject:` header is empty would otherwise be a row you cannot
+          # aim at, and the label carries the `(no subject)` stand-in.
+          - { key: subject, label: Subject, source: label, sizing: "flex(2)" }
+          # From the `Date:` header, falling back to the server's own
+          # INTERNALDATE when the sender wrote something unparseable.
+          - { key: date, label: Date, kind: datetime, sizing: "fixed(16)" }
+          - {
+              key: size,
+              label: Size,
+              kind: number,
+              sizing: "fixed(9)",
+              hidden: true,
+            }
+          - {
+              key: attachments,
+              label: Att,
+              kind: number,
+              sizing: "fixed(5)",
+              hidden: true,
+            }
+          - { key: to, label: To, sizing: "flex(1)", hidden: true }
+          - { key: account, label: Account, sizing: "fixed(10)", hidden: true }
+        actions:
+          - { name: refresh, key: r, type: reload }
+        # Two things this level deliberately does NOT do yet: `preview:` (the
+        # body is phase 2b, and a preview pane reading an unimplemented
+        # `content()` would just be empty) and a `children:` branch for
+        # attachments. Sorting with `c s` reaches the PAGE, not the mailbox —
+        # the rows a sort can compare are the ones already fetched, and the
+        # status line says so. Unsorted, the newest mail is first: IMAP gives
+        # that away for free, since UIDs rise with arrival.
+
       # The same ChildDef serves every depth (`recursive: true` makes it an
       # implicit member of its own `children:`), so a folder expands into its
       # subfolders, theirs, and so on. No `columns:` here — a tree
@@ -117,6 +201,10 @@ views:
         # fills `has_children` from the mailbox list, so leaves are known
         # rather than guessed.
         leaf_glyph: "📁"
+        # A nested folder opens its messages exactly as a top-level one does
+        # — the same level, aliased rather than copied.
+        children:
+          - *messages
 
   - name: Bridged
     key: b
@@ -127,17 +215,21 @@ views:
     unread_marker: "●"
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }
-      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: unread_count, label: Unread, kind: number, sizing: "fixed(7)" }
       - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
       - { key: path, label: Path, sizing: "flex(1)", hidden: true }
     actions:
       - { name: refresh, key: r, type: reload }
+      - { name: messages, key: m, type: navigate, navigate_to: "mail:message" }
     children:
+      - *messages
       - name: subfolders
         node_type: "mail:folder"
         tree_label: name
         recursive: true
         leaf_glyph: "📁"
+        children:
+          - *messages
 
   # A subtab may pin a SUBTREE as well as an account: `folder:` takes the
   # server-side path, spaces and all, and only that folder and its children
@@ -153,35 +245,17 @@ views:
     tree_label: name
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }
-      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: unread_count, label: Unread, kind: number, sizing: "fixed(7)" }
       - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
     actions:
       - { name: refresh, key: r, type: reload }
+      - { name: messages, key: m, type: navigate, navigate_to: "mail:message" }
     children:
+      - *messages
       - name: subfolders
         node_type: "mail:folder"
         tree_label: name
         recursive: true
         leaf_glyph: "📁"
-# ── Phase 2 sketch: messages under a folder ─────────────────────────────────
-# NOT YET IMPLEMENTED — the adapter offers no `mail:message` level yet, so
-# adding this today gives a subtab that cannot be drilled into. It is written
-# down here so the eventual shape is not re-invented: the Stoat chat layout,
-# folder tree on the left, message list in a coupled split on the right.
-#
-#     children:
-#       - name: subfolders
-#         node_type: "mail:folder"
-#         tree_label: name
-#         recursive: true
-#       # A folder carrying no `tree_label` child of this type means Enter
-#       # DRILLS into the message list instead of expanding.
-#       - name: messages
-#         node_type: "mail:message"
-#         split: { direction: right, ratio: 0.7, coupled: true }
-#         cursor_on_open: first_unread
-#         columns:
-#           - { key: from, label: From, sizing: "flex(1)" }
-#           - { key: subject, label: Subject, sizing: "flex(2)" }
-#           - { key: date, label: Date, kind: datetime, sizing: "fixed(16)" }
-#         preview: { source: content, markdown: true }
+        children:
+          - *messages

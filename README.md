@@ -1714,10 +1714,11 @@ under one instance); what is new is that an account's credentials are an
 ordinary `auth:` block, so `nyd config auth mail` describes them and every
 credential provider works per account.
 
-> **Status: Phase 1 (folders).** The folder tree of each account is browsable —
-> `LIST` for the hierarchy, `STATUS` for the unread/total counts, mailbox names
-> decoded from IMAP's modified UTF-7 (`Entw&APw-rfe` reads as `Entwürfe`).
-> Messages, previews and attachments arrive in phase 2; see
+> **Status: Phase 2a (folders + messages).** The folder tree of each account is
+> browsable — `LIST` for the hierarchy, `STATUS` for the unread/total counts,
+> mailbox names decoded from IMAP's modified UTF-7 (`Entw&APw-rfe` reads as
+> `Entwürfe`) — and a folder opens its messages as envelope rows. Reading a
+> message BODY, its preview and its attachments arrive in phase 2b; see
 > [`docs/plan-mail-adapter.md`](docs/plan-mail-adapter.md) for the phase cut.
 
 ### Subtabs are accounts
@@ -1757,6 +1758,32 @@ answers, and a mail client that confuses them is lying about an empty inbox.
 hides a whole subtree (`Trash*`). The pattern is matched without knowing the
 server's hierarchy delimiter, which differs per server and is not something the
 person writing the config should have to look up.
+
+### What a page of messages costs
+
+A message level is one folder's mail, and opening it costs exactly two round
+trips: a `UID SEARCH` for the matching set, then a `UID FETCH` of just the
+window on screen. That is what makes a mailbox with forty thousand mails open
+as fast as one with forty — `>` and `<` fetch the next window of the same
+search rather than slicing something already downloaded. **No body is read
+here**: a row is an envelope (flags, sender, subject, date, size, attachment
+count), so scrolling a mailbox never pulls a single message over the wire.
+
+Unsorted, the newest mail is first. IMAP gives that away for free — UIDs rise
+with arrival, so descending UID _is_ newest-first and costs no `SORT` round
+trip. Sorting with `c s` reaches the **page**, not the mailbox: the rows a sort
+can compare are the ones already fetched, and the status line says so rather
+than leaving you to infer it.
+
+The level's query is handed to the server **verbatim as IMAP SEARCH**
+(`UNSEEN`, `FROM boss`, `SINCE 1-Sep-2026`, `TEXT invoice`) — unlike the folder
+level, nothing is parsed out of it first. It does not need to be: the account
+and the mailbox are already fixed by the folder the level hangs under.
+
+Enter on a folder that **has** subfolders expands it — that is what the arrow
+in front of it promises — so the shipped view binds `m` to open the messages
+of the folder under the cursor. On a folder with nothing below it Enter opens
+the messages directly, and `m` does the same thing.
 
 ### Setup
 
