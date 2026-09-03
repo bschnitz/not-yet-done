@@ -704,9 +704,13 @@ accounts:
         );
 
         let inbox = &res.items[0];
-        assert_eq!(cell(inbox, "unread"), "1");
+        assert_eq!(cell(inbox, "unread_count"), "1");
         assert_eq!(cell(inbox, "total"), "3");
-        assert_eq!(cell(inbox, "unread_marker"), "true");
+        // `unread` is the key the frontend paints the highlight from, so it
+        // carries the FLAG and the count had to move aside. Getting these
+        // two the wrong way round costs nothing at compile time and leaves
+        // the unread highlight silently dead.
+        assert_eq!(cell(inbox, "unread"), "true");
         assert_eq!(
             res.items[1].has_children,
             Some(true),
@@ -715,7 +719,7 @@ accounts:
 
         // A `\Noselect` folder cannot be counted; an empty cell says so,
         // where a `0` would claim the folder is empty.
-        assert_eq!(cell(&res.items[1], "unread"), "");
+        assert_eq!(cell(&res.items[1], "unread_count"), "");
         assert_eq!(res.items[2].label, "Entwürfe", "the label is decoded");
         assert_eq!(cell(&res.items[2], "name"), "Entwürfe");
 

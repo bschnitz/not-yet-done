@@ -6624,15 +6624,15 @@ Set on the Jira instance as `auto_reload: 10m`. For a quicker round use
       `auto_reload: 10m` set (checked headless, 2026-08-31); a real
       `nyd adapter jira ls -q '<JQL>'` still runs one request and exits.
 
-## Mail (IMAP): the folder tree, one account per subtab (phases 0-1)
+## Mail (IMAP): the folder tree and its messages, one account per subtab (phases 0-2a)
 
 Prerequisite: copy
 [`docs/examples/views/mail-adapter.yaml`](examples/views/mail-adapter.yaml) and
 [`docs/examples/views/mail.yaml`](examples/views/mail.yaml) into
 `~/.config/not_yet_done/views/`, replace the example accounts with real ones
 (ids may stay `work`/`bridged`/`club` — the view's `query:` lines name them),
-and add `Mail` to `tabs.order` in `tui.yaml`. Messages do not exist yet: this
-block ends at the folder tree.
+and add `Mail` to `tabs.order` in `tui.yaml`. Message BODIES do not exist yet:
+this block ends at the envelope rows — no preview pane, no attachments.
 
 ### Headless (no TUI needed)
 
@@ -6645,8 +6645,12 @@ block ends at the folder tree.
       view file silently, so start the TUI, which reports the parse error, and
       the CLI otherwise only says it knows no such instance.
 - [ ] **The levels document themselves**: `nyd adapter mail help --full` names
-      the root and both children (`Account` / `Folder`), and the folder level
-      lists the columns `name`, `unread`, `total`, `path`. No login happens.
+      the root and its children (`Account` / `Folder`), and the folder level
+      lists the columns `name`, `unread_count`, `total`, `path`. No login
+      happens. KNOWN GAP: `nyd adapter mail:folder help` still reports a leaf
+      level — the message children are built from a folder's id, and the
+      type-level probe has none, so the CLI cannot document the level yet.
+      The TUI reaches it normally.
 - [ ] **Accounts without the network**: `nyd adapter mail ls --type mail:account`
       prints one row per configured account (name, address, host, id) —
       immediately, with no credential prompt. This is config, not IMAP.
@@ -6694,7 +6698,7 @@ block ends at the folder tree.
       the config, press `r` → `Trash` and everything below it are gone from
       the tree, the rest is unchanged.
 - [ ] **A subtree subtab**: the `Club archive` subtab (`query: "account:club
-  folder:Archive"`) opens _inside_ that folder — its top row is the first
+folder:Archive"`) opens _inside_ that folder — its top row is the first
       child of `Archive`, not `INBOX`.
 - [ ] **Unread emphasis**: a folder holding unread mail carries the marker and
       the `unread` colour; the tab bar prefixes `Mail` with `✉` while any
@@ -6710,6 +6714,56 @@ block ends at the folder tree.
 - [ ] **Transport**: an account with `security: starttls` on 143 and one with
       `security: none` against a local bridge both connect. Neither is guessed
       from the port.
+
+### Messages under a folder (phase 2a)
+
+- [ ] **Enter opens a leaf folder's mail**: put the cursor on a folder with no
+      subfolders (`INBOX` on most servers) and press Enter → the message list
+      opens in a pane beside the tree, newest mail first. The arrow and Enter
+      now agree: a row with no arrow no longer swallows the key.
+- [ ] **`m` opens any folder's mail**: put the cursor on a folder that _does_
+      have subfolders and press Enter → it expands (unchanged). Press `m` →
+      its own messages open. `m` on a leaf folder does the same as Enter.
+- [ ] **From a nested folder too**: expand `Archive`, put the cursor on
+      `Archive/2019`, press `m` → that folder's mail, not `Archive`'s.
+- [ ] **The pane is the tree's own**: with the list open, move the cursor to
+      another folder and press `m` again → the same pane is REPLACED, no third
+      pane stacks up. Closing the tree pane takes the list with it.
+- [ ] **The cursor lands on the first unread**: open a folder with unread mail
+      → the cursor sits on the oldest unread message, with the rest of the
+      unread run below it. With nothing unread it lands on the newest.
+- [ ] **A row is an envelope**: flags, sender, subject, date and (via `c c`)
+      size, attachment count, recipient. Compare a handful against
+      Thunderbird — especially a mail with an encoded subject (umlauts,
+      `=?UTF-8?…?=`) and one whose sender has a display name.
+- [ ] **A mail with no subject**: shows `(no subject)`, not an empty row you
+      cannot aim at.
+- [ ] **The flag glyphs**: `●` unread, `↩` answered, `★` flagged, `✎` draft,
+      `📎` has an attachment — in that fixed order, so the column does not
+      jitter from row to row. An unread mail is also painted in the `unread`
+      colour.
+- [ ] **Paging is server-side**: in a mailbox with more mail than
+      `page_size`, `>` fetches the next window (brief load, the counter in the
+      status line moves) and `<` comes back. The total is the mailbox's, not
+      the page's.
+- [ ] **A big mailbox opens fast**: Gmail's `All Mail` (tens of thousands of
+      messages) opens in about the time `INBOX` does — the page is fetched,
+      not the mailbox.
+- [ ] **Sorting is honest**: `c s` on `from` sorts the rows on screen and the
+      status line says the sort applies to the page. Paging on and back does
+      not silently re-sort the whole mailbox.
+- [ ] **The query is IMAP SEARCH**: with the message list focused, edit the
+      query to `UNSEEN` → only unread mail. `FROM <someone>` and
+      `SINCE 1-Sep-2026` work the same way. A syntactically wrong search is
+      refused by the server with a readable message and the session survives
+      (the next key still works, no reconnect).
+- [ ] **Nothing is downloaded**: watch a folder of large mails scroll past —
+      no delay per row, no growth in the message store. A body is a separate
+      fetch that phase 2b brings.
+- [ ] **A restored cursor does not connect**: leave the TUI with the cursor on
+      a message, restart → the Mail tab restores without logging in (the row
+      resolves from its id alone).
+
 - [ ] **Real-data sweep**: no real mail domain, address or password anywhere in
       the repo — the examples use `example.org`/`example.net` and the
       credentials come from `pass`.

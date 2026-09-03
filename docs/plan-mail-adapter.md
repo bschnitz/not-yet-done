@@ -176,13 +176,21 @@ with the cursor.
 
 Columns per level (`Child::columns`, typed so sort and `kind:` work):
 
-- account: `name` (text), `address` (text), `unread` (number), `state` (text)
-- folder: `name` (text), `unread` (number), `total` (number)
+- account: `name` (text), `address` (text), `host` (text), `id` (text)
+- folder: `name` (text), `unread_count` (number), `total` (number),
+  `path` (text), `account` (text)
 - message: `flags` (text, e.g. `●` unread / `★` flagged / `↩` answered),
   `from` (text), `subject` (text), `date` (datetime), `size` (number),
-  `attachments` (number), `unread` (text — feeds the existing unread highlight),
-  `account` (text, so a merged view can say where a mail came from)
+  `attachments` (number), `to` (text), `account` (text, so a merged view can
+  say where a mail came from)
 - attachment: `filename`, `content_type`, `size`
+
+Folder and message rows additionally carry an **undeclared** `unread` metadata
+field holding `"true"` — the key the frontend paints `unread_style` /
+`unread_marker` from, here, in the tree and in the tab bar. It is not a column
+(nothing renders it as text), and it is why the folder's count had to be named
+`unread_count`: a number sitting on `unread` takes the name over and leaves the
+highlight permanently dark.
 
 ### 4.4 Reusing what already exists
 

@@ -3959,6 +3959,49 @@ views: []
                 .find(|c| c.node_type == "mail:folder")
                 .unwrap_or_else(|| panic!("subtab `{}` needs a subfolder branch", view.name));
             assert!(sub.recursive, "the subfolder branch must be recursive");
+
+            // The count column had to give up the name `unread`: that key
+            // carries the highlight FLAG the frontend paints from, and a
+            // number sitting on it leaves the highlight permanently dark.
+            assert!(
+                view.columns.iter().any(|c| c.key == "unread_count"),
+                "subtab `{}` should show the count as `unread_count`",
+                view.name
+            );
+
+            // The message level hangs under a folder at EVERY depth — a
+            // top-level `INBOX` and a nested `Archive/2019` must both open
+            // their mail, and the recursive subfolder branch is its own
+            // ChildDef that would otherwise dead-end.
+            let messages = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "mail:message")
+                .unwrap_or_else(|| panic!("subtab `{}` needs a message level", view.name));
+            assert!(
+                messages.tree_label.is_none(),
+                "messages open in a pane; they are not another tree depth"
+            );
+            assert!(
+                messages.split.is_some(),
+                "the message list opens beside the folder tree"
+            );
+            assert!(
+                messages.columns.iter().any(|c| c.key == "subject"),
+                "the message level keeps its own columns through tree inheritance"
+            );
+            assert!(
+                sub.children.iter().any(|c| c.node_type == "mail:message"),
+                "a nested folder must reach its messages too"
+            );
+            // Enter on a folder that HAS subfolders expands it, so without a
+            // key of its own the message level is unreachable from there.
+            assert!(
+                view.actions.iter().any(|a| a.action_type == "navigate"
+                    && a.navigate_to.as_deref() == Some("mail:message")),
+                "subtab `{}` needs a key that navigates to the messages",
+                view.name
+            );
         }
 
         cfg.validate(
