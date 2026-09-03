@@ -10,6 +10,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -61,6 +62,12 @@ pub(crate) struct Script {
     /// answering the last one — a server-side idle timeout, as the client
     /// experiences it.
     pub(crate) hang_up_after: Option<usize>,
+    /// Go silent on the *first* connection at this command: read it, answer
+    /// nothing, and hold the socket open. A hung-up server and a mute one
+    /// look the same to a user and completely different to a client — the
+    /// first ends the read, the second ends nothing at all, which is the
+    /// case a deadline exists for.
+    pub(crate) stall_at: Option<usize>,
     /// What `LIST` and `STATUS` report. Empty means the account has no
     /// mailboxes at all, which is itself worth being able to script.
     pub(crate) folders: &'static [FakeFolder],
@@ -242,6 +249,7 @@ pub(crate) fn scripted() -> Script {
     Script {
         password: PASSWORD,
         hang_up_after: None,
+        stall_at: None,
         folders: FOLDERS,
     }
 }
@@ -323,6 +331,12 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
         if nth == 0 && script.hang_up_after == Some(commands) {
             // Gone without a word — exactly what a timed-out session looks
             // like from the client side.
+            return;
+        }
+        if nth == 0 && script.stall_at == Some(commands) {
+            // Still there, still silent. Nothing but a deadline gets the
+            // client out of this.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
             return;
         }
         let mut parts = line.split_whitespace();
