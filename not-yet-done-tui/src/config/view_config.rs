@@ -3994,6 +3994,35 @@ views: []
                 sub.children.iter().any(|c| c.node_type == "mail:message"),
                 "a nested folder must reach its messages too"
             );
+
+            // Reading the mail. `markdown: false` is a decision, not an
+            // omission: a mail is not markdown, and rendering it as such
+            // reflows the header block and eats the `>` quoting.
+            let preview = messages
+                .preview
+                .as_ref()
+                .unwrap_or_else(|| panic!("subtab `{}` needs a message preview", view.name));
+            assert!(preview.enabled);
+            assert_eq!(preview.source, "content");
+            assert!(!preview.markdown, "a mail body is plain text, not markdown");
+
+            // Attachments hang under a message. The level is free — the
+            // BODYSTRUCTURE arrives with the envelope — so there is no
+            // reason for a subtab not to offer it.
+            let attachments = messages
+                .children
+                .iter()
+                .find(|c| c.node_type == "mail:attachment")
+                .unwrap_or_else(|| panic!("subtab `{}` needs an attachment level", view.name));
+            let action_ids: Vec<&str> = attachments
+                .actions
+                .iter()
+                .filter_map(|a| a.id.as_deref())
+                .collect();
+            assert!(
+                action_ids.contains(&"open") && action_ids.contains(&"download_all"),
+                "the attachment level must offer both adapter actions, got {action_ids:?}"
+            );
             // Enter on a folder that HAS subfolders expands it, so without a
             // key of its own the message level is unreachable from there.
             assert!(

@@ -196,10 +196,7 @@ pub(crate) fn row_from(fetch: &Fetch, uid_validity: u32) -> Option<EnvelopeRow> 
             _ => {}
         }
     }
-    row.attachments = fetch
-        .bodystructure()
-        .map(|b| attachments_of(b).len() as u32)
-        .unwrap_or(0);
+    row.attachments = fetch.bodystructure().map(attachments_of).unwrap_or_default();
     Some(row)
 }
 

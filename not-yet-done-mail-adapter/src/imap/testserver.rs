@@ -28,6 +28,13 @@ pub(crate) struct FakeMessage {
     pub(crate) flags: &'static str,
     /// `true` gives the message a multipart body with one attachment.
     pub(crate) attachment: bool,
+    /// What `BODY[]` hands back — the message as it travelled.
+    pub(crate) source: &'static str,
+    /// What `BODY[<section>]` hands back, as
+    /// `(section, MIME headers, body)`. The headers are a section of their
+    /// own on the wire (`BODY[2.MIME]`) and carry the transfer encoding, so
+    /// a client that forgets them writes base64 to disk.
+    pub(crate) parts: &'static [(&'static str, &'static str, &'static str)],
 }
 
 /// One mailbox the fake server knows about.
@@ -76,6 +83,8 @@ pub(crate) const MAILS: &[FakeMessage] = &[
         size: 1024,
         flags: "\\Seen",
         attachment: false,
+        source: PLAIN_SOURCE,
+        parts: &[],
     },
     FakeMessage {
         uid: 4,
@@ -87,6 +96,8 @@ pub(crate) const MAILS: &[FakeMessage] = &[
         size: 40960,
         flags: "",
         attachment: true,
+        source: MIXED_SOURCE,
+        parts: MIXED_PARTS,
     },
     FakeMessage {
         uid: 9,
@@ -98,7 +109,58 @@ pub(crate) const MAILS: &[FakeMessage] = &[
         size: 512,
         flags: "\\Seen \\Answered",
         attachment: false,
+        source: PLAIN_SOURCE,
+        parts: &[],
     },
+];
+
+/// A one-part message, quoted-printable and not UTF-8 — the ordinary case
+/// the body renderer has to survive.
+pub(crate) const PLAIN_SOURCE: &str = concat!(
+    "From: juergen@example.org\r\n",
+    "Subject: =?UTF-8?Q?Gr=C3=BC=C3=9Fe?=\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: text/plain; charset=iso-8859-1\r\n",
+    "Content-Transfer-Encoding: quoted-printable\r\n",
+    "\r\n",
+    "Gr=FC=DFe aus M=FCnchen\r\n"
+);
+
+/// A `multipart/mixed`: text and one base64 attachment.
+pub(crate) const MIXED_SOURCE: &str = concat!(
+    "From: billing@example.net\r\n",
+    "Subject: Rechnung\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: multipart/mixed; boundary=\"b\"\r\n",
+    "\r\n",
+    "--b\r\n",
+    "Content-Type: text/plain; charset=utf-8\r\n",
+    "\r\n",
+    "Die Rechnung haengt an.\r\n",
+    "--b\r\n",
+    "Content-Type: application/pdf; name=\"invoice.pdf\"\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "aGVsbG8gd29ybGQ=\r\n",
+    "--b--\r\n"
+);
+
+/// The two sections of [`MIXED_SOURCE`], as the server hands them out one
+/// at a time.
+pub(crate) const MIXED_PARTS: &[(&str, &str, &str)] = &[
+    (
+        "1",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "Die Rechnung haengt an.\r\n",
+    ),
+    (
+        "2",
+        concat!(
+            "Content-Type: application/pdf; name=\"invoice.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n"
+        ),
+        "aGVsbG8gd29ybGQ=\r\n",
+    ),
 ];
 
 /// A little of everything a real server throws at the folder layer: a
@@ -161,57 +223,60 @@ pub(crate) fn scripted() -> Script {
     }
 }
 
+/// What the server counted. Every claim about *cost* — one reconnect, no
+/// second `LIST`, a body fetched once — is a claim about one of these.
+#[derive(Default)]
+struct Counters {
+    connections: AtomicUsize,
+    logins: AtomicUsize,
+    lists: AtomicUsize,
+    fetches: AtomicUsize,
+}
+
 pub(crate) struct FakeServer {
     pub(crate) addr: SocketAddr,
-    connections: Arc<AtomicUsize>,
-    logins: Arc<AtomicUsize>,
-    lists: Arc<AtomicUsize>,
+    counters: Arc<Counters>,
 }
 
 impl FakeServer {
     pub(crate) async fn start(script: Script) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
         let addr = listener.local_addr().expect("has an address");
-        let connections = Arc::new(AtomicUsize::new(0));
-        let logins = Arc::new(AtomicUsize::new(0));
-        let lists = Arc::new(AtomicUsize::new(0));
-        let (conns, logs, lsts) = (
-            Arc::clone(&connections),
-            Arc::clone(&logins),
-            Arc::clone(&lists),
-        );
+        let counters = Arc::new(Counters::default());
+        let accepting = Arc::clone(&counters);
         tokio::spawn(async move {
             loop {
                 let Ok((sock, _)) = listener.accept().await else {
                     return;
                 };
-                let nth = conns.fetch_add(1, Ordering::SeqCst);
-                let (logs, lsts) = (Arc::clone(&logs), Arc::clone(&lsts));
-                tokio::spawn(async move { serve(sock, script, nth, logs, lsts).await });
+                let nth = accepting.connections.fetch_add(1, Ordering::SeqCst);
+                let counters = Arc::clone(&accepting);
+                tokio::spawn(async move { serve(sock, script, nth, counters).await });
             }
         });
-        Self {
-            addr,
-            connections,
-            logins,
-            lists,
-        }
+        Self { addr, counters }
     }
 
     /// How many TCP connections the client has opened — the reconnect count.
     pub(crate) fn connections(&self) -> usize {
-        self.connections.load(Ordering::SeqCst)
+        self.counters.connections.load(Ordering::SeqCst)
     }
 
     /// How many `LOGIN` commands arrived, successful or not.
     pub(crate) fn logins(&self) -> usize {
-        self.logins.load(Ordering::SeqCst)
+        self.counters.logins.load(Ordering::SeqCst)
     }
 
     /// How many `LIST` commands arrived — what says whether the folder
     /// snapshot was reused or re-fetched.
     pub(crate) fn lists(&self) -> usize {
-        self.lists.load(Ordering::SeqCst)
+        self.counters.lists.load(Ordering::SeqCst)
+    }
+
+    /// How many `UID FETCH` commands arrived — what says whether a body was
+    /// read once or once per keystroke.
+    pub(crate) fn fetches(&self) -> usize {
+        self.counters.fetches.load(Ordering::SeqCst)
     }
 }
 
@@ -219,8 +284,7 @@ async fn serve(
     sock: tokio::net::TcpStream,
     script: Script,
     nth: usize,
-    logins: Arc<AtomicUsize>,
-    lists: Arc<AtomicUsize>,
+    counters: Arc<Counters>,
 ) {
     let (rx, mut tx) = sock.into_split();
     let mut lines = BufReader::new(rx).lines();
@@ -254,7 +318,7 @@ async fn serve(
             |nth: usize| -> Option<String> { line.split('"').nth(nth * 2 + 1).map(str::to_string) };
         let reply = match cmd.as_str() {
             "LOGIN" => {
-                logins.fetch_add(1, Ordering::SeqCst);
+                counters.logins.fetch_add(1, Ordering::SeqCst);
                 if args.get(1).map(String::as_str) == Some(script.password) {
                     format!("{tag} OK LOGIN completed\r\n")
                 } else {
@@ -262,7 +326,7 @@ async fn serve(
                 }
             }
             "LIST" => {
-                lists.fetch_add(1, Ordering::SeqCst);
+                counters.lists.fetch_add(1, Ordering::SeqCst);
                 let mut out = String::new();
                 for f in script.folders {
                     let delim = if f.delimiter.is_empty() {
@@ -331,18 +395,26 @@ async fn serve(
                         )
                     }
                     (Some(folder), "FETCH") => {
+                        counters.fetches.fetch_add(1, Ordering::SeqCst);
                         let wanted: Vec<u32> = args
                             .get(1)
                             .map(|set| {
                                 set.split(',').filter_map(|u| u.parse::<u32>().ok()).collect()
                             })
                             .unwrap_or_default();
+                        // Which sections the client asked for. A real server
+                        // answers what was requested and nothing else, and
+                        // that is exactly what the body path depends on.
+                        let sections = requested_sections(&line);
                         let mut out = String::new();
                         for (seq, mail) in folder.mails.iter().enumerate() {
                             if !wanted.contains(&mail.uid) {
                                 continue;
                             }
-                            out.push_str(&fetch_line(seq + 1, mail));
+                            out.push_str(&match sections.as_slice() {
+                                [] => fetch_line(seq + 1, mail),
+                                wanted => body_line(seq + 1, mail, wanted),
+                            });
                         }
                         out.push_str(&format!("{tag} OK FETCH completed\r\n"));
                         out
@@ -416,4 +488,59 @@ fn fetch_line(seq: usize, mail: &FakeMessage) -> String {
         envelope = envelope,
         body = body
     )
+}
+
+/// The `BODY[…]` sections a `FETCH` line asks for, in order. `BODY[]` — the
+/// whole message — comes back as an empty string, which is also how it is
+/// written on the wire.
+fn requested_sections(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find("BODY") {
+        rest = &rest[open + "BODY".len()..];
+        // `BODY.PEEK[…]` and `BODY[…]` name the same section; only the
+        // `\Seen` side effect differs, and this server sets no flags.
+        let rest_trimmed = rest.strip_prefix(".PEEK").unwrap_or(rest);
+        let Some(inner) = rest_trimmed.strip_prefix('[') else {
+            continue;
+        };
+        let Some(close) = inner.find(']') else {
+            break;
+        };
+        out.push(inner[..close].to_string());
+        rest = &inner[close..];
+    }
+    out
+}
+
+/// A `FETCH` response carrying literals — the body, or named MIME sections.
+///
+/// Literals rather than quoted strings because that is what a real server
+/// sends for anything that may contain a newline, and the byte count in the
+/// braces is the whole point: a client that miscounts desynchronises the
+/// stream instead of returning a wrong value.
+fn body_line(seq: usize, mail: &FakeMessage, sections: &[String]) -> String {
+    let mut out = format!("* {seq} FETCH (UID {}", mail.uid);
+    for section in sections {
+        let payload: Option<&str> = if section.is_empty() {
+            Some(mail.source)
+        } else if let Some(part) = section.strip_suffix(".MIME") {
+            mail.parts.iter().find(|(p, _, _)| *p == part).map(|(_, h, _)| *h)
+        } else {
+            mail.parts
+                .iter()
+                .find(|(p, _, _)| p == section)
+                .map(|(_, _, b)| *b)
+        };
+        // A section the message does not have is simply absent from the
+        // response — the client must not read that as an empty file.
+        if let Some(payload) = payload {
+            out.push_str(&format!(
+                " BODY[{section}] {{{}}}\r\n{payload}",
+                payload.len()
+            ));
+        }
+    }
+    out.push_str(")\r\n");
+    out
 }

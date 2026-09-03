@@ -5,13 +5,19 @@
 //! a message is a separate read, so scrolling a mailbox of a hundred thousand
 //! mails never pulls a single body over the wire.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 
-use not_yet_done_content::{ColumnSchema, Metadata, Node, NodeSummary, NodeType};
+use not_yet_done_content::{
+    ColumnSchema, Content, Metadata, Node, NodeSummary, NodeType, Result,
+};
 
 use super::field;
 use super::types::message_type;
 use crate::ids::MessageId;
+use crate::imap::conn::Connection;
 use crate::model::EnvelopeRow;
 
 /// What the flags column shows. Three glyphs, in the order a mail client
@@ -51,7 +57,7 @@ fn glyphs(row: &EnvelopeRow) -> String {
     if row.draft {
         out.push_str(DRAFT);
     }
-    if row.attachments > 0 {
+    if !row.attachments.is_empty() {
         out.push_str(ATTACHED);
     }
     out
@@ -72,7 +78,7 @@ pub(super) fn metadata_of(account: &str, row: &EnvelopeRow) -> Metadata {
             field("subject", row.subject.clone(), "Subject"),
             field("date", date_cell(row), "Date"),
             field("size", row.size.to_string(), "Size"),
-            field("attachments", row.attachments.to_string(), "Att"),
+            field("attachments", row.attachments.len().to_string(), "Att"),
             field("to", row.to.clone(), "To"),
             field("account", account.to_string(), "Account"),
             // The flag the styling layer paints from — the same `unread`
@@ -110,10 +116,85 @@ pub(super) fn message_row(account: &str, folder: &str, row: &EnvelopeRow) -> Nod
         label: label_of(row),
         node_type: message_type().clone(),
         metadata: metadata_of(account, row),
-        // Attachments arrive in phase 2b; until then a message is a leaf and
-        // must say so, or every row grows an arrow that opens nothing.
-        has_children: Some(false),
+        // Only a message that actually carries files has something below it.
+        // Saying so per row is what keeps the drill arrow honest: a mail with
+        // no attachment is a leaf, and Enter on it does nothing rather than
+        // opening an empty level.
+        has_children: Some(!row.attachments.is_empty()),
     }
+}
+
+/// How many message bodies are kept. A body is the one expensive thing on
+/// this level, and moving the cursor down a thread and back up is the normal
+/// way to read mail — without a cache that is a fetch per keypress. Small
+/// because a body is a whole message: thirty-odd of them is a bounded amount
+/// of memory, a mailbox's worth would not be.
+const BODY_CACHE_LEN: usize = 32;
+
+/// The last few rendered message bodies, keyed by message id.
+///
+/// Oldest-out rather than least-recently-used: the access pattern that
+/// matters is walking a list, and for that the two behave the same while
+/// this one is a `VecDeque` and a `Mutex` instead of a data structure.
+#[derive(Default)]
+pub(super) struct BodyCache {
+    entries: Mutex<VecDeque<(String, Arc<String>)>>,
+}
+
+impl BodyCache {
+    fn get(&self, id: &str) -> Option<Arc<String>> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, text)| Arc::clone(text))
+    }
+
+    fn put(&self, id: &str, text: Arc<String>) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.retain(|(key, _)| key != id);
+        entries.push_back((id.to_string(), text));
+        while entries.len() > BODY_CACHE_LEN {
+            entries.pop_front();
+        }
+    }
+
+    /// Forget everything. Called when the instance drops its sessions, so a
+    /// reconnect cannot serve a body from a mailbox that has since been
+    /// renumbered.
+    pub(super) fn clear(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.clear();
+        }
+    }
+}
+
+/// The header block a reader expects above the text. Written here rather
+/// than left to the view because the body the server hands back has no
+/// header the user would want to read — the raw ones are a screenful of
+/// `Received:` lines — and a message without a visible sender is unreadable.
+fn header_block(row: &EnvelopeRow) -> String {
+    let mut out = String::new();
+    for (label, value) in [
+        ("From", row.from.as_str()),
+        ("To", row.to.as_str()),
+        ("Subject", row.subject.as_str()),
+    ] {
+        if !value.trim().is_empty() {
+            out.push_str(&format!("{label}: {value}\n"));
+        }
+    }
+    if let Some(date) = row.date {
+        out.push_str(&format!("Date: {}\n", date.to_rfc2822()));
+    }
+    if !row.attachments.is_empty() {
+        let names: Vec<&str> = row.attachments.iter().map(|a| a.filename.as_str()).collect();
+        out.push_str(&format!("Attachments: {}\n", names.join(", ")));
+    }
+    out.push('\n');
+    out
 }
 
 /// One message, as a node.
@@ -121,15 +202,79 @@ pub(super) struct MailMessageNode {
     id: String,
     label: String,
     metadata: Metadata,
+    body: MessageBody,
 }
 
 impl MailMessageNode {
-    pub(super) fn new(id: &MessageId, row: &EnvelopeRow) -> Self {
+    pub(super) fn new(
+        id: &MessageId,
+        row: &EnvelopeRow,
+        conn: Connection,
+        cache: Arc<BodyCache>,
+    ) -> Self {
         Self {
             id: id.encode(),
             label: label_of(row),
             metadata: metadata_of(&id.account, row),
+            body: MessageBody {
+                id: id.clone(),
+                header: header_block(row),
+                conn,
+                cache,
+            },
         }
+    }
+}
+
+/// The readable form of one message: a header block over the text part.
+///
+/// A `Content` and not an action, so the frontend's preview pane can show it
+/// while the cursor moves — which is the whole point of the level. What
+/// keeps that affordable is [`BodyCache`] plus `BODY.PEEK`: reading never
+/// costs a second fetch, and never marks the mail `\Seen` either.
+struct MessageBody {
+    id: MessageId,
+    header: String,
+    conn: Connection,
+    cache: Arc<BodyCache>,
+}
+
+impl MessageBody {
+    async fn text(&self) -> Result<Arc<String>> {
+        let key = self.id.encode();
+        if let Some(hit) = self.cache.get(&key) {
+            return Ok(hit);
+        }
+        let source = self
+            .conn
+            .body(&self.id.folder, self.id.uid_validity, self.id.uid)
+            .await
+            .map_err(super::mail_err)?;
+        let text = Arc::new(format!("{}{}", self.header, crate::mime::body_text(&source)));
+        self.cache.put(&key, Arc::clone(&text));
+        Ok(text)
+    }
+}
+
+#[async_trait]
+impl Content for MessageBody {
+    fn node_type(&self) -> &NodeType {
+        message_type()
+    }
+
+    /// Nothing to detect a conflict against: a message body is never
+    /// written back, and the UID pair that would serve as a version is
+    /// already in the node's id.
+    fn version(&self) -> Option<&str> {
+        None
+    }
+
+    async fn read(&self) -> Result<Vec<u8>> {
+        Ok(self.text().await?.as_bytes().to_vec())
+    }
+
+    async fn read_text(&self) -> Result<String> {
+        Ok(self.text().await?.to_string())
     }
 }
 
@@ -149,6 +294,10 @@ impl Node for MailMessageNode {
 
     fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    fn content(&self) -> Option<&dyn Content> {
+        Some(&self.body)
     }
 }
 
@@ -176,7 +325,12 @@ mod tests {
         assert_eq!(glyphs(&r), "");
         r.flagged = true;
         r.answered = true;
-        r.attachments = 2;
+        r.attachments = vec![crate::model::AttachmentInfo {
+            part: "2".into(),
+            filename: "invoice.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 4096,
+        }];
         assert_eq!(glyphs(&r), "↩★📎");
     }
 
@@ -227,6 +381,10 @@ mod tests {
     fn the_row_id_addresses_the_message() {
         let summary = message_row("work", "INBOX/Projects", &row());
         assert_eq!(summary.id, "work/INBOX/Projects#42.7");
-        assert_eq!(summary.has_children, Some(false));
+        assert_eq!(
+            summary.has_children,
+            Some(false),
+            "a mail without attachments is a leaf"
+        );
     }
 }

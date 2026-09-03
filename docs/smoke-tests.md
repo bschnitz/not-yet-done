@@ -6759,10 +6759,48 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
       (the next key still works, no reconnect).
 - [ ] **Nothing is downloaded**: watch a folder of large mails scroll past —
       no delay per row, no growth in the message store. A body is a separate
-      fetch that phase 2b brings.
+      fetch, and only pressing `p` makes it.
 - [ ] **A restored cursor does not connect**: leave the TUI with the cursor on
       a message, restart → the Mail tab restores without logging in (the row
       resolves from its id alone).
+
+### Reading a message and its files (phase 2b)
+
+- [ ] **`p` opens the body**: with the cursor on a message press `p` → the
+      preview pane shows a header block (From, To, Subject, Date, and
+      `Attachments:` when there are any), a blank line, then the text.
+- [ ] **Reading does not mark read**: pick an unread mail, read it with `p`,
+      move away, press `r` → it is STILL unread, here and in Thunderbird. The
+      fetch peeks; marking read is phase 5 and deliberate.
+- [ ] **HTML-only mail is readable**: a newsletter with no `text/plain` part
+      shows as flowing text, not as tag soup and not as an empty pane.
+- [ ] **Umlauts survive**: a mail in `quoted-printable` / ISO-8859-1 reads
+      correctly — no `=FC`, no mojibake. Compare one against Thunderbird.
+- [ ] **The second read is free**: read a mail, move away, read it again → it
+      appears at once, with no load banner. Reconnecting (`r` after a dropped
+      session) throws the cache away, so the next read fetches again.
+- [ ] **The preview is not markdown**: a mail containing `*asterisks*`, `#`
+      at the start of a line or `>` quoting shows those characters as written
+      — nothing is reflowed or styled away.
+- [ ] **Drilling into the files costs nothing**: a mail with `📎` has an arrow;
+      opening it lists the attachments instantly, with no round trip (the
+      structure rode along with the envelope). Name, type, size and part
+      number are filled in.
+- [ ] **A mail without files is a leaf**: no arrow, and Enter does not open an
+      empty level.
+- [ ] **`o` opens one**: put the cursor on an attachment and press `o` → the
+      file opens in the desktop's handler, with its real name and its real
+      content (a PDF is a PDF, not base64 text). Pressing `o` a second time
+      reuses the copy instead of fetching again.
+- [ ] **`D` saves them all**: press `D`, answer with a directory (`~` is
+      expanded) → every attachment lands there, prefixed by its part number so
+      two files of the same name do not collide. The message says how many.
+      Aiming `D` at an existing FILE is refused before anything is fetched.
+- [ ] **Only the part travels**: opening one attachment of a large mail is
+      quick — the part is fetched, not the whole message.
+- [ ] **A renumbered mailbox refuses**: with a message open, have the server
+      renumber the mailbox (or use a stale restored cursor) → a clear error,
+      never a different mail's body.
 
 - [ ] **Real-data sweep**: no real mail domain, address or password anywhere in
       the repo — the examples use `example.org`/`example.net` and the

@@ -18,6 +18,7 @@
 //!   is the addressee of the answer.
 
 mod account;
+mod attachment;
 mod factory;
 mod folder;
 mod message;
@@ -32,9 +33,9 @@ use async_trait::async_trait;
 use tokio::sync::{OnceCell, RwLock, broadcast, watch};
 
 use not_yet_done_content::{
-    AdapterCapabilities, AdapterStatus, Child, ColumnSchema, ContentAdapter, ContentError,
-    Invalidation, ListParams, ListResult, MetadataField, Node, PageInfo, Result, StatusReporter,
-    apply_sort,
+    ActionInput, AdapterCapabilities, AdapterStatus, Child, ColumnSchema, ContentAdapter,
+    ContentError, Invalidation, ListParams, ListResult, MetadataField, Node, NodeAction, NodeType,
+    PageInfo, Result, StatusReporter, apply_sort,
 };
 
 use crate::config::{AccountConfig, MailConfig};
@@ -44,8 +45,9 @@ use crate::ids::MessageId;
 use crate::imap::conn::Connection;
 use crate::model::{EnvelopeRow, FolderInfo};
 use account::MailAccountNode;
+use attachment::MailAttachmentNode;
 use folder::MailFolderNode;
-use message::MailMessageNode;
+use message::{BodyCache, MailMessageNode};
 use root::MailRoot;
 
 pub use factory::MailAdapterFactory;
@@ -67,6 +69,22 @@ pub(crate) fn field(key: &str, value: String, label: &str) -> MetadataField {
 
 fn other_err(e: impl std::fmt::Display) -> ContentError {
     ContentError::Other(e.to_string().into())
+}
+
+/// One value out of a form action's input, refused when it is blank. A
+/// download into `""` would silently land in the process's working
+/// directory, which is not where the user meant.
+fn form_field(input: &ActionInput, key: &str) -> Result<String> {
+    match input {
+        ActionInput::Form(values) => {
+            let value = values.get(key).map(|s| s.trim()).unwrap_or("");
+            if value.is_empty() {
+                return Err(other_err(format!("`{key}` must not be empty")));
+            }
+            Ok(value.to_string())
+        }
+        _ => Err(ContentError::NotSupported("expected form input".into())),
+    }
 }
 
 /// Everything one account needs, plus the connection it gets on first use.
@@ -109,6 +127,10 @@ pub struct MailAdapter {
     messages: RwLock<HashMap<String, Arc<Vec<EnvelopeRow>>>>,
     /// Messages per page when a view asks for no window of its own.
     page_size: Option<u32>,
+    /// The last few message bodies, shared by every message node this
+    /// instance hands out — a node lives for one call, the cache has to
+    /// outlive it or reading the same mail twice fetches it twice.
+    bodies: Arc<BodyCache>,
 }
 
 impl MailAdapter {
@@ -157,6 +179,7 @@ impl MailAdapter {
             folders: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
             page_size: cfg.page_size,
+            bodies: Arc::new(BodyCache::default()),
         })
     }
 
@@ -414,6 +437,33 @@ impl MailAdapter {
             ..Default::default()
         }
     }
+
+    /// The envelope behind a message id, asking the server when the page
+    /// that listed it is gone.
+    ///
+    /// The counterpart to [`MailAdapter::known_message`], and the difference
+    /// is who is asking: this one is reached by *drilling into* a message,
+    /// which the user just did, so a round trip is the answer to something
+    /// they requested rather than a login behind their back.
+    async fn fetch_message(&self, id: &MessageId) -> Result<EnvelopeRow> {
+        if let Some(hit) = self
+            .messages
+            .read()
+            .await
+            .get(&id.folder_id())
+            .and_then(|page| {
+                page.iter()
+                    .find(|r| r.uid == id.uid && r.uid_validity == id.uid_validity)
+            })
+        {
+            return Ok(hit.clone());
+        }
+        self.connection(&id.account)
+            .await?
+            .envelope(&id.folder, id.uid_validity, id.uid)
+            .await
+            .map_err(mail_err)
+    }
 }
 
 /// An IMAP-layer error as the content layer sees it.
@@ -447,13 +497,40 @@ impl ContentAdapter for MailAdapter {
         if id == ROOT_ID {
             return self.root().await;
         }
-        // Messages are read first: `work/INBOX#42.7` also splits as a folder
-        // id whose path happens to end in `#42.7`, and the folder reading
-        // would win by being tried first.
+        // Read from the most specific id outwards. Each of these patterns is
+        // a prefix of the next: an attachment id also parses as a message id
+        // (whose folder happens to end in `/part/2`), and that in turn as a
+        // folder id. Whichever is tried first wins, so the order is the
+        // meaning.
+        if let Some((msg, part)) = crate::ids::parse_attachment_id(id) {
+            self.runtime(&msg.account)?;
+            let conn = self.connection(&msg.account).await?.clone();
+            // The cache, never the server: this is also what a restored
+            // cursor calls, and the part path in the id is all `open` needs.
+            let known = self.known_message(&msg).await;
+            let att = known
+                .attachments
+                .iter()
+                .find(|a| a.part == part)
+                .cloned()
+                .unwrap_or_else(|| attachment::placeholder(&part));
+            return Ok(Box::new(MailAttachmentNode::new(
+                &msg,
+                att,
+                known.attachments,
+                conn,
+            )));
+        }
         if let Some(msg) = crate::ids::parse_message_id(id) {
             self.runtime(&msg.account)?;
+            let conn = self.connection(&msg.account).await?.clone();
             let row = self.known_message(&msg).await;
-            return Ok(Box::new(MailMessageNode::new(&msg, &row)));
+            return Ok(Box::new(MailMessageNode::new(
+                &msg,
+                &row,
+                conn,
+                Arc::clone(&self.bodies),
+            )));
         }
         if let Some((account, path)) = crate::ids::split_folder_id(id) {
             self.runtime(account)?;
@@ -539,6 +616,27 @@ impl ContentAdapter for MailAdapter {
                     },
                 ]
             }
+            "mail:message" => {
+                let Some(msg) = crate::ids::parse_message_id(node.id()) else {
+                    return Vec::new();
+                };
+                vec![Child {
+                    node_type: types::attachment_type().clone(),
+                    columns: attachment::columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let row = self.fetch_message(&msg).await?;
+                            let mut listed = attachment::list(&msg, &row.attachments);
+                            listed.applied_sort = apply_sort(
+                                &mut listed.items,
+                                &params.sort,
+                                &attachment::columns(),
+                            );
+                            Ok(listed)
+                        })
+                    }),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -548,6 +646,16 @@ impl ContentAdapter for MailAdapter {
             "mail:account" => account::columns(),
             "mail:folder" => folder::columns(),
             "mail:message" => message::columns(),
+            "mail:attachment" => attachment::columns(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Only the attachment level acts. Everything above it is a listing —
+    /// the write actions (seen, flag, move) arrive with phase 5.
+    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        match node_type.type_id.as_str() {
+            "mail:attachment" => attachment::actions(),
             _ => Vec::new(),
         }
     }
@@ -598,6 +706,9 @@ impl ContentAdapter for MailAdapter {
         }
         self.folders.write().await.clear();
         self.messages.write().await.clear();
+        // A body is only valid for the UID it was fetched under, and a
+        // reconnect is exactly when a mailbox may have been renumbered.
+        self.bodies.clear();
         Ok(())
     }
 
@@ -785,6 +896,185 @@ accounts:
         };
         assert!(err.to_string().contains("account:"), "{err}");
         assert_eq!(server.connections(), 0, "and nothing was connected over it");
+    }
+
+    /// Reading a message: a header block the server never sends, then the
+    /// decoded text. And it is read *once* — the cache is what makes a
+    /// preview pane that follows the cursor affordable.
+    #[tokio::test]
+    async fn a_message_reads_as_a_header_block_over_decoded_text() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let folder = adapter.get_by_id("work/INBOX").await.expect("resolves");
+        children::list(
+            &adapter,
+            folder.as_ref(),
+            params(types::message_type(), None),
+        )
+        .await
+        .expect("lists");
+        let listed = server.fetches();
+
+        let node = adapter
+            .get_by_id("work/INBOX#42.1")
+            .await
+            .expect("resolves");
+        let text = node
+            .content()
+            .expect("a message has a body")
+            .read_text()
+            .await
+            .expect("reads");
+
+        assert!(text.starts_with("From: Jürgen <juergen@example.org>\n"), "{text}");
+        assert!(text.contains("Subject: Grüße\n"), "{text}");
+        assert!(
+            text.contains("Grüße aus München"),
+            "quoted-printable ISO-8859-1 arrived readable: {text}"
+        );
+        assert!(
+            !text.contains("quoted-printable"),
+            "the raw headers are not part of what is shown: {text}"
+        );
+        assert_eq!(server.fetches(), listed + 1, "one fetch for the body");
+
+        // The same message again comes out of the cache.
+        let again = adapter
+            .get_by_id("work/INBOX#42.1")
+            .await
+            .expect("resolves");
+        again
+            .content()
+            .expect("body")
+            .read_text()
+            .await
+            .expect("reads");
+        assert_eq!(
+            server.fetches(),
+            listed + 1,
+            "a second read of the same message costs nothing"
+        );
+    }
+
+    /// A message with attachments names them in its header block, so a
+    /// reader knows what is there before drilling in.
+    #[tokio::test]
+    async fn a_message_with_files_says_so_above_its_text() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let folder = adapter.get_by_id("work/INBOX").await.expect("resolves");
+        children::list(
+            &adapter,
+            folder.as_ref(),
+            params(types::message_type(), None),
+        )
+        .await
+        .expect("lists");
+
+        let node = adapter
+            .get_by_id("work/INBOX#42.4")
+            .await
+            .expect("resolves");
+        let text = node
+            .content()
+            .expect("body")
+            .read_text()
+            .await
+            .expect("reads");
+        assert!(text.contains("Attachments: invoice.pdf\n"), "{text}");
+        assert!(text.contains("Die Rechnung haengt an."), "{text}");
+    }
+
+    /// The attachment level is a projection of a row the adapter already
+    /// holds: drilling into a listed message must not cost a round trip.
+    #[tokio::test]
+    async fn attachments_come_from_the_envelope_without_a_second_fetch() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let folder = adapter.get_by_id("work/INBOX").await.expect("resolves");
+        children::list(
+            &adapter,
+            folder.as_ref(),
+            params(types::message_type(), None),
+        )
+        .await
+        .expect("lists");
+        let listed = server.fetches();
+
+        let message = adapter
+            .get_by_id("work/INBOX#42.4")
+            .await
+            .expect("resolves");
+        let res = children::list(
+            &adapter,
+            message.as_ref(),
+            params(types::attachment_type(), None),
+        )
+        .await
+        .expect("lists");
+
+        let ids: Vec<&str> = res.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["work/INBOX#42.4/part/2"]);
+        assert_eq!(res.items[0].label, "invoice.pdf");
+        assert_eq!(cell(&res.items[0], "size"), "4096");
+        assert_eq!(
+            server.fetches(),
+            listed,
+            "the BODYSTRUCTURE came with the envelope"
+        );
+        assert!(children::check_rows(&attachment::columns(), &res.items).is_empty());
+    }
+
+    /// A message with nothing attached says so in its row, which is what
+    /// keeps the drill arrow honest.
+    #[tokio::test]
+    async fn a_message_without_files_is_a_leaf() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let folder = adapter.get_by_id("work/INBOX").await.expect("resolves");
+        let res = children::list(
+            &adapter,
+            folder.as_ref(),
+            params(types::message_type(), None),
+        )
+        .await
+        .expect("lists");
+
+        let with_file = res.items.iter().find(|i| i.id.ends_with("#42.4")).unwrap();
+        let without = res.items.iter().find(|i| i.id.ends_with("#42.1")).unwrap();
+        assert_eq!(with_file.has_children, Some(true));
+        assert_eq!(without.has_children, Some(false));
+    }
+
+    /// An attachment id resolves to a node that can open its file — the
+    /// path is in the id, so a restored cursor works without the listing.
+    #[tokio::test]
+    async fn an_attachment_id_resolves_and_its_actions_are_published() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+
+        let node = adapter
+            .get_by_id("work/INBOX#42.4/part/2")
+            .await
+            .expect("resolves");
+        assert_eq!(node.node_type().type_id, "mail:attachment");
+        assert_eq!(
+            node.label(),
+            "part 2",
+            "nothing listed it, so the part path is the name it has"
+        );
+        assert_eq!(server.connections(), 0, "and nothing was connected over it");
+
+        let ids: Vec<String> = adapter
+            .actions_for_type(types::attachment_type())
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids, ["open", "download_all"]);
+        assert!(
+            adapter.actions_for_type(types::message_type()).is_empty(),
+            "the message level is read-only until phase 5"
+        );
     }
 
     /// The account level is pure config: it renders before anything is

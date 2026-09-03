@@ -27,7 +27,7 @@ use super::session::SessionState;
 use crate::config::AccountConfig;
 use crate::credentials::AccountCredentials;
 use crate::error::{MailError, MailResult};
-use crate::model::FolderInfo;
+use crate::model::{EnvelopeRow, FolderInfo};
 
 /// How many requests may queue up before the caller waits. Deep enough that
 /// a burst of view loads never blocks, shallow enough to notice a stall.
@@ -55,6 +55,28 @@ pub(crate) enum Request {
         offset: u32,
         limit: u32,
         reply: oneshot::Sender<MailResult<MessagePage>>,
+    },
+    /// The whole source of one message, for reading it.
+    Body {
+        path: String,
+        uid_validity: u32,
+        uid: u32,
+        reply: oneshot::Sender<MailResult<Vec<u8>>>,
+    },
+    /// The decoded bytes of one MIME part, for saving or opening a file.
+    Part {
+        path: String,
+        uid_validity: u32,
+        uid: u32,
+        part: String,
+        reply: oneshot::Sender<MailResult<Vec<u8>>>,
+    },
+    /// The envelope of a single message, for a row nobody listed.
+    Envelope {
+        path: String,
+        uid_validity: u32,
+        uid: u32,
+        reply: oneshot::Sender<MailResult<EnvelopeRow>>,
     },
     /// Log out and drop the session. The actor stays alive: the next request
     /// connects again.
@@ -127,6 +149,64 @@ impl Connection {
             reply,
         })
         .await
+    }
+
+    /// One message's source, whole and unread-preserving. What the preview
+    /// pane renders from.
+    pub(crate) async fn body(&self, path: &str, uid_validity: u32, uid: u32) -> MailResult<Vec<u8>> {
+        let path = path.to_string();
+        self.ask(|reply| Request::Body {
+            path,
+            uid_validity,
+            uid,
+            reply,
+        })
+        .await
+    }
+
+    /// The decoded bytes of one MIME part — an attachment as a file.
+    pub(crate) async fn part(
+        &self,
+        path: &str,
+        uid_validity: u32,
+        uid: u32,
+        part: &str,
+    ) -> MailResult<Vec<u8>> {
+        let (path, part) = (path.to_string(), part.to_string());
+        self.ask(|reply| Request::Part {
+            path,
+            uid_validity,
+            uid,
+            part,
+            reply,
+        })
+        .await
+    }
+
+    /// The envelope of one message. Used where a message is reached without
+    /// the page that listed it — a restored cursor, a bookmarked attachment
+    /// level — and never on the listing path, which gets its rows in bulk.
+    pub(crate) async fn envelope(
+        &self,
+        path: &str,
+        uid_validity: u32,
+        uid: u32,
+    ) -> MailResult<EnvelopeRow> {
+        let path = path.to_string();
+        self.ask(|reply| Request::Envelope {
+            path,
+            uid_validity,
+            uid,
+            reply,
+        })
+        .await
+    }
+
+    /// A handle with no actor behind it. Only for tests that must build a
+    /// node without a server — the first request on it fails as `Closed`.
+    #[cfg(test)]
+    pub(crate) fn from_sender(tx: mpsc::Sender<Request>) -> Self {
+        Self { tx }
     }
 
     /// Drop the session (a manual reconnect, or a tab being put away).
@@ -257,6 +337,46 @@ impl Actor {
                     self,
                     self.label(&format!("Loading {path} {}-{}", offset + 1, offset + limit)),
                     |s| ops::messages(s, &path, &query, offset, limit)
+                );
+                let _ = reply.send(out);
+            }
+            Request::Body {
+                path,
+                uid_validity,
+                uid,
+                reply,
+            } => {
+                let out = on_session!(
+                    self,
+                    self.label(&format!("Reading {path} #{uid}")),
+                    |s| ops::message_source(s, &path, uid_validity, uid)
+                );
+                let _ = reply.send(out);
+            }
+            Request::Part {
+                path,
+                uid_validity,
+                uid,
+                part,
+                reply,
+            } => {
+                let out = on_session!(
+                    self,
+                    self.label(&format!("Fetching attachment {part} of {path} #{uid}")),
+                    |s| ops::message_part(s, &path, uid_validity, uid, &part)
+                );
+                let _ = reply.send(out);
+            }
+            Request::Envelope {
+                path,
+                uid_validity,
+                uid,
+                reply,
+            } => {
+                let out = on_session!(
+                    self,
+                    self.label(&format!("Reading {path} #{uid}")),
+                    |s| ops::message_envelope(s, &path, uid_validity, uid)
                 );
                 let _ = reply.send(out);
             }
@@ -572,9 +692,15 @@ mod tests {
         let invoice = &page.rows[1];
         assert!(!invoice.seen, "no \\Seen flag means unread");
         assert_eq!(
-            invoice.attachments, 1,
+            invoice.attachments.len(),
+            1,
             "the PDF part of the multipart is an attachment"
         );
+        // The whole part description is kept, not just its count: it is what
+        // the attachment level lists, and it arrived with this fetch.
+        assert_eq!(invoice.attachments[0].filename, "invoice.pdf");
+        assert_eq!(invoice.attachments[0].part, "2");
+        assert_eq!(invoice.attachments[0].content_type, "application/pdf");
         // The Date header, not the server's arrival time: the fixture gives
         // them deliberately different days.
         assert_eq!(
@@ -616,6 +742,76 @@ mod tests {
         assert!(!err.is_fatal(), "{err}");
         conn.messages("INBOX", "", 0, 50).await.expect("still live");
         assert_eq!(server.connections(), 1, "no reconnect");
+    }
+
+    /// A body is the message as it travelled — headers, encodings and all.
+    /// Decoding it is the MIME layer's job, not the protocol layer's, so
+    /// what has to arrive here is the source verbatim.
+    #[tokio::test]
+    async fn a_body_arrives_as_the_message_travelled() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let source = conn.body("INBOX", 42, 1).await.expect("reads");
+        let text = String::from_utf8_lossy(&source);
+        assert!(
+            text.contains("Content-Transfer-Encoding: quoted-printable"),
+            "the source is not decoded on the way: {text}"
+        );
+        assert!(text.contains("Gr=FC=DFe aus M=FCnchen"), "{text}");
+    }
+
+    /// A part comes back *decoded*, because the client asked for the part's
+    /// MIME headers alongside it. Without them this would be the base64 text
+    /// rather than the file.
+    #[tokio::test]
+    async fn a_part_arrives_decoded_because_its_headers_came_with_it() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let bytes = conn.part("INBOX", 42, 4, "2").await.expect("fetches");
+        assert_eq!(bytes, b"hello world", "base64 was decoded, not saved");
+        assert_eq!(
+            server.fetches(),
+            1,
+            "headers and body are one command, not two"
+        );
+    }
+
+    /// The UIDVALIDITY in a message id is a *check*, not decoration: a
+    /// renumbered mailbox has to fail loudly rather than open whatever mail
+    /// now wears that UID. And it must not cost the session.
+    #[tokio::test]
+    async fn a_renumbered_mailbox_refuses_an_old_id_instead_of_opening_the_wrong_mail() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let err = conn
+            .body("INBOX", 41, 1)
+            .await
+            .expect_err("the id is from before the renumbering");
+        assert!(err.to_string().contains("renumbered"), "{err}");
+        assert!(!err.is_fatal(), "the session is fine: {err}");
+        conn.body("INBOX", 42, 1).await.expect("still live");
+    }
+
+    /// One envelope for one UID — the path a message reached without its
+    /// listing takes.
+    #[tokio::test]
+    async fn a_single_envelope_can_be_fetched_without_its_page() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let row = conn.envelope("INBOX", 42, 4).await.expect("fetches");
+        assert_eq!(row.uid, 4);
+        assert_eq!(row.subject, "Rechnung");
+        assert_eq!(row.attachments.len(), 1);
+
+        let err = conn
+            .envelope("INBOX", 42, 4711)
+            .await
+            .expect_err("no such message");
+        assert!(err.to_string().contains("moved or deleted"), "{err}");
     }
 
     /// `disconnect` really ends the session; the next request builds a new

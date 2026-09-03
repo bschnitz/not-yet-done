@@ -111,8 +111,13 @@ pub(crate) struct EnvelopeRow {
     pub(crate) flagged: bool,
     pub(crate) answered: bool,
     pub(crate) draft: bool,
-    /// How many parts the BODYSTRUCTURE describes as attachments.
-    pub(crate) attachments: u32,
+    /// The parts the BODYSTRUCTURE describes as attachments.
+    ///
+    /// Kept whole rather than counted: `BODYSTRUCTURE` arrives with every
+    /// envelope anyway, so holding on to it makes the attachment level cost
+    /// **nothing** — no second round trip to find out what hangs under a
+    /// message, only one to fetch a part the user actually opens.
+    pub(crate) attachments: Vec<AttachmentInfo>,
 }
 
 /// One attachment below a message.
@@ -123,15 +128,6 @@ pub(crate) struct AttachmentInfo {
     pub(crate) filename: String,
     pub(crate) content_type: String,
     pub(crate) size: u32,
-}
-
-/// A message body, already reduced to what the preview renders.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MessageBody {
-    /// Plain text — the `text/plain` alternative where one exists, else the
-    /// HTML alternative rendered down to text.
-    pub(crate) text: String,
-    pub(crate) attachments: Vec<AttachmentInfo>,
 }
 
 /// Order the folder list the way a mail client shows it: `INBOX` first —
