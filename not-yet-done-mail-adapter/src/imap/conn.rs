@@ -13,6 +13,16 @@
 //! idling followed by a folder switch is the normal case, not an error worth
 //! showing.
 //!
+//! Opening the connection is itself repeated, per the account's `retry:`. A
+//! refused socket is the failure that most often goes away on its own — a
+//! server restarting, a VPN route that came up a moment after the tab did —
+//! and showing it as a failed account makes the user clear an error that had
+//! already passed. Three questions, deliberately kept apart: whether the
+//! session survives ([`MailError::is_fatal`]), whether the *command* is worth
+//! running again on a new one ([`MailError::is_worth_retrying`]), and whether
+//! *opening* the connection is worth another go
+//! ([`MailError::is_worth_reconnecting`]).
+//!
 //! Every command runs under a deadline. Not because a slow server is an
 //! error, but because a connection that neither answers nor closes would
 //! otherwise be waited on forever — and with one command at a time, that one
@@ -25,10 +35,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use not_yet_done_content::StatusReporter;
+use not_yet_done_content::{RetryConfig, StatusReporter};
 use tokio::sync::{mpsc, oneshot};
 
-use super::login::{self, MailSession};
+use super::login::{self, Attempt, MailSession};
 use super::ops::{self, MessagePage};
 use super::session::SessionState;
 use crate::config::AccountConfig;
@@ -106,6 +116,7 @@ impl Connection {
         creds: Arc<AccountCredentials>,
         status: StatusReporter,
         command_timeout: Duration,
+        retry: RetryConfig,
     ) -> Self {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let actor = Actor {
@@ -113,6 +124,7 @@ impl Connection {
             creds,
             status,
             command_timeout,
+            retry,
             session: None,
         };
         tokio::spawn(actor.run(rx));
@@ -162,7 +174,12 @@ impl Connection {
 
     /// One message's source, whole and unread-preserving. What the preview
     /// pane renders from.
-    pub(crate) async fn body(&self, path: &str, uid_validity: u32, uid: u32) -> MailResult<Vec<u8>> {
+    pub(crate) async fn body(
+        &self,
+        path: &str,
+        uid_validity: u32,
+        uid: u32,
+    ) -> MailResult<Vec<u8>> {
         let path = path.to_string();
         self.ask(|reply| Request::Body {
             path,
@@ -245,6 +262,11 @@ struct Actor {
     status: StatusReporter,
     /// How long one command may take. Zero means no deadline at all.
     command_timeout: Duration,
+    /// How often opening the connection is attempted before the failure is
+    /// shown to the user. Applies to the *login*, never to a command: a
+    /// command runs on a session that already exists, and its own repeat rule
+    /// is the one in [`on_session`].
+    retry: RetryConfig,
     session: Option<SessionState>,
 }
 
@@ -385,11 +407,9 @@ impl Actor {
                 uid,
                 reply,
             } => {
-                let out = on_session!(
-                    self,
-                    self.label(&format!("Reading {path} #{uid}")),
-                    |s| ops::message_source(s, &path, uid_validity, uid)
-                );
+                let out = on_session!(self, self.label(&format!("Reading {path} #{uid}")), |s| {
+                    ops::message_source(s, &path, uid_validity, uid)
+                });
                 let _ = reply.send(out);
             }
             Request::Part {
@@ -412,11 +432,9 @@ impl Actor {
                 uid,
                 reply,
             } => {
-                let out = on_session!(
-                    self,
-                    self.label(&format!("Reading {path} #{uid}")),
-                    |s| ops::message_envelope(s, &path, uid_validity, uid)
-                );
+                let out = on_session!(self, self.label(&format!("Reading {path} #{uid}")), |s| {
+                    ops::message_envelope(s, &path, uid_validity, uid)
+                });
                 let _ = reply.send(out);
             }
             Request::Disconnect { reply } => {
@@ -436,28 +454,82 @@ impl Actor {
         // A fresh session has nothing selected, and `SessionState` is what
         // guarantees that: the selection cache is born with the session, so
         // a reconnect cannot inherit the old one's idea of where it is.
-        let session = SessionState::new(self.establish().await?);
+        let session = SessionState::new(self.establish_with_retries().await?);
         Ok((session, true))
     }
 
-    /// Resolve credentials, open the transport, log in. Reports each step, so
-    /// a login that waits on a password store says so instead of looking
-    /// hung.
-    async fn establish(&mut self) -> MailResult<MailSession> {
+    /// Open the connection, trying again while the failure is one that goes
+    /// away by itself.
+    ///
+    /// The whole point of the loop is what the user does *not* see: a mail
+    /// server that is restarting, or a VPN route that comes up a second after
+    /// the tab did, refuses the socket once and accepts it immediately after.
+    /// Reporting that as a failed account — a red banner that stays until
+    /// something reloads — turns a hiccup into an error the user has to clear
+    /// by hand. So `Failed` is published here and only here, after the last
+    /// attempt: an intermediate failure names itself in the connect banner
+    /// and is then simply tried again.
+    ///
+    /// What is *not* repeated is anything the server actually answered:
+    /// a rejected password (replaying it is how an account gets locked), a
+    /// cancelled dialog, a config that cannot describe a connection. See
+    /// [`MailError::is_worth_reconnecting`].
+    async fn establish_with_retries(&mut self) -> MailResult<MailSession> {
         let who = self.account.label().to_string();
+        let attempts = self.retry.attempts.max(1);
+        let mut backoff = Duration::from_millis(self.retry.backoff_ms);
+
+        for n in 1..=attempts {
+            let attempt = Attempt { n, of: attempts };
+            match self.establish(&who, attempt).await {
+                Ok(session) => return Ok(session),
+                Err(e) if n < attempts && e.is_worth_reconnecting() => {
+                    // Named, not swallowed: the banner says what went wrong
+                    // and that another try is coming, so a connection that
+                    // takes three attempts does not look like a hang.
+                    self.status.connect_step(format!(
+                        "{who}: {e} — trying again in {:.1}s",
+                        backoff.as_secs_f32()
+                    ));
+                    self.status
+                        .connect_attempt(n + 1, attempts, login::CONNECT_TIMEOUT_SECS);
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
+                Err(e) => {
+                    self.status.failed(format!("{who}: {e}"));
+                    return Err(e);
+                }
+            }
+        }
+        // Unreachable: the loop runs at least once and every arm either
+        // returns or continues. Stated as an error rather than a panic.
+        Err(MailError::Config(format!(
+            "{who}: no connection attempt was made"
+        )))
+    }
+
+    /// One attempt: resolve credentials, open the transport, log in. Reports
+    /// each step, so a login that waits on a password store says so instead
+    /// of looking hung.
+    ///
+    /// Publishes no failure of its own — that is
+    /// [`Actor::establish_with_retries`]'s call to make, because only it knows
+    /// whether this attempt was the last one.
+    async fn establish(&mut self, who: &str, attempt: Attempt) -> MailResult<MailSession> {
         self.status.begin_connect();
         self.status
             .connect_step(format!("{who}: unlocking credentials"));
 
         let result = async {
             let creds = self.creds.fields().await?;
-            let client = login::connect(&self.account, &self.status, &who).await?;
+            let client = login::connect(&self.account, &self.status, who, attempt).await?;
             login::login(
                 client,
                 &self.account.auth.mechanism,
                 &creds,
                 &self.status,
-                &who,
+                who,
             )
             .await
         }
@@ -475,7 +547,6 @@ impl Actor {
                 if e.is_auth() {
                     self.creds.invalidate().await;
                 }
-                self.status.failed(format!("{who}: {e}"));
                 Err(e)
             }
         }
@@ -566,6 +637,24 @@ mod tests {
         account: Arc<AccountConfig>,
         command_timeout: Duration,
     ) -> (Connection, StatusReporter, watch::Receiver<AdapterStatus>) {
+        // One attempt: a test that wants a failed connect must not sit
+        // through two backoffs to get it.
+        connection_with(
+            account,
+            command_timeout,
+            RetryConfig {
+                attempts: 1,
+                backoff_ms: 0,
+            },
+        )
+    }
+
+    /// The full set of knobs — for the tests about repeating a connect.
+    fn connection_with(
+        account: Arc<AccountConfig>,
+        command_timeout: Duration,
+        retry: RetryConfig,
+    ) -> (Connection, StatusReporter, watch::Receiver<AdapterStatus>) {
         let status = StatusReporter::new();
         let watching = status.subscribe();
         let creds = AccountCredentials::new(
@@ -576,7 +665,13 @@ mod tests {
         )
         .expect("spec is valid");
         (
-            Connection::spawn(Arc::clone(&account), creds, status.clone(), command_timeout),
+            Connection::spawn(
+                Arc::clone(&account),
+                creds,
+                status.clone(),
+                command_timeout,
+                retry,
+            ),
             status,
             watching,
         )
@@ -683,11 +778,96 @@ mod tests {
             Duration::from_millis(200),
         );
         conn.capabilities().await.expect("first request");
-        conn.capabilities().await.expect_err("runs into the deadline");
+        conn.capabilities()
+            .await
+            .expect_err("runs into the deadline");
 
-        let caps = conn.capabilities().await.expect("the account is usable again");
+        let caps = conn
+            .capabilities()
+            .await
+            .expect("the account is usable again");
         assert!(caps.iter().any(|c| c == "IMAP4rev1"), "{caps:?}");
-        assert_eq!(server.connections(), 2, "the stalled session was thrown away");
+        assert_eq!(
+            server.connections(),
+            2,
+            "the stalled session was thrown away"
+        );
+    }
+
+    /// The failure the retry exists for: a server that is not up *yet*. The
+    /// user asked for a folder list and gets one — the hiccup never becomes
+    /// a red banner they have to clear.
+    #[tokio::test]
+    async fn a_connection_that_is_refused_once_is_simply_opened_again() {
+        let server = FakeServer::start(Script {
+            close_first: 1,
+            ..scripted()
+        })
+        .await;
+        let (conn, status, _watching) = connection_with(
+            account(server.addr.port(), PASSWORD),
+            Duration::from_secs(60),
+            RetryConfig {
+                attempts: 3,
+                backoff_ms: 1,
+            },
+        );
+
+        let folders = conn.folders().await.expect("the second attempt gets in");
+        assert!(!folders.is_empty());
+        assert_eq!(server.connections(), 2, "one refusal, one retry");
+        assert!(
+            !matches!(status.current(), AdapterStatus::Failed { .. }),
+            "a connection that came up on the second try is not a failure"
+        );
+    }
+
+    /// And it gives up: `attempts` is a bound, not a loop. After the last one
+    /// the user is told, once.
+    #[tokio::test]
+    async fn a_server_that_stays_down_fails_after_the_last_attempt() {
+        let server = FakeServer::start(Script {
+            close_first: 10,
+            ..scripted()
+        })
+        .await;
+        let (conn, status, _watching) = connection_with(
+            account(server.addr.port(), PASSWORD),
+            Duration::from_secs(60),
+            RetryConfig {
+                attempts: 2,
+                backoff_ms: 1,
+            },
+        );
+
+        conn.folders().await.expect_err("nobody is answering");
+        assert_eq!(server.connections(), 2, "exactly `attempts` attempts");
+        match status.current() {
+            AdapterStatus::Failed { reason } => {
+                assert!(reason.contains("Work"), "names the account: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// What must *not* be repeated. Some servers lock an account after a
+    /// handful of refused logins, so a wrong password is asked about once —
+    /// however many attempts the config allows for a dead socket.
+    #[tokio::test]
+    async fn a_refused_password_is_never_replayed() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection_with(
+            account(server.addr.port(), "wrong"),
+            Duration::from_secs(60),
+            RetryConfig {
+                attempts: 3,
+                backoff_ms: 1,
+            },
+        );
+
+        let err = conn.capabilities().await.expect_err("the server says no");
+        assert!(err.is_auth(), "{err}");
+        assert_eq!(server.logins(), 1, "one LOGIN, not three");
     }
 
     /// A refused password must surface as an auth error — that is what makes

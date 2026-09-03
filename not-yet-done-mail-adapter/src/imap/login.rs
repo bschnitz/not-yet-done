@@ -36,18 +36,38 @@ pub(crate) const LOGIN_TIMEOUT_SECS: u64 = 120;
 pub(crate) type MailClient = Client<MailStream>;
 pub(crate) type MailSession = async_imap::Session<MailStream>;
 
+/// Which attempt at opening the connection this is, and how many there are.
+/// Only for the banner: the decision to try again is
+/// [`Actor::establish_with_retries`](super::conn)'s, and `Attempt` is what it
+/// hands down so the line the user reads says `(2/3)` instead of looking like
+/// the first try each time.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Attempt {
+    /// 1-based.
+    pub(crate) n: u32,
+    /// Total attempts allowed. `1` means retrying is off, and the frontend
+    /// then shows no counter at all.
+    pub(crate) of: u32,
+}
+
 /// Open the transport and read the server greeting.
 pub(crate) async fn connect(
     account: &AccountConfig,
     status: &StatusReporter,
     who: &str,
+    attempt: Attempt,
 ) -> MailResult<MailClient> {
     let addr = (account.host.as_str(), account.port());
     status.connect_phase(
         format!("{who}: connecting to {}:{}", addr.0, addr.1),
-        0,
+        attempt.of,
         CONNECT_TIMEOUT_SECS,
     );
+    // `connect_phase` starts a phase at attempt one; only a repeat has to
+    // correct that, so the common case stays one publish.
+    if attempt.n > 1 {
+        status.connect_attempt(attempt.n, attempt.of, CONNECT_TIMEOUT_SECS);
+    }
     let tcp = with_timeout(
         CONNECT_TIMEOUT_SECS,
         TcpStream::connect(addr),
