@@ -213,6 +213,33 @@ Nothing here is new machinery; it is wiring:
 - **`auto_connect` / `auto_reload`** — a mail tab can connect at startup and
   poll every few minutes without adapter code.
 
+### 4.5 `export_html` — handing a message to a viewer
+
+The body a sender actually wrote is invisible from the outside: the row carries
+the text part, and the attachment level lists the parts that have a file name,
+not the `text/html` alternative beside them. A script that wanted the markup
+would have to fetch and parse the source itself — a side door around the
+adapter. So the message level publishes one action instead:
+
+`nyd adapter mail "<message id>" export_html` writes the message into the same
+per-message directory an opened attachment already uses and prints
+`exported message to <dir>`:
+
+| File           | Content                                                                             |
+| -------------- | ----------------------------------------------------------------------------------- |
+| `message.html` | the sender's `text/html` part, `cid:` references rewritten to `inline/<file>`       |
+| `inline/…`     | the related parts those references point at                                         |
+| `message.txt`  | the `text/plain` part, when the message has one                                     |
+| `message.json` | subject, from/to/cc, date, the attachment names, and which of the files above exist |
+
+The metadata is written **last** on purpose: a reader that waits for
+`message.json` never sees a half-written directory.
+
+Nothing is sanitised here. The adapter hands over what the sender sent, and
+whoever renders it decides what to allow — the browser preview
+(`_lib/nyd_mail_preview.py`) drops scripts, styles and frames and blocks remote
+images before the page is ever shown.
+
 ## 5. Config — the adapter YAML (one file, all accounts)
 
 ```yaml
@@ -375,6 +402,8 @@ Either way the levels below are identical:
   `mark_read_on_reach_end: mark-read`.
 - Child `mail:attachment` with `open` / `download all`, verbatim the Stoat
   attachment level.
+- On the message level, `export_html` (§4.5) is what the browser preview
+  (`o p`, and the `row_change` hook that follows the cursor) reads.
 
 Because everything is one tab, `auto_connect` is a single decision for the tab,
 and the per-account laziness of §4.2 does the rest: opening the Work subtab
