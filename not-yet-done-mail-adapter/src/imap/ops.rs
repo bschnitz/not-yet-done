@@ -6,6 +6,7 @@
 //! is a function here plus one arm in the actor's match.
 
 use async_imap::error::Error as ImapError;
+use async_imap::imap_proto::types::{MessageSection, SectionPath};
 use async_imap::types::{Capability, NameAttribute};
 use futures::StreamExt;
 
@@ -161,7 +162,17 @@ pub(crate) async fn messages(
     let rows = if window.is_empty() {
         Vec::new()
     } else {
-        fetch_envelopes(state, &window, selection.uid_validity).await?
+        let rows = fetch_envelopes(state, &window, selection.uid_validity).await?;
+        // The same empty-but-`Ok` trap as in `search`: a stream that ends
+        // parses as a complete, empty answer. Here the premise that makes it
+        // a contradiction is right above — the search just named these UIDs,
+        // so none of them coming back is a dead session, not an empty page.
+        if rows.is_empty() {
+            return Err(MailError::Transport(format!(
+                "the server ended the connection while fetching envelopes from `{path}`"
+            )));
+        }
+        rows
     };
     Ok(MessagePage {
         rows,
@@ -234,12 +245,149 @@ async fn fetch_envelopes(
         }
     }
     drain_unsolicited(&mut state.session);
-    if rows.is_empty() {
-        return Err(MailError::Transport(
-            "the server ended the connection while fetching envelopes".into(),
-        ));
-    }
+    // Emptiness is *not* judged here: whether no rows means a dead session or
+    // simply a message that is gone depends on what the caller asked, and
+    // only the caller knows.
     let position = |uid: u32| window.iter().position(|w| *w == uid).unwrap_or(usize::MAX);
     rows.sort_by_key(|r| position(r.uid));
     Ok(rows)
+}
+
+/// Select `path` and insist it is still the mailbox the caller's ids were
+/// minted in.
+///
+/// This is what the UIDVALIDITY in a message id is *for* (see
+/// [`crate::ids`]). A server that renumbers a mailbox bumps the value, and
+/// every UID minted before that now points at a different message — so a
+/// bookmark from yesterday must fail loudly here rather than open the wrong
+/// mail. The session is fine either way, which is why this is a `Server`
+/// error and not a `Transport` one.
+async fn select_stable(state: &mut SessionState, path: &str, uid_validity: u32) -> MailResult<()> {
+    let selection = state.select(path).await?;
+    if selection.uid_validity != uid_validity {
+        return Err(MailError::Server(format!(
+            "`{path}` was renumbered by the server (UIDVALIDITY {uid_validity} → {}); \
+             reload the folder to address its messages again",
+            selection.uid_validity
+        )));
+    }
+    Ok(())
+}
+
+/// One message, whole, as it travelled.
+///
+/// `BODY.PEEK[]` rather than `BODY[]`: reading a message in a preview pane
+/// must not mark it `\Seen` behind the user's back — that is a decision the
+/// unread wiring makes deliberately (phase 5), not a side effect of moving
+/// the cursor.
+///
+/// The whole source is fetched, attachments included, because that is what a
+/// body costs: the text part cannot be decoded without its own MIME headers,
+/// and a mail client that opens a message downloads the message. What it buys
+/// is that no *further* round trip is needed to render it.
+pub(crate) async fn message_source(
+    state: &mut SessionState,
+    path: &str,
+    uid_validity: u32,
+    uid: u32,
+) -> MailResult<Vec<u8>> {
+    select_stable(state, path, uid_validity).await?;
+    let mut source = None;
+    {
+        let fetches = state
+            .session
+            .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
+            .await
+            .map_err(classify)?;
+        futures::pin_mut!(fetches);
+        while let Some(fetch) = fetches.next().await {
+            let fetch = fetch.map_err(classify)?;
+            if let Some(body) = fetch.body() {
+                source = Some(body.to_vec());
+            }
+        }
+    }
+    drain_unsolicited(&mut state.session);
+    source.ok_or_else(|| {
+        MailError::Transport(format!(
+            "the server returned no body for message {uid} in `{path}`"
+        ))
+    })
+}
+
+/// The decoded bytes of one MIME part — an attachment, as a file.
+///
+/// Two sections are asked for in the one command: the part's own MIME
+/// headers and its body. The headers are not decoration — they carry the
+/// transfer encoding, without which base64 would be written to disk as
+/// base64. Fetching only the part (and not the whole message) is what keeps
+/// opening a 30 kB PDF out of a 20 MB mail cheap.
+pub(crate) async fn message_part(
+    state: &mut SessionState,
+    path: &str,
+    uid_validity: u32,
+    uid: u32,
+    part: &str,
+) -> MailResult<Vec<u8>> {
+    let section: Vec<u32> = part
+        .split('.')
+        .map(|n| n.parse::<u32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| MailError::Parse(format!("`{part}` is not a MIME part path")))?;
+    if section.is_empty() {
+        return Err(MailError::Parse("empty MIME part path".into()));
+    }
+    select_stable(state, path, uid_validity).await?;
+
+    let items = format!("(BODY.PEEK[{part}.MIME] BODY.PEEK[{part}])");
+    let mut found = None;
+    {
+        let fetches = state
+            .session
+            .uid_fetch(uid.to_string(), &items)
+            .await
+            .map_err(classify)?;
+        futures::pin_mut!(fetches);
+        while let Some(fetch) = fetches.next().await {
+            let fetch = fetch.map_err(classify)?;
+            let headers = fetch
+                .section(&SectionPath::Part(
+                    section.clone(),
+                    Some(MessageSection::Mime),
+                ))
+                .unwrap_or_default();
+            let Some(body) = fetch.section(&SectionPath::Part(section.clone(), None)) else {
+                continue;
+            };
+            found = Some(crate::mime::decode_part(headers, body));
+        }
+    }
+    drain_unsolicited(&mut state.session);
+    found.ok_or_else(|| {
+        MailError::Server(format!(
+            "the server returned no part `{part}` of message {uid} in `{path}`"
+        ))
+    })
+}
+
+/// The envelope of a single message — the same row a listing produces, for
+/// one UID.
+///
+/// Needed where a message is reached without its list: a restored cursor, or
+/// an attachment level opened straight from a bookmark. One round trip, the
+/// cheap attribute set, no body.
+pub(crate) async fn message_envelope(
+    state: &mut SessionState,
+    path: &str,
+    uid_validity: u32,
+    uid: u32,
+) -> MailResult<EnvelopeRow> {
+    select_stable(state, path, uid_validity).await?;
+    let mut rows = fetch_envelopes(state, &[uid], uid_validity).await?;
+    if rows.is_empty() {
+        return Err(MailError::Server(format!(
+            "no message {uid} in `{path}` — it may have been moved or deleted"
+        )));
+    }
+    Ok(rows.remove(0))
 }

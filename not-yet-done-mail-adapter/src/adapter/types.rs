@@ -53,3 +53,17 @@ pub(super) fn message_type() -> &'static NodeType {
     });
     &T
 }
+
+/// A file hanging off a message. `file_extension` stays empty: the extension
+/// of an attachment is the one its own filename carries, and inventing one
+/// here would rename every part to the same thing.
+pub(super) fn attachment_type() -> &'static NodeType {
+    static T: LazyLock<NodeType> = LazyLock::new(|| NodeType {
+        type_id: "mail:attachment".into(),
+        mime_type: String::new(),
+        syntax: None,
+        file_extension: String::new(),
+        display_name: "Attachment".into(),
+    });
+    &T
+}

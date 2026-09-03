@@ -39,10 +39,9 @@
 # and in the tab bar. A count column sitting on the same name would take it
 # over and leave the highlight permanently dark.
 #
-# SCOPE: this file covers what the adapter implements today — the folder tree
-# and the messages under a folder. Reading a message BODY (the preview pane)
-# and its attachments arrive with phase 2b; until then a message row shows its
-# envelope, which is all one `FETCH` per page costs.
+# SCOPE: this file covers what the adapter implements today — the folder tree,
+# the messages under a folder, reading a message and its attachments. Writing
+# (marking read, flagging, moving, sending) is phase 5 and is not here.
 
 tab:
   name: Mail
@@ -124,7 +123,8 @@ views:
       # One page costs a `UID SEARCH` for the matching set plus a `UID FETCH`
       # of exactly the window on screen — so a mailbox holding 40 000 mails
       # opens as fast as one holding 40. No body is read here: a row is the
-      # envelope, and reading the mail itself is a separate fetch (phase 2b).
+      # envelope, and reading the mail itself is a separate fetch, made only
+      # for the message the cursor is actually on.
       #
       # This level's QUERY is handed to the server verbatim as IMAP SEARCH
       # (`UNSEEN`, `FROM boss`, `SINCE 1-Sep-2026`, `TEXT invoice`) — unlike
@@ -180,13 +180,66 @@ views:
           - { key: account, label: Account, sizing: "fixed(10)", hidden: true }
         actions:
           - { name: refresh, key: r, type: reload }
-        # Two things this level deliberately does NOT do yet: `preview:` (the
-        # body is phase 2b, and a preview pane reading an unimplemented
-        # `content()` would just be empty) and a `children:` branch for
-        # attachments. Sorting with `c s` reaches the PAGE, not the mailbox —
-        # the rows a sort can compare are the ones already fetched, and the
-        # status line says so. Unsorted, the newest mail is first: IMAP gives
-        # that away for free, since UIDs rise with arrival.
+        # Reading the mail. The pane shows a short header block (From / To /
+        # Subject / Date, plus an `Attachments:` line when there are any) over
+        # the text — `text/plain` when the mail has one, otherwise the HTML
+        # part rendered down to text.
+        #
+        # `markdown: false` (the default, spelled out because it is a
+        # decision): a mail is not markdown. Turning it on would reflow the
+        # header block, eat `*asterisks*` out of ordinary prose and mangle the
+        # `>` quoting that every reply is built from.
+        #
+        # The body is fetched with `BODY.PEEK[]`, so moving the cursor over a
+        # mail does NOT mark it read — that stays a thing you do on purpose
+        # (phase 5). The last few bodies are cached, so walking a thread and
+        # coming back costs one fetch, not one per keystroke.
+        preview:
+          enabled: true
+          source: content
+          markdown: false
+          keybinding: p
+        # Sorting with `c s` reaches the PAGE, not the mailbox — the rows a
+        # sort can compare are the ones already fetched, and the status line
+        # says so. Unsorted, the newest mail is first: IMAP gives that away
+        # for free, since UIDs rise with arrival.
+        children:
+          # ── Attachments of a message ────────────────────────────────────
+          # This level is FREE. The `BODYSTRUCTURE` describing every part
+          # arrives with the envelope the page already fetched, so drilling
+          # into a mail costs no round trip at all — and the message row
+          # reports `has_children` only when it really carries files, so
+          # Enter drills in on those and does nothing on the rest.
+          #
+          # Only OPENING a file costs a fetch, and then only that part: a
+          # 30 kB PDF out of a 20 MB mail is 30 kB over the wire.
+          - name: attachments
+            node_type: "mail:attachment"
+            columns:
+              - {
+                  key: filename,
+                  label: File,
+                  source: label,
+                  style: text_high,
+                  sizing: "flex(1)",
+                }
+              - { key: content_type, label: Type, sizing: max }
+              - { key: size, label: Size, kind: number, sizing: "fixed(10)" }
+              # The IMAP section path (`2`, `3.1`). Rarely interesting, but
+              # it is the whole address of the part — worth switching on with
+              # `c c` when a file refuses to open.
+              - { key: part, label: Part, sizing: "fixed(6)", hidden: true }
+            actions:
+              # Fetches the part once into a per-message temp dir and hands
+              # the path to the frontend (xdg-open). All files of one mail
+              # land in the same dir, so the viewer can page through them;
+              # re-opening reuses the bytes already there.
+              - { name: open, key: o, type: custom, id: open }
+              # Saves EVERY file of the mail into a directory the form asks
+              # for (`~` is expanded, missing parents are created). A part
+              # that fails is reported, not fatal — nine files out of ten
+              # beats none.
+              - { name: download all, key: D, type: custom, id: download_all }
 
       # The same ChildDef serves every depth (`recursive: true` makes it an
       # implicit member of its own `children:`), so a folder expands into its
