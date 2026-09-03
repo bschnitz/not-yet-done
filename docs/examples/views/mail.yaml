@@ -1,0 +1,187 @@
+# Example: Mail (IMAP) view — one subtab per account
+#
+# Place in: ~/.config/not_yet_done/views/mail.yaml
+# Adapter config: ~/.config/not_yet_done/views/mail-adapter.yaml (same folder)
+#
+# ONE mail instance holds MANY accounts (see mail-adapter.yaml), so all of
+# them live in ONE tab and each account gets its own SUBTAB. What pins a
+# subtab to an account is its level query:
+#
+#     node_type: "mail:folder"
+#     query: { default: "account:work" }
+#
+# `account:<id>` names an `id:` from the adapter config; `folder:<path>` may
+# additionally pin the subtab to one subtree. An instance holding a single
+# account may omit the query — with several accounts the level refuses to
+# guess and says which syntax it wants, because a swallowed scope looks
+# exactly like a scope that matches everything.
+#
+# Alternative shape (not spelled out here): ONE subtab with
+# `node_type: "mail:account"`, listing every account as a row and drilling
+# into its folders. Same file, no query. Use it when the accounts should sit
+# side by side rather than behind separate keys.
+#
+# Connecting is per account, not per instance: opening the Work subtab logs
+# in Work and nothing else, and an account nobody looks at is never contacted.
+# That is why `auto_connect:` below is a single decision for the whole tab
+# without dragging every mailbox onto the network at once.
+#
+# Folder counts (`unread` / `total`) come from an IMAP `STATUS` call — one
+# round trip PER FOLDER. They are therefore fetched for the folders of the
+# level being shown, not for the whole tree; a `\Noselect` folder (a pure
+# container, e.g. `Archive` above `Archive/2019`) has no counts at all and
+# leaves the cells EMPTY rather than showing `0` — "cannot be counted" and
+# "counted zero" are different answers.
+#
+# SCOPE: this file covers what the adapter implements today — the folder
+# tree. The message level (`mail:message`), its preview and its attachments
+# arrive with phase 2; the sketch at the end of this file shows where they
+# will hang.
+
+tab:
+  name: Mail
+  order: 8
+  icon: "󰇮"
+  # While any folder in this view holds unread mail, the tab bar prefixes the
+  # label with this marker and emphasises it — the only cue a *background*
+  # mail tab can give. Both keys are optional (marker falls back to the view's
+  # own `unread_marker` below, style to bold).
+  unread_marker: "✉"
+
+adapter:
+  type: mail
+  id: mail
+  config: mail-adapter.yaml
+  # `never` (the default) connects on your first `r`; `on_open` connects the
+  # account of the subtab you switch to; `startup` connects before you ask —
+  # note that an account whose password needs answering then raises its dialog
+  # right away, over whatever tab you happen to be on. Which account the dialog
+  # means is written into its header, because with several mailboxes behind one
+  # instance "Password:" alone is not an answerable question.
+  auto_connect: on_open
+
+views:
+  # ── One subtab per account ────────────────────────────────────────────────
+  # The three ids below (`work`, `bridged`, `club`) are the ones the shipped
+  # mail-adapter.yaml defines. Copy both files and the pair works as-is;
+  # change an id in one and change it here too — a query naming an unknown
+  # account is refused with the list of ids the instance actually holds.
+  - name: Work
+    key: w
+    default: true
+    node_type: "mail:folder"
+    query: { default: "account:work" }
+    # The folder hierarchy is a tree: `Archive` expands into `Archive/2019`
+    # and so on, through the recursive `subfolders` branch below. Expanding
+    # is FREE of round trips — the whole mailbox list arrives in one `LIST`
+    # when the top level loads, and expansion reads that snapshot. `r`
+    # re-lists.
+    tree_label: name
+    unread_style: unread
+    unread_marker: "●"
+    columns:
+      - { key: name, label: Folder, source: label, sizing: "flex(1)" }
+      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
+      # The server-side path (`Archive/2019`, IMAP's own spelling) — what
+      # `SELECT` uses and what `exclude_folders:` matches against. Off by
+      # default because the name says it in nine cases out of ten; switch it
+      # on via the column popup (`c c`) when two folders in different
+      # subtrees share a name, or when an exclude pattern is not biting.
+      - { key: path, label: Path, sizing: "flex(1)", hidden: true }
+    actions:
+      - { name: refresh, key: r, type: reload }
+      # Filters the folders already on screen by name. A plain local filter,
+      # not an IMAP search: it needs no round trip and, in a lazily expanded
+      # tree, it can only match what is expanded.
+      - name: fuzzy filter
+        key: f
+        type: fuzzy_filter
+        fuzzy_filter:
+          fields: [name]
+    # Auto-expanding costs one `STATUS` per folder brought on screen, so the
+    # tree opens collapsed. Uncomment on a small mailbox where seeing every
+    # subfolder at once is worth the extra round trips:
+    #   expand_depth: 1
+    children:
+      # The same ChildDef serves every depth (`recursive: true` makes it an
+      # implicit member of its own `children:`), so a folder expands into its
+      # subfolders, theirs, and so on. No `columns:` here — a tree
+      # continuation inherits the root level's set, and all depths render into
+      # one shared column grid anyway.
+      - name: subfolders
+        node_type: "mail:folder"
+        tree_label: name
+        recursive: true
+        # A folder the server reports as having nothing below it. The adapter
+        # fills `has_children` from the mailbox list, so leaves are known
+        # rather than guessed.
+        leaf_glyph: "📁"
+
+  - name: Bridged
+    key: b
+    node_type: "mail:folder"
+    query: { default: "account:bridged" }
+    tree_label: name
+    unread_style: unread
+    unread_marker: "●"
+    columns:
+      - { key: name, label: Folder, source: label, sizing: "flex(1)" }
+      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
+      - { key: path, label: Path, sizing: "flex(1)", hidden: true }
+    actions:
+      - { name: refresh, key: r, type: reload }
+    children:
+      - name: subfolders
+        node_type: "mail:folder"
+        tree_label: name
+        recursive: true
+        leaf_glyph: "📁"
+
+  # A subtab may pin a SUBTREE as well as an account: `folder:` takes the
+  # server-side path, spaces and all, and only that folder and its children
+  # are listed. Useful for a shared mailbox that lives below one account, or
+  # for keeping a noisy archive out of the way of the everyday view.
+  - name: Club archive
+    # A subtab key must dodge the leader chords of its own tab: `c` would
+    # collide with `c c` (column config) and `c s` (sort menu), and the
+    # validator refuses the file rather than letting one of them win.
+    key: a
+    node_type: "mail:folder"
+    query: { default: "account:club folder:Archive" }
+    tree_label: name
+    columns:
+      - { key: name, label: Folder, source: label, sizing: "flex(1)" }
+      - { key: unread, label: Unread, kind: number, sizing: "fixed(7)" }
+      - { key: total, label: Total, kind: number, sizing: "fixed(7)" }
+    actions:
+      - { name: refresh, key: r, type: reload }
+    children:
+      - name: subfolders
+        node_type: "mail:folder"
+        tree_label: name
+        recursive: true
+        leaf_glyph: "📁"
+# ── Phase 2 sketch: messages under a folder ─────────────────────────────────
+# NOT YET IMPLEMENTED — the adapter offers no `mail:message` level yet, so
+# adding this today gives a subtab that cannot be drilled into. It is written
+# down here so the eventual shape is not re-invented: the Stoat chat layout,
+# folder tree on the left, message list in a coupled split on the right.
+#
+#     children:
+#       - name: subfolders
+#         node_type: "mail:folder"
+#         tree_label: name
+#         recursive: true
+#       # A folder carrying no `tree_label` child of this type means Enter
+#       # DRILLS into the message list instead of expanding.
+#       - name: messages
+#         node_type: "mail:message"
+#         split: { direction: right, ratio: 0.7, coupled: true }
+#         cursor_on_open: first_unread
+#         columns:
+#           - { key: from, label: From, sizing: "flex(1)" }
+#           - { key: subject, label: Subject, sizing: "flex(2)" }
+#           - { key: date, label: Date, kind: datetime, sizing: "fixed(16)" }
+#         preview: { source: content, markdown: true }

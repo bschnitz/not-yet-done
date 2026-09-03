@@ -6624,6 +6624,96 @@ Set on the Jira instance as `auto_reload: 10m`. For a quicker round use
       `auto_reload: 10m` set (checked headless, 2026-08-31); a real
       `nyd adapter jira ls -q '<JQL>'` still runs one request and exits.
 
+## Mail (IMAP): the folder tree, one account per subtab (phases 0-1)
+
+Prerequisite: copy
+[`docs/examples/views/mail-adapter.yaml`](examples/views/mail-adapter.yaml) and
+[`docs/examples/views/mail.yaml`](examples/views/mail.yaml) into
+`~/.config/not_yet_done/views/`, replace the example accounts with real ones
+(ids may stay `work`/`bridged`/`club` — the view's `query:` lines name them),
+and add `Mail` to `tabs.order` in `tui.yaml`. Messages do not exist yet: this
+block ends at the folder tree.
+
+### Headless (no TUI needed)
+
+- [ ] **The type is registered**: `nyd config auth mail` prints the mechanisms
+      `password` (fields `username`, `password`) and `xoauth2` (`username`,
+      `token`) with their providers. This works before any account exists —
+      it reads the mechanism table, not the config.
+- [ ] **The instance is found**: `nyd adapter` lists `mail (type: mail)`. If
+      it does not, the view file was rejected — instance discovery skips a bad
+      view file silently, so start the TUI, which reports the parse error, and
+      the CLI otherwise only says it knows no such instance.
+- [ ] **The levels document themselves**: `nyd adapter mail help --full` names
+      the root and both children (`Account` / `Folder`), and the folder level
+      lists the columns `name`, `unread`, `total`, `path`. No login happens.
+- [ ] **Accounts without the network**: `nyd adapter mail ls --type mail:account`
+      prints one row per configured account (name, address, host, id) —
+      immediately, with no credential prompt. This is config, not IMAP.
+- [ ] **The folder tree headlessly** (phase 1's own definition of done):
+      `nyd adapter mail ls --type mail:folder -q 'account:work'` asks for the
+      password once and prints the top-level folders with their unread/total
+      counts, `INBOX` first.
+- [ ] **A scope that names nobody**: `-q 'account:nope'` is refused with a
+      message naming the ids the instance actually holds — it does not fall
+      back to the first account.
+- [ ] **A term nobody understands**: `-q 'is:unread account:work'` is refused
+      and says what a folder query understands. A silently dropped term would
+      look exactly like a filter that matches everything.
+- [ ] **No scope, several accounts**: `nyd adapter mail ls --type mail:folder`
+      refuses and names the `account:<id>` syntax. With a single-account
+      instance the same call simply works.
+
+### In the TUI
+
+- [ ] **One tab, many mailboxes**: the Mail tab opens on `Work`; `b` and `a`
+      switch to the other subtabs. Each shows _its own_ folders — the surest
+      check is a folder name that exists in only one of the accounts.
+- [ ] **Only what you look at connects**: start the TUI, open Mail, stay on
+      `Work`. Only the Work account asks for its password; the other accounts
+      are never contacted. Switching to `Bridged` connects that one, and now.
+- [ ] **The prompt says whose password it wants**: the credential dialog's
+      header carries the account label (`Work: …`). With three mailboxes
+      behind one instance, an unlabelled "Password:" is unanswerable.
+- [ ] **Counts**: `INBOX` shows plausible unread/total numbers — compare
+      against Thunderbird on the same account. `Total` is the message count,
+      not the size.
+- [ ] **A container has no counts**: a `\Noselect` folder (one that only holds
+      subfolders, e.g. `Archive` above `Archive/2019`) shows _empty_ count
+      cells, not `0`.
+- [ ] **Names are decoded, paths are not**: a folder with a non-ASCII name
+      reads correctly (`Entwürfe`, not `Entw&APw-rfe`). Switch the `path`
+      column on via `c c` → it shows the server's own spelling, which is what
+      `exclude_folders:` matches and what a bug report should quote.
+- [ ] **Expanding is free**: expand and collapse a folder with subfolders
+      several times → instant, no load banner. The hierarchy came with the one
+      `LIST` at the top level; only `r` re-lists.
+- [ ] **Reload**: create a folder in Thunderbird, press `r` → it appears.
+      Without `r` it does not (phase 6 brings `IDLE`).
+- [ ] **Excluding**: add `exclude_folders: ["Trash*"]` to an account, reload
+      the config, press `r` → `Trash` and everything below it are gone from
+      the tree, the rest is unchanged.
+- [ ] **A subtree subtab**: the `Club archive` subtab (`query: "account:club
+  folder:Archive"`) opens _inside_ that folder — its top row is the first
+      child of `Archive`, not `INBOX`.
+- [ ] **Unread emphasis**: a folder holding unread mail carries the marker and
+      the `unread` colour; the tab bar prefixes `Mail` with `✉` while any
+      subtab has unread. Reading the mail elsewhere and pressing `r` clears
+      both.
+- [ ] **A wrong password heals**: answer the prompt wrongly → a clear error,
+      no crash, the tab stays usable; `r` asks again and the correct password
+      connects (no restart needed).
+- [ ] **A server that is not there**: point an account at a host that does not
+      answer → the banner says what it is doing and for how long, the request
+      is repeated per `retry:`, and the failure names the account. The other
+      subtabs keep working.
+- [ ] **Transport**: an account with `security: starttls` on 143 and one with
+      `security: none` against a local bridge both connect. Neither is guessed
+      from the port.
+- [ ] **Real-data sweep**: no real mail domain, address or password anywhere in
+      the repo — the examples use `example.org`/`example.net` and the
+      credentials come from `pass`.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

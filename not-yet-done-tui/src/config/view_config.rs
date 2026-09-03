@@ -3154,6 +3154,10 @@ views:
                 include_str!("../../../docs/examples/views/kimai.yaml"),
             ),
             (
+                "mail.yaml",
+                include_str!("../../../docs/examples/views/mail.yaml"),
+            ),
+            (
                 "postgres.yaml",
                 include_str!("../../../docs/examples/views/postgres.yaml"),
             ),
@@ -3917,6 +3921,51 @@ views: []
             &crate::config::editor::EditorsConfig::default(),
         )
         .expect("postgres.yaml should pass the validator");
+    }
+
+    /// The shipped `docs/examples/views/mail.yaml` is the one file that shows
+    /// how MANY accounts live behind ONE adapter instance: every subtab pins
+    /// itself to an account with `query: "account:<id>"`. A subtab that lost
+    /// its query would silently show a different mailbox's folders, so the
+    /// scope is asserted here rather than left to the eye.
+    #[test]
+    fn example_mail_yaml_parses_and_validates() {
+        let yaml = include_str!("../../../docs/examples/views/mail.yaml");
+        let mut cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("mail.yaml should deserialize");
+        cfg.inherit_tree_columns();
+        cfg.inherit_tree_actions();
+        assert_eq!(cfg.adapter.adapter_type, "mail");
+
+        for view in &cfg.views {
+            let query = view
+                .query
+                .as_ref()
+                .and_then(|q| q.default.as_deref())
+                .unwrap_or_else(|| panic!("subtab `{}` must pin an account", view.name));
+            assert!(
+                query.starts_with("account:"),
+                "subtab `{}` should scope itself to an account, got `{query}`",
+                view.name
+            );
+            assert_eq!(view.node_type, "mail:folder");
+            assert_eq!(view.tree_label.as_deref(), Some("name"));
+            // The folder hierarchy continues through a recursive branch of
+            // the same type — without it a mailbox with subfolders renders
+            // as a flat top level.
+            let sub = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "mail:folder")
+                .unwrap_or_else(|| panic!("subtab `{}` needs a subfolder branch", view.name));
+            assert!(sub.recursive, "the subfolder branch must be recursive");
+        }
+
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .expect("mail.yaml should pass the validator");
     }
 
     #[test]
