@@ -22,7 +22,8 @@ use not_yet_done_content::StatusReporter;
 use tokio::sync::{mpsc, oneshot};
 
 use super::login::{self, MailSession};
-use super::ops;
+use super::ops::{self, MessagePage};
+use super::session::SessionState;
 use crate::config::AccountConfig;
 use crate::credentials::AccountCredentials;
 use crate::error::{MailError, MailResult};
@@ -46,6 +47,14 @@ pub(crate) enum Request {
     FolderStatus {
         path: String,
         reply: oneshot::Sender<MailResult<(u32, u32)>>,
+    },
+    /// One page of a folder's messages.
+    Messages {
+        path: String,
+        query: String,
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<MailResult<MessagePage>>,
     },
     /// Log out and drop the session. The actor stays alive: the next request
     /// connects again.
@@ -99,6 +108,27 @@ impl Connection {
             .await
     }
 
+    /// One page of a folder, matching an IMAP SEARCH query. The window is
+    /// what reaches the wire as a `UID FETCH`: a folder of a hundred thousand
+    /// messages costs one search and one page of envelopes.
+    pub(crate) async fn messages(
+        &self,
+        path: &str,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> MailResult<MessagePage> {
+        let (path, query) = (path.to_string(), query.to_string());
+        self.ask(|reply| Request::Messages {
+            path,
+            query,
+            offset,
+            limit,
+            reply,
+        })
+        .await
+    }
+
     /// Drop the session (a manual reconnect, or a tab being put away).
     pub(crate) async fn disconnect(&self) -> MailResult<()> {
         self.ask(|reply| Request::Disconnect { reply }).await
@@ -124,7 +154,7 @@ struct Actor {
     /// account; the adapter merges the channels and only has to name it in
     /// the credential dialog's header, which the auth layer writes.
     status: StatusReporter,
-    session: Option<MailSession>,
+    session: Option<SessionState>,
 }
 
 /// Run one command against the account's session, with the lifecycle around
@@ -143,7 +173,7 @@ macro_rules! on_session {
             };
             let announced = $self.status.busy($label, 0);
             let outcome = {
-                let $s: &mut MailSession = &mut owned;
+                let $s: &mut SessionState = &mut owned;
                 $call.await
             };
             drop(announced);
@@ -212,6 +242,24 @@ impl Actor {
                 });
                 let _ = reply.send(out);
             }
+            Request::Messages {
+                path,
+                query,
+                offset,
+                limit,
+                reply,
+            } => {
+                // The label names the window, not just the folder: waiting on
+                // rows 5000-5050 of a big mailbox should look different from
+                // waiting on the first page. It is rebuilt per attempt because
+                // a retry announces itself again.
+                let out = on_session!(
+                    self,
+                    self.label(&format!("Loading {path} {}-{}", offset + 1, offset + limit)),
+                    |s| ops::messages(s, &path, &query, offset, limit)
+                );
+                let _ = reply.send(out);
+            }
             Request::Disconnect { reply } => {
                 self.close().await;
                 let _ = reply.send(Ok(()));
@@ -222,11 +270,14 @@ impl Actor {
     /// The session, connecting first if there is none. The flag says whether
     /// it was built just now — which decides whether a failure is worth a
     /// second attempt.
-    async fn take_session(&mut self) -> MailResult<(MailSession, bool)> {
+    async fn take_session(&mut self) -> MailResult<(SessionState, bool)> {
         if let Some(session) = self.session.take() {
             return Ok((session, false));
         }
-        let session = self.establish().await?;
+        // A fresh session has nothing selected, and `SessionState` is what
+        // guarantees that: the selection cache is born with the session, so
+        // a reconnect cannot inherit the old one's idea of where it is.
+        let session = SessionState::new(self.establish().await?);
         Ok((session, true))
     }
 
@@ -483,7 +534,7 @@ mod tests {
         let server = FakeServer::start(scripted()).await;
         let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
 
-        assert_eq!(conn.folder_status("INBOX").await.expect("INBOX"), (12, 3));
+        assert_eq!(conn.folder_status("INBOX").await.expect("INBOX"), (3, 1));
         assert_eq!(
             conn.folder_status("Sent Items").await.expect("quoted name"),
             (7, 0)
@@ -496,6 +547,75 @@ mod tests {
             !err.is_fatal(),
             "a refused command must not cost the session: {err}"
         );
+    }
+
+    /// The message level end to end: search, window, envelopes — and the
+    /// decoding that makes the rows readable at all.
+    #[tokio::test]
+    async fn a_page_of_messages_comes_back_newest_first_and_decoded() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let page = conn.messages("INBOX", "", 0, 50).await.expect("lists");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.uid_validity, 42);
+        // Descending UID is "newest first" without a SORT round trip.
+        let uids: Vec<u32> = page.rows.iter().map(|r| r.uid).collect();
+        assert_eq!(uids, [9, 4, 1]);
+
+        let oldest = page.rows.last().expect("three rows");
+        assert_eq!(oldest.subject, "Grüße", "the subject arrives encoded");
+        assert_eq!(oldest.from, "Jürgen <juergen@example.org>");
+        assert!(oldest.seen);
+        assert_eq!(oldest.size, 1024);
+
+        let invoice = &page.rows[1];
+        assert!(!invoice.seen, "no \\Seen flag means unread");
+        assert_eq!(
+            invoice.attachments, 1,
+            "the PDF part of the multipart is an attachment"
+        );
+        // The Date header, not the server's arrival time: the fixture gives
+        // them deliberately different days.
+        assert_eq!(
+            invoice.date.expect("has a date").to_rfc3339(),
+            "2026-09-02T10:30:00+02:00"
+        );
+    }
+
+    /// Paging is a window over the search result, not a second search: the
+    /// total stays the whole match while the rows are only the slice asked
+    /// for. That is what makes a folder of a hundred thousand affordable.
+    #[tokio::test]
+    async fn a_window_fetches_only_its_slice() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let page = conn.messages("INBOX", "", 1, 1).await.expect("lists");
+        assert_eq!(page.total, 3, "the total is the whole match");
+        let uids: Vec<u32> = page.rows.iter().map(|r| r.uid).collect();
+        assert_eq!(uids, [4], "one row, the second-newest");
+
+        let past_the_end = conn.messages("INBOX", "", 99, 50).await.expect("lists");
+        assert!(past_the_end.rows.is_empty());
+        assert_eq!(past_the_end.total, 3);
+    }
+
+    /// A mailbox that cannot be opened must fail as a *refused command*, not
+    /// as a dead session — otherwise one mistyped folder costs a reconnect.
+    #[tokio::test]
+    async fn selecting_a_missing_mailbox_does_not_cost_the_session() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+        conn.messages("INBOX", "", 0, 50).await.expect("first");
+
+        let err = conn
+            .messages("Nope", "", 0, 50)
+            .await
+            .expect_err("no such mailbox");
+        assert!(!err.is_fatal(), "{err}");
+        conn.messages("INBOX", "", 0, 50).await.expect("still live");
+        assert_eq!(server.connections(), 1, "no reconnect");
     }
 
     /// `disconnect` really ends the session; the next request builds a new

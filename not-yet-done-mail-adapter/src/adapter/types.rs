@@ -42,3 +42,14 @@ pub(super) fn folder_type() -> &'static NodeType {
     });
     &T
 }
+
+pub(super) fn message_type() -> &'static NodeType {
+    static T: LazyLock<NodeType> = LazyLock::new(|| NodeType {
+        type_id: "mail:message".into(),
+        mime_type: "text/plain".into(),
+        syntax: None,
+        file_extension: ".md".into(),
+        display_name: "Message".into(),
+    });
+    &T
+}
