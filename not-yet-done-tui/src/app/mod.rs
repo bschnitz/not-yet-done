@@ -2341,11 +2341,26 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
     ) {
-        // A record-detail follower has no fetchable data of its own — its
-        // rows are the transposed fields of the source's selected record.
-        // Reloading it directly would fetch the source level's rows into the
-        // synthetic pane and blank it. Redirect to the source pane so the
-        // record reloads and `sync_detail_panes` re-transposes it.
+        self.reload_content_pane_level(view_index, pane_id, false);
+    }
+
+    /// Which level a pane is actually showing, as the pair a reload needs:
+    /// the pane to load into, and `Some((parent_id, child_type))` when it
+    /// sits inside a drill — `None` when it shows its own root list.
+    ///
+    /// A record-detail follower has no fetchable data of its own: its rows are
+    /// the transposed fields of the source's selected record. Loading into it
+    /// would fetch the source level's rows into the synthetic pane and blank
+    /// it, so the source pane is answered instead and `sync_detail_panes`
+    /// re-transposes what comes back.
+    fn content_pane_level(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) -> (
+        crate::views::content_view::PaneId,
+        Option<(String, String)>,
+    ) {
         let pane_id = self
             .content_view(view_index)
             .and_then(|cv| cv.find_pane(pane_id))
@@ -2359,11 +2374,23 @@ impl App {
                 let child = pane.current_child_node_type()?.to_string();
                 Some((parent, child))
             });
-        match drill {
-            Some((parent, child)) => {
-                self.spawn_content_drill_down(view_index, pane_id, parent, child)
+        (pane_id, drill)
+    }
+
+    /// Reload a pane at the level it currently shows. `force` is the hard
+    /// variant: the adapter is asked to `refresh()` — abort in-flight work,
+    /// drop caches — before anything is listed.
+    fn reload_content_pane_level(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        force: bool,
+    ) {
+        match self.content_pane_level(view_index, pane_id) {
+            (pane_id, Some((parent, child))) => {
+                self.spawn_content_drill_down_inner(view_index, pane_id, parent, child, force)
             }
-            None => self.spawn_content_load(view_index, pane_id),
+            (pane_id, None) => self.spawn_content_load_inner(view_index, pane_id, force),
         }
     }
 
@@ -2380,12 +2407,18 @@ impl App {
     /// Hard reload (the `r` action): ask the adapter to `refresh()` — abort
     /// every in-flight load and drop caches — *before* re-listing, so the load
     /// always fetches fresh instead of re-serving a warm cache.
+    ///
+    /// Reloads the level the pane is *showing*, not its root. A pane inside a
+    /// drill — a mail folder's message list, a chat's messages — would
+    /// otherwise answer `r` with the root listing, which replaces the rows
+    /// with something the user did not ask to see and leaves the cursor on
+    /// whatever the row index then points at.
     pub fn spawn_content_reload(
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
     ) {
-        self.spawn_content_load_inner(view_index, pane_id, true);
+        self.reload_content_pane_level(view_index, pane_id, true);
     }
 
     fn spawn_content_load_inner(
@@ -3578,6 +3611,20 @@ impl App {
         node_id: String,
         child_node_type: String,
     ) {
+        self.spawn_content_drill_down_inner(view_index, pane_id, node_id, child_node_type, false);
+    }
+
+    /// [`Self::spawn_content_drill_down`] with the hard-reload flag: `force`
+    /// asks the adapter to `refresh()` before the child level is listed, the
+    /// same thing [`Self::spawn_content_load_inner`] does one level up.
+    fn spawn_content_drill_down_inner(
+        &self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        child_node_type: String,
+        force: bool,
+    ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
             None => return,
@@ -3617,6 +3664,12 @@ impl App {
         // should say so rather than leave the pane looking frozen.
         cv.begin_load();
         tokio::spawn(async move {
+            // Hard reload: the adapter tears down in-flight work and caches
+            // first, so the child list below runs against a clean slate.
+            // No-op for adapters that don't override `refresh()`.
+            if force {
+                let _ = adapter.refresh().await;
+            }
             let result = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
                 let node_id = node_id.clone();
