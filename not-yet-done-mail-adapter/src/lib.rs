@@ -15,6 +15,7 @@
 //!   that keeps two accounts from asking the user at the same time.
 //! - [`error`] — what went wrong, and whether the session survived it.
 //! - [`ids`] — how a node id names its account, folder, message and part.
+//! - [`mutf7`] — the encoding mailbox names arrive in.
 //! - [`model`] — the protocol-free shapes the IMAP layer hands upwards.
 //! - [`imap`] — connecting, logging in, and the per-account connection actor.
 //! - [`adapter`] — the `ContentAdapter`/`Node` impls over all of it.
@@ -27,5 +28,6 @@ pub(crate) mod error;
 pub(crate) mod ids;
 pub(crate) mod imap;
 pub(crate) mod model;
+pub(crate) mod mutf7;
 
 pub use config::MailConfig;
