@@ -518,6 +518,12 @@ impl Actor {
     /// whether this attempt was the last one.
     async fn establish(&mut self, who: &str, attempt: Attempt) -> MailResult<MailSession> {
         self.status.begin_connect();
+        // Before the first step, so the counter is on screen for the whole
+        // attempt — unlocking a password store is where a login waits
+        // longest, and that is the worst moment to look like the first try.
+        if attempt.of > 1 {
+            self.status.connect_attempt(attempt.n, attempt.of, 0);
+        }
         self.status
             .connect_step(format!("{who}: unlocking credentials"));
 
