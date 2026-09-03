@@ -17476,6 +17476,47 @@ mod tests {
         );
     }
 
+    /// What `r` in a message list has to hit. A drilled pane — the coupled
+    /// split a mail folder opens its messages into, a chat's message list —
+    /// says which level it shows; a reload that asks the *pane's view* instead
+    /// re-lists the root and answers a message list with the folder tree.
+    #[test]
+    fn a_drilled_pane_names_the_level_it_shows_not_its_root() {
+        let config = heterogeneous_uneven_tree_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = view.view_defs.clone();
+        let child = hchild("messages", "mock:msg", None, vec![hcol("name")], vec![]);
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        assert_eq!(
+            pane.parent_node_id(),
+            None,
+            "before the drill the pane is its own root"
+        );
+
+        pane.drill_down_prepare("c1", "Channel", &child, &view_defs);
+        assert_eq!(pane.parent_node_id(), Some("c1"));
+        assert_eq!(pane.current_child_node_type(), Some("mock:msg"));
+        match pane.reload_current_level(0, 0) {
+            SubViewMessage::Request(ViewRequest::DrillDown {
+                node_id,
+                child_node_type,
+                ..
+            }) => {
+                assert_eq!(node_id, "c1");
+                assert_eq!(child_node_type, "mock:msg");
+            }
+            other => panic!("expected the drilled level, got {other:?}"),
+        }
+
+        // Back out, and the root listing is right again.
+        pane.nav_back(&view_defs);
+        assert!(matches!(
+            pane.reload_current_level(0, 0),
+            SubViewMessage::Request(ViewRequest::SpawnContentLoad { .. })
+        ));
+    }
+
     #[test]
     fn reload_re_selects_the_same_node_after_the_page_shifted() {
         // A flat feed renders its newest page: one incoming message slides the

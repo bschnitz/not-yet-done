@@ -6962,6 +6962,24 @@ seconds a minute earlier. Every command now runs under a deadline
       instance value stands for the rest. `0` on either level means no
       deadline at all.
 
+### Refresh reloads the list you are looking at
+
+`r` is a hard reload: the adapter aborts in-flight work and drops caches
+before anything is listed. It now targets the level the pane is **showing**,
+not the pane's root — in the message list it used to answer with the folder
+tree, in the pane that was showing mail.
+
+- [ ] **In the message list**: `r` on a folder's messages re-fetches those
+      messages. The folder tree beside it is untouched, and the cursor stays on
+      the message it was on.
+- [ ] **In the folder tree**: `r` still re-lists the folders, as before.
+- [ ] **Everywhere else a pane drills**: a chat's message list, a
+      `postgres:table`'s rows, a Jira ticket's links — `r` re-fetches that
+      level, never the root.
+- [ ] **Auto-reload follows suit**: a tab with `adapter.auto_reload` left
+      sitting in a drilled pane refreshes that level when the timer fires,
+      instead of silently replacing it with the root listing.
+
 ### A connection that is refused (`retry:`)
 
 The other half of "connection refused": a mail server that is restarting, or a
