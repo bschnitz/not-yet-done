@@ -166,6 +166,8 @@ level 'mail:folder' (available: )` — `childs()` builds the folder's
 
 ## Phases
 
+All seven are implemented: 1-4 in `db0b2ad`, 5 in `8422b3e`, 6 in `93f5336`, 7 in the script tree outside the repo (its smoke block is `b51ba0b`). What is left is the live smoke — both blocks in `docs/smoke-tests.md` need a TUI restart, because shortcuts and hook bindings are read once at start.
+
 | #   | what                                                                                                                           |
 | --- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1   | `ScriptHook::RowChange`: the vocabulary, the picker entry, the binding rules (`background` only), the round-trip test.         |
