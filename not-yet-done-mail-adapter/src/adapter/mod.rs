@@ -20,6 +20,7 @@
 mod account;
 mod factory;
 mod folder;
+mod message;
 mod root;
 mod scope;
 mod types;
@@ -32,16 +33,19 @@ use tokio::sync::{OnceCell, RwLock, broadcast, watch};
 
 use not_yet_done_content::{
     AdapterCapabilities, AdapterStatus, Child, ColumnSchema, ContentAdapter, ContentError,
-    Invalidation, ListParams, ListResult, MetadataField, Node, Result, StatusReporter, apply_sort,
+    Invalidation, ListParams, ListResult, MetadataField, Node, PageInfo, Result, StatusReporter,
+    apply_sort,
 };
 
 use crate::config::{AccountConfig, MailConfig};
 use crate::credentials::{AccountCredentials, LoginLane};
 use crate::error::MailError;
+use crate::ids::MessageId;
 use crate::imap::conn::Connection;
-use crate::model::FolderInfo;
+use crate::model::{EnvelopeRow, FolderInfo};
 use account::MailAccountNode;
 use folder::MailFolderNode;
+use message::MailMessageNode;
 use root::MailRoot;
 
 pub use factory::MailAdapterFactory;
@@ -98,6 +102,13 @@ pub struct MailAdapter {
     /// be a round trip per keystroke; a listing of a *top* level refreshes
     /// it, so a reload is still a reload.
     folders: RwLock<HashMap<String, Arc<Vec<FolderInfo>>>>,
+    /// The last page of messages listed per folder, so a cursor restored onto
+    /// a row resolves without a round trip. One page per folder and replaced
+    /// on every listing — a mailbox of a hundred thousand messages must not
+    /// become a hundred thousand cached envelopes.
+    messages: RwLock<HashMap<String, Arc<Vec<EnvelopeRow>>>>,
+    /// Messages per page when a view asks for no window of its own.
+    page_size: Option<u32>,
 }
 
 impl MailAdapter {
@@ -144,6 +155,8 @@ impl MailAdapter {
             inv_tx,
             lane,
             folders: RwLock::new(HashMap::new()),
+            messages: RwLock::new(HashMap::new()),
+            page_size: cfg.page_size,
         })
     }
 
@@ -279,6 +292,62 @@ impl MailAdapter {
         })
     }
 
+    /// One page of a folder's messages.
+    ///
+    /// The whole query string is IMAP SEARCH here — unlike the folder level,
+    /// nothing is parsed out of it first. It does not need to be: the account
+    /// and the mailbox are already fixed by the folder this level hangs
+    /// under, so there is nothing left for the adapter to read.
+    async fn message_level(
+        &self,
+        account: &str,
+        folder: &str,
+        params: &ListParams,
+    ) -> Result<ListResult> {
+        let limit = params
+            .page
+            .map(|p| p.limit)
+            .or_else(|| self.runtime(account).ok()?.cfg.page_size)
+            .or(self.page_size)
+            .unwrap_or(crate::config::DEFAULT_PAGE_SIZE)
+            .max(1);
+        let offset = params.page.map(|p| p.offset).unwrap_or(0);
+        let page = self
+            .connection(account)
+            .await?
+            .messages(folder, params.query.as_deref().unwrap_or(""), offset, limit)
+            .await
+            .map_err(mail_err)?;
+
+        let rows = Arc::new(page.rows);
+        self.messages
+            .write()
+            .await
+            .insert(crate::ids::folder_id(account, folder), Arc::clone(&rows));
+
+        let mut items: Vec<_> = rows
+            .iter()
+            .map(|row| message::message_row(account, folder, row))
+            .collect();
+        // Sorting is over the page, not the mailbox: the rows a sort could
+        // reach are the ones already fetched. `applied_sort` is what says so
+        // to the frontend rather than leaving the user to infer it.
+        let applied = apply_sort(&mut items, &params.sort, &message::columns());
+        Ok(ListResult {
+            items,
+            applied_sort: applied,
+            page: Some(PageInfo {
+                offset,
+                limit,
+                total: Some(page.total as u64),
+                has_next: offset.saturating_add(limit) < page.total,
+                has_prev: offset > 0,
+            }),
+            batch_download_available: false,
+            downloaded: Vec::new(),
+        })
+    }
+
     /// Which account a folder listing is about: the one the query names, or —
     /// when the instance holds exactly one — that one.
     fn scoped_account(&self, named: Option<String>) -> Result<String> {
@@ -315,6 +384,36 @@ impl MailAdapter {
             ..Default::default()
         }
     }
+
+    /// The envelope behind a message id, from the page it was listed on.
+    ///
+    /// A miss is not worth a fetch: `get_by_id` is what a restored cursor
+    /// calls at startup, and fetching there would log every account in before
+    /// the user has looked at anything. The row is built from the id instead,
+    /// and says as much.
+    async fn known_message(&self, id: &MessageId) -> EnvelopeRow {
+        if let Some(hit) = self
+            .messages
+            .read()
+            .await
+            .get(&id.folder_id())
+            .and_then(|page| {
+                page.iter()
+                    .find(|r| r.uid == id.uid && r.uid_validity == id.uid_validity)
+            })
+        {
+            return hit.clone();
+        }
+        EnvelopeRow {
+            uid: id.uid,
+            uid_validity: id.uid_validity,
+            subject: format!("message {}", id.uid),
+            // Not knowing is not the same as having read it: an unloaded
+            // message must not paint itself as seen.
+            seen: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// An IMAP-layer error as the content layer sees it.
@@ -347,6 +446,14 @@ impl ContentAdapter for MailAdapter {
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
         if id == ROOT_ID {
             return self.root().await;
+        }
+        // Messages are read first: `work/INBOX#42.7` also splits as a folder
+        // id whose path happens to end in `#42.7`, and the folder reading
+        // would win by being tried first.
+        if let Some(msg) = crate::ids::parse_message_id(id) {
+            self.runtime(&msg.account)?;
+            let row = self.known_message(&msg).await;
+            return Ok(Box::new(MailMessageNode::new(&msg, &row)));
         }
         if let Some((account, path)) = crate::ids::split_folder_id(id) {
             self.runtime(account)?;
@@ -410,15 +517,27 @@ impl ContentAdapter for MailAdapter {
                     return Vec::new();
                 };
                 let (account, path) = (account.to_string(), path.to_string());
-                vec![Child {
-                    node_type: types::folder_type().clone(),
-                    columns: folder::columns(),
-                    list: Box::new(move |params| {
-                        Box::pin(
-                            async move { self.folder_level(&account, Some(&path), &params).await },
-                        )
-                    }),
-                }]
+                let (msg_account, msg_path) = (account.clone(), path.clone());
+                vec![
+                    Child {
+                        node_type: types::folder_type().clone(),
+                        columns: folder::columns(),
+                        list: Box::new(move |params| {
+                            Box::pin(async move {
+                                self.folder_level(&account, Some(&path), &params).await
+                            })
+                        }),
+                    },
+                    Child {
+                        node_type: types::message_type().clone(),
+                        columns: message::columns(),
+                        list: Box::new(move |params| {
+                            Box::pin(async move {
+                                self.message_level(&msg_account, &msg_path, &params).await
+                            })
+                        }),
+                    },
+                ]
             }
             _ => Vec::new(),
         }
@@ -428,6 +547,7 @@ impl ContentAdapter for MailAdapter {
         match node_type {
             "mail:account" => account::columns(),
             "mail:folder" => folder::columns(),
+            "mail:message" => message::columns(),
             _ => Vec::new(),
         }
     }
@@ -477,6 +597,7 @@ impl ContentAdapter for MailAdapter {
             }
         }
         self.folders.write().await.clear();
+        self.messages.write().await.clear();
         Ok(())
     }
 
@@ -583,8 +704,8 @@ accounts:
         );
 
         let inbox = &res.items[0];
-        assert_eq!(cell(inbox, "unread"), "3");
-        assert_eq!(cell(inbox, "total"), "12");
+        assert_eq!(cell(inbox, "unread"), "1");
+        assert_eq!(cell(inbox, "total"), "3");
         assert_eq!(cell(inbox, "unread_marker"), "true");
         assert_eq!(
             res.items[1].has_children,

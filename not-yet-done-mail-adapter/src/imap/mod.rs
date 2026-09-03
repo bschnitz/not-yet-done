@@ -6,8 +6,10 @@
 //! channel, rather than handing a lock around.
 
 pub(crate) mod conn;
+pub(crate) mod envelope;
 pub(crate) mod login;
 pub(crate) mod ops;
+pub(crate) mod session;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod testserver;
