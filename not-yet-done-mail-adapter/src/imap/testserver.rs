@@ -68,6 +68,11 @@ pub(crate) struct Script {
     /// first ends the read, the second ends nothing at all, which is the
     /// case a deadline exists for.
     pub(crate) stall_at: Option<usize>,
+    /// Accept and drop the first N connections without so much as a
+    /// greeting. What a server that is restarting looks like from the
+    /// client's side, and the case the connect loop exists for. Counted, so
+    /// a test can say how many attempts it took.
+    pub(crate) close_first: usize,
     /// What `LIST` and `STATUS` report. Empty means the account has no
     /// mailboxes at all, which is itself worth being able to script.
     pub(crate) folders: &'static [FakeFolder],
@@ -250,6 +255,7 @@ pub(crate) fn scripted() -> Script {
         password: PASSWORD,
         hang_up_after: None,
         stall_at: None,
+        close_first: 0,
         folders: FOLDERS,
     }
 }
@@ -312,6 +318,11 @@ impl FakeServer {
 }
 
 async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters: Arc<Counters>) {
+    if nth < script.close_first {
+        // Dropped before the greeting: the client sees the connection go,
+        // which is a transport failure and nothing it can ask the user about.
+        return;
+    }
     let (rx, mut tx) = sock.into_split();
     let mut lines = BufReader::new(rx).lines();
     if tx

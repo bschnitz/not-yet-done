@@ -6962,6 +6962,34 @@ seconds a minute earlier. Every command now runs under a deadline
       instance value stands for the rest. `0` on either level means no
       deadline at all.
 
+### A connection that is refused (`retry:`)
+
+The other half of "connection refused": a mail server that is restarting, or a
+VPN route that comes up a second after the tab did, refuses the socket once and
+accepts it right after. Showing that as a failed account makes the user clear
+an error that had already passed, so the login is now repeated per `retry:`
+(`attempts`, `backoff_ms`; per instance, overridable per account) and the
+account is only reported as failed after the last attempt.
+
+- [ ] **A hiccup is invisible**: stop the mail server, open its subtab, start
+      the server again within the backoff → the folder tree fills in and no
+      `Failed` banner is left behind.
+- [ ] **The banner counts the attempts**: while it retries, the connect line
+      names the failure and says another attempt is coming, and shows `(2/2)`
+      rather than looking like the first try each time.
+- [ ] **A server that stays down still fails**: leave it stopped → after
+      `attempts` attempts (and not before) the banner reads `Failed` and names
+      the account, exactly as before this change.
+- [ ] **A wrong password is asked once**: put a wrong password in the store →
+      one `LOGIN` reaches the server, the credential dialog opens, and nothing
+      is replayed. Repeating a refused login is how an account gets locked.
+- [ ] **Cancelling still cancels**: close the credential dialog → the account
+      fails immediately, with no further attempt.
+- [ ] **`attempts: 1` turns it off**: an account with that setting fails on the
+      first refusal, with no wait in between.
+- [ ] **Per account**: an account with its own `retry:` uses it; the rest use
+      the instance's.
+
 ## Mail: the message under the cursor in the browser (`o p` + `row_change`)
 
 Two scripts on the message level: `html_preview.py` on `o p` opens the preview,

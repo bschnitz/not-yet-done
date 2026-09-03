@@ -71,6 +71,22 @@ impl MailError {
         self.is_fatal() && !matches!(self, MailError::Timeout(_))
     }
 
+    /// Whether *opening* the connection again is worth it after this.
+    ///
+    /// A third question, and not the same as either of the two above, which
+    /// both ask about a session that already exists. This one is asked when
+    /// there is none: the login failed, and the choice is between trying once
+    /// more and telling the user. Only a transport failure earns another
+    /// attempt — a refused socket, a handshake that broke, a connect that ran
+    /// out of time — because that is the class of failure that goes away by
+    /// itself while the user watches (a server restarting, a VPN that came up
+    /// a second too late). A rejected password, a cancelled dialog and an
+    /// unusable config are all answers, and repeating the question does not
+    /// change them.
+    pub(crate) fn is_worth_reconnecting(&self) -> bool {
+        matches!(self, MailError::Transport(_))
+    }
+
     /// Whether the credentials themselves are suspect, i.e. resolving them
     /// again (and asking, if that is where they come from) is the fix.
     pub(crate) fn is_auth(&self) -> bool {
@@ -123,6 +139,17 @@ mod tests {
         assert!(timed_out.is_fatal());
         assert!(!timed_out.is_worth_retrying());
         assert!(MailError::Transport("connection lost".into()).is_worth_retrying());
+    }
+
+    /// The connect loop repeats a network failure and nothing else: a
+    /// rejected password replayed three times is how an account gets locked.
+    #[test]
+    fn only_a_transport_failure_earns_a_second_connect() {
+        assert!(MailError::Transport("connection refused".into()).is_worth_reconnecting());
+        assert!(!MailError::Auth("bad password".into()).is_worth_reconnecting());
+        assert!(!MailError::Cancelled.is_worth_reconnecting());
+        assert!(!MailError::Config("no host".into()).is_worth_reconnecting());
+        assert!(!MailError::Timeout("no answer in 60s".into()).is_worth_reconnecting());
     }
 
     #[test]

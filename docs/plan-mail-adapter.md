@@ -252,6 +252,10 @@ page_size: 50
 # How long one IMAP command may wait for its answer. 0 turns the limit off.
 # May also be set per account, for a server that is known to be slow.
 command_timeout_secs: 60
+# How often *opening* the connection is attempted before the account is shown
+# as failed, and how long the first wait between two attempts is (doubled
+# before each further one). Only a network failure is repeated — a refused
+# password never is. `attempts: 1` turns repeating off. Also per account.
 retry:
   attempts: 2
   backoff_ms: 250
@@ -464,6 +468,16 @@ What is still owed is the live smoke run against real mailboxes (see
   though — retrying a deadline just makes the user wait twice — so `Timeout`
   is fatal to the session but explicitly not retried, unlike a session the
   server itself ended.
+- **A server that is not up yet.** A mail server restarting, or a VPN route
+  that comes up a second after the tab did, refuses the socket once and
+  accepts it immediately after. Reporting that as a failed account turns a
+  hiccup into an error the user has to clear by hand, so the login is repeated
+  per `retry:` and `Failed` is published only after the last attempt. What is
+  _not_ repeated is anything the server actually answered: a rejected password
+  (some servers lock the account after a handful of tries), a cancelled
+  dialog, a config that cannot describe a connection. Note that this is a
+  third question, distinct from the two above — whether the _session_ survives
+  an error, and whether a _command_ is worth running again on a new one.
 - **Deleting mail** is destructive and irreversible in a way a ticket edit is
   not. Phase 5 moves to Trash by default; a real `EXPUNGE` stays behind a
   confirmation.

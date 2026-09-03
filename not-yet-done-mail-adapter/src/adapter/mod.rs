@@ -37,7 +37,7 @@ use tokio::sync::{OnceCell, RwLock, broadcast, watch};
 use not_yet_done_content::{
     ActionInput, AdapterCapabilities, AdapterStatus, Child, ColumnSchema, ContentAdapter,
     ContentError, Invalidation, ListParams, ListResult, MetadataField, Node, NodeAction, NodeType,
-    PageInfo, Result, StatusReporter, apply_sort,
+    PageInfo, Result, RetryConfig, StatusReporter, apply_sort,
 };
 
 use crate::config::{AccountConfig, DEFAULT_COMMAND_TIMEOUT_SECS, MailConfig};
@@ -137,6 +137,8 @@ struct AccountRuntime {
     /// The deadline every command on this account runs under, resolved once:
     /// the account's own setting, else the instance's, else the default.
     command_timeout: Duration,
+    /// How often logging this account in is attempted, resolved the same way.
+    retry: RetryConfig,
 }
 
 pub struct MailAdapter {
@@ -184,6 +186,7 @@ impl MailAdapter {
         let (inv_tx, _) = broadcast::channel(64);
 
         let instance_timeout = cfg.command_timeout_secs;
+        let instance_retry = cfg.retry;
         let mut order = Vec::new();
         let mut accounts = HashMap::new();
         for account in cfg.accounts {
@@ -202,6 +205,7 @@ impl MailAdapter {
                     .or(instance_timeout)
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS),
             );
+            let retry = account.retry.clone().unwrap_or_else(|| instance_retry.clone());
             order.push(account.id.clone());
             let (labelled, labelled_rx) = watch::channel(AdapterStatus::Idle);
             accounts.insert(
@@ -214,6 +218,7 @@ impl MailAdapter {
                     _labelled_keepalive: labelled_rx,
                     conn: OnceCell::new(),
                     command_timeout,
+                    retry,
                 },
             );
         }
@@ -262,6 +267,7 @@ impl MailAdapter {
                     Arc::clone(&rt.creds),
                     rt.status.clone(),
                     rt.command_timeout,
+                    rt.retry.clone(),
                 )
             })
             .await)
