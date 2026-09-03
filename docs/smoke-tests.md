@@ -7036,10 +7036,11 @@ Both are bound in `nyd.db` (`query_shortcut` / `script_hook`, scope
 level, so neither the shortcut nor the hook exists. The TUI caches its
 shortcuts, so a **restart** is part of the preparation.
 
-- [ ] **`o p` opens it**: on a message row a qutebrowser window comes up on the
-      current workspace, titled `pandoc-preview/nyd-mail: <subject>`, with the
-      subject as the heading and From/To/Cc/Date as a field block above the
-      message; attachment names are listed when there are any.
+- [ ] **`o p` opens it**: on a message row a qutebrowser window comes up
+      **beside the TUI** (see the placement block below), titled
+      `pandoc-preview/nyd-mail: <subject>`, with the subject as the heading and
+      From/To/Cc/Date as a field block above the message; attachment names are
+      listed when there are any.
 - [ ] **An HTML mail looks like the mail**: a newsletter or a reply from a web
       client keeps its headings, emphasis, lists, tables and link colours — no
       raw `<td>` markup in the text and no wall of unstyled lines. A link opens
@@ -7142,6 +7143,50 @@ no-store`, so the reload after a render shows the new message and never
       `message.html` whose `cid:` references point into `inline/`, and
       `message.txt`. A plain mail has no `message.html` and says so in the
       JSON.
+
+### The preview window opens beside the TUI, not inside its column
+
+`_lib/nyd_sway_place.py` places the window the way `edit_window.py` places the
+editor: the anchor is the window the TUI runs in, and the preview either joins
+an existing right-hand column or becomes a new one right of the anchor. The
+anchor is read in the process the TUI calls (where the TUI still has the
+focus), not in the detached worker, which may render for seconds first.
+
+Both preview engines use it, so the Jira and Taiga `o p` are part of this.
+
+- [ ] **One column becomes two**: with the TUI alone on the workspace, `o p`
+      splits it 50:50 — the preview on the right, the TUI keeps its width on
+      the left. It does **not** land inside the TUI's own column.
+- [ ] **A second column is joined, not split**: with the TUI on the left and
+      anything else on the right, `o p` puts the preview into that right-hand
+      column (a tab of it under `workspace_layout tabbed`). Nothing gets
+      narrower.
+- [ ] **The TUI on the right stays rightmost**: with the TUI as the right-hand
+      column, the preview becomes a column of its own beside it — it is not
+      pushed into the column on the left.
+- [ ] **A tabbed column counts once**: a right-hand column with three tabs is
+      still one column, so the preview joins it instead of splitting anything.
+- [ ] **The second `o p` moves nothing**: with the preview open, `o p` on
+      another message re-renders into the same window and leaves the layout
+      alone — the placement runs when a window is opened, not on every render.
+- [ ] **Following the cursor never places anything**: walking the message list
+      with the preview open produces no window and no sway command (the
+      `row_change` hook does not even ask for the tree — `follow.log` beside
+      `preview.html` shows the render, the sway log stays quiet).
+- [ ] **The TUI is not disturbed while it works**: nothing is moved before the
+      window exists, and a spawn that never produces one leaves the layout as
+      it was — `NYD_PREVIEW_BROWSER=/bin/false` and then `o p` writes _no
+      window of ours within 8s — placement skipped_ into
+      `~/.local/state/not_yet_done/logs/mail-preview.log`, and the mark is
+      cleaned up.
+- [ ] **The escape hatch works**: `NYD_PREVIEW_PLACE=0` opens the window the
+      old way, wherever sway would put it.
+- [ ] **No sway, no placement**: with `SWAYSOCK` unset the script falls back to
+      the plain browser start and still opens the page.
+- [ ] **The layout decision itself**: `python3
+~/.local/share/not_yet_done/scripts/_lib/nyd_sway_place.py --selftest`
+      passes, and running it without arguments prints the plan for the focused
+      window (`anchor con_id=… → join|split|none`).
 
 ## A view file that does not load: reading and copying the problems
 
