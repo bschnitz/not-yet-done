@@ -249,6 +249,9 @@ name: Mail # instance label (root node, tab title)
 # Defaults every account inherits; each may override them.
 page_size: 50
 # connections_per_account: 1
+# How long one IMAP command may wait for its answer. 0 turns the limit off.
+# May also be set per account, for a server that is known to be slow.
+command_timeout_secs: 60
 retry:
   attempts: 2
   backoff_ms: 250
@@ -451,6 +454,16 @@ What is still owed is the live smoke run against real mailboxes (see
   discriminator on the protocol, not a race here.
 - **Big folders.** Search over a huge folder can be slow server-side; the busy
   label plus the `retry`/timeout config make it visible rather than mysterious.
+- **A command that gets no answer.** IMAP has no multiplexing: one command at a
+  time on one connection. A server that neither answers nor closes therefore
+  holds up the whole account, not just the one request — a folder that usually
+  opens in seconds sits at "loading INBOX 50s". Every command runs under
+  `command_timeout_secs` for that reason, and a deadline that goes off costs
+  the session: an answer arriving after we stopped waiting would be read as
+  the answer to whatever we send next. It is never worth a second attempt,
+  though — retrying a deadline just makes the user wait twice — so `Timeout`
+  is fatal to the session but explicitly not retried, unlike a session the
+  server itself ended.
 - **Deleting mail** is destructive and irreversible in a way a ticket edit is
   not. Phase 5 moves to Trash by default; a real `EXPUNGE` stays behind a
   confirmation.
