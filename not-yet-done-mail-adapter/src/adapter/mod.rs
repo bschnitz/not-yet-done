@@ -122,6 +122,15 @@ struct AccountRuntime {
     /// The account's own status channel, merged onto the instance's by the
     /// forwarder started alongside the connection.
     status: StatusReporter,
+    /// The same statuses, with the credential dialog's header naming this
+    /// account — what a subtab pinned to it subscribes to. It is a channel of
+    /// its own and not the instance's because the instance's carries all six
+    /// accounts, and a `watch` keeps its last value: one account's failure
+    /// would sit on every other account's screen with nothing to clear it.
+    labelled: watch::Sender<AdapterStatus>,
+    /// A sender with no receivers cannot publish; this keeps the labelled
+    /// channel alive between subscribers, exactly as the instance's does.
+    _labelled_keepalive: watch::Receiver<AdapterStatus>,
     /// Built on first use — opening one account's subtab must not log into
     /// the other five.
     conn: OnceCell<Connection>,
@@ -194,12 +203,15 @@ impl MailAdapter {
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS),
             );
             order.push(account.id.clone());
+            let (labelled, labelled_rx) = watch::channel(AdapterStatus::Idle);
             accounts.insert(
                 account.id.clone(),
                 AccountRuntime {
                     cfg: account,
                     creds,
                     status,
+                    labelled,
+                    _labelled_keepalive: labelled_rx,
                     conn: OnceCell::new(),
                     command_timeout,
                 },
@@ -255,7 +267,9 @@ impl MailAdapter {
             .await)
     }
 
-    /// Merge one account's status into the instance's channel.
+    /// Publish one account's status on both channels it belongs on: the
+    /// account's own, which one subtab watches, and the instance's, which a
+    /// view showing every account watches.
     ///
     /// The only thing rewritten on the way is the credential dialog's header:
     /// the auth layer writes it without knowing which of six mailboxes it is
@@ -267,6 +281,7 @@ impl MailAdapter {
         };
         let mut rx = rt.status.subscribe();
         let tx = self.status_tx.clone();
+        let mine = rt.labelled.clone();
         let who = rt.cfg.label().to_string();
         handle.spawn(async move {
             while rx.changed().await.is_ok() {
@@ -285,6 +300,9 @@ impl MailAdapter {
                     },
                     other => other,
                 };
+                // The account's own channel first: it is the one a subtab
+                // is looking at, and it must not lag the merged one.
+                let _ = mine.send(status.clone());
                 if tx.send(status).is_err() {
                     break;
                 }
@@ -692,11 +710,8 @@ impl ContentAdapter for MailAdapter {
                         Box::pin(async move {
                             let row = self.fetch_message(&msg).await?;
                             let mut listed = attachment::list(&msg, &row.attachments);
-                            listed.applied_sort = apply_sort(
-                                &mut listed.items,
-                                &params.sort,
-                                &attachment::columns(),
-                            );
+                            listed.applied_sort =
+                                apply_sort(&mut listed.items, &params.sort, &attachment::columns());
                             Ok(listed)
                         })
                     }),
@@ -730,6 +745,26 @@ impl ContentAdapter for MailAdapter {
 
     fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
         self.status_tx.subscribe()
+    }
+
+    /// A subtab pinned to `account:<id>` hears that account and nothing else.
+    ///
+    /// The instance-wide channel carries every account, which is right for a
+    /// view that shows all of them and wrong for one that shows one: a
+    /// `watch` keeps its last value, so a failure over on another account
+    /// stayed on this subtab's screen until somebody else published — and
+    /// coming back to a subtab that is already loaded publishes nothing.
+    ///
+    /// A query that names no account, or names one this instance does not
+    /// have, falls back to the instance channel: fewer statuses than the
+    /// truth is a bug, more of them is only noise.
+    fn subscribe_status_for(&self, query: Option<&str>) -> watch::Receiver<AdapterStatus> {
+        scope::parse_folder_scope(query)
+            .ok()
+            .and_then(|scope| scope.account)
+            .and_then(|id| self.accounts.get(&id))
+            .map(|rt| rt.labelled.subscribe())
+            .unwrap_or_else(|| self.status_tx.subscribe())
     }
 
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
@@ -794,7 +829,9 @@ impl ContentAdapter for MailAdapter {
 mod tests {
     use super::*;
     use crate::imap::testserver::{FakeServer, PASSWORD, scripted};
-    use not_yet_done_content::{ActionInput, ActionOutcome, ListParams, NodeSummary, NodeType, children};
+    use not_yet_done_content::{
+        ActionInput, ActionOutcome, ListParams, NodeSummary, NodeType, children,
+    };
 
     /// A two-account instance against one fake server. The second account is
     /// deliberately never reached: it is what makes "opening one subtab must
@@ -832,6 +869,51 @@ accounts:
         );
         let cfg: MailConfig = serde_yaml::from_str(&yaml).expect("config parses");
         MailAdapter::from_config("mail", cfg).expect("adapter builds")
+    }
+
+    /// The bug this is here for: one account's failure showed on every
+    /// subtab, and stayed there — a `watch` keeps its last value and coming
+    /// back to a loaded subtab publishes nothing new.
+    #[tokio::test]
+    async fn a_subtab_hears_its_own_account_only() {
+        let adapter = adapter_for(1);
+        let work = adapter.runtime("work").expect("account");
+        let private = adapter.runtime("private").expect("account");
+
+        let work_rx = adapter.subscribe_status_for(Some("account:work"));
+        let private_rx = adapter.subscribe_status_for(Some("account:private"));
+        let instance_rx = adapter.subscribe_status();
+
+        // Both forwarders would normally start with the connection; here the
+        // point is only which channel carries what.
+        let failure = AdapterStatus::Failed {
+            reason: "connection refused".to_string(),
+        };
+        let _ = private.labelled.send(failure.clone());
+        let _ = work.labelled.send(AdapterStatus::Ready);
+
+        assert_eq!(*private_rx.borrow(), failure);
+        assert_eq!(*work_rx.borrow(), AdapterStatus::Ready);
+        // Nothing was published on the instance channel by either of them.
+        assert_eq!(*instance_rx.borrow(), AdapterStatus::Idle);
+    }
+
+    /// A query that names no account, or one that is not ours, must still
+    /// yield a channel — a view that shows every account is a legitimate
+    /// thing to build, and an unknown id is not worth a silent dead channel.
+    #[tokio::test]
+    async fn an_unscoped_query_falls_back_to_the_instance() {
+        let adapter = adapter_for(1);
+        for query in [None, Some("account:nobody"), Some("is:unread")] {
+            let rx = adapter.subscribe_status_for(query);
+            assert_eq!(*rx.borrow(), AdapterStatus::Idle, "query {query:?}");
+        }
+        let rx = adapter.subscribe_status_for(None);
+        adapter
+            .status_tx
+            .send(AdapterStatus::Ready)
+            .expect("instance channel is alive");
+        assert_eq!(*rx.borrow(), AdapterStatus::Ready);
     }
 
     fn params(node_type: &NodeType, query: Option<&str>) -> ListParams {
@@ -1032,7 +1114,10 @@ accounts:
             .await
             .expect("reads");
 
-        assert!(text.starts_with("From: Jürgen <juergen@example.org>\n"), "{text}");
+        assert!(
+            text.starts_with("From: Jürgen <juergen@example.org>\n"),
+            "{text}"
+        );
         assert!(text.contains("Subject: Grüße\n"), "{text}");
         assert!(
             text.contains("Grüße aus München"),
@@ -1271,7 +1356,8 @@ accounts:
             .map(|a| a.id)
             .collect();
         assert_eq!(
-            ids, ["export_html"],
+            ids,
+            ["export_html"],
             "a message can be handed to a viewer; the write actions (seen, \
              flag, move) arrive with phase 5"
         );

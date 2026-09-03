@@ -438,6 +438,33 @@ Two rules make the status usable by a frontend that cannot ask twice:
 Adapters that authenticate synchronously inside their calls need none of this:
 the default `subscribe_status()` reports `Ready` forever.
 
+#### One instance, several views — `subscribe_status_for()`
+
+An instance need not be one connection. The mail adapter is one instance
+holding six IMAP accounts, each shown in its own subtab pinned by
+`query: "account:<id>"`, and the calendar is built the same way. On a single
+instance-wide channel every account's state lands on every subtab — and it
+stays there, because a `watch` keeps its last value and a subtab that is
+already loaded asks for nothing new. A failure on the account you visited for
+a moment then sits on the screen of the account that is working.
+
+`subscribe_status_for(query)` is the seam for that: the frontend subscribes
+per view, handing over that view's own level query, and an adapter that knows
+how to read it hands back the channel of the part the view shows. The default
+ignores the query and returns `subscribe_status()`, so an adapter that is one
+connection needs no change — it has one status and nothing to tell apart.
+
+Two things follow for an adapter that overrides it:
+
+- **A query it cannot place gets the instance channel**, not a dead one. A
+  view showing every account is a legitimate thing to build, and an id that is
+  not ours is worth some noise but never silence.
+- **The scoped channel carries the same statuses, named.** Where a merged
+  channel had to prefix a credential dialog's header with the account
+  ("Work: unlock the password store"), the scoped one still should: the header
+  is what the frontend puts on the form, and it must say which mailbox is
+  asking even when only one subtab can see it.
+
 #### Saying what it is doing — `StatusReporter`
 
 `Connecting` and `Busy` both carry a clock (`started_at_unix_ms`) and a name

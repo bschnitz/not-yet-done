@@ -579,6 +579,12 @@ impl ContentAdapter for AnonymizingAdapter {
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.inner.subscribe_status()
     }
+    fn subscribe_status_for(
+        &self,
+        query: Option<&str>,
+    ) -> tokio::sync::watch::Receiver<AdapterStatus> {
+        self.inner.subscribe_status_for(query)
+    }
     fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
         self.inner.subscribe_invalidations()
     }

@@ -6908,6 +6908,31 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 - [ ] **A POP3 account is named, not dropped**: if the profile has one, it is
       listed under "not imported" with the reason.
 
+### One account's failure stays on its own subtab
+
+Six accounts in one instance, one subtab each. The status used to travel on a
+single instance-wide channel, so a `Failed` from the account you looked at for
+a moment appeared on every other subtab — and stayed, because that channel
+keeps its last value and a subtab that is already loaded publishes nothing new.
+Each subtab now subscribes under its own `account:<id>` query.
+
+- [ ] **The failure is where it happened**: switch to an account whose server
+      is unreachable (point one at a closed port) → its subtab says
+      "connection refused". Switch to a working account → its list is there
+      and **no** banner. Switch back and forth: each subtab keeps saying its
+      own thing.
+- [ ] **A failure that heals disappears**: bring the server back, press `r` on
+      the failing subtab → the banner goes and the folders load. The other
+      subtabs never showed it and are unchanged.
+- [ ] **The login form names the account**: an account whose store must be
+      unlocked shows the form with that account's name in the title, not the
+      instance's — the scoped channel keeps the label the merged one added.
+- [ ] **Still one form at a time**: two accounts that both need to ask do so
+      one after the other, never two dialogs at once.
+- [ ] **A view over all accounts still works**: the root level (no
+      `account:` in its query) shows the account rows and hears every account,
+      as before.
+
 ### A command that gets no answer (`command_timeout_secs`)
 
 IMAP runs one command at a time on one connection, so a server that neither
@@ -7052,7 +7077,7 @@ shortcuts, so a **restart** is part of the preparation.
       cannot poll a stamp without the browser treating every render as a
       cross-origin fetch.
 - [ ] **Nothing is served stale**: every answer carries `Cache-Control:
-  no-store`, so the reload after a render shows the new message and never
+no-store`, so the reload after a render shows the new message and never
       the one the browser kept.
 - [ ] **The server goes when nobody watches**: leave the preview closed for
       `NYD_PREVIEW_SERVER_IDLE_MIN` (10 minutes) → the process exits and takes

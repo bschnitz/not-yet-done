@@ -202,6 +202,11 @@ pub enum LoadMsg {
     /// that watches the adapter's status channel.
     ContentAdapterStatus {
         view_index: usize,
+        /// Which subtab of that view the status belongs to. One adapter
+        /// instance can serve several (the mail adapter serves one IMAP
+        /// account per subtab), and each subscribes under its own level
+        /// query, so a status is only ever news about one of them.
+        subtab: usize,
         status: not_yet_done_content::AdapterStatus,
     },
     /// Out-of-band content-change signal from a streaming adapter (the
@@ -1755,18 +1760,35 @@ impl App {
         let Some(adapter) = cv.adapter.as_ref() else {
             return;
         };
-        let mut rx = adapter.subscribe_status();
-        let tx = self.load_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(LoadMsg::ContentAdapterStatus {
-                view_index,
-                status: rx.borrow().clone(),
+        // One watcher per subtab, each subscribing under that subtab's own
+        // level query. An adapter that is one connection hands out the same
+        // channel every time (the trait's default) and nothing changes; the
+        // mail adapter hands out the channel of the account the query names,
+        // which is what keeps one account's failure off the other's screen.
+        let queries: Vec<Option<String>> = cv
+            .view_defs
+            .iter()
+            .map(|vd| vd.query.as_ref().and_then(|q| q.default.clone()))
+            .collect();
+        for (subtab, query) in queries.into_iter().enumerate() {
+            let mut rx = adapter.subscribe_status_for(query.as_deref());
+            let tx = self.load_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(LoadMsg::ContentAdapterStatus {
+                    view_index,
+                    subtab,
+                    status: rx.borrow().clone(),
+                });
+                while rx.changed().await.is_ok() {
+                    let status = rx.borrow().clone();
+                    let _ = tx.send(LoadMsg::ContentAdapterStatus {
+                        view_index,
+                        subtab,
+                        status,
+                    });
+                }
             });
-            while rx.changed().await.is_ok() {
-                let status = rx.borrow().clone();
-                let _ = tx.send(LoadMsg::ContentAdapterStatus { view_index, status });
-            }
-        });
+        }
     }
 
     /// Forward a streaming adapter's out-of-band [`Invalidation`] events
@@ -4694,11 +4716,25 @@ impl App {
                 } => {
                     self.open_content_action_popup(view_index, pane_id, node_id, action_id);
                 }
-                LoadMsg::ContentAdapterStatus { view_index, status } => {
-                    if let Some(cv) = self.content_view_mut(view_index) {
-                        cv.set_auth_status(status.clone());
+                LoadMsg::ContentAdapterStatus {
+                    view_index,
+                    subtab,
+                    status,
+                } => {
+                    let on_screen = self
+                        .content_view_mut(view_index)
+                        .map(|cv| {
+                            cv.set_auth_status_for(subtab, status.clone());
+                            cv.active_view_index() == subtab
+                        })
+                        .unwrap_or(false);
+                    // Only the subtab the user is looking at may act on its
+                    // status — a credential form popped by a background
+                    // account would take the screen away from the one in
+                    // front of them.
+                    if on_screen {
+                        self.react_to_adapter_status(view_index, &status);
                     }
-                    self.react_to_adapter_status(view_index, &status);
                 }
                 LoadMsg::AdapterInvalidation { view_index, inv } => {
                     self.handle_adapter_invalidation(view_index, inv);
@@ -8460,7 +8496,7 @@ impl App {
                     let adapter = Arc::clone(adapter);
                     tokio::spawn(async move { adapter.revalidate().await });
                 }
-                let status = cv.auth_status.clone();
+                let status = cv.auth_status().clone();
                 self.react_to_adapter_status(idx, &status);
                 // Live-tick coalescing: if this tab accrued background ticks
                 // while hidden, run exactly one refresh now against the current
