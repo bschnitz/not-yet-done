@@ -2908,16 +2908,21 @@ offers the hooks; the binding is stored in the DB table
 (`script:<tab>/<view-node-type…>`), and the entry then carries the hook name as
 a suffix (`[reload]`). Hooks run **unattended**, so only the two modes that need
 neither the terminal nor an editor may be bound: `background` and `commands`;
-`interactive` and `capture` are refused when binding.
+`interactive` and `capture` are refused when binding. `row_change` narrows that
+further to `background` alone, because it is the one hook whose answer cannot be
+control flow.
 
-| hook     | fires                                            | payload                    | may answer with                |
-| -------- | ------------------------------------------------ | -------------------------- | ------------------------------ |
-| `reload` | after the pane's rows have landed                | the level's/script's scope | `commands`                     |
-| `load`   | on the loaded rows _before_ they reach the table | always `table`             | `cells`, `highlights`, `order` |
+| hook         | fires                                            | payload                                               | may answer with                |
+| ------------ | ------------------------------------------------ | ----------------------------------------------------- | ------------------------------ |
+| `reload`     | after the pane's rows have landed                | the level's/script's scope                            | `commands`                     |
+| `load`       | on the loaded rows _before_ they reach the table | always `table`                                        | `cells`, `highlights`, `order` |
+| `row_change` | when the cursor lands on another row             | the level's/script's scope, plus a `row_change` block | nothing                        |
 
-Both fire on the first load of a view and on every drill-down into a level, and
-neither fires when the fetch failed — an empty view that only looks empty
-because the request died is not something to act on.
+`reload` and `load` fire on the first load of a view and on every drill-down
+into a level, and neither fires when the fetch failed — an empty view that only
+looks empty because the request died is not something to act on. `row_change`
+fires from navigation instead, and is the subject of a section of its own
+below.
 
 **`reload` — act on the settled view.** The script sees what the user sees,
 including the cursor, and hands back commands the TUI executes
@@ -3003,8 +3008,8 @@ to _write_ somewhere and wants the view to catch up afterwards, `reload` is the
 hook — a script may of course do both: write in a `load` hook so other views and
 the CLI see the value too, and still patch the rows it was handed.
 
-**Telling the invocations apart.** A `load` hook runs with `NYD_SCRIPT_HOOK=load`
-in its environment. The same file is usually still runnable by hand from the
+**Telling the invocations apart.** Every hook runs with the hook name in
+`NYD_SCRIPT_HOOK` — a `load` hook with `NYD_SCRIPT_HOOK=load`. The same file is usually still runnable by hand from the
 menu, where nobody is holding the rows and `cells` has no reader — a script that
 wants to work both ways answers with `cells` when the variable is set and with
 `{"commands": ["reload"]}` when it is not.
@@ -3016,14 +3021,99 @@ a reload runs no second round. The guard sits on the _load_, not on the command
 name — a script emitting `:jump` or a query command also ends in a fetch and
 would slip past a `:reload`-only check.
 
-**Scripts run synchronously**, on the main loop, both hooks alike: a `load` hook
+**The two load-shaped hooks run synchronously**, on the main loop: a `load` hook
 has to be finished before the rows can be handed on, and there is nothing to
 hand a patch to afterwards. Nothing is painted between the two seams, so the
 runtime of either hook sits in front of the first frame that shows the new rows.
 A hook that shells out to slow commands makes every load feel that slow.
+`row_change` is the exception — it is spawned detached, precisely because a
+script per keystroke in front of the frame would make the list feel broken.
 
-**Script shortcuts (`ctrl+s` in the menu).** As in the query menu, a key can be
-assigned to a script in the script menu via **`ctrl+s`**. The captured chord is
+#### `row_change` — a script that follows the cursor
+
+The third hook fires when the cursor **lands on another row**, so a script can
+keep something outside the TUI in step with the selection: a preview in a
+browser window, a scratch file another tool watches, a status line. It is the
+only hook that fires from a key press rather than from a finished load, and
+everything below follows from that.
+
+**When it fires.** The focused pane of the active tab shows a different selected
+row than the last time this pane reported one, and the selection has then been
+still for the settle delay.
+
+- **Identity is the row's node id, not its index.** A reload that keeps the
+  cursor on the same row changes nothing, and neither does a sort that carries
+  the same row to another index — both would otherwise re-render a preview that
+  is already correct.
+- **Arriving counts as a change.** When a pane gets a selection it did not have
+  before — a level opens, a tab is entered for the first time — the hook fires
+  with `previous_index: null`. A script that only wants to _update_ something
+  already on screen can see that from the payload; a script that wants to open
+  something on arrival has no other way of being told.
+- **Per pane.** The last reported row is remembered per pane, so leaving a tab
+  and coming back to an unmoved cursor is not a row change.
+- **Nothing selected is not a row change.** An empty pane reports nothing and
+  forgets its last row, so re-entering it fires again.
+
+**The settle delay** is `script.row_change_delay_ms` in `tui.yaml`, default
+**250**. The hook fires once the selection has been unchanged for that long, so
+holding `j` through forty rows runs the script **once**, for row forty — and
+`previous_index` is then the row the burst started from, because the rows in
+between were never reported to anybody. It is a config option rather than a
+constant because the right value depends on what the script costs: a preview
+that runs pandoc and a browser wants a quarter of a second or more, a script
+that only writes a file can sit at 50.
+
+**How the script runs.** Detached: the child is spawned and not waited for, its
+stdout and stderr go to a temp file rather than to the terminal the TUI draws
+on, and it is reaped on the periodic tick.
+
+- **At most one run per pane at a time.** A cursor that moves on while a run is
+  still alive re-arms the timer instead of starting a second child — two
+  renders never race for the same output file, and the script converges on the
+  row the cursor actually came to rest on.
+- **stdout is ignored; a failure is reported once.** A non-zero exit becomes a
+  notification quoting the tail of that log, but an identical message repeating
+  back-to-back is suppressed: a broken script must not be able to fill the
+  notification log one line per cursor move.
+- **`NYD_SCRIPT_HOOK=row_change`** is in the environment, so a file that is also
+  runnable by hand from the menu can tell the two apart.
+
+**It may answer with nothing.** Not `cells`, `highlights` or `order` — there is
+no load to patch, the rows have been on screen for a while — and not
+`commands`: a command that reloads or jumps moves the cursor, which fires the
+hook again, and the depth guard that stops a `reload` loop rides on the _load_,
+which a row change does not have. A `# mode: commands` script is therefore
+refused when it is bound to this hook, not quietly ignored at run time. A
+script bound here acts on the world outside the TUI; if it wants the view to
+catch up, it has to say so through a key the user presses.
+
+**The payload** is whatever shape the script's `# scope:` header (or the level's
+action scope) asks for — `node`, `filtered_set` or `table`, unchanged — plus one
+extra top-level key:
+
+```json
+{
+  "node": { "...": "..." },
+  "row_change": {
+    "previous_index": 3,
+    "previous_id": "<node id>",
+    "next_index": 4,
+    "next_id": "<node id>"
+  }
+}
+```
+
+`previous_index` and `previous_id` are `null` on the first row a pane reports.
+The `next_*` pair restates what a `node` or `table` payload already carries; it
+is written out anyway so the block reads on its own and means the same thing
+under all three shapes — a `filtered_set` payload has no cursor in it at all.
+Indices are into the **displayed** order, the same number a `table` payload
+reports as `selected_index`.
+
+### Script shortcuts (`ctrl+s` in the menu)
+
+As in the query menu, a key can be assigned to a script in the script menu via **`ctrl+s`**. The captured chord is
 stored in the DB table `query_shortcut(scope, name, shortcut)` under the scope
 `script:<tab>/<view-node-type…>` (the same derivation as the script directory)
 for the file name. If the focus afterwards sits on a level offering a

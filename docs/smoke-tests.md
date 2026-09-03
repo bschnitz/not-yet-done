@@ -5739,6 +5739,70 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
       the same index — a reordering load must not silently move the selection
       to another ticket.
 
+## A script on the `row_change` hook (the cursor moved)
+
+The third hook: it fires from navigation, not from a load, runs detached, and
+may answer with nothing. The point of the test is that it fires **once** per
+resting row, that it names both rows, and that a slow or broken script never
+gets in front of the frame.
+
+Preparation — a `background`-mode script on the `row_change` hook of any level
+with more than a handful of rows, appending one line per run:
+
+```python
+#!/usr/bin/env python3
+# mode: background
+import json, os, sys, time
+with open(sys.argv[1]) as f:
+    payload = json.load(f)
+rc = payload["row_change"]
+with open("/tmp/nyd-row-change.log", "a") as f:
+    f.write(f"{time.time():.3f} {os.environ.get('NYD_SCRIPT_HOOK')} "
+            f"{rc['previous_index']} -> {rc['next_index']} {rc['next_id']}\n")
+```
+
+- [ ] `ctrl+h` in the `:script` menu offers **row_change** next to reload and
+      load, described as "when the cursor lands on another row"; the entry then
+      carries a `[row_change]` suffix.
+- [ ] Enter the level: the first selection is a change, so one line is written
+      with `previous_index` **null** and `NYD_SCRIPT_HOOK=row_change`.
+- [ ] `j` once, wait: one further line, `3 -> 4` naming both rows.
+- [ ] Hold `j` through twenty rows: **one** line, from the row the burst
+      started at to the row it ended on — not twenty. The list scrolls at full
+      speed while it is held; nothing stutters per row.
+- [ ] `j` then `k` back within the settle delay: no line at all — the pane
+      never reported the row in between.
+- [ ] `r` on the same row (a reload that keeps the cursor): no line. Identity
+      is the node id.
+- [ ] `c s` → sort by a column so the selected row moves to another index: no
+      line either.
+- [ ] Set `script.row_change_delay_ms: 1000` in `tui.yaml`, restart: a single
+      `j` writes its line a second later; holding `j` writes nothing until the
+      keys stop.
+- [ ] Click a row with the mouse, and jump to one with the jump mode: both
+      count as row changes — the detection sits in the loop, not in the key
+      handler.
+- [ ] Leave the tab and come back onto the unmoved cursor: no line. Move
+      inside a split's other pane and back: each pane remembers its own row.
+- [ ] A level whose load comes back empty: no line, and re-entering it later
+      fires again with `previous_index: null`.
+- [ ] Make the script sleep 3 s and hold `j`: the TUI stays responsive
+      throughout, and only one child is alive at a time — the log shows the
+      runs one after another, the last one for the row the cursor rests on.
+- [ ] Make the script exit non-zero with something on stderr: one notification
+      quoting the tail of it. Move the cursor ten more times: the identical
+      message is **not** repeated ten times.
+- [ ] Fix the script: the next row change reports nothing at all (no success
+      notice per cursor move).
+- [ ] Try to bind a `# mode: commands` script to `row_change`: refused with "a
+      row_change hook may not answer with commands". `interactive` and
+      `capture` are refused as for the other hooks.
+- [ ] A `# scope: table` header on the hook script: the payload carries `rows`
+      **and** the `row_change` block; with `# scope: filtered_set` the block is
+      the only thing naming the cursor.
+- [ ] Nothing of the script's stdout reaches the terminal — no paint artefacts
+      in the table while it runs.
+
 ## A script declares its own payload scope (`# scope:`)
 
 The level's `scope:` setting says what a script is handed; a `# scope:` header
@@ -6809,7 +6873,7 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 ### Importing from Thunderbird (phase 3)
 
 - [ ] **It finds the right profile**: run `nyd config import-thunderbird
-  --stdout` with no flags → the accounts printed are the ones Thunderbird
+--stdout` with no flags → the accounts printed are the ones Thunderbird
       shows, not an older profile's. On a machine with several profiles, check
       that the one named in `installs.ini` won.
 - [ ] **Every IMAP account arrives**: the count matches Thunderbird's account
@@ -6832,7 +6896,7 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 - [ ] **The output actually loads**: point `XDG_CONFIG_HOME` at a scratch
       directory holding the two generated files and start the TUI → the Mail
       tab comes up with one subtab per account, and `nyd adapter mail help
-  --full` prints the levels without connecting.
+--full` prints the levels without connecting.
 - [ ] **The guessed paths are printed**: every account's `<prefix>/<id>/pass`
       appears in the summary, marked as a guess. `--pass-prefix` changes all of
       them.
@@ -6868,7 +6932,7 @@ also has `o s` / `o k` bound), then start the TUI.
       a config that moved it), never a hard-coded `f10`.
 - [ ] **The bar summarises, the log carries the detail**: the bottom bar shows
       one line per broken file (`<tab>: N configuration problem(s) — [key]
-    lists them`), not N lines. With `notifications.max_messages: 1` and two
+  lists them`), not N lines. With `notifications.max_messages: 1` and two
       broken files, only the last summary is on the bar — and both files'
       problems are still in the log.
 - [ ] **The notification centre has them**: `f10` (or your binding) lists every
