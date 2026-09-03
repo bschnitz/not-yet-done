@@ -225,7 +225,9 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
               - { key: size, label: Size, kind: number, sizing: "fixed(10)" }
               - { key: part, label: Part, sizing: "fixed(6)", hidden: true }
             actions:
-              - { name: open, key: o, type: custom, id: open }
+              # On the `o` leader: a bare `o` would swallow every global
+              # chord starting with it (shortcut overview/menu).
+              - { name: open, key: "o o", type: custom, id: open }
               - { name: download all, key: D, type: custom, id: download_all }
       - name: subfolders
         node_type: "mail:folder"

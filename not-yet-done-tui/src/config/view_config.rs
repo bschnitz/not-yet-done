@@ -3126,66 +3126,32 @@ views:
         }
     }
 
+    /// Every view example we ship, as (file name, contents). Used by the
+    /// checks below, which stand in for the loader a user runs these
+    /// files through the first time they copy one into their config.
+    const SHIPPED_EXAMPLES: &[(&str, &str)] = &[
+        ("calendar.yaml", include_str!("../../../docs/examples/views/calendar.yaml")),
+        ("cards.yaml", include_str!("../../../docs/examples/views/cards.yaml")),
+        ("confluence.yaml", include_str!("../../../docs/examples/views/confluence.yaml")),
+        ("jira.yaml", include_str!("../../../docs/examples/views/jira.yaml")),
+        ("kimai.yaml", include_str!("../../../docs/examples/views/kimai.yaml")),
+        ("mail.yaml", include_str!("../../../docs/examples/views/mail.yaml")),
+        ("postgres.yaml", include_str!("../../../docs/examples/views/postgres.yaml")),
+        ("projects.yaml", include_str!("../../../docs/examples/views/projects.yaml")),
+        ("sqlite.yaml", include_str!("../../../docs/examples/views/sqlite.yaml")),
+        ("stoat.yaml", include_str!("../../../docs/examples/views/stoat.yaml")),
+        ("taiga.yaml", include_str!("../../../docs/examples/views/taiga.yaml")),
+        ("tasks.yaml", include_str!("../../../docs/examples/views/tasks.yaml")),
+        ("trackings.yaml", include_str!("../../../docs/examples/views/trackings.yaml")),
+    ];
+
     /// Every shipped view example is something a user copies wholesale, so
     /// none may carry a key the schema drops — a dead `key:` on a child, a
     /// typo, a field that moved. This is the same check the loader runs at
     /// startup, applied to the files we hand out.
     #[test]
     fn no_shipped_view_example_carries_an_unknown_field() {
-        for (file, yaml) in [
-            (
-                "calendar.yaml",
-                include_str!("../../../docs/examples/views/calendar.yaml"),
-            ),
-            (
-                "cards.yaml",
-                include_str!("../../../docs/examples/views/cards.yaml"),
-            ),
-            (
-                "confluence.yaml",
-                include_str!("../../../docs/examples/views/confluence.yaml"),
-            ),
-            (
-                "jira.yaml",
-                include_str!("../../../docs/examples/views/jira.yaml"),
-            ),
-            (
-                "kimai.yaml",
-                include_str!("../../../docs/examples/views/kimai.yaml"),
-            ),
-            (
-                "mail.yaml",
-                include_str!("../../../docs/examples/views/mail.yaml"),
-            ),
-            (
-                "postgres.yaml",
-                include_str!("../../../docs/examples/views/postgres.yaml"),
-            ),
-            (
-                "projects.yaml",
-                include_str!("../../../docs/examples/views/projects.yaml"),
-            ),
-            (
-                "sqlite.yaml",
-                include_str!("../../../docs/examples/views/sqlite.yaml"),
-            ),
-            (
-                "stoat.yaml",
-                include_str!("../../../docs/examples/views/stoat.yaml"),
-            ),
-            (
-                "taiga.yaml",
-                include_str!("../../../docs/examples/views/taiga.yaml"),
-            ),
-            (
-                "tasks.yaml",
-                include_str!("../../../docs/examples/views/tasks.yaml"),
-            ),
-            (
-                "trackings.yaml",
-                include_str!("../../../docs/examples/views/trackings.yaml"),
-            ),
-        ] {
+        for (file, yaml) in SHIPPED_EXAMPLES {
             let (_, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
                 .unwrap_or_else(|e| panic!("{file} must parse: {e}"));
             assert!(
@@ -3193,6 +3159,33 @@ views:
                 "{file} carries keys the schema ignores: {unknown:?}"
             );
         }
+    }
+
+    /// A shipped example is copied wholesale, so it has to survive the key
+    /// validator the loader runs at startup — otherwise the file a user
+    /// copies in refuses to load, and does so once per subtab that reuses
+    /// the offending YAML anchor.
+    ///
+    /// Checked against the *default* keybindings: the user's own `tui.yaml`
+    /// can always move a global out of the way, but the file we hand out
+    /// must be clean without that help.
+    #[test]
+    fn no_shipped_view_example_collides_with_a_key() {
+        let kb = crate::config::keybindings::KeyBindingConfig::default();
+        // Collected across all files rather than asserted per file: one
+        // pattern copied between examples breaks several of them, and
+        // fixing them one test run at a time is needless work.
+        let mut all = Vec::new();
+        for (file, yaml) in SHIPPED_EXAMPLES {
+            let (cfg, _) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+                .unwrap_or_else(|e| panic!("{file} must parse: {e}"));
+            all.extend(
+                crate::keymap::validate_view_file(&cfg, &kb)
+                    .into_iter()
+                    .map(|e| format!("{file}: {e}")),
+            );
+        }
+        assert!(all.is_empty(), "shipped examples claim a key twice:\n{}", all.join("\n"));
     }
 
     /// A `key:` on a `children:` entry parses but does nothing, because
