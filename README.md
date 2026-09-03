@@ -1703,6 +1703,92 @@ which is what the prompt labels it. Only the returned session token is
 persisted — never the password. Multi-factor auth is not supported yet
 (a login that returns an MFA ticket fails with a clear message).
 
+## Mail Adapter (IMAP)
+
+Adapter for **IMAP mailboxes**. It differs from every other adapter in one
+respect: **one instance holds many accounts**. Mail is a single workflow, and
+six tabs for six mailboxes is the wrong shape for it — so all accounts sit in
+one tab, each behind its own subtab, each with its own connection and its own
+credentials. The layout follows the calendar adapter (a list of connections
+under one instance); what is new is that an account's credentials are an
+ordinary `auth:` block, so `nyd config auth mail` describes them and every
+credential provider works per account.
+
+> **Status: Phase 1 (folders).** The folder tree of each account is browsable —
+> `LIST` for the hierarchy, `STATUS` for the unread/total counts, mailbox names
+> decoded from IMAP's modified UTF-7 (`Entw&APw-rfe` reads as `Entwürfe`).
+> Messages, previews and attachments arrive in phase 2; see
+> [`docs/plan-mail-adapter.md`](docs/plan-mail-adapter.md) for the phase cut.
+
+### Subtabs are accounts
+
+A folder level says which mailbox it means through its query:
+
+```yaml
+node_type: "mail:folder"
+query: { default: "account:work" }
+```
+
+`account:<id>` names an `id:` from the adapter config; an additional
+`folder:<path>` pins the subtab to one subtree (the path is the server's own
+spelling, spaces and all). An instance holding a **single** account may omit
+the query. With several accounts a scopeless level does **not** pick one — it
+refuses and names the syntax, because a scope that was silently dropped looks
+exactly like a scope matching everything.
+
+Connecting follows the same per-account grain: opening the Work subtab logs in
+Work and nothing else, and an account nobody looks at is never contacted. When
+a login needs an answer, the account's label is written into the prompt header
+— with several mailboxes behind one instance, "Password:" alone is not an
+answerable question.
+
+### What a folder row costs
+
+Listing the mailboxes is **one** `LIST` per account; expanding a folder in the
+tree reads that snapshot and costs no round trip at all. The counts are the
+expensive part — `STATUS` is one round trip **per folder** — so they are
+fetched for the folders of the level being displayed rather than for the whole
+tree, and only for folders that can be selected. A `\Noselect` container (an
+`Archive` that only holds `Archive/2019`) leaves both count cells **empty**
+rather than showing `0`: "cannot be counted" and "counted zero" are different
+answers, and a mail client that confuses them is lying about an empty inbox.
+
+`exclude_folders:` hides paths that are never worth listing; a trailing `*`
+hides a whole subtree (`Trash*`). The pattern is matched without knowing the
+server's hierarchy delimiter, which differs per server and is not something the
+person writing the config should have to look up.
+
+### Setup
+
+Two YAML files in `~/.config/not_yet_done/views/`:
+
+- **`mail-adapter.yaml`** — every account: host, port, transport security and
+  its `auth:` block. See
+  [`docs/examples/views/mail-adapter.yaml`](docs/examples/views/mail-adapter.yaml).
+- **`mail.yaml`** — the tab and one subtab per account. See
+  [`docs/examples/views/mail.yaml`](docs/examples/views/mail.yaml).
+
+Transport security is **stated, never guessed from the port**: `tls` (implicit
+TLS, usually 993), `starttls` (plain connect then upgrade, usually 143) or
+`none`. The last one exists for a bridge on loopback, which speaks plain text
+on purpose — silently "upgrading" it would break it rather than protect
+anyone.
+
+Auth offers two mechanisms (`nyd config auth mail` prints them with their
+fields):
+
+- **`password`** — IMAP `LOGIN`. `username` is the **login name** the server
+  wants, which is often but not always the e-mail address. Where a provider
+  offers an app password (Gmail, for one), this is the simpler route.
+- **`xoauth2`** — an OAuth 2 access token as an ordinary credential. The
+  adapter runs no OAuth flow itself, so a script that refreshes the token is
+  all it needs.
+
+Both are usually sourced through one script run per account (the `pass`
+route the Taiga/Kimai/Postgres adapters already use), so a locked store asks
+for its passphrase through the TUI instead of opening its own pinentry window
+somewhere off-screen.
+
 ## Waybar Integration
 
 The Waybar CFFI module shows the currently active tracking in your status bar.
@@ -2561,7 +2647,8 @@ not-yet-done-content      # ContentAdapter/Node trait + auth orchestration
 not-yet-done-local-adapter# Tasks/Trackings/Projects as adapters (over task-core)
 not-yet-done-jira-adapter not-yet-done-taiga-adapter
 not-yet-done-postgres-adapter not-yet-done-confluence-adapter
-not-yet-done-stoat-adapter not-yet-done-transport   # SSH tunnel
+not-yet-done-stoat-adapter not-yet-done-mail-adapter # chat, IMAP
+not-yet-done-transport    # SSH tunnel
 
 # Data core
 not-yet-done-core         # nyd.db: settings, saved queries, links, tags

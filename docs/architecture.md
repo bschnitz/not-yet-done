@@ -22,7 +22,7 @@ cut the way they are:
   search internally. They communicate with the app only through message and
   request enums.
 - **Adapter isolation** — content backends (Jira, Taiga, Postgres,
-  Confluence, Stoat, local) depend exclusively on `not-yet-done-content`,
+  Confluence, Stoat, mail, local) depend exclusively on `not-yet-done-content`,
   never on the TUI. That keeps the dependency graph acyclic, and a new
   adapter touches no core code.
 - **One adapter wiring for every frontend** — `not-yet-done-host` is the only
@@ -63,6 +63,7 @@ flowchart TD
         SQLCORE["not-yet-done-sql-core<br/>quote_ident · sql_shape<br/>script storage · ScriptStore<br/>DB script node tree · completions<br/>editor protocols: view_ddl · row_edit"]
         CONF[not-yet-done-confluence-adapter]
         STOAT[not-yet-done-stoat-adapter]
+        MAIL[not-yet-done-mail-adapter<br/>IMAP, many accounts per instance]
         TRANSPORT[not-yet-done-transport<br/>SSH tunnel]
     end
 
@@ -101,6 +102,7 @@ flowchart TD
     HOST --> SQLITE
     HOST --> CONF
     HOST --> STOAT
+    HOST --> MAIL
 
     LOCAL --> CONTENT
     LOCAL --> TASKCORE
@@ -108,6 +110,7 @@ flowchart TD
     TAIGA --> CONTENT
     CONF --> CONTENT
     STOAT --> CONTENT
+    MAIL --> CONTENT
     PG --> CONTENT
     PG --> TRANSPORT
     PG --> SQLCORE
@@ -143,6 +146,7 @@ flowchart TD
 | **not-yet-done-sql-core**           | Backend-neutral SQL building blocks: identifier quoting, the SQL text sniffer, script file storage, `ScriptStore`, the DB script node tree, editor completions, buffer protocols for the view and row editors | content                                                              |
 | **not-yet-done-confluence-adapter** | Confluence spaces/pages/comments/attachments                                                                                                                                                                  | content                                                              |
 | **not-yet-done-stoat-adapter**      | Chat (the Stoat/Revolt fork) as a streaming content tree                                                                                                                                                      | content                                                              |
+| **not-yet-done-mail-adapter**       | IMAP mailboxes as a content tree — one instance holds many accounts, one connection each                                                                                                                      | content                                                              |
 | **not-yet-done-transport**          | SSH tunnel support for adapters (e.g. Postgres behind a bastion)                                                                                                                                              | content                                                              |
 | **not-yet-done-forest**             | Tree/forest → a flat list of rows (tree rendering)                                                                                                                                                            | table                                                                |
 | **not-yet-done-table**              | Column layout and table rendering primitives                                                                                                                                                                  | —                                                                    |
