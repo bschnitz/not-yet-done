@@ -492,6 +492,7 @@ mod config_edit;
 pub mod editor;
 mod filter_persist;
 mod link;
+pub mod row_change;
 pub mod node_actions;
 pub mod option_menu;
 pub mod script;
@@ -1134,6 +1135,23 @@ pub struct App {
     /// this keeps that true if a hook ever completes asynchronously.
     pub hook_runs_in_flight: std::collections::HashSet<(usize, crate::views::content_view::PaneId)>,
 
+    /// The row each pane last reported to the `row_change` hook. Per pane,
+    /// so switching tabs and coming back to an unmoved cursor is not a row
+    /// change. See [`crate::app::row_change`].
+    pub row_change_seen: crate::app::row_change::RowMarks,
+
+    /// When the settle delay of a pending row change runs out. Re-armed by
+    /// every further change, so a burst of `j` reports only its last row.
+    pub row_change_deadline: Option<Instant>,
+
+    /// Row-change hook scripts that are running right now — spawned
+    /// detached, reaped on the ticker.
+    pub row_change_runs: Vec<crate::app::row_change::RowChangeRun>,
+
+    /// The last failure a row-change hook reported, so the same message
+    /// repeating does not write one notification per cursor move.
+    pub row_change_last_error: Option<String>,
+
     /// Shortcut/action menu (`global.shortcut_menu`, default `ctrl+y`).
     /// Lists every configurable keyboard shortcut as name → keys, toggling
     /// between the current context and every tab.
@@ -1467,6 +1485,10 @@ impl App {
             script_hook_picker: None,
             load_hook_depth: 0,
             hook_runs_in_flight: std::collections::HashSet::new(),
+            row_change_seen: Default::default(),
+            row_change_deadline: None,
+            row_change_runs: Vec::new(),
+            row_change_last_error: None,
             shortcut_menu: crate::components::shortcut_menu::ShortcutMenu::new(
                 Arc::clone(&shared_theme),
                 shortcut_menu_execute,
@@ -12573,7 +12595,12 @@ impl App {
     }
 
     pub fn needs_periodic_tick(&self) -> bool {
-        self.has_live_banner() || self.detached_editor.is_some() || self.detached_script.is_some()
+        self.has_live_banner()
+            || self.detached_editor.is_some()
+            || self.detached_script.is_some()
+            // A detached row-change script has to be reaped, and its failure
+            // reported, without anyone waiting for it.
+            || !self.row_change_runs.is_empty()
     }
 
     // -----------------------------------------------------------------------

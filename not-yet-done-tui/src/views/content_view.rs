@@ -9210,6 +9210,22 @@ impl ContentView {
         self.active_pane().selected_item_id()
     }
 
+    /// The focused pane and the row its cursor sits on, as
+    /// `(pane, display index, node id)` — what the `row_change` hook
+    /// compares against the row it last reported for this pane
+    /// ([`crate::app::row_change`]).
+    ///
+    /// The id and not just the index: a reload that keeps the cursor on the
+    /// same row, or a sort that moves that row somewhere else, is not a row
+    /// change — and re-running a preview for the row already on screen is
+    /// exactly what the hook must not do. `None` while nothing is selected
+    /// (an empty pane, a placeholder row).
+    pub fn focused_row_mark(&self) -> Option<(PaneId, usize, String)> {
+        let pane = self.active_pane();
+        let id = pane.selected_item_id()?.to_string();
+        Some((self.active_pane_id(), pane.selected_row_index(), id))
+    }
+
     pub fn nav_depth(&self) -> usize {
         self.active_pane().nav_depth()
     }

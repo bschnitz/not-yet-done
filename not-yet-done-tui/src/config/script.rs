@@ -60,6 +60,21 @@ pub struct ScriptConfig {
     /// Seconds to wait before showing a "script busy" indicator.
     #[serde(default = "default_busy_timeout_secs")]
     pub busy_timeout_secs: f32,
+
+    /// How long the cursor has to sit still before a script bound to the
+    /// `row_change` hook is run, in milliseconds.
+    ///
+    /// The hook fires per cursor move, so without a settle delay holding `j`
+    /// would start a script per row. The right value depends on what the
+    /// script costs: a preview that runs pandoc and a browser wants a
+    /// quarter of a second or more, a script that only writes a file can sit
+    /// at 50.
+    #[serde(default = "default_row_change_delay_ms")]
+    pub row_change_delay_ms: u64,
+}
+
+fn default_row_change_delay_ms() -> u64 {
+    250
 }
 
 fn default_template() -> String {
@@ -117,6 +132,7 @@ impl Default for ScriptConfig {
             interactive_command: String::new(),
             pause_tui: default_pause_tui(),
             busy_timeout_secs: default_busy_timeout_secs(),
+            row_change_delay_ms: default_row_change_delay_ms(),
         }
     }
 }
