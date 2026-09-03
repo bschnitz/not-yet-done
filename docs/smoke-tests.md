@@ -6947,6 +6947,15 @@ shortcuts, so a **restart** is part of the preparation.
 - [ ] **Nothing in the mail runs**: an HTML mail carrying a `<script>`, an
       `onclick=`, a `<style>` block, an `<iframe>` or a form renders as text and
       layout only — no dialog, no request, no page of the sender's design.
+- [ ] **A mail written in Word is not an empty box**: a message from Outlook or
+      Word (`<meta name=Generator content="Microsoft Word …">`, two `<meta>`
+      tags and a conditional comment in the head) shows its text. Those tags
+      never close: a renderer that counts one as the start of a region to skip
+      swallows the whole message and leaves a header card above a blank frame.
+- [ ] **A body that cannot be shown falls back**: when the markup sanitises
+      away to nothing, the text part is rendered instead — never an empty box.
+      The worker log says so (`the html part sanitised to nothing`), because
+      that is a fault of the renderer, not of the mail.
 - [ ] **A plain-text mail reads like mail**: single line breaks stay breaks, a
       quoted passage is coloured as a quote and the reply typed under it is
       **not** part of it, a bare URL is a link — and `*asterisks*`, `#hash` and
@@ -6974,10 +6983,14 @@ shortcuts, so a **restart** is part of the preparation.
       evidence too.
 - [ ] **A message read twice costs no login**: go back to a message you have
       already previewed → the page is back at once, from
-      `~/.local/share/not_yet_done/mail/<instance>/preview/pages/<key>.html`,
+      `~/.local/share/not_yet_done/mail/<instance>/preview/pages.v<N>/<key>.html`,
       with no CLI call and no touch of the account. A body cannot change under
       its uid, so the cache is not a guess — `NYD_MAIL_PREVIEW_REFRESH=1`
       renders again anyway.
+- [ ] **A fixed renderer does not serve old pages**: the cache directory
+      carries the renderer's version, so raising `RENDER_VERSION` renders every
+      message again and the previous directory is removed on the first render.
+      Without that, a page built by a broken renderer would outlive the fix.
 - [ ] **The settle delay is the one from the config**:
       `script.row_change_delay_ms: 1000` in `tui.yaml`, restart → the preview
       visibly waits a second after the cursor stops.
