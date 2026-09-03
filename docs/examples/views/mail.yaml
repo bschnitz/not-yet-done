@@ -46,12 +46,12 @@
 tab:
   name: Mail
   order: 8
-  icon: "󰇮"
+  icon: "📧"
   # While any folder in this view holds unread mail, the tab bar prefixes the
   # label with this marker and emphasises it — the only cue a *background*
   # mail tab can give. Both keys are optional (marker falls back to the view's
   # own `unread_marker` below, style to bold).
-  unread_marker: "✉"
+  unread_marker: "📬"
 
 adapter:
   type: mail
@@ -87,7 +87,7 @@ views:
     # re-lists.
     tree_label: name
     unread_style: unread
-    unread_marker: "●"
+    unread_marker: "📩"
     # The messages list opens as a pane beside the tree (see the
     # `split:` below), so the `w` leader has something to operate on:
     # `w q` closes the list, `w h` / `w l` move focus between the two.
@@ -173,10 +173,17 @@ views:
         # yanks the cursor away from where you scrolled.
         cursor_on_open: first_unread
         columns:
-          # The flag glyphs, in a fixed order so the column does not jitter
-          # from row to row: ● unread, ↩ answered, ★ flagged, ✎ draft,
-          # 📎 carries an attachment.
-          - { key: flags, label: "", sizing: "fixed(6)" }
+          # One slot per flag, always occupied — by its glyph or by a blank
+          # of the same width — so the same meaning always lands on the same
+          # cell and the gutter can be read downward as a column:
+          # 📩 unread, ↩ answered, ⭐ flagged, 📝 draft, 📎 carries an attachment.
+          #
+          # `fixed(9)` is the sum of those five slots: the emoji are two
+          # terminal cells wide, `↩` is one. `max` would look tidier here
+          # and is a trap — it measures only the rows of the CURRENT page, so
+          # a page that happens to carry no flags collapses the column to
+          # nothing and shifts the whole table sideways when you turn to it.
+          - { key: flags, label: "", sizing: "fixed(9)" }
           - { key: from, label: From, sizing: "flex(1)" }
           # `source: label` rather than the raw subject: a mail whose
           # `Subject:` header is empty would otherwise be a row you cannot
@@ -291,7 +298,7 @@ views:
     query: { default: "account:bridged" }
     tree_label: name
     unread_style: unread
-    unread_marker: "●"
+    unread_marker: "📩"
     window_ops: true
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }

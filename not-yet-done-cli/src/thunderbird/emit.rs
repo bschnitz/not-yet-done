@@ -90,11 +90,11 @@ pub(super) fn view_yaml(accounts: &[Account]) -> String {
          # message and its ATTACHMENTS. Writing — marking read, flagging, moving,\n\
          # sending — is the adapter's next phase.\n\n",
     );
-    s.push_str("tab:\n  name: Mail\n  icon: \"\u{f01e0}\"\n");
+    s.push_str("tab:\n  name: Mail\n  icon: \"\u{1f4e7}\"\n");
     s.push_str("  # While any folder in this tab holds unread mail, the tab bar\n");
     s.push_str("  # prefixes the label with this marker — the only cue a background\n");
     s.push_str("  # mail tab can give.\n");
-    s.push_str("  unread_marker: \"\u{2709}\"\n\n");
+    s.push_str("  unread_marker: \"\u{1f4ec}\"\n\n");
     s.push_str("adapter:\n  type: mail\n  id: mail\n  config: mail-adapter.yaml\n");
     s.push_str(&format!(
         "  # Connect the subtab actually opened, and only that one: {} mailboxes\n",
@@ -115,7 +115,7 @@ pub(super) fn view_yaml(accounts: &[Account]) -> String {
             "    query: {{ default: \"account:{}\" }}\n",
             account.id
         ));
-        s.push_str("    tree_label: name\n    unread_style: unread\n    unread_marker: \"●\"\n");
+        s.push_str("    tree_label: name\n    unread_style: unread\n    unread_marker: \"📩\"\n");
         // The messages list opens as a pane beside the tree, so the `w`
         // leader has panes to operate on. Without the opt-in it never
         // engages and `w q` / `w h` / `w l` do nothing here.
@@ -183,9 +183,10 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
         pagination: { mode: server, page_size: 50 }
         cursor_on_open: first_unread
         columns:
-          # ● unread, ↩ answered, ★ flagged, ✎ draft, 📎 has an attachment —
-          # in a fixed order, so the column does not jitter from row to row.
-          - { key: flags, label: "", sizing: "fixed(6)" }
+          # One slot per flag, always occupied, so the gutter reads downward:
+          # 📩 unread, ↩ answered, ⭐ flagged, 📝 draft, 📎 attachment.
+          # fixed(9) is the sum of the slots — the emoji are two cells wide.
+          - { key: flags, label: "", sizing: "fixed(9)" }
           - { key: from, label: From, sizing: "flex(1)" }
           # `source: label`, so a mail with an empty Subject header still has
           # a row to aim at: the label carries the `(no subject)` stand-in.
