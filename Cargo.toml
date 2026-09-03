@@ -28,6 +28,7 @@ members = [
   "not-yet-done-sqlite-adapter",
   "not-yet-done-confluence-adapter",
   "not-yet-done-stoat-adapter",
+  "not-yet-done-mail-adapter",
   "not-yet-done-local-adapter",
   "not-yet-done-workflow",
   "not-yet-done-calendar-core",
