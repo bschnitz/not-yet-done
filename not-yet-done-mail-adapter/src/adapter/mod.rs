@@ -20,6 +20,7 @@
 mod account;
 mod attachment;
 mod factory;
+mod files;
 mod folder;
 mod message;
 mod root;
@@ -702,11 +703,14 @@ impl ContentAdapter for MailAdapter {
         }
     }
 
-    /// Only the attachment level acts. Everything above it is a listing —
-    /// the write actions (seen, flag, move) arrive with phase 5.
+    /// Two levels act: an attachment can be opened or saved, and a message
+    /// can be exported for a viewer that shows more than a text pane can.
+    /// Everything above them is a listing — the write actions (seen, flag,
+    /// move) arrive with phase 5.
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
             "mail:attachment" => attachment::actions(),
+            "mail:message" => message::actions(),
             _ => Vec::new(),
         }
     }
@@ -777,7 +781,7 @@ impl ContentAdapter for MailAdapter {
 mod tests {
     use super::*;
     use crate::imap::testserver::{FakeServer, PASSWORD, scripted};
-    use not_yet_done_content::{ListParams, NodeSummary, NodeType, children};
+    use not_yet_done_content::{ActionInput, ActionOutcome, ListParams, NodeSummary, NodeType, children};
 
     /// A two-account instance against one fake server. The second account is
     /// deliberately never reached: it is what makes "opening one subtab must
@@ -1045,6 +1049,94 @@ accounts:
         );
     }
 
+    /// The export seam: everything an external viewer needs, in one
+    /// directory, from one call — the markup as the sender wrote it, the
+    /// image it points at, and the headers the envelope row has no room for.
+    #[tokio::test]
+    async fn a_message_exports_its_markup_and_the_images_it_points_at() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let mut node = adapter
+            .get_by_id("work/INBOX#42.9")
+            .await
+            .expect("resolves");
+        let outcome = node
+            .execute("export_html", ActionInput::None)
+            .await
+            .expect("exports");
+        let ActionOutcome::Done {
+            message: Some(message),
+        } = outcome
+        else {
+            panic!("an export says where it put the message");
+        };
+        let dir = std::path::PathBuf::from(
+            message
+                .split_once("exported message to ")
+                .expect("the path is in the message")
+                .1,
+        );
+
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("message.json")).expect("metadata"))
+                .expect("json");
+        assert_eq!(meta["html"], "message.html");
+        assert_eq!(meta["text"], serde_json::Value::Null, "no text alternative");
+        assert_eq!(meta["inline"], 1);
+        assert_eq!(meta["from"], "news@example.com");
+
+        let html = std::fs::read_to_string(dir.join("message.html")).expect("markup");
+        assert!(html.contains("<h1>Neues</h1>"), "the tags survive: {html}");
+        assert!(
+            !html.to_ascii_lowercase().contains("cid:"),
+            "the markup points at the file that was written: {html}"
+        );
+        let image = html
+            .split_once("src=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .expect("an image source")
+            .0;
+        assert_eq!(
+            std::fs::read(dir.join(image)).expect("the inline image"),
+            b"hello world"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A plain mail exports what it has and says what it has not — a viewer
+    /// must not have to tell "no HTML" from "the export broke".
+    #[tokio::test]
+    async fn a_plain_message_exports_text_and_no_markup() {
+        let server = FakeServer::start(scripted()).await;
+        let adapter = adapter_for(server.addr.port());
+        let mut node = adapter
+            .get_by_id("work/INBOX#42.4")
+            .await
+            .expect("resolves");
+        let ActionOutcome::Done {
+            message: Some(message),
+        } = node
+            .execute("export_html", ActionInput::None)
+            .await
+            .expect("exports")
+        else {
+            panic!("an export says where it put the message");
+        };
+        let dir = std::path::PathBuf::from(message.split_once("exported message to ").unwrap().1);
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("message.json")).unwrap()).unwrap();
+        assert_eq!(meta["html"], serde_json::Value::Null);
+        assert_eq!(meta["text"], "message.txt");
+        assert_eq!(meta["attachments"][0], "invoice.pdf");
+        assert!(!dir.join("message.html").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("message.txt")).unwrap(),
+            "Die Rechnung haengt an."
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A message with attachments names them in its header block, so a
     /// reader knows what is there before drilling in.
     #[tokio::test]
@@ -1160,9 +1252,15 @@ accounts:
             .map(|a| a.id)
             .collect();
         assert_eq!(ids, ["open", "download_all"]);
-        assert!(
-            adapter.actions_for_type(types::message_type()).is_empty(),
-            "the message level is read-only until phase 5"
+        let ids: Vec<String> = adapter
+            .actions_for_type(types::message_type())
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids, ["export_html"],
+            "a message can be handed to a viewer; the write actions (seen, \
+             flag, move) arrive with phase 5"
         );
     }
 
