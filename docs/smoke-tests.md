@@ -6912,8 +6912,10 @@ it never takes the focus away from the TUI, and that a hook firing on every row
 costs nothing while nobody is watching.
 
 Both are bound in `nyd.db` (`query_shortcut` / `script_hook`, scope
-`script:mail/mail:folder/mail:message`), and the TUI caches its shortcuts — a
-**restart** is part of the preparation.
+`script:mail/mail:folder/mail:message`), and the message level carries a
+`type: script` action (`x`) — without one there is no script scope at that
+level, so neither the shortcut nor the hook exists. The TUI caches its
+shortcuts, so a **restart** is part of the preparation.
 
 - [ ] **`o p` opens it**: on a message row a qutebrowser window comes up on the
       current workspace, titled `pandoc-preview/nyd-mail: <message key>`, with
@@ -6980,7 +6982,7 @@ also has `o s` / `o k` bound), then start the TUI.
       a config that moved it), never a hard-coded `f10`.
 - [ ] **The bar summarises, the log carries the detail**: the bottom bar shows
       one line per broken file (`<tab>: N configuration problem(s) — [key]
-  lists them`), not N lines. With `notifications.max_messages: 1` and two
+lists them`), not N lines. With `notifications.max_messages: 1` and two
       broken files, only the last summary is on the bar — and both files'
       problems are still in the log.
 - [ ] **The notification centre has them**: `f10` (or your binding) lists every
