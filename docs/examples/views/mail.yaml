@@ -72,7 +72,11 @@ views:
   # change an id in one and change it here too — a query naming an unknown
   # account is refused with the list of ids the instance actually holds.
   - name: Work
-    key: w
+    # Every subtab key here is a `t` chord, and with `window_ops: true`
+    # below that is no longer just tidiness: `w` is a leader in this tab
+    # now, so a subtab on a bare `w` would swallow `w q` and its
+    # siblings — and the validator says so rather than picking a winner.
+    key: "t w"
     default: true
     node_type: "mail:folder"
     query: { default: "account:work" }
@@ -84,6 +88,11 @@ views:
     tree_label: name
     unread_style: unread
     unread_marker: "●"
+    # The messages list opens as a pane beside the tree (see the
+    # `split:` below), so the `w` leader has something to operate on:
+    # `w q` closes the list, `w h` / `w l` move focus between the two.
+    # Without this opt-in `w` stays an ordinary letter.
+    window_ops: true
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }
       - { key: unread_count, label: Unread, kind: number, sizing: "fixed(7)" }
@@ -139,6 +148,20 @@ views:
         # folder REPLACES the list instead of stacking a third pane, and
         # closing the tree takes the list with it.
         split: { direction: right, ratio: 0.65, coupled: true }
+        # Backing out of the list CLOSES its pane instead of walking the
+        # pane one level up the folder tree. Walking up is what a
+        # standalone pane should do, but this pane is the tree's own list:
+        # one level up turns it into a second folder list beside the tree,
+        # and the next back descends from there. Closing gives the width
+        # back to the tree, which is where "back" means something here.
+        # `back: null` first: leaving it bound would mean two handlers on
+        # one key, with the chain quietly winning. Dropped here, the
+        # chain below is the only claim, and the validator agrees.
+        keybindings:
+          back: null
+        action_chains:
+          backspace: [window.close]
+          h: [window.close]
         # `>` / `<` page through the mailbox ON THE SERVER — the next page is
         # another window of the same search, not a slice of something already
         # downloaded. Drop `page_size` to take the account's own `page_size:`
@@ -263,12 +286,13 @@ views:
           - *messages
 
   - name: Bridged
-    key: b
+    key: "t b"
     node_type: "mail:folder"
     query: { default: "account:bridged" }
     tree_label: name
     unread_style: unread
     unread_marker: "●"
+    window_ops: true
     columns:
       - { key: name, label: Folder, source: label, sizing: "flex(1)" }
       - { key: unread_count, label: Unread, kind: number, sizing: "fixed(7)" }
@@ -292,10 +316,11 @@ views:
   # are listed. Useful for a shared mailbox that lives below one account, or
   # for keeping a noisy archive out of the way of the everyday view.
   - name: Club archive
-    # A subtab key must dodge the leader chords of its own tab: `c` would
-    # collide with `c c` (column config) and `c s` (sort menu), and the
-    # validator refuses the file rather than letting one of them win.
-    key: a
+    # On the `t` leader like the others: a bare subtab key has to dodge
+    # every leader chord of its own tab — `c` would collide with `c c`
+    # (column config) and `c s` (sort menu) — and the validator refuses
+    # the file rather than letting one of them win.
+    key: "t a"
     node_type: "mail:folder"
     query: { default: "account:club folder:Archive" }
     tree_label: name

@@ -116,6 +116,10 @@ pub(super) fn view_yaml(accounts: &[Account]) -> String {
             account.id
         ));
         s.push_str("    tree_label: name\n    unread_style: unread\n    unread_marker: \"●\"\n");
+        // The messages list opens as a pane beside the tree, so the `w`
+        // leader has panes to operate on. Without the opt-in it never
+        // engages and `w q` / `w h` / `w l` do nothing here.
+        s.push_str("    window_ops: true\n");
         if first {
             s.push_str(FIRST_SUBTAB_BODY);
         } else {
@@ -166,6 +170,16 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
         # makes that pane the tree's own: opening another folder replaces the
         # list instead of stacking a third pane.
         split: { direction: right, ratio: 0.65, coupled: true }
+        # Backing out of the list closes its pane rather than walking the
+        # pane up the folder tree: this pane is the tree's own list, so one
+        # level up would leave a second folder list beside the tree.
+        # `back: null` first: two handlers on one key would let the chain
+        # win quietly, and the validator flags exactly that.
+        keybindings:
+          back: null
+        action_chains:
+          backspace: [window.close]
+          h: [window.close]
         pagination: { mode: server, page_size: 50 }
         cursor_on_open: first_unread
         columns:
