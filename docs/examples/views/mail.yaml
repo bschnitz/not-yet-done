@@ -213,6 +213,14 @@ views:
           - { key: account, label: Account, sizing: "fixed(10)", hidden: true }
         actions:
           - { name: refresh, key: r, type: reload }
+          # Scripts. A level without this action can run none at all: the
+          # script scope — and with it every script shortcut and every
+          # script hook that could be bound here — exists only where a
+          # `type: script` action does. `x` opens the menu (`ctrl+s` runs
+          # the selected script, `ctrl+h` binds one to a hook); a script on
+          # the `row_change` hook is how an external preview follows the
+          # cursor from mail to mail.
+          - { name: script, key: x, type: script }
         # Reading the mail. The pane shows a short header block (From / To /
         # Subject / Date, plus an `Attachments:` line when there are any) over
         # the text — `text/plain` when the mail has one, otherwise the HTML
