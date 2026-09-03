@@ -95,6 +95,11 @@ pub enum Region {
     QueryError,
     /// One leaf of the active view's pane tree, inside its focus border.
     ContentPane(PaneId),
+    /// The configuration-error panel a broken view file draws instead of
+    /// its content. It registers for one reason only: without an entry here
+    /// a drag anchors nowhere, and the one text in the app a user most wants
+    /// to paste into a bug report is the one text they cannot select.
+    ConfigError,
     /// The builtin editor pane (a row band, not an overlay).
     Editor,
     NotificationBar,
@@ -574,6 +579,13 @@ fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -
         // does on a tab strip everywhere else.
         Some(Region::Tab(_) | Region::SubTab(_) | Region::TabBar) => {
             app.cycle_tab(forward);
+            EditorRequest::None
+        }
+        // The configuration-error panel scrolls on its own offset — it has no
+        // cursor and no rows, so the key path has nothing to fall back on.
+        Some(Region::ConfigError) => {
+            let rows = app.config.mouse.wheel_rows.max(1) as isize;
+            app.wheel_config_error(if forward { rows } else { -rows });
             EditorRequest::None
         }
         // Focus follows the wheel: scrolling a pane the keys would not reach

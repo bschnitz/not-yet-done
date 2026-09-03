@@ -132,15 +132,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             mouse::push(rows[row_idx], mouse::Region::QueryError);
             row_idx += 1;
         }
-        if let Some(cv) = app.content_view_mut(content_idx) {
+        if app.content_view(content_idx).is_some() {
             // The panes register themselves one level down, in
             // `PaneNode::render` — only it knows where a split put them.
-            cv.view(frame, rows[row_idx]);
+            if let Some(cv) = app.content_view_mut(content_idx) {
+                cv.view(frame, rows[row_idx]);
+            }
         } else {
-            // Broken content slot: show the configuration error
-            // panel in the content area (Phase 3 placeholder; final
-            // theming lives in `ui::content_error`).
-            crate::ui::content_error::render(frame, rows[row_idx], app, content_idx);
+            // Broken content slot: show the configuration error panel in
+            // the content area (theming lives in `ui::content_error`). It
+            // registers itself for the mouse so the error text can be
+            // dragged out and pasted somewhere useful, and hands back how
+            // far it may scroll — the key handler has no other way to know.
+            let panel = rows[row_idx];
+            let max = crate::ui::content_error::render(frame, panel, app, content_idx);
+            app.config_error_max_scroll = max;
+            app.config_error_scroll = app.config_error_scroll.min(max);
+            mouse::push(panel, mouse::Region::ConfigError);
         }
     }
 

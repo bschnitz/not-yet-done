@@ -604,7 +604,7 @@ fn truncate(text: &str, width: usize) -> String {
 /// Wrap on words, keeping explicit line breaks, and breaking mid-word when a
 /// word is wider than the line — an error message is full of URLs and paths
 /// that no word boundary would ever split.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     for raw in text.lines() {

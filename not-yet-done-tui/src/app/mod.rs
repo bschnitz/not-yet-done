@@ -1148,6 +1148,18 @@ pub struct App {
     /// both bars' logs on one page, with copy.
     pub notification_center: crate::components::notification_center::NotificationCenter,
 
+    /// First visible line of the configuration-error panel a broken view
+    /// file draws instead of its content. One field for all broken slots
+    /// rather than one per slot: switching tabs resets it, and two broken
+    /// files scrolled to different places is not a state anyone is keeping.
+    pub config_error_scroll: usize,
+
+    /// The furthest [`config_error_scroll`](Self::config_error_scroll) may
+    /// go, as the last render of that panel worked it out. Only the render
+    /// pass knows how wide the problems wrapped, so the key handler cannot
+    /// clamp without being told.
+    pub config_error_max_scroll: usize,
+
     /// Adapter credentials popup (login form for adapters that surface
     /// `AdapterStatus::NeedsCreds`).
     pub adapter_creds_popup: Option<crate::components::adapter_creds_popup::AdapterCredsPopup>,
@@ -1504,6 +1516,8 @@ impl App {
             adapter_factory_builder,
             host_ctx,
             event_rule_watcher_started: false,
+            config_error_scroll: 0,
+            config_error_max_scroll: 0,
         };
         // A duplicate tab name is a hard config error — show it up front
         // (the layout already fell back to legacy so the app still runs).
@@ -1526,6 +1540,10 @@ impl App {
         app.apply_key_groups();
 
         app.reload_link_refs();
+
+        // Broken view files draw their own panel, but only on their own tab.
+        // The log is what makes them readable from anywhere, and copyable.
+        app.log_broken_view_configs();
 
         app
     }
@@ -5450,6 +5468,12 @@ impl App {
                         return result;
                     }
                 }
+            } else if self.handle_config_error_key(key) {
+                // Broken slot: the error panel takes the handful of keys it
+                // owns. Everything else falls through, so `f10`, the tab
+                // digits and `:` keep working on a tab that has no view.
+                self.sync_components();
+                return EditorRequest::None;
             }
         }
 
@@ -8222,6 +8246,105 @@ impl App {
         self.open_session(Box::new(session))
     }
 
+    /// Keys the configuration-error panel owns.
+    ///
+    /// Deliberately a short list: the panel is not a mode, and a tab whose
+    /// view failed to load must still reach the tab switch, the command line
+    /// and the notification centre. Returns whether the key was taken.
+    fn handle_config_error_key(&mut self, key: &str) -> bool {
+        // A page is one screenful minus a line of overlap, so the last line
+        // read stays on screen. The panel's height is not known here, but the
+        // clamp the render pass leaves behind is.
+        let page = 10usize;
+        match key {
+            "down" | "j" => {
+                self.config_error_scroll =
+                    (self.config_error_scroll + 1).min(self.config_error_max_scroll);
+            }
+            "up" | "k" => self.config_error_scroll = self.config_error_scroll.saturating_sub(1),
+            "pagedown" | "ctrl+f" => {
+                self.config_error_scroll =
+                    (self.config_error_scroll + page).min(self.config_error_max_scroll);
+            }
+            "pageup" | "ctrl+b" => {
+                self.config_error_scroll = self.config_error_scroll.saturating_sub(page);
+            }
+            // `home`/`end` only: `g` is the prefix of the global link chords
+            // (`glm`, `glb`, …), and swallowing it here would make them
+            // unreachable on this tab.
+            "home" => self.config_error_scroll = 0,
+            "end" => self.config_error_scroll = self.config_error_max_scroll,
+            "y" => self.copy_config_errors(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Put every problem of the active broken tab on the clipboard.
+    ///
+    /// The panel exists to be quoted somewhere else — a commit message, an
+    /// issue, a message to whoever wrote the YAML — and a validator's wording
+    /// retyped by hand is a validator's wording changed by hand.
+    fn copy_config_errors(&mut self) {
+        let Tab::Content(idx) = self.active_tab;
+        let Some(text) = crate::ui::content_error::error_text(self, idx) else {
+            return;
+        };
+        let count = text.lines().filter(|l| l.trim_start().starts_with('\u{2022}')).count();
+        if crate::clipboard::copy(&text) {
+            self.notify(format!("Copied {count} problem(s)"));
+        } else {
+            self.notify_error("Could not reach the clipboard".to_string());
+        }
+    }
+
+    /// Scroll the configuration-error panel from the wheel.
+    #[cfg(feature = "mouse")]
+    pub(crate) fn wheel_config_error(&mut self, delta: isize) {
+        let next = self.config_error_scroll as isize + delta;
+        self.config_error_scroll = next.clamp(0, self.config_error_max_scroll as isize) as usize;
+    }
+
+    /// Put every broken view file's problems into the notification log.
+    ///
+    /// The panel shows them, but only on its own tab and only as far as the
+    /// terminal is tall. The log is where they become one scrollable,
+    /// filterable, copyable page (`f10`) that survives switching away — so
+    /// the errors are recorded silently, and the bar gets one line per file
+    /// saying how many there were and where to read them.
+    pub(crate) fn log_broken_view_configs(&mut self) {
+        let broken: Vec<(String, Vec<String>)> = self
+            .content_views
+            .iter()
+            .filter_map(|slot| match slot {
+                ContentSlot::Broken { name, errors, .. } => Some((name.clone(), errors.clone())),
+                ContentSlot::Working(_) => None,
+            })
+            .collect();
+        // Name the key the user actually bound, not the default: on a config
+        // that moved the centre to `z l`, pointing at `f10` would send them
+        // to a key that does nothing — which is the complaint that started
+        // this.
+        let centre = self
+            .keybindings
+            .global
+            .get(&GlobalAction::ShowNotifications)
+            .map(|b| b.display_label());
+        for (name, errors) in broken {
+            for err in &errors {
+                self.notification_bar.record_error(&format!("{name}: {err}"));
+            }
+            let where_to_read = match &centre {
+                Some(label) => format!(" \u{2014} {label} lists them"),
+                None => String::new(),
+            };
+            self.notify_error(format!(
+                "{name}: {} configuration problem(s){where_to_read}",
+                errors.len()
+            ));
+        }
+    }
+
     /// Open the notification centre: both bars' logs on one page, newest
     /// first, with per-message and whole-log copy. Opens even when nothing
     /// has been reported — the page says so, which is an answer too.
@@ -8272,6 +8395,10 @@ impl App {
     }
 
     fn set_active_tab(&mut self, tab: Tab) {
+        // The error panel's scroll belongs to the tab that was showing it.
+        if self.active_tab != tab {
+            self.config_error_scroll = 0;
+        }
         // Sort-hint mode is bound to the previously active view; cancel
         // on tab switch so we don't strand the user in a tab-mismatched
         // popup.
