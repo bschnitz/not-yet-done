@@ -6314,6 +6314,11 @@ point is a three-line wrapper that names a **profile**. `_lib` is a sibling of
 the `<tab>/<node_type>` folders, not a tab: script discovery only reads the one
 directory a level maps to, so it is never enumerated.
 
+Mail is not a profile of this engine. A message has no workspace and no
+Markdown, and its page follows the cursor — it has its own renderer,
+`_lib/nyd_mail_preview.py`, tested under "Mail: the message under the cursor in
+the browser".
+
 The profiles differ where the two trackers do:
 
 |                                    | `jira`                                                      | `taiga`                                                                 |
@@ -6907,9 +6912,15 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 
 Two scripts on the message level: `html_preview.py` on `o p` opens the preview,
 `preview_follow.py` on the `row_change` hook keeps it on the row the cursor
-rests on. The point of the test is that there is only ever **one** window, that
-it never takes the focus away from the TUI, and that a hook firing on every row
-costs nothing while nobody is watching.
+rests on. Both are wrappers around `_lib/nyd_mail_preview.py` — the mail
+renderer, **not** the pandoc engine the Jira and Taiga previews share. A
+message is no workspace item and its body is HTML, so nothing here goes through
+Markdown: the adapter's `export_html` writes the message to disk and the script
+builds the page itself.
+
+The point of the test is that there is only ever **one** window, that it never
+takes the focus away from the TUI, that a hook firing on every row costs
+nothing while nobody is watching, and that a mail cannot phone home.
 
 Both are bound in `nyd.db` (`query_shortcut` / `script_hook`, scope
 `script:mail/mail:folder/mail:message`), and the message level carries a
@@ -6918,13 +6929,28 @@ level, so neither the shortcut nor the hook exists. The TUI caches its
 shortcuts, so a **restart** is part of the preparation.
 
 - [ ] **`o p` opens it**: on a message row a qutebrowser window comes up on the
-      current workspace, titled `pandoc-preview/nyd-mail: <message key>`, with
-      the subject as the heading, From/To/Date as a field block above the text
-      and the attachment names listed when there are any.
-- [ ] **The text reads like mail**: single line breaks stay breaks, a quoted
-      passage is one block and the reply typed under it is **not** part of it,
-      a bare URL is a link, and the signature separator is still `--`, not an
-      en dash.
+      current workspace, titled `pandoc-preview/nyd-mail: <subject>`, with the
+      subject as the heading and From/To/Cc/Date as a field block above the
+      message; attachment names are listed when there are any.
+- [ ] **An HTML mail looks like the mail**: a newsletter or a reply from a web
+      client keeps its headings, emphasis, lists, tables and link colours — no
+      raw `<td>` markup in the text and no wall of unstyled lines. A link opens
+      in a new window.
+- [ ] **The sender's own images are there**: a mail carrying its logo or a
+      screenshot as an inline (`cid:`) part shows it, and the page is a single
+      file — those parts are embedded, not linked.
+- [ ] **Remote images stay off**: a mail pulling images off a server shows
+      placeholders and a bar saying how many were blocked and why. Press **Load
+      images** → they appear. Before that click nothing is fetched (the
+      browser's network log, or simply working offline, is the proof).
+      `NYD_MAIL_REMOTE_IMAGES=1` loads them from the start.
+- [ ] **Nothing in the mail runs**: an HTML mail carrying a `<script>`, an
+      `onclick=`, a `<style>` block, an `<iframe>` or a form renders as text and
+      layout only — no dialog, no request, no page of the sender's design.
+- [ ] **A plain-text mail reads like mail**: single line breaks stay breaks, a
+      quoted passage is coloured as a quote and the reply typed under it is
+      **not** part of it, a bare URL is a link — and `*asterisks*`, `#hash` and
+      `_underscores_` stay exactly as typed. This is no longer Markdown.
 - [ ] **The focus stays in the terminal**: the new window appears, the cursor
       keeps moving in the table without a click.
 - [ ] **The cursor pulls the page along**: `j` to the next message → after the
@@ -6947,9 +6973,11 @@ shortcuts, so a **restart** is part of the preparation.
       ours, and the page still updates, because the last `o p` counts as
       evidence too.
 - [ ] **A message read twice costs no login**: go back to a message you have
-      already previewed → the page updates from
-      `~/.local/share/not_yet_done/mail/<instance>/preview/bodies/<key>.md`,
-      the account is not touched again.
+      already previewed → the page is back at once, from
+      `~/.local/share/not_yet_done/mail/<instance>/preview/pages/<key>.html`,
+      with no CLI call and no touch of the account. A body cannot change under
+      its uid, so the cache is not a guess — `NYD_MAIL_PREVIEW_REFRESH=1`
+      renders again anyway.
 - [ ] **The settle delay is the one from the config**:
       `script.row_change_delay_ms: 1000` in `tui.yaml`, restart → the preview
       visibly waits a second after the cursor stops.
@@ -6959,6 +6987,13 @@ shortcuts, so a **restart** is part of the preparation.
       a page that cannot reload is not one to write into.
 - [ ] **It survives a dead browser**: kill qutebrowser, move the cursor → the
       hook returns silently; `o p` opens a fresh window.
+- [ ] **The message on disk is the adapter's**: headless,
+      `nyd adapter mail "<message id>" export_html` prints
+      `exported message to <dir>`, and that directory holds `message.json`
+      (written last, so a reader that waits for it never sees half a message),
+      `message.html` whose `cid:` references point into `inline/`, and
+      `message.txt`. A plain mail has no `message.html` and says so in the
+      JSON.
 
 ## A view file that does not load: reading and copying the problems
 
