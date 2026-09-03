@@ -26,6 +26,13 @@ pub(crate) enum MailError {
     /// Socket, TLS or protocol framing — the session is gone.
     #[error("{0}")]
     Transport(String),
+    /// The server never answered a command. Fatal to the session — a reply
+    /// that arrives after we stopped waiting would be read as the answer to
+    /// whatever we send next — but never worth repeating: a command that ran
+    /// out of time once takes just as long the second time, and the user has
+    /// already waited for it.
+    #[error("{0}")]
+    Timeout(String),
     /// The server answered `NO` or `BAD`. The session is still usable.
     #[error("{0}")]
     Server(String),
@@ -45,8 +52,23 @@ impl MailError {
     pub(crate) fn is_fatal(&self) -> bool {
         matches!(
             self,
-            MailError::Transport(_) | MailError::Auth(_) | MailError::Closed
+            MailError::Transport(_)
+                | MailError::Timeout(_)
+                | MailError::Auth(_)
+                | MailError::Closed
         )
+    }
+
+    /// Whether running the command again on a fresh session is worth it.
+    ///
+    /// Fatal and worth retrying are not the same question. A session the
+    /// server timed out answers the first question yes and the second one
+    /// too — that is the routine case the reconnect exists for. A command
+    /// that hit *our* deadline answers the first yes and the second no:
+    /// nothing about a new session makes a slow server fast, and repeating
+    /// it doubles the wait the user is already complaining about.
+    pub(crate) fn is_worth_retrying(&self) -> bool {
+        self.is_fatal() && !matches!(self, MailError::Timeout(_))
     }
 
     /// Whether the credentials themselves are suspect, i.e. resolving them
@@ -90,6 +112,17 @@ mod tests {
         assert!(classify(async_imap::error::Error::ConnectionLost).is_fatal());
         assert!(MailError::Auth("bad password".into()).is_fatal());
         assert!(!MailError::Config("no host".into()).is_fatal());
+    }
+
+    /// A deadline we set is fatal to the session — a late reply would be
+    /// read as the answer to the next command — but repeating it would only
+    /// make the user wait twice.
+    #[test]
+    fn a_timeout_costs_the_session_but_never_a_second_attempt() {
+        let timed_out = MailError::Timeout("Loading INBOX 1-50 got no answer in 60s".into());
+        assert!(timed_out.is_fatal());
+        assert!(!timed_out.is_worth_retrying());
+        assert!(MailError::Transport("connection lost".into()).is_worth_retrying());
     }
 
     #[test]

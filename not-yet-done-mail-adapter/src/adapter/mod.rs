@@ -29,6 +29,7 @@ mod types;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{OnceCell, RwLock, broadcast, watch};
@@ -39,7 +40,7 @@ use not_yet_done_content::{
     PageInfo, Result, StatusReporter, apply_sort,
 };
 
-use crate::config::{AccountConfig, MailConfig};
+use crate::config::{AccountConfig, DEFAULT_COMMAND_TIMEOUT_SECS, MailConfig};
 use crate::credentials::{AccountCredentials, LoginLane};
 use crate::error::MailError;
 use crate::ids::MessageId;
@@ -124,6 +125,9 @@ struct AccountRuntime {
     /// Built on first use — opening one account's subtab must not log into
     /// the other five.
     conn: OnceCell<Connection>,
+    /// The deadline every command on this account runs under, resolved once:
+    /// the account's own setting, else the instance's, else the default.
+    command_timeout: Duration,
 }
 
 pub struct MailAdapter {
@@ -170,6 +174,7 @@ impl MailAdapter {
         let (status_tx, status_rx) = watch::channel(AdapterStatus::Idle);
         let (inv_tx, _) = broadcast::channel(64);
 
+        let instance_timeout = cfg.command_timeout_secs;
         let mut order = Vec::new();
         let mut accounts = HashMap::new();
         for account in cfg.accounts {
@@ -182,6 +187,12 @@ impl MailAdapter {
                 Arc::clone(&lane),
             )
             .map_err(|e| format!("account `{}`: {e}", account.id))?;
+            let command_timeout = Duration::from_secs(
+                account
+                    .command_timeout_secs
+                    .or(instance_timeout)
+                    .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS),
+            );
             order.push(account.id.clone());
             accounts.insert(
                 account.id.clone(),
@@ -190,6 +201,7 @@ impl MailAdapter {
                     creds,
                     status,
                     conn: OnceCell::new(),
+                    command_timeout,
                 },
             );
         }
@@ -237,6 +249,7 @@ impl MailAdapter {
                     Arc::clone(&rt.cfg),
                     Arc::clone(&rt.creds),
                     rt.status.clone(),
+                    rt.command_timeout,
                 )
             })
             .await)

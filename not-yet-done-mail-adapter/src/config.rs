@@ -18,6 +18,15 @@ use not_yet_done_content::{AuthSpec, RetryConfig};
 /// How many messages one page holds when the view asks for no explicit window.
 pub(crate) const DEFAULT_PAGE_SIZE: u32 = 50;
 
+/// How long one IMAP command may take before the adapter gives up on it.
+///
+/// Generous, because a `SEARCH` over a mailbox of a hundred thousand messages
+/// on a busy server is slow but not broken. It exists for the other case: a
+/// connection that is neither answering nor closing, where without a deadline
+/// the actor waits forever — and, since IMAP runs one command at a time,
+/// takes the whole account's queue down with it.
+pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
+
 /// How the connection to the IMAP server is secured. Stated, never guessed
 /// from the port: a bridge on loopback speaks plain text on purpose, and
 /// silently "upgrading" it would break it rather than protect anyone.
@@ -61,6 +70,11 @@ pub struct MailConfig {
     /// Inherited by every account that names no `retry` of its own.
     #[serde(default)]
     pub(crate) retry: RetryConfig,
+    /// Seconds one IMAP command may take. `0` switches the deadline off —
+    /// for a server that is genuinely that slow, and at the price of a
+    /// stalled connection hanging the account's whole queue.
+    #[serde(default)]
+    pub(crate) command_timeout_secs: Option<u64>,
     /// Optional override for the backing store (envelope cache, phase 4).
     #[serde(default)]
     pub(crate) db: Option<DbConfig>,
@@ -108,6 +122,9 @@ pub struct AccountConfig {
     /// Per-account override of the instance's `retry`.
     #[serde(default)]
     pub(crate) retry: Option<RetryConfig>,
+    /// Per-account override of the instance's `command_timeout_secs`.
+    #[serde(default)]
+    pub(crate) command_timeout_secs: Option<u64>,
 }
 
 fn default_folder() -> String {

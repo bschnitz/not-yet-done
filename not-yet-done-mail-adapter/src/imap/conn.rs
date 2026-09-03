@@ -13,10 +13,17 @@
 //! idling followed by a folder switch is the normal case, not an error worth
 //! showing.
 //!
+//! Every command runs under a deadline. Not because a slow server is an
+//! error, but because a connection that neither answers nor closes would
+//! otherwise be waited on forever — and with one command at a time, that one
+//! request takes the account's whole queue with it. The wait the user sees is
+//! then bounded by what the config says, not by the TCP stack.
+//!
 //! Adding a command means: a function in [`super::ops`], a variant in
 //! [`Request`], one arm in [`Actor::serve`], and a method on [`Connection`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use not_yet_done_content::StatusReporter;
 use tokio::sync::{mpsc, oneshot};
@@ -98,12 +105,14 @@ impl Connection {
         account: Arc<AccountConfig>,
         creds: Arc<AccountCredentials>,
         status: StatusReporter,
+        command_timeout: Duration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let actor = Actor {
             account,
             creds,
             status,
+            command_timeout,
             session: None,
         };
         tokio::spawn(actor.run(rx));
@@ -234,7 +243,32 @@ struct Actor {
     /// account; the adapter merges the channels and only has to name it in
     /// the credential dialog's header, which the auth layer writes.
     status: StatusReporter,
+    /// How long one command may take. Zero means no deadline at all.
+    command_timeout: Duration,
     session: Option<SessionState>,
+}
+
+/// Run one command under the account's deadline.
+///
+/// The timeout drops the command's future mid-await, which leaves the session
+/// with a half-read response on the wire — so the error it returns is fatal
+/// and the session goes. What it is *not* is worth another attempt: see
+/// [`MailError::is_worth_retrying`].
+async fn under_deadline<T>(
+    limit: Duration,
+    label: &str,
+    call: impl std::future::Future<Output = MailResult<T>>,
+) -> MailResult<T> {
+    if limit.is_zero() {
+        return call.await;
+    }
+    match tokio::time::timeout(limit, call).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(MailError::Timeout(format!(
+            "{label}: no answer in {}s — giving up on this connection",
+            limit.as_secs()
+        ))),
+    }
 }
 
 /// Run one command against the account's session, with the lifecycle around
@@ -251,10 +285,14 @@ macro_rules! on_session {
                 Ok(v) => v,
                 Err(e) => break Err(e),
             };
-            let announced = $self.status.busy($label, 0);
+            let label = $label;
+            let limit = $self.command_timeout;
+            // The announcement names the deadline it runs under, so the
+            // banner counts towards something instead of just counting.
+            let announced = $self.status.busy(label.clone(), limit.as_secs());
             let outcome = {
                 let $s: &mut SessionState = &mut owned;
-                $call.await
+                under_deadline(limit, &label, $call).await
             };
             drop(announced);
             match outcome {
@@ -267,9 +305,10 @@ macro_rules! on_session {
                     if e.is_auth() {
                         $self.creds.invalidate().await;
                     }
-                    if fresh {
-                        // It failed on a session we had just built — trying
-                        // again would only repeat it.
+                    if fresh || !e.is_worth_retrying() {
+                        // Either it failed on a session we had just built, so
+                        // trying again would only repeat it — or it is the
+                        // kind of failure a new session does not cure.
                         $self.status.failed(e.to_string());
                         break Err(e);
                     }
@@ -482,6 +521,7 @@ mod tests {
             auth: literal_auth(password),
             page_size: None,
             retry: None,
+            command_timeout_secs: None,
         })
     }
 
@@ -517,6 +557,15 @@ mod tests {
     fn connection(
         account: Arc<AccountConfig>,
     ) -> (Connection, StatusReporter, watch::Receiver<AdapterStatus>) {
+        connection_with_timeout(account, Duration::from_secs(60))
+    }
+
+    /// The same, with an explicit deadline — for the tests that are about
+    /// the deadline itself.
+    fn connection_with_timeout(
+        account: Arc<AccountConfig>,
+        command_timeout: Duration,
+    ) -> (Connection, StatusReporter, watch::Receiver<AdapterStatus>) {
         let status = StatusReporter::new();
         let watching = status.subscribe();
         let creds = AccountCredentials::new(
@@ -527,7 +576,7 @@ mod tests {
         )
         .expect("spec is valid");
         (
-            Connection::spawn(Arc::clone(&account), creds, status.clone()),
+            Connection::spawn(Arc::clone(&account), creds, status.clone(), command_timeout),
             status,
             watching,
         )
@@ -581,6 +630,64 @@ mod tests {
             !matches!(status.current(), AdapterStatus::Failed { .. }),
             "a recovered timeout is not a failure the user should see"
         );
+    }
+
+    /// A server that answers nothing and closes nothing is the case the
+    /// deadline exists for: without one the actor waits forever, and because
+    /// IMAP runs one command at a time, so does everything queued behind it.
+    #[tokio::test]
+    async fn a_mute_server_costs_the_deadline_and_not_the_session_forever() {
+        let server = FakeServer::start(Script {
+            // LOGIN is command 1, the first CAPABILITY command 2; the second
+            // CAPABILITY (command 3) is read and never answered.
+            stall_at: Some(3),
+            ..scripted()
+        })
+        .await;
+        let (conn, status, _watching) = connection_with_timeout(
+            account(server.addr.port(), PASSWORD),
+            Duration::from_millis(200),
+        );
+        conn.capabilities().await.expect("first request");
+
+        let started = std::time::Instant::now();
+        let err = conn.capabilities().await.expect_err("nothing ever answers");
+        assert!(
+            matches!(err, MailError::Timeout(_)),
+            "a silent server is a timeout, not a lost connection: {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait is bounded by the deadline, not by the network stack"
+        );
+        // The reconnect exists for a session the *server* ended. Repeating a
+        // command that ran out of time would only make the user wait twice.
+        assert_eq!(server.connections(), 1, "a deadline is not worth a retry");
+        assert!(
+            matches!(status.current(), AdapterStatus::Failed { .. }),
+            "the user is told why the request stopped"
+        );
+    }
+
+    /// The queue behind a stalled request must drain too: the deadline frees
+    /// the actor, so the next request gets a fresh session and an answer.
+    #[tokio::test]
+    async fn the_queue_behind_a_stall_still_gets_served() {
+        let server = FakeServer::start(Script {
+            stall_at: Some(3),
+            ..scripted()
+        })
+        .await;
+        let (conn, _status, _watching) = connection_with_timeout(
+            account(server.addr.port(), PASSWORD),
+            Duration::from_millis(200),
+        );
+        conn.capabilities().await.expect("first request");
+        conn.capabilities().await.expect_err("runs into the deadline");
+
+        let caps = conn.capabilities().await.expect("the account is usable again");
+        assert!(caps.iter().any(|c| c == "IMAP4rev1"), "{caps:?}");
+        assert_eq!(server.connections(), 2, "the stalled session was thrown away");
     }
 
     /// A refused password must surface as an auth error — that is what makes
