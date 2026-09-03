@@ -22,10 +22,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use not_yet_done_content::{
-    AdapterStatus, AuthOrchestrator, AuthSpec, InMemorySessionStore, StatusReporter,
-};
-use tokio::sync::{Mutex, MutexGuard, RwLock, watch};
+use not_yet_done_content::{AuthOrchestrator, AuthSpec, InMemorySessionStore, StatusReporter};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{MailError, MailResult};
 
@@ -102,17 +100,6 @@ impl AccountCredentials {
             orchestrator: Arc::new(orchestrator),
             lane,
         }))
-    }
-
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// This account's own status stream — `NeedsCreds` while its dialog is
-    /// up. The adapter merges these onto the instance channel, naming the
-    /// account as it goes.
-    pub(crate) fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
-        self.orchestrator.subscribe_status()
     }
 
     /// Every field of the account's `auth:` block, resolved. Cached, so the

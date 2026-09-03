@@ -89,6 +89,10 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
         not_yet_done_content::typed(not_yet_done_stoat_adapter::StoatAdapterFactory::new()),
     );
     factories.insert(
+        "mail".to_string(),
+        not_yet_done_content::typed(not_yet_done_mail_adapter::MailAdapterFactory::new()),
+    );
+    factories.insert(
         "tasks".to_string(),
         not_yet_done_content::typed(not_yet_done_local_adapter::TaskAdapterFactory::new()),
     );

@@ -4333,6 +4333,7 @@ dependencies = [
  "not-yet-done-jira-adapter",
  "not-yet-done-kimai-adapter",
  "not-yet-done-local-adapter",
+ "not-yet-done-mail-adapter",
  "not-yet-done-postgres-adapter",
  "not-yet-done-scripts",
  "not-yet-done-sqlite-adapter",

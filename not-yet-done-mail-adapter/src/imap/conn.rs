@@ -26,6 +26,7 @@ use super::ops;
 use crate::config::AccountConfig;
 use crate::credentials::AccountCredentials;
 use crate::error::{MailError, MailResult};
+use crate::model::FolderInfo;
 
 /// How many requests may queue up before the caller waits. Deep enough that
 /// a burst of view loads never blocks, shallow enough to notice a stall.
@@ -36,6 +37,15 @@ pub(crate) enum Request {
     /// Make sure the account is logged in, and report what the server can do.
     Capabilities {
         reply: oneshot::Sender<MailResult<Vec<String>>>,
+    },
+    /// Every mailbox the account has, minus the ones its config excludes.
+    Folders {
+        reply: oneshot::Sender<MailResult<Vec<FolderInfo>>>,
+    },
+    /// Message and unread counts for one mailbox.
+    FolderStatus {
+        path: String,
+        reply: oneshot::Sender<MailResult<(u32, u32)>>,
     },
     /// Log out and drop the session. The actor stays alive: the next request
     /// connects again.
@@ -72,6 +82,21 @@ impl Connection {
     /// Connect if necessary and hand back the server's capability list.
     pub(crate) async fn capabilities(&self) -> MailResult<Vec<String>> {
         self.ask(|reply| Request::Capabilities { reply }).await
+    }
+
+    /// The account's folder tree, already ordered and filtered.
+    pub(crate) async fn folders(&self) -> MailResult<Vec<FolderInfo>> {
+        self.ask(|reply| Request::Folders { reply }).await
+    }
+
+    /// `(total, unread)` for one mailbox. Separate from [`Connection::folders`]
+    /// because `STATUS` costs a round trip *per folder* — some servers open
+    /// the mailbox internally to answer it — so the counts are fetched for the
+    /// folders that are actually on screen, not for all two hundred.
+    pub(crate) async fn folder_status(&self, path: &str) -> MailResult<(u32, u32)> {
+        let path = path.to_string();
+        self.ask(|reply| Request::FolderStatus { path, reply })
+            .await
     }
 
     /// Drop the session (a manual reconnect, or a tab being put away).
@@ -168,6 +193,25 @@ impl Actor {
                 });
                 let _ = reply.send(out);
             }
+            Request::Folders { reply } => {
+                let out = on_session!(self, self.label("Listing folders"), |s| {
+                    ops::list_folders(s)
+                });
+                let excluded = &self.account.exclude_folders;
+                let out = out.map(|folders| {
+                    folders
+                        .into_iter()
+                        .filter(|f| !f.is_excluded(excluded))
+                        .collect()
+                });
+                let _ = reply.send(out);
+            }
+            Request::FolderStatus { path, reply } => {
+                let out = on_session!(self, self.label(&format!("Reading {path}")), |s| {
+                    ops::folder_status(s, &path)
+                });
+                let _ = reply.send(out);
+            }
             Request::Disconnect { reply } => {
                 self.close().await;
                 let _ = reply.send(Ok(()));
@@ -243,15 +287,17 @@ mod tests {
     use super::*;
     use crate::config::Security;
     use crate::credentials::LoginLane;
-    use crate::imap::testserver::{FakeServer, Script};
+    use crate::imap::testserver::{FakeServer, PASSWORD, Script, scripted};
     use not_yet_done_content::{
         AdapterStatus, AuthSpec, CredentialBinding, CredentialProvider, SessionCachePolicy,
     };
     use tokio::sync::watch;
 
-    const PASSWORD: &str = "right";
-
     fn account(port: u16, password: &str) -> Arc<AccountConfig> {
+        account_excluding(port, password, &[])
+    }
+
+    fn account_excluding(port: u16, password: &str, exclude: &[&str]) -> Arc<AccountConfig> {
         Arc::new(AccountConfig {
             id: "work".into(),
             name: Some("Work".into()),
@@ -261,7 +307,7 @@ mod tests {
             security: Security::None,
             accept_invalid_certs: false,
             default_folder: "INBOX".into(),
-            exclude_folders: Vec::new(),
+            exclude_folders: exclude.iter().map(|s| s.to_string()).collect(),
             auth: literal_auth(password),
             page_size: None,
             retry: None,
@@ -320,11 +366,7 @@ mod tests {
     /// accounts in one instance are affordable at all.
     #[tokio::test]
     async fn nothing_connects_until_a_request_arrives() {
-        let server = FakeServer::start(Script {
-            password: PASSWORD,
-            hang_up_after: None,
-        })
-        .await;
+        let server = FakeServer::start(scripted()).await;
         let (conn, status, _watching) = connection(account(server.addr.port(), PASSWORD));
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_eq!(server.connections(), 0, "spawning must not log in");
@@ -339,11 +381,7 @@ mod tests {
     /// The session is kept: a second request must not log in again.
     #[tokio::test]
     async fn the_session_is_reused() {
-        let server = FakeServer::start(Script {
-            password: PASSWORD,
-            hang_up_after: None,
-        })
-        .await;
+        let server = FakeServer::start(scripted()).await;
         let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
         conn.capabilities().await.expect("first");
         conn.capabilities().await.expect("second");
@@ -356,10 +394,10 @@ mod tests {
     #[tokio::test]
     async fn a_dead_session_costs_one_reconnect_not_the_request() {
         let server = FakeServer::start(Script {
-            password: PASSWORD,
             // LOGIN is command 1, the first CAPABILITY command 2; the second
             // CAPABILITY (command 3) meets a server that has gone away.
             hang_up_after: Some(3),
+            ..scripted()
         })
         .await;
         let (conn, status, _watching) = connection(account(server.addr.port(), PASSWORD));
@@ -378,11 +416,7 @@ mod tests {
     /// the adapter drop the credential and ask again rather than replay it.
     #[tokio::test]
     async fn a_refused_password_is_an_auth_error() {
-        let server = FakeServer::start(Script {
-            password: PASSWORD,
-            hang_up_after: None,
-        })
-        .await;
+        let server = FakeServer::start(scripted()).await;
         let (conn, status, _watching) = connection(account(server.addr.port(), "wrong"));
         let err = conn.capabilities().await.expect_err("the server says no");
         assert!(err.is_auth(), "{err}");
@@ -395,15 +429,80 @@ mod tests {
         }
     }
 
+    /// The folder list is what the tree is built from: decoded labels,
+    /// `INBOX` first, and `\\Noselect` parents kept as rows but marked, since
+    /// selecting one is an error.
+    #[tokio::test]
+    async fn folders_come_back_decoded_and_in_display_order() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let folders = conn.folders().await.expect("lists");
+        let paths: Vec<&str> = folders.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "INBOX",
+                "Archive",
+                "Archive/2019",
+                "Entw&APw-rfe",
+                "Sent Items"
+            ]
+        );
+        let labels: Vec<&str> = folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["INBOX", "Archive", "2019", "Entwürfe", "Sent Items"],
+            "the label is decoded and stripped to its last segment"
+        );
+        assert!(!folders[1].selectable, "Archive is \\Noselect");
+        assert_eq!(folders[2].parent_path(), Some("Archive"));
+    }
+
+    /// `exclude_folders` is what keeps a server-side archive of hundreds of
+    /// folders out of the tree — and it hides the subtree, not just its root.
+    #[tokio::test]
+    async fn excluded_folders_never_reach_the_caller() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account_excluding(
+            server.addr.port(),
+            PASSWORD,
+            &["Archive/*", "Sent Items"],
+        ));
+
+        let folders = conn.folders().await.expect("lists");
+        let paths: Vec<&str> = folders.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["INBOX", "Entw&APw-rfe"]);
+    }
+
+    /// Counts come from `STATUS`, where `unseen` is the *number* of unread
+    /// messages — and the mailbox name has to reach the server quoted, or a
+    /// folder with a space in its name is simply unreadable.
+    #[tokio::test]
+    async fn status_reports_total_and_unread_for_a_named_mailbox() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        assert_eq!(conn.folder_status("INBOX").await.expect("INBOX"), (12, 3));
+        assert_eq!(
+            conn.folder_status("Sent Items").await.expect("quoted name"),
+            (7, 0)
+        );
+        let err = conn
+            .folder_status("Nope")
+            .await
+            .expect_err("no such mailbox");
+        assert!(
+            !err.is_fatal(),
+            "a refused command must not cost the session: {err}"
+        );
+    }
+
     /// `disconnect` really ends the session; the next request builds a new
     /// one. This is the manual-reconnect path.
     #[tokio::test]
     async fn disconnect_ends_the_session_and_the_next_request_rebuilds_it() {
-        let server = FakeServer::start(Script {
-            password: PASSWORD,
-            hang_up_after: None,
-        })
-        .await;
+        let server = FakeServer::start(scripted()).await;
         let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
         conn.capabilities().await.expect("first");
         conn.disconnect().await.expect("logs out");

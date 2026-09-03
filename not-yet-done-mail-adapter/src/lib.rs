@@ -30,4 +30,5 @@ pub(crate) mod imap;
 pub(crate) mod model;
 pub(crate) mod mutf7;
 
+pub use adapter::{MailAdapter, MailAdapterFactory};
 pub use config::MailConfig;
