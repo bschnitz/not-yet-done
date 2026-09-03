@@ -1714,11 +1714,12 @@ under one instance); what is new is that an account's credentials are an
 ordinary `auth:` block, so `nyd config auth mail` describes them and every
 credential provider works per account.
 
-> **Status: Phase 2a (folders + messages).** The folder tree of each account is
+> **Status: reading works end to end.** The folder tree of each account is
 > browsable — `LIST` for the hierarchy, `STATUS` for the unread/total counts,
 > mailbox names decoded from IMAP's modified UTF-7 (`Entw&APw-rfe` reads as
-> `Entwürfe`) — and a folder opens its messages as envelope rows. Reading a
-> message BODY, its preview and its attachments arrive in phase 2b; see
+> `Entwürfe`) — a folder opens its messages as envelope rows, `p` shows a
+> message, and a mail carrying files drills into them. Writing (marking read,
+> flagging, moving, sending) is the next phase; see
 > [`docs/plan-mail-adapter.md`](docs/plan-mail-adapter.md) for the phase cut.
 
 ### Subtabs are accounts
@@ -1815,6 +1816,56 @@ Both are usually sourced through one script run per account (the `pass`
 route the Taiga/Kimai/Postgres adapters already use), so a locked store asks
 for its passphrase through the TUI instead of opening its own pinentry window
 somewhere off-screen.
+
+### Importing from Thunderbird
+
+Writing six accounts out by hand is the boring half of setting this up, and
+Thunderbird already knows every answer — which host, which port, which socket
+type, and above all which **login name**, the one field that is not derivable
+from the address. So it can be read instead:
+
+```sh
+nyd config import-thunderbird              # write both files into views/
+nyd config import-thunderbird --stdout     # print them and touch nothing
+```
+
+It reads one profile's `prefs.js` and writes the pair described above:
+`mail-adapter.yaml` with an entry per IMAP account, and `mail.yaml` with one
+subtab per account, bound to it by `account:<id>`. Both files keep the
+comments explaining what was decided; the view file shares one definition of
+the levels through YAML anchors, so a column or a keybinding is changed once
+rather than once per mailbox.
+
+| Flag                | Meaning                                                                                                                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--profile <dir>`   | The profile directory (or a `prefs.js` outright). Default: the profile Thunderbird actually runs — `installs.ini` first, because a profile marked default in `profiles.ini` can be a leftover that has not been opened in years. Flatpak's location is searched too. |
+| `--pass-prefix <p>` | The store prefix the guessed password paths are built under. Default `mail`.                                                                                                                                                                                         |
+| `--out-dir <dir>`   | Write somewhere other than `~/.config/not_yet_done/views/`.                                                                                                                                                                                                          |
+| `--stdout`          | Print both files instead of writing them.                                                                                                                                                                                                                            |
+| `--force`           | Overwrite existing files. Without it an existing config is left alone.                                                                                                                                                                                               |
+
+**No password is read, and none is written.** Thunderbird keeps its passwords
+in an NSS-encrypted store (`logins.json` + `key4.db`); decrypting it would mean
+linking NSS for a one-time convenience and would copy every password into a
+second place on disk. Each account instead gets a `pass_credentials.py` block
+whose store path is a **guess** — `<prefix>/<account id>/pass` — and the
+command prints every guess it made, so a wrong one reads as a line to fix
+rather than as a mysterious login failure.
+
+Three things it tells you rather than silently deciding:
+
+- an account Thunderbird signs in with **OAuth2** (Gmail, most Microsoft
+  tenants) — this adapter logs in with a password, so the store needs an **app
+  password** for it;
+- a **login name that is not the address**, which several German providers
+  use and which is the single likeliest cause of a login that "should" work;
+- a mailbox reached over **POP3**, which this adapter cannot take over at all.
+
+Ids are derived from the account's domain (`ada@example.org` → `example-org`),
+not from the host: two mailboxes behind one local Exchange bridge share a host
+and a port, and an id taken from `127.0.0.1` would collide on the one field
+that must not. Rename them freely — but an id lives in **both** files, as
+`id:` and as `account:<id>`, so rename it in both or in neither.
 
 ## Waybar Integration
 

@@ -260,6 +260,9 @@ pub fn expand(template: &[String], user_args: &[String]) -> Result<Vec<String>> 
 ///   [`crate::config_template::run_build`]).
 /// * `auth` — list the auth mechanisms an adapter type implements and the
 ///   fields each one needs (see [`crate::config_auth`]).
+/// * `import-thunderbird` — read a Thunderbird profile's `prefs.js` and write
+///   a mail adapter config plus a view with one subtab per account (see
+///   [`crate::thunderbird`]). No password is read or written.
 pub fn run_config(args: &[String]) -> Result<()> {
     // args = ["nyd", "config", <sub?>, <target?>]
     let sub = args.get(2).map(String::as_str).unwrap_or("edit");
@@ -269,8 +272,9 @@ pub fn run_config(args: &[String]) -> Result<()> {
         "template" | "tpl" => crate::config_template::run(args),
         "build" | "new" => crate::config_template::run_build(args),
         "auth" => crate::config_auth::run(args),
+        "import-thunderbird" | "import-tb" => crate::thunderbird::run(args),
         other => Err(anyhow!(
-            "unknown config subcommand '{other}' (use `edit`, `generate`, `template`, `build`, or `auth`)"
+            "unknown config subcommand '{other}' (use `edit`, `generate`, `template`, `build`, `auth`, or `import-thunderbird`)"
         )),
     }
 }
