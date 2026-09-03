@@ -202,6 +202,17 @@ impl NotificationBarComponent {
         self.messages.retain(|n| n.key.as_deref() != Some(key));
     }
 
+    /// Put a message in the log without showing it on the bar.
+    ///
+    /// For a report that is already on screen in full — a broken view file
+    /// draws its own error panel — but must still be reachable afterwards in
+    /// the notification centre, where it can be scrolled, filtered and
+    /// copied. Pushing twenty-four of them onto the bar instead would bury
+    /// every other message the session has.
+    pub fn record_error(&mut self, msg: &str) {
+        self.log(msg, NoticeLevel::Error);
+    }
+
     fn log(&mut self, msg: &str, level: NoticeLevel) {
         self.history.push(NotificationRecord {
             at: chrono::Local::now(),
@@ -453,6 +464,23 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| bar.view(f, f.area())).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// A broken view file reports two dozen problems and already draws them
+    /// all on its own tab. They belong in the log — so `f10` can scroll and
+    /// copy them — but not on the bar, which would show nothing else.
+    #[test]
+    fn a_recorded_error_reaches_the_log_but_not_the_bar() {
+        let mut bar = NotificationBarComponent::new(theme());
+        bar.record_error("views.Mail: key [\"o s\"] is claimed twice");
+        assert!(!bar.is_visible(), "the bar should stay empty");
+        assert_eq!(bar.history().len(), 1);
+        assert_eq!(bar.history()[0].level, NoticeLevel::Error);
+
+        // A dismiss wipes the bar, never the log.
+        bar.push("something else".into());
+        bar.clear();
+        assert_eq!(bar.history().len(), 2);
     }
 
     #[test]

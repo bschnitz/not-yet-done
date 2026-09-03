@@ -310,6 +310,9 @@ impl App {
         // wiring startup applies, otherwise rebinding a key leaves every tab
         // empty and half-wired until the next restart.
         self.wire_content_views();
+        // Same reload, same broken files: whatever failed to load now says so
+        // in the notification log too, not only on its own tab.
+        self.log_broken_view_configs();
 
         // Rebuilding the views re-reads every `views/*.yaml`, so this is
         // also the moment their unknown keys resurface.
@@ -504,6 +507,7 @@ impl App {
         // Rebuilt views are bare — re-run the startup wiring (see
         // `reload_tui_config`).
         self.wire_content_views();
+        self.log_broken_view_configs();
 
         if warnings.is_empty() {
             Ok("All content views reloaded".to_string())

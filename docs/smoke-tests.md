@@ -6809,7 +6809,7 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 ### Importing from Thunderbird (phase 3)
 
 - [ ] **It finds the right profile**: run `nyd config import-thunderbird
-    --stdout` with no flags → the accounts printed are the ones Thunderbird
+  --stdout` with no flags → the accounts printed are the ones Thunderbird
       shows, not an older profile's. On a machine with several profiles, check
       that the one named in `installs.ini` won.
 - [ ] **Every IMAP account arrives**: the count matches Thunderbird's account
@@ -6832,12 +6832,53 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 - [ ] **The output actually loads**: point `XDG_CONFIG_HOME` at a scratch
       directory holding the two generated files and start the TUI → the Mail
       tab comes up with one subtab per account, and `nyd adapter mail help
-    --full` prints the levels without connecting.
+  --full` prints the levels without connecting.
 - [ ] **The guessed paths are printed**: every account's `<prefix>/<id>/pass`
       appears in the summary, marked as a guess. `--pass-prefix` changes all of
       them.
 - [ ] **A POP3 account is named, not dropped**: if the profile has one, it is
       listed under "not imported" with the reason.
+
+## A view file that does not load: reading and copying the problems
+
+A broken `views/*.yaml` keeps its tab and draws a configuration-error panel
+instead of its content. One duplicate key in a shared YAML anchor is reported
+once per subtab that uses it, so the list is routinely longer than the
+terminal — these points are about getting all of it out of the app.
+
+Set up by breaking one view file on purpose: give an action on a child level a
+bare key that a global chord already claims (`key: o` under a level whose tab
+also has `o s` / `o k` bound), then start the TUI.
+
+- [ ] **The tab is still there**: the broken file's tab appears (last, without
+      its icon) and opens the error panel with the file path and the count.
+- [ ] **The list scrolls**: `↓`/`j`, `PageDown`, `End` walk down it, `↑`/`k`,
+      `PageUp`, `Home` back up. The bottom row says how many problems are
+      still below, and stops saying it at the end.
+- [ ] **The wheel scrolls it too**, by `mouse.wheel_rows` a notch.
+- [ ] **A drag selects**: pressing and dragging over the panel highlights the
+      text and copies it on release; a double click takes the word, a triple
+      the line. (Before this the panel was in no mouse region at all, so a
+      drag anchored nowhere and nothing could be selected.)
+- [ ] **`y` copies everything**: the clipboard holds the file path, the count
+      and every problem — including the ones off the bottom of the screen —
+      and the bar confirms how many.
+- [ ] **The hint row names the real key**: it says whatever
+      `global.show_notifications` is bound to (`[f10]` by default, `[z l]` on
+      a config that moved it), never a hard-coded `f10`.
+- [ ] **The bar summarises, the log carries the detail**: the bottom bar shows
+      one line per broken file (`<tab>: N configuration problem(s) — [key]
+    lists them`), not N lines. With `notifications.max_messages: 1` and two
+      broken files, only the last summary is on the bar — and both files'
+      problems are still in the log.
+- [ ] **The notification centre has them**: `f10` (or your binding) lists every
+      problem, `e` narrows to errors, `y` copies the one under the cursor, `Y`
+      the whole log, `o` hands it to `$EDITOR`.
+- [ ] **The panel is not a mode**: on the broken tab the digits still switch
+      tabs, `:` still opens the command line, and the `g…` link chords still
+      resolve.
+- [ ] **A reload re-reports**: `:config` → save a still-broken file → the
+      summary and the log entries appear again.
 
 ## Refinements / deferred tasks
 
