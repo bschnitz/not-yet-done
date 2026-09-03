@@ -46,7 +46,7 @@
 tab:
   name: Mail
   order: 8
-  icon: "📧"
+  icon: "✉️"
   # While any folder in this view holds unread mail, the tab bar prefixes the
   # label with this marker and emphasises it — the only cue a *background*
   # mail tab can give. Both keys are optional (marker falls back to the view's
