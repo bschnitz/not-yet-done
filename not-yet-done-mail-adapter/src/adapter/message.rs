@@ -10,9 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
-    ColumnSchema, Content, Metadata, Node, NodeSummary, NodeType, Result,
-};
+use not_yet_done_content::{ColumnSchema, Content, Metadata, Node, NodeSummary, NodeType, Result};
 
 use super::field;
 use super::types::message_type;
@@ -20,13 +18,46 @@ use crate::ids::MessageId;
 use crate::imap::conn::Connection;
 use crate::model::EnvelopeRow;
 
-/// What the flags column shows. Three glyphs, in the order a mail client
-/// reads them: is it new, did I answer it, did I mark it.
-const UNREAD: &str = "●";
-const ANSWERED: &str = "↩";
-const FLAGGED: &str = "★";
-const DRAFT: &str = "✎";
-const ATTACHED: &str = "📎";
+/// One slot of the flags column: the glyph, and the blank that stands in
+/// for it when a message does not carry that flag.
+///
+/// The blank is written out rather than measured because the glyphs are not
+/// all the same width — an emoji takes two terminal cells, `↩` takes one
+/// — and spelling it out forces a glyph swap to state the width it needs.
+#[derive(Clone, Copy)]
+struct Flag {
+    glyph: &'static str,
+    blank: &'static str,
+}
+
+/// What the flags column shows, in the order a mail client reads them: is it
+/// new, did I answer it, did I mark it, is it mine and unsent, does it carry
+/// files.
+const UNREAD: Flag = Flag {
+    glyph: "📩",
+    blank: "  ",
+};
+const ANSWERED: Flag = Flag {
+    glyph: "↩",
+    blank: " ",
+};
+const FLAGGED: Flag = Flag {
+    glyph: "⭐",
+    blank: "  ",
+};
+const DRAFT: Flag = Flag {
+    glyph: "📝",
+    blank: "  ",
+};
+const ATTACHED: Flag = Flag {
+    glyph: "📎",
+    blank: "  ",
+};
+
+/// Combined display width of the five slots. This is what `sizing:` has to
+/// be in the view file; nothing derives one from the other across crates, so
+/// the number is asserted here and repeated there as `fixed(9)`.
+const FLAGS_WIDTH: usize = 9;
 
 pub(super) fn columns() -> Vec<ColumnSchema> {
     vec![
@@ -41,25 +72,26 @@ pub(super) fn columns() -> Vec<ColumnSchema> {
     ]
 }
 
-/// The flag glyphs of one message, in a fixed order so the column stays a
-/// column and does not jitter from row to row.
+/// The one cell a slot contributes: its glyph when the flag is set, its
+/// blank when it is not.
+fn slot(flag: Flag, present: bool) -> &'static str {
+    if present { flag.glyph } else { flag.blank }
+}
+
+/// The flag glyphs of one message — every slot always occupied, by its glyph
+/// or by its blank.
+///
+/// Packing the glyphs to the left instead would keep the *order* fixed while
+/// letting the *positions* move: a mail whose only flag is an attachment
+/// would put its 📎 exactly where the row above carries its unread
+/// marker, and the gutter could no longer be read as a column.
 fn glyphs(row: &EnvelopeRow) -> String {
     let mut out = String::new();
-    if !row.seen {
-        out.push_str(UNREAD);
-    }
-    if row.answered {
-        out.push_str(ANSWERED);
-    }
-    if row.flagged {
-        out.push_str(FLAGGED);
-    }
-    if row.draft {
-        out.push_str(DRAFT);
-    }
-    if !row.attachments.is_empty() {
-        out.push_str(ATTACHED);
-    }
+    out.push_str(slot(UNREAD, !row.seen));
+    out.push_str(slot(ANSWERED, row.answered));
+    out.push_str(slot(FLAGGED, row.flagged));
+    out.push_str(slot(DRAFT, row.draft));
+    out.push_str(slot(ATTACHED, !row.attachments.is_empty()));
     out
 }
 
@@ -86,7 +118,11 @@ pub(super) fn metadata_of(account: &str, row: &EnvelopeRow) -> Metadata {
             // unread mail lights up with no frontend work.
             field(
                 "unread",
-                if row.seen { String::new() } else { "true".into() },
+                if row.seen {
+                    String::new()
+                } else {
+                    "true".into()
+                },
                 "Unread",
             ),
         ],
@@ -190,7 +226,11 @@ fn header_block(row: &EnvelopeRow) -> String {
         out.push_str(&format!("Date: {}\n", date.to_rfc2822()));
     }
     if !row.attachments.is_empty() {
-        let names: Vec<&str> = row.attachments.iter().map(|a| a.filename.as_str()).collect();
+        let names: Vec<&str> = row
+            .attachments
+            .iter()
+            .map(|a| a.filename.as_str())
+            .collect();
         out.push_str(&format!("Attachments: {}\n", names.join(", ")));
     }
     out.push('\n');
@@ -250,7 +290,11 @@ impl MessageBody {
             .body(&self.id.folder, self.id.uid_validity, self.id.uid)
             .await
             .map_err(super::mail_err)?;
-        let text = Arc::new(format!("{}{}", self.header, crate::mime::body_text(&source)));
+        let text = Arc::new(format!(
+            "{}{}",
+            self.header,
+            crate::mime::body_text(&source)
+        ));
         self.cache.put(&key, Arc::clone(&text));
         Ok(text)
     }
@@ -315,23 +359,67 @@ mod tests {
         }
     }
 
-    /// The glyph order is fixed so the column does not jitter, and an unread
-    /// message is the one that has to be visible at a glance.
-    #[test]
-    fn the_flag_column_reads_in_a_fixed_order() {
-        let mut r = row();
-        assert_eq!(glyphs(&r), "●", "unseen by default");
-        r.seen = true;
-        assert_eq!(glyphs(&r), "");
-        r.flagged = true;
-        r.answered = true;
-        r.attachments = vec![crate::model::AttachmentInfo {
+    fn pdf() -> crate::model::AttachmentInfo {
+        crate::model::AttachmentInfo {
             part: "2".into(),
             filename: "invoice.pdf".into(),
             content_type: "application/pdf".into(),
             size: 4096,
-        }];
-        assert_eq!(glyphs(&r), "↩★📎");
+        }
+    }
+
+    /// Each flag keeps its own slot, so the same meaning always lands on the
+    /// same cell. The attachment case is the one that matters: left-packed,
+    /// its 📎 would sit where the unread marker sits, and the two would
+    /// be indistinguishable while scanning down the gutter.
+    #[test]
+    fn every_flag_keeps_its_own_slot() {
+        let mut r = row();
+        assert_eq!(glyphs(&r), "📩       ", "unseen by default");
+        r.seen = true;
+        assert_eq!(glyphs(&r), "         ", "no flags is nine blanks, not none");
+
+        r.attachments = vec![pdf()];
+        assert_eq!(
+            glyphs(&r),
+            "       📎",
+            "an attachment stays in the last slot"
+        );
+
+        r.flagged = true;
+        r.answered = true;
+        assert_eq!(glyphs(&r), "  ↩⭐  📎");
+
+        r.seen = false;
+        r.draft = true;
+        assert_eq!(glyphs(&r), "📩↩⭐📝📎", "all five, in reading order");
+    }
+
+    /// The blank of a slot has to be exactly as wide as its glyph, or a row
+    /// missing that flag shifts every slot after it. This is the invariant a
+    /// glyph swap breaks silently — emoji are two terminal cells wide, most
+    /// of the arrows and stars in the same neighbourhood are one.
+    #[test]
+    fn every_blank_matches_the_width_of_its_glyph() {
+        use unicode_width::UnicodeWidthStr;
+        for flag in [UNREAD, ANSWERED, FLAGGED, DRAFT, ATTACHED] {
+            assert_eq!(
+                flag.glyph.width(),
+                flag.blank.width(),
+                "`{}` and its blank disagree on width",
+                flag.glyph
+            );
+            assert!(
+                flag.blank.chars().all(|c| c == ' '),
+                "a blank slot is spaces, not `{}`",
+                flag.blank
+            );
+        }
+        assert_eq!(
+            glyphs(&row()).width(),
+            FLAGS_WIDTH,
+            "the view file's `sizing: fixed({FLAGS_WIDTH})` has to match"
+        );
     }
 
     /// Every column the schema names must exist on every row, or a table
