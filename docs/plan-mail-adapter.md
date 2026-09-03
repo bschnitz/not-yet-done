@@ -1,8 +1,9 @@
 # Plan — Mail adapter (IMAP)
 
-> Status: **phases 0-2 are built** (crate, config, folders, messages, body and
-> attachments); phase 3, the Thunderbird importer, is next. §9 carries the
-> per-phase state.
+> Status: **phases 0-3 are built** — the crate, the config, the folder tree,
+> the messages, the body and its attachments, and the Thunderbird importer.
+> That is the milestone the original request named: every account in the
+> profile has a working subtab. Phases 4-8 (§9) are the comfort layer.
 >
 > Target setup: every mail account the user currently has in Thunderbird must
 > work in not-yet-done, **one adapter instance holding every account**, split
@@ -381,22 +382,23 @@ connects Work and nothing else.
 
 ## 9. Phase cut
 
-| Phase | Content                                                                                                                                                                                                                                                       | Done when                                                                                          |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **0** | **done.** Crate skeleton, config + `deny_unknown_fields` + parse tests, auth mechanism table, factory, host registration, connection actor with login/logout/status, example YAMLs, docs.                                                                     | `nyd adapter mail help --full` prints the level docs; a login against a real account succeeds.     |
-| **1** | **done.** Read folders: `LIST`/`STATUS`, hierarchy, unread/total columns, tree.                                                                                                                                                                               | `nyd adapter mail ls` lists the folder tree headlessly.                                            |
-| **2** | **done.** Read messages: search + windowed fetch, columns, paging, default sort, body + preview, attachment level (list/open/save).                                                                                                                           | A folder opens in the TUI, `p` shows the body, `o` opens an attachment.                            |
-| **3** | **Thunderbird importer** — `nyd config import-thunderbird` reads `prefs.js` and writes **one** adapter YAML holding every account plus **one** view YAML with a subtab per account (no secrets — a `pass_credentials.py` block with guessed store paths, §7). | Every Thunderbird account has a working subtab. **This is the goal line of the original request.** |
-| **4** | Envelope cache in SQLite (`(account, folder, uidvalidity, uid)`), so a tab opens instantly and survives offline.                                                                                                                                              | Second open of a folder does no network round trip for rows already known.                         |
-| **5** | Write actions: seen/unseen, flag, move (folder `option_menu`), delete/archive, and the unread wiring end to end.                                                                                                                                              | Marking read in nyd is visible in Thunderbird.                                                     |
-| **6** | Live: `IDLE` per selected folder → `Invalidation`, so new mail appears without `r`.                                                                                                                                                                           | A mail sent from elsewhere shows up in an open pane.                                               |
-| **7** | Compose / reply / forward via SMTP (lettre), reusing the editor-compose path Stoat's `n`/`e` already use.                                                                                                                                                     | A reply written in `$EDITOR` is sent and lands in Sent.                                            |
-| **8** | Gmail XOAUTH2 token script (or app password, see §10).                                                                                                                                                                                                        | The OAuth account connects like the others.                                                        |
+| Phase | Content                                                                                                                                                                                                                                                                 | Done when                                                                                          |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **0** | **done.** Crate skeleton, config + `deny_unknown_fields` + parse tests, auth mechanism table, factory, host registration, connection actor with login/logout/status, example YAMLs, docs.                                                                               | `nyd adapter mail help --full` prints the level docs; a login against a real account succeeds.     |
+| **1** | **done.** Read folders: `LIST`/`STATUS`, hierarchy, unread/total columns, tree.                                                                                                                                                                                         | `nyd adapter mail ls` lists the folder tree headlessly.                                            |
+| **2** | **done.** Read messages: search + windowed fetch, columns, paging, default sort, body + preview, attachment level (list/open/save).                                                                                                                                     | A folder opens in the TUI, `p` shows the body, `o` opens an attachment.                            |
+| **3** | **done.** **Thunderbird importer** — `nyd config import-thunderbird` reads `prefs.js` and writes **one** adapter YAML holding every account plus **one** view YAML with a subtab per account (no secrets — a `pass_credentials.py` block with guessed store paths, §7). | Every Thunderbird account has a working subtab. **This is the goal line of the original request.** |
+| **4** | Envelope cache in SQLite (`(account, folder, uidvalidity, uid)`), so a tab opens instantly and survives offline.                                                                                                                                                        | Second open of a folder does no network round trip for rows already known.                         |
+| **5** | Write actions: seen/unseen, flag, move (folder `option_menu`), delete/archive, and the unread wiring end to end.                                                                                                                                                        | Marking read in nyd is visible in Thunderbird.                                                     |
+| **6** | Live: `IDLE` per selected folder → `Invalidation`, so new mail appears without `r`.                                                                                                                                                                                     | A mail sent from elsewhere shows up in an open pane.                                               |
+| **7** | Compose / reply / forward via SMTP (lettre), reusing the editor-compose path Stoat's `n`/`e` already use.                                                                                                                                                               | A reply written in `$EDITOR` is sent and lands in Sent.                                            |
+| **8** | Gmail XOAUTH2 token script (or app password, see §10).                                                                                                                                                                                                                  | The OAuth account connects like the others.                                                        |
 
 Phases 0-3 are the "all my accounts work" milestone; 4-8 are the comfort layer.
-Phases 0-2 are implemented and covered by unit tests against a fake IMAP server;
-what is still owed there is the live smoke run (see
-[`smoke-tests.md`](smoke-tests.md), the three Mail blocks).
+All four are implemented and covered by unit tests — the adapter against a fake
+IMAP server, the importer against invented profiles in Thunderbird's own shape.
+What is still owed is the live smoke run against real mailboxes (see
+[`smoke-tests.md`](smoke-tests.md), the four Mail blocks).
 
 ## 10. Risks and open points
 

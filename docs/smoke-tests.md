@@ -6806,6 +6806,39 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
       the repo — the examples use `example.org`/`example.net` and the
       credentials come from `pass`.
 
+### Importing from Thunderbird (phase 3)
+
+- [ ] **It finds the right profile**: run `nyd config import-thunderbird
+    --stdout` with no flags → the accounts printed are the ones Thunderbird
+      shows, not an older profile's. On a machine with several profiles, check
+      that the one named in `installs.ini` won.
+- [ ] **Every IMAP account arrives**: the count matches Thunderbird's account
+      list minus Local Folders. Host, port, security and **login name** agree
+      per account — compare against Thunderbird's own server settings, which
+      are the values known to work.
+- [ ] **A login name that is not the address is carried**: an account logging
+      in by account name rather than by e-mail keeps that name, and the run
+      says so in a note.
+- [ ] **The bridged pair keeps two ids**: two mailboxes on the same host and
+      port get different ids and different subtabs.
+- [ ] **An OAuth2 account is flagged**: the run says the store needs an app
+      password for it rather than importing something that cannot log in.
+- [ ] **Nothing secret moved**: `grep -i pass` over both generated files finds
+      only `pass_credentials.py` invocations and store PATHS — no password,
+      and Thunderbird's `logins.json` was never opened.
+- [ ] **An existing config is safe**: run it a second time without `--force` →
+      it refuses and names the file; the hand-written config is untouched. With
+      `--force` it overwrites.
+- [ ] **The output actually loads**: point `XDG_CONFIG_HOME` at a scratch
+      directory holding the two generated files and start the TUI → the Mail
+      tab comes up with one subtab per account, and `nyd adapter mail help
+    --full` prints the levels without connecting.
+- [ ] **The guessed paths are printed**: every account's `<prefix>/<id>/pass`
+      appears in the summary, marked as a guess. `--pass-prefix` changes all of
+      them.
+- [ ] **A POP3 account is named, not dropped**: if the profile has one, it is
+      listed under "not imported" with the reason.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

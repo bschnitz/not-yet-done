@@ -20,6 +20,7 @@ mod commands;
 mod config_auth;
 mod config_gen;
 mod config_template;
+mod thunderbird;
 
 static MODULE: OnceLock<Arc<TaskDomainModule>> = OnceLock::new();
 
