@@ -6908,6 +6908,35 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 - [ ] **A POP3 account is named, not dropped**: if the profile has one, it is
       listed under "not imported" with the reason.
 
+### A command that gets no answer (`command_timeout_secs`)
+
+IMAP runs one command at a time on one connection, so a server that neither
+answers nor closes does not hold up one request — it holds up the account. That
+is what "loading INBOX 50s" looked like, on a mailbox that had opened in
+seconds a minute earlier. Every command now runs under a deadline
+(`command_timeout_secs`, 60 s by default, per instance or per account, `0` off).
+
+- [ ] **Normal work is untouched**: with the default, opening folders, reading
+      mail and saving attachments behave exactly as in the blocks above — a
+      deadline that never goes off is invisible.
+- [ ] **The banner names the limit**: while a folder loads, the connect/busy
+      line says what is running and how long it may take, and counts up
+      towards that limit rather than counting alone.
+- [ ] **A stuck server costs one command, not the account**: set
+      `command_timeout_secs: 5`, then cut the connection mid-request (block
+      the port with a firewall rule, or suspend the server) → within about
+      five seconds the error reads "no answer in 5s — giving up on this
+      connection", the banner closes, and the very next key works again on a
+      fresh session. The other subtabs are unaffected.
+- [ ] **A deadline is not waited out twice**: the log shows one attempt for
+      that command, not a retry — repeating a command that already ran out of
+      time only makes the wait twice as long. A session the **server** ended
+      (`* BYE`, a dropped socket) is still retried once, silently.
+- [ ] **The limit is per account too**: give one slow account its own
+      `command_timeout_secs` → only that account's commands run under it; the
+      instance value stands for the rest. `0` on either level means no
+      deadline at all.
+
 ## Mail: the message under the cursor in the browser (`o p` + `row_change`)
 
 Two scripts on the message level: `html_preview.py` on `o p` opens the preview,
@@ -6921,6 +6950,14 @@ builds the page itself.
 The point of the test is that there is only ever **one** window, that it never
 takes the focus away from the TUI, that a hook firing on every row costs
 nothing while nobody is watching, and that a mail cannot phone home.
+
+The page keeps itself current: `preview.html` asks for `stamp.js` a few times a
+second and reloads when the stamp names another message. Both come from a small
+loopback server the first `o p` starts, which makes every poll proof that
+somebody is still looking. That heartbeat is what the follow decision reads —
+asking the window manager for a title cannot work, because a title belongs to
+the window's active tab and a preview sitting behind another tab then looks
+closed.
 
 Both are bound in `nyd.db` (`query_shortcut` / `script_hook`, scope
 `script:mail/mail:folder/mail:message`), and the message level carries a
@@ -6971,16 +7008,22 @@ shortcuts, so a **restart** is part of the preparation.
       → the page that is open reloads, the window count stays at one.
 - [ ] **A folder row does nothing**: the hook is bound on the message level, so
       moving in the folder tree leaves the preview where it was.
-- [ ] **Closing the window ends it**: close the preview, move the cursor over
-      several messages → after at most `NYD_PREVIEW_FOLLOW_TTL_H` (half an
-      hour, and immediately when the closed window was the one Sway could
-      see by title) nothing is rendered any more and no notification appears.
-      `<preview dir>/follow.log` says which of the two it was for every run.
-      Re-open with `o p`.
 - [ ] **A preview in a background tab still follows**: put the preview into a
-      tab of a window whose other tab is in front → Sway sees no title of
-      ours, and the page still updates, because the last `o p` counts as
-      evidence too.
+      tab of a window whose other tab is in front, or on another workspace
+      → the page still updates. Whether somebody is looking is decided by the
+      page's own heartbeat, not by a window title: a title belongs to the
+      window's **active** tab, so asking Sway for one left every background
+      tab looking closed.
+- [ ] **Closing the window ends it**: close the preview, move the cursor over
+      several messages → within seconds (a heartbeat counts as stale once it
+      is older than four poll intervals) nothing is rendered any more and no
+      notification appears. `<preview dir>/follow.log` names the decision and
+      the age of the heartbeat for every run. Re-open with `o p`.
+- [ ] **A page that is still starting is not cut off**: `o p`, then move the
+      cursor at once, before the browser has fetched anything → the page
+      follows. `NYD_PREVIEW_FOLLOW_GRACE_S` (30 s) covers exactly the gap
+      between opening a window and its first heartbeat; wait longer than that
+      without a browser and the following stops.
 - [ ] **A message read twice costs no login**: go back to a message you have
       already previewed → the page is back at once, from
       `~/.local/share/not_yet_done/mail/<instance>/preview/pages.v<N>/<key>.html`,
@@ -7000,6 +7043,27 @@ shortcuts, so a **restart** is part of the preparation.
       a page that cannot reload is not one to write into.
 - [ ] **It survives a dead browser**: kill qutebrowser, move the cursor → the
       hook returns silently; `o p` opens a fresh window.
+- [ ] **The preview is served, and only to this machine**: the page comes from
+      a loopback server, `http://127.0.0.1:<port>/<token>/preview.html`, whose
+      port and random token are noted in `<preview dir>/server.json`. Without
+      the token, with a wrong one, or with a `../` in the path the answer is
+      404 — the server hands out the preview directory and nothing above it,
+      and it listens on loopback only. It has to be a server: a `file://` page
+      cannot poll a stamp without the browser treating every render as a
+      cross-origin fetch.
+- [ ] **Nothing is served stale**: every answer carries `Cache-Control:
+  no-store`, so the reload after a render shows the new message and never
+      the one the browser kept.
+- [ ] **The server goes when nobody watches**: leave the preview closed for
+      `NYD_PREVIEW_SERVER_IDLE_MIN` (10 minutes) → the process exits and takes
+      `server.json` with it; `NYD_PREVIEW_SERVER_IDLE_MIN=0.1` makes that
+      quick to test. A note left behind by a killed server is not believed
+      either — the script pings it first and starts a fresh one.
+- [ ] **A big image is linked, not embedded**: an inline part over
+      `NYD_MAIL_INLINE_MAX_BYTES` (4 MB) is copied to
+      `pages.v<N>/media/<key>/` and linked **relatively** — an absolute
+      `file://` link is unreachable from a page served over http. Dropping a
+      page from the cache takes its media directory with it.
 - [ ] **The message on disk is the adapter's**: headless,
       `nyd adapter mail "<message id>" export_html` prints
       `exported message to <dir>`, and that directory holds `message.json`
