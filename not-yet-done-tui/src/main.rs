@@ -213,6 +213,11 @@ async fn run_loop(
         // that reports back through `load_rx`.
         app.pump_image_downloads();
 
+        // Did the cursor land on another row? Cheap enough to ask every
+        // turn; it only arms a timer, and the `row_change` hook's scripts
+        // are looked up when that timer runs out.
+        app.note_row_cursor();
+
         if dirty {
             app.sync_components();
             terminal.draw(|frame| render::render(frame, app))?;
@@ -264,6 +269,9 @@ async fn run_loop(
         // the loop stays parked instead of waking up to poll.
         let auto_reload_deadline = app.auto_reload_deadline();
 
+        // Moment a settled row change reaches its `row_change` hook scripts.
+        let row_change_deadline = app.row_change_deadline();
+
         tokio::select! {
             // Background-loaded results (tasks, content items, adapter
             // status, …). `recv()` consumes one; handle it, then drain any
@@ -309,6 +317,19 @@ async fn run_loop(
                 dirty |= app.poll_auto_reload();
             }
 
+            // The cursor has come to rest on another row for
+            // `script.row_change_delay_ms`: hand it to the scripts bound to
+            // the `row_change` hook. Same shape as the two deadlines above —
+            // no armed change, no timer.
+            _ = async {
+                match row_change_deadline {
+                    Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                dirty |= app.fire_row_change_hooks();
+            }
+
             // Poll-backed change sources, serviced only while one is
             // pending. Each self-gates on its own interval/condition, so
             // running them all every tick is cheap.
@@ -317,6 +338,7 @@ async fn run_loop(
                 dirty |= app.poll_live_editor().await;
                 dirty |= app.poll_editor_close();
                 dirty |= app.poll_detached_script();
+                dirty |= app.poll_row_change_runs();
             }
 
             // Terminal input. A key resolving to an `EditorRequest`

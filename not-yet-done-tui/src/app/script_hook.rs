@@ -64,15 +64,21 @@ pub enum ScriptHook {
     /// Run on the freshly loaded rows *before* they reach the pane, with
     /// the chance to patch them (see [`App::run_load_hooks`]).
     Load,
+    /// Run when the cursor lands on another row — the only hook that fires
+    /// from a key press rather than from a load, and therefore the only one
+    /// whose script is spawned *detached* (see [`crate::app::row_change`]).
+    RowChange,
 }
 
 impl ScriptHook {
-    pub const ALL: &'static [ScriptHook] = &[ScriptHook::Reload, ScriptHook::Load];
+    pub const ALL: &'static [ScriptHook] =
+        &[ScriptHook::Reload, ScriptHook::Load, ScriptHook::RowChange];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Reload => "reload",
             Self::Load => "load",
+            Self::RowChange => "row_change",
         }
     }
 
@@ -80,6 +86,7 @@ impl ScriptHook {
         match s {
             "reload" => Some(Self::Reload),
             "load" => Some(Self::Load),
+            "row_change" => Some(Self::RowChange),
             _ => None,
         }
     }
@@ -89,6 +96,7 @@ impl ScriptHook {
         match self {
             Self::Reload => "after the view's rows (re)loaded",
             Self::Load => "on the rows before they reach the table",
+            Self::RowChange => "when the cursor lands on another row",
         }
     }
 }
@@ -103,13 +111,17 @@ pub struct ScriptHookPicker {
     pub popup: SearchablePopup,
     scope: String,
     name: String,
+    /// The script file the binding is about. Kept because the *hook* decides
+    /// which modes are allowed, and the hook is only known once the user
+    /// picks one — see [`hook_binding_rejection`].
+    path: String,
 }
 
 impl App {
     /// All hook bindings registered for `scope`, as `(script name, hook)`.
     /// Empty on a DB error — a hook that cannot be read must not take the
     /// view down with it.
-    fn hooks_for_scope(&self, scope: &str) -> Vec<(String, String)> {
+    pub(super) fn hooks_for_scope(&self, scope: &str) -> Vec<(String, String)> {
         let repo = Arc::clone(&self.script_hook_repo);
         let scope = scope.to_string();
         tokio::task::block_in_place(|| {
@@ -212,7 +224,12 @@ impl App {
                 "cancel".into(),
             ),
         ]);
-        self.script_hook_picker = Some(ScriptHookPicker { popup, scope, name });
+        self.script_hook_picker = Some(ScriptHookPicker {
+            popup,
+            scope,
+            name,
+            path: path.to_string(),
+        });
     }
 
     /// Dispatch one keypress while the hook picker is open.
@@ -237,6 +254,10 @@ impl App {
             };
             let hook = ScriptHook::parse(&item.value);
             if hook.is_none() && !item.value.is_empty() {
+                return;
+            }
+            if let Some(reason) = hook.and_then(|h| hook_binding_rejection(h, &picker.path)) {
+                self.notify_error(format!("Cannot hook '{}': {reason}", picker.name));
                 return;
             }
             self.store_script_hook(&picker.scope, &picker.name, hook);
@@ -699,6 +720,25 @@ fn hook_mode_rejection(path: &str) -> Option<String> {
     }
     if mode.captures_output() {
         return Some("capture-mode scripts cannot run as a hook".to_string());
+    }
+    None
+}
+
+/// Why `path` may not be bound to `hook`, if it may not: the blanket rules
+/// of [`hook_mode_rejection`] plus the one that belongs to `row_change`
+/// alone. A hook that fires from a key press must not answer with
+/// **commands** — a command that reloads or jumps moves the cursor, which
+/// fires the hook again, and the guard that stops a `reload` hook from
+/// looping rides on the *load*, which this hook does not have.
+pub(super) fn hook_binding_rejection(hook: ScriptHook, path: &str) -> Option<String> {
+    if let Some(reason) = hook_mode_rejection(path) {
+        return Some(reason);
+    }
+    if hook == ScriptHook::RowChange {
+        let content = std::fs::read_to_string(path).ok()?;
+        if parse_script_mode(&content).emits_commands() {
+            return Some("a row_change hook may not answer with commands".to_string());
+        }
     }
     None
 }

@@ -350,9 +350,35 @@ impl ScriptContext {
     }
 }
 
+/// Add one more top-level key to a payload object.
+///
+/// The payloads are assembled as text (see [`ScriptContext::build_json`]),
+/// so a key that is not part of any of the three shapes is spliced in rather
+/// than merged: every shape ends on its closing brace, and the new pair goes
+/// in front of it. Used by the `row_change` hook, which has something to say
+/// about the cursor whichever shape the script asked for.
+///
+/// `value` is written verbatim and must therefore be valid JSON itself.
+pub(super) fn splice_top_level(json: String, key: &str, value: &str) -> String {
+    let Some(close) = json.rfind('}') else {
+        return json;
+    };
+    // An object with nothing in it takes no separating comma. None of the
+    // three payload shapes is ever empty, but the rule belongs here rather
+    // than in the assumption of the caller.
+    let empty = json[..close].trim_end().ends_with('{');
+    let separator = if empty { "" } else { "," };
+    format!(
+        "{head}{separator}\n  {key}: {value}\n{tail}",
+        head = json[..close].trim_end(),
+        key = json_string(key),
+        tail = &json[close..],
+    )
+}
+
 /// JSON-escape `s` and wrap it in double-quotes. Hand-rolled to avoid
 /// pulling in `serde_json` for a single literal-output use case.
-fn json_string(s: &str) -> String {
+pub(super) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -1128,6 +1154,56 @@ impl App {
     /// `NYD_OUTPUT_FILE` environment variable. After the script exits,
     /// the file is parsed as JSON `{"commands": [...]}` and each entry
     /// is fed to [`App::execute_cmdline`].
+    /// Start a script and do **not** wait for it: the caller gets the child
+    /// back and reaps it later. The one run path that returns before the
+    /// script is finished, because it is the one that fires from a key press
+    /// — see [`crate::app::row_change`].
+    ///
+    /// Two things differ from [`Self::run_script_background`] and both are
+    /// forced by nobody waiting:
+    ///   - **The output goes to a file.** Inheriting the TUI's terminal would
+    ///     paint over the frame; a pipe nobody reads fills up and blocks the
+    ///     script at 64 KB. The caller quotes the file when the run failed.
+    ///   - **The payload file is per run.** The shared `nyd-bg-script-*` name
+    ///     would be overwritten by the next run while this child is still
+    ///     reading it.
+    ///
+    /// `hook` names the firing event for `NYD_SCRIPT_HOOK`, so a script that
+    /// is also runnable by hand can tell the two invocations apart.
+    pub(super) fn spawn_script_detached(
+        &mut self,
+        ctx: &ScriptContext,
+        script_path: &std::path::Path,
+        payload: &str,
+        hook: &str,
+    ) -> std::io::Result<(std::process::Child, std::path::PathBuf, std::path::PathBuf)> {
+        use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let n = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+        let json_path = tmp.join(format!("nyd-{hook}-hook-{pid}-{n}.json"));
+        let log_path = tmp.join(format!("nyd-{hook}-hook-{pid}-{n}.log"));
+        std::fs::write(&json_path, payload)?;
+        let log = std::fs::File::create(&log_path)?;
+        let log_err = log.try_clone()?;
+
+        let child_env = self.child_env_for_script(ctx);
+        let child = Command::new(script_path)
+            .arg(&json_path)
+            .current_dir(script_path.parent().unwrap_or(std::path::Path::new(".")))
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .envs(&child_env)
+            .env("NYD_SCRIPT_HOOK", hook)
+            .spawn()?;
+        Ok((child, json_path, log_path))
+    }
+
     fn run_script_background(
         &mut self,
         ctx: &ScriptContext,
@@ -1407,6 +1483,29 @@ fn load_only_key_rejection(parsed: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::splice_top_level;
+
+    /// The three payload shapes are assembled as text, so the hook's own
+    /// block is spliced in — and has to survive the pretty-printed layout
+    /// `build_json` produces.
+    #[test]
+    fn an_extra_key_lands_inside_the_object() {
+        let json = "{\n  \"node\": {\n    \"id\": \"x\"\n  }\n}".to_string();
+        let out = splice_top_level(json, "row_change", "{\"next_index\": 4}");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["node"]["id"], "x");
+        assert_eq!(parsed["row_change"]["next_index"], 4);
+    }
+
+    /// Nothing produces an empty payload today, but a comma in front of the
+    /// first key would be the kind of breakage nobody looks for.
+    #[test]
+    fn an_empty_object_takes_no_separating_comma() {
+        let out = splice_top_level("{}".to_string(), "row_change", "null");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert!(parsed["row_change"].is_null());
+    }
+
     use super::*;
 
     fn dt(s: &str) -> DateTime<Utc> {
