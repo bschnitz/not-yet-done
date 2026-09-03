@@ -68,7 +68,10 @@ views:
   - name: projects
     node_type: "project:item"
     default: true
-    key: a
+    # A subtab key is live in the same pane as this view's own actions,
+    # so a bare `a` here would fight the `create` action below. The
+    # `t` leader keeps every subtab out of that competition.
+    key: "t p"
 
     # Two typed columns the adapter exposes. `created` is an RFC3339 datetime.
     # `S` opens a column/direction picker over the adapter's sortable columns

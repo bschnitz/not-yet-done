@@ -234,7 +234,10 @@ views:
               # the path to the frontend (xdg-open). All files of one mail
               # land in the same dir, so the viewer can page through them;
               # re-opening reuses the bytes already there.
-              - { name: open, key: o, type: custom, id: open }
+              # On the `o` leader, not a bare `o`: a single letter here
+              # swallows every global chord that starts with it, and `o`
+              # is where the shortcut overview and menu commonly sit.
+              - { name: open, key: "o o", type: custom, id: open }
               # Saves EVERY file of the mail into a directory the form asks
               # for (`~` is expanded, missing parents are created). A part
               # that fails is reported, not fatal — nine files out of ten
