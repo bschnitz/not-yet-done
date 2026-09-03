@@ -6903,6 +6903,54 @@ folder:Archive"`) opens _inside_ that folder — its top row is the first
 - [ ] **A POP3 account is named, not dropped**: if the profile has one, it is
       listed under "not imported" with the reason.
 
+## Mail: the message under the cursor in the browser (`o p` + `row_change`)
+
+Two scripts on the message level: `html_preview.py` on `o p` opens the preview,
+`preview_follow.py` on the `row_change` hook keeps it on the row the cursor
+rests on. The point of the test is that there is only ever **one** window, that
+it never takes the focus away from the TUI, and that a hook firing on every row
+costs nothing while nobody is watching.
+
+Both are bound in `nyd.db` (`query_shortcut` / `script_hook`, scope
+`script:mail/mail:folder/mail:message`), and the TUI caches its shortcuts — a
+**restart** is part of the preparation.
+
+- [ ] **`o p` opens it**: on a message row a qutebrowser window comes up on the
+      current workspace, titled `pandoc-preview/nyd-mail: <message key>`, with
+      the subject as the heading, From/To/Date as a field block above the text
+      and the attachment names listed when there are any.
+- [ ] **The text reads like mail**: single line breaks stay breaks, a quoted
+      passage is one block and the reply typed under it is **not** part of it,
+      a bare URL is a link, and the signature separator is still `--`, not an
+      en dash.
+- [ ] **The focus stays in the terminal**: the new window appears, the cursor
+      keeps moving in the table without a click.
+- [ ] **The cursor pulls the page along**: `j` to the next message → after the
+      settle delay the page shows that message, in the same window, without a
+      flash of white.
+- [ ] **Fast is quiet**: hold `j` over a dozen rows → only the row you come to
+      rest on is rendered (the preview never walks the whole path).
+- [ ] **A second `o p` opens no second window**: press it again on another row
+      → the page that is open reloads, the window count stays at one.
+- [ ] **A folder row does nothing**: the hook is bound on the message level, so
+      moving in the folder tree leaves the preview where it was.
+- [ ] **Closing the window ends it**: close the preview, move the cursor over
+      several messages → nothing is rendered, nothing is logged, no
+      notification. Re-open with `o p`.
+- [ ] **A message read twice costs no login**: go back to a message you have
+      already previewed → the page updates from
+      `~/.local/share/not_yet_done/mail/<instance>/preview/bodies/<key>.md`,
+      the account is not touched again.
+- [ ] **The settle delay is the one from the config**:
+      `script.row_change_delay_ms: 1000` in `tui.yaml`, restart → the preview
+      visibly waits a second after the cursor stops.
+- [ ] **The poll interval is a knob**: `NYD_PREVIEW_POLL_MS=250` follows more
+      eagerly; `NYD_PREVIEW_POLL_MS=0` takes the poller out of the page, and
+      then `o p` opens a window per invocation and the hook stops rendering —
+      a page that cannot reload is not one to write into.
+- [ ] **It survives a dead browser**: kill qutebrowser, move the cursor → the
+      hook returns silently; `o p` opens a fresh window.
+
 ## A view file that does not load: reading and copying the problems
 
 A broken `views/*.yaml` keeps its tab and draws a configuration-error panel
