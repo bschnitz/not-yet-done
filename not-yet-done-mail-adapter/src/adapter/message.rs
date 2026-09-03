@@ -54,10 +54,45 @@ const ATTACHED: Flag = Flag {
     blank: "  ",
 };
 
-/// Combined display width of the five slots. This is what `sizing:` has to
-/// be in the view file; nothing derives one from the other across crates, so
-/// the number is asserted here and repeated there as `fixed(9)`.
-const FLAGS_WIDTH: usize = 9;
+/// Which slots a list of messages actually needs — the union of their flags.
+///
+/// A slot nobody on the page uses is not rendered at all, so a mailbox where
+/// nothing is starred or drafted does not pay for a star and a pencil column.
+/// The rows of one page all get the same mask, which is what keeps the gutter
+/// readable downward: within a page a glyph never moves.
+///
+/// Computed over the PAGE, not the visible window. A mask that followed the
+/// viewport would re-lay the gutter out under the cursor on every scrolled
+/// line, which is the jitter this whole arrangement exists to prevent.
+#[derive(Clone, Copy, Default)]
+pub(super) struct FlagSlots {
+    unread: bool,
+    answered: bool,
+    flagged: bool,
+    draft: bool,
+    attached: bool,
+}
+
+impl FlagSlots {
+    pub(super) fn of(rows: &[EnvelopeRow]) -> Self {
+        let mut slots = Self::default();
+        for row in rows {
+            slots.unread |= !row.seen;
+            slots.answered |= row.answered;
+            slots.flagged |= row.flagged;
+            slots.draft |= row.draft;
+            slots.attached |= !row.attachments.is_empty();
+        }
+        slots
+    }
+
+    /// The mask for a message looked at on its own — a detail view has no
+    /// column to line up with, so it shows what this one message carries and
+    /// nothing else.
+    pub(super) fn just(row: &EnvelopeRow) -> Self {
+        Self::of(std::slice::from_ref(row))
+    }
+}
 
 pub(super) fn columns() -> Vec<ColumnSchema> {
     vec![
@@ -78,21 +113,26 @@ fn slot(flag: Flag, present: bool) -> &'static str {
     if present { flag.glyph } else { flag.blank }
 }
 
-/// The flag glyphs of one message — every slot always occupied, by its glyph
-/// or by its blank.
+/// The flag glyphs of one message: every slot `slots` asks for, occupied by
+/// its glyph or by its blank.
 ///
 /// Packing the glyphs to the left instead would keep the *order* fixed while
 /// letting the *positions* move: a mail whose only flag is an attachment
-/// would put its 📎 exactly where the row above carries its unread
-/// marker, and the gutter could no longer be read as a column.
-fn glyphs(row: &EnvelopeRow) -> String {
-    let mut out = String::new();
-    out.push_str(slot(UNREAD, !row.seen));
-    out.push_str(slot(ANSWERED, row.answered));
-    out.push_str(slot(FLAGGED, row.flagged));
-    out.push_str(slot(DRAFT, row.draft));
-    out.push_str(slot(ATTACHED, !row.attachments.is_empty()));
-    out
+/// would put its 📎 exactly where the row above carries its unread marker,
+/// and the gutter could no longer be read as a column. The mask is what
+/// keeps that from costing five slots on a mailbox that only ever uses two.
+fn glyphs(row: &EnvelopeRow, slots: FlagSlots) -> String {
+    [
+        (UNREAD, slots.unread, !row.seen),
+        (ANSWERED, slots.answered, row.answered),
+        (FLAGGED, slots.flagged, row.flagged),
+        (DRAFT, slots.draft, row.draft),
+        (ATTACHED, slots.attached, !row.attachments.is_empty()),
+    ]
+    .into_iter()
+    .filter(|(_, needed, _)| *needed)
+    .map(|(flag, _, present)| slot(flag, present))
+    .collect()
 }
 
 /// The date as the table sorts and shows it. RFC 3339 rather than something
@@ -102,10 +142,10 @@ fn date_cell(row: &EnvelopeRow) -> String {
     row.date.map(|d| d.to_rfc3339()).unwrap_or_default()
 }
 
-pub(super) fn metadata_of(account: &str, row: &EnvelopeRow) -> Metadata {
+pub(super) fn metadata_of(account: &str, row: &EnvelopeRow, slots: FlagSlots) -> Metadata {
     Metadata {
         fields: vec![
-            field("flags", glyphs(row), ""),
+            field("flags", glyphs(row, slots), ""),
             field("from", row.from.clone(), "From"),
             field("subject", row.subject.clone(), "Subject"),
             field("date", date_cell(row), "Date"),
@@ -140,7 +180,12 @@ fn label_of(row: &EnvelopeRow) -> String {
     }
 }
 
-pub(super) fn message_row(account: &str, folder: &str, row: &EnvelopeRow) -> NodeSummary {
+pub(super) fn message_row(
+    account: &str,
+    folder: &str,
+    row: &EnvelopeRow,
+    slots: FlagSlots,
+) -> NodeSummary {
     let id = MessageId {
         account: account.to_string(),
         folder: folder.to_string(),
@@ -151,7 +196,7 @@ pub(super) fn message_row(account: &str, folder: &str, row: &EnvelopeRow) -> Nod
         id: id.encode(),
         label: label_of(row),
         node_type: message_type().clone(),
-        metadata: metadata_of(account, row),
+        metadata: metadata_of(account, row, slots),
         // Only a message that actually carries files has something below it.
         // Saying so per row is what keeps the drill arrow honest: a mail with
         // no attachment is a leaf, and Enter on it does nothing rather than
@@ -255,7 +300,7 @@ impl MailMessageNode {
         Self {
             id: id.encode(),
             label: label_of(row),
-            metadata: metadata_of(&id.account, row),
+            metadata: metadata_of(&id.account, row, FlagSlots::just(row)),
             body: MessageBody {
                 id: id.clone(),
                 header: header_block(row),
@@ -368,37 +413,88 @@ mod tests {
         }
     }
 
-    /// Each flag keeps its own slot, so the same meaning always lands on the
-    /// same cell. The attachment case is the one that matters: left-packed,
-    /// its 📎 would sit where the unread marker sits, and the two would
-    /// be indistinguishable while scanning down the gutter.
+    /// A page needs every slot in it: with all five in use each flag keeps
+    /// its own cell, so the same meaning always lands on the same column.
+    /// The attachment case is the one that matters — packed to the left, its
+    /// 📎 would sit where the unread marker sits, and scanning down the
+    /// gutter could not tell the two apart.
     #[test]
     fn every_flag_keeps_its_own_slot() {
+        let all = FlagSlots {
+            unread: true,
+            answered: true,
+            flagged: true,
+            draft: true,
+            attached: true,
+        };
         let mut r = row();
-        assert_eq!(glyphs(&r), "📩       ", "unseen by default");
+        assert_eq!(glyphs(&r, all), "📩       ", "unseen by default");
         r.seen = true;
-        assert_eq!(glyphs(&r), "         ", "no flags is nine blanks, not none");
+        assert_eq!(
+            glyphs(&r, all),
+            "         ",
+            "no flags is nine blanks, not none"
+        );
 
         r.attachments = vec![pdf()];
         assert_eq!(
-            glyphs(&r),
+            glyphs(&r, all),
             "       📎",
             "an attachment stays in the last slot"
         );
 
         r.flagged = true;
         r.answered = true;
-        assert_eq!(glyphs(&r), "  ↩⭐  📎");
+        assert_eq!(glyphs(&r, all), "  ↩⭐  📎");
 
         r.seen = false;
         r.draft = true;
-        assert_eq!(glyphs(&r), "📩↩⭐📝📎", "all five, in reading order");
+        assert_eq!(glyphs(&r, all), "📩↩⭐📝📎", "all five, in reading order");
+    }
+
+    /// The gutter is only as wide as the page needs: a slot no message on the
+    /// page uses is not rendered, so an ordinary mailbox pays for unread and
+    /// attachment and not for the star and the pencil it never sets.
+    #[test]
+    fn the_gutter_costs_only_the_slots_the_page_uses() {
+        let unread = row();
+        let mut with_file = row();
+        with_file.seen = true;
+        with_file.attachments = vec![pdf()];
+
+        let page = [unread.clone(), with_file.clone()];
+        let slots = FlagSlots::of(&page);
+
+        // Two slots, four cells — not the nine a full mask would cost.
+        assert_eq!(glyphs(&unread, slots), "📩  ");
+        assert_eq!(glyphs(&with_file, slots), "  📎");
+    }
+
+    /// A page with nothing flagged at all renders no gutter. The view file
+    /// asks for `sizing: max`, so the column then takes no width either.
+    #[test]
+    fn a_page_without_flags_has_no_gutter() {
+        let mut read = row();
+        read.seen = true;
+        let slots = FlagSlots::of(std::slice::from_ref(&read));
+        assert_eq!(glyphs(&read, slots), "");
+    }
+
+    /// Looked at on its own a message has no column to line up with, so it
+    /// shows its own flags and no blanks.
+    #[test]
+    fn a_single_message_shows_only_what_it_carries() {
+        let mut r = row();
+        r.seen = true;
+        r.attachments = vec![pdf()];
+        assert_eq!(glyphs(&r, FlagSlots::just(&r)), "📎");
     }
 
     /// The blank of a slot has to be exactly as wide as its glyph, or a row
-    /// missing that flag shifts every slot after it. This is the invariant a
-    /// glyph swap breaks silently — emoji are two terminal cells wide, most
-    /// of the arrows and stars in the same neighbourhood are one.
+    /// missing a flag that another row on the page carries shifts every slot
+    /// after it. This is the invariant a glyph swap breaks silently — emoji
+    /// are two terminal cells wide, most of the arrows and stars in the same
+    /// neighbourhood are one.
     #[test]
     fn every_blank_matches_the_width_of_its_glyph() {
         use unicode_width::UnicodeWidthStr;
@@ -415,18 +511,13 @@ mod tests {
                 flag.blank
             );
         }
-        assert_eq!(
-            glyphs(&row()).width(),
-            FLAGS_WIDTH,
-            "the view file's `sizing: fixed({FLAGS_WIDTH})` has to match"
-        );
     }
 
     /// Every column the schema names must exist on every row, or a table
     /// silently shows a blank where a value was promised.
     #[test]
     fn every_declared_column_has_a_cell() {
-        let meta = metadata_of("work", &row());
+        let meta = metadata_of("work", &row(), FlagSlots::just(&row()));
         for column in columns() {
             assert!(
                 meta.fields.iter().any(|f| f.key == column.key),
@@ -443,7 +534,7 @@ mod tests {
     #[test]
     fn an_unseen_message_carries_the_unread_flag() {
         let flag = |r: &EnvelopeRow| {
-            metadata_of("work", r)
+            metadata_of("work", r, FlagSlots::just(r))
                 .fields
                 .iter()
                 .find(|f| f.key == "unread")
@@ -467,7 +558,7 @@ mod tests {
     /// account, folder and both message coordinates.
     #[test]
     fn the_row_id_addresses_the_message() {
-        let summary = message_row("work", "INBOX/Projects", &row());
+        let summary = message_row("work", "INBOX/Projects", &row(), FlagSlots::just(&row()));
         assert_eq!(summary.id, "work/INBOX/Projects#42.7");
         assert_eq!(
             summary.has_children,

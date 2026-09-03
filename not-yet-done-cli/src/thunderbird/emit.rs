@@ -183,10 +183,12 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
         pagination: { mode: server, page_size: 50 }
         cursor_on_open: first_unread
         columns:
-          # One slot per flag, always occupied, so the gutter reads downward:
+          # One slot per flag, always occupied by its glyph or by a blank of
+          # the same width, so the gutter reads downward:
           # 📩 unread, ↩ answered, ⭐ flagged, 📝 draft, 📎 attachment.
-          # fixed(9) is the sum of the slots — the emoji are two cells wide.
-          - { key: flags, label: "", sizing: "fixed(9)" }
+          # `max`: the adapter emits only the slots the current page uses, so
+          # a mailbox that stars nothing pays for two slots and not for five.
+          - { key: flags, label: "", sizing: max }
           - { key: from, label: From, sizing: "flex(1)" }
           # `source: label`, so a mail with an empty Subject header still has
           # a row to aim at: the label carries the `(no subject)` stand-in.

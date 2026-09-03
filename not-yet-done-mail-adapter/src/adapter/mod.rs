@@ -348,9 +348,13 @@ impl MailAdapter {
             .await
             .insert(crate::ids::folder_id(account, folder), Arc::clone(&rows));
 
+        // Which flag slots this page needs, decided once for the whole page:
+        // every row gets the same mask, so the gutter is a column that can be
+        // read downward, and a slot nobody uses costs no width at all.
+        let slots = message::FlagSlots::of(&rows);
         let mut items: Vec<_> = rows
             .iter()
-            .map(|row| message::message_row(account, folder, row))
+            .map(|row| message::message_row(account, folder, row, slots))
             .collect();
         // Sorting is over the page, not the mailbox: the rows a sort could
         // reach are the ones already fetched. `applied_sort` is what says so

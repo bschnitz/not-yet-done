@@ -173,17 +173,20 @@ views:
         # yanks the cursor away from where you scrolled.
         cursor_on_open: first_unread
         columns:
-          # One slot per flag, always occupied — by its glyph or by a blank
-          # of the same width — so the same meaning always lands on the same
-          # cell and the gutter can be read downward as a column:
-          # 📩 unread, ↩ answered, ⭐ flagged, 📝 draft, 📎 carries an attachment.
+          # One slot per flag — 📩 unread, ↩ answered, ⭐ flagged, 📝 draft,
+          # 📎 carries an attachment — and a slot is always occupied, by its
+          # glyph or by a blank of the same width. That is what lets the
+          # gutter be read downward: packed to the left instead, a mail whose
+          # only flag is an attachment would put its 📎 exactly where the row
+          # above carries its unread marker.
           #
-          # `fixed(9)` is the sum of those five slots: the emoji are two
-          # terminal cells wide, `↩` is one. `max` would look tidier here
-          # and is a trap — it measures only the rows of the CURRENT page, so
-          # a page that happens to carry no flags collapses the column to
-          # nothing and shifts the whole table sideways when you turn to it.
-          - { key: flags, label: "", sizing: "fixed(9)" }
+          # `max` rather than a fixed width, because the adapter renders only
+          # the slots the CURRENT PAGE actually uses: a mailbox where nothing
+          # is starred or drafted pays for two slots, not five, and a page
+          # with no flags at all costs no column at all. The width therefore
+          # changes when you turn the page — inside a page nothing moves,
+          # which is the part that has to hold.
+          - { key: flags, label: "", sizing: max }
           - { key: from, label: From, sizing: "flex(1)" }
           # `source: label` rather than the raw subject: a mail whose
           # `Subject:` header is empty would otherwise be a row you cannot
