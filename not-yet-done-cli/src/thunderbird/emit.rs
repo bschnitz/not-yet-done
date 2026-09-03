@@ -90,7 +90,7 @@ pub(super) fn view_yaml(accounts: &[Account]) -> String {
          # message and its ATTACHMENTS. Writing — marking read, flagging, moving,\n\
          # sending — is the adapter's next phase.\n\n",
     );
-    s.push_str("tab:\n  name: Mail\n  icon: \"\u{1f4e7}\"\n");
+    s.push_str("tab:\n  name: Mail\n  icon: \"\u{2709}\u{fe0f}\"\n");
     s.push_str("  # While any folder in this tab holds unread mail, the tab bar\n");
     s.push_str("  # prefixes the label with this marker — the only cue a background\n");
     s.push_str("  # mail tab can give.\n");
