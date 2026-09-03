@@ -1,0 +1,128 @@
+# Example: Mail (IMAP) adapter — one instance, every account
+#
+# Place in: ~/.config/not_yet_done/views/mail-adapter.yaml
+# Referenced by mail.yaml via: adapter.config: mail-adapter.yaml
+#
+# Unlike the other network adapters, ONE mail instance holds MANY accounts —
+# mail is one workflow, and a tab per mailbox is the wrong shape for it. The
+# layout mirrors the calendar adapter: a list of connections under a single
+# instance. Each account gets its own subtab in the view (see mail.yaml), its
+# own IMAP connection, and its own credentials.
+#
+# `nyd config auth mail` prints the mechanisms below with their fields and every
+# provider; `nyd config build mail` asks and writes the block.
+#
+# `nyd config import-thunderbird` writes this whole file for you, one entry per
+# account found in a Thunderbird profile — passwords excluded, see `auth:`.
+
+# Label of the instance: the root node and the tab title.
+name: Mail
+
+# Defaults every account inherits; each may override them.
+page_size: 50
+
+# How a request that produced no answer at all is sent again — the connection
+# refused, the handshake lost, the answer never arriving. Such a failure says
+# nothing about the server a moment later, so the adapter repeats the call
+# instead of handing the error straight to the user.
+#
+# `attempts` counts the first try; `1` switches repeating off. `backoff_ms` is
+# the wait before the second attempt and doubles before each further one.
+# Defaults: 2 attempts, 250 ms.
+retry:
+  attempts: 2
+  backoff_ms: 250
+
+accounts:
+  # ── A normal account over implicit TLS ────────────────────────────────────
+  - id: work # stable and unique: the first segment of every node id below
+    name: Work # what the account row and its subtab are called
+    address: me@example.org # the From address; shown, never used to log in
+    host: imap.example.org
+    port: 993 # optional: 993 for tls, 143 otherwise
+    security: tls # tls | starttls | none — stated, never guessed from the port
+    default_folder: INBOX
+
+    # Folders never listed. A trailing `/*` hides a whole subtree.
+    # exclude_folders: ["Junk", "Trash/*"]
+
+    auth:
+      # IMAP LOGIN / AUTHENTICATE PLAIN. `username` is the LOGIN NAME the
+      # provider asks for — often the e-mail address, not always.
+      mechanism: password
+      # Both fields out of ONE script run, the way the taiga/kimai/postgres
+      # adapters already source their secrets: one gpg call, and a locked
+      # store asks for its passphrase through the TUI instead of opening its
+      # own pinentry window somewhere off-screen.
+      script: >-
+        ~/.config/not_yet_done/scripts/pass_credentials.py
+        username=mail/example-org/user
+        password=mail/example-org/pass
+      bindings:
+        - field: username
+          provider: { type: script-result }
+        - field: password
+          provider: { type: script-result }
+
+  # ── A mailbox reached through a local bridge ──────────────────────────────
+  # A bridge on loopback speaks plain text on purpose: nothing leaves the
+  # machine, and there is no certificate to check. `security: none` says so
+  # explicitly rather than leaving it to be guessed from the port.
+  - id: bridged
+    name: Bridged
+    address: me@example.net
+    host: 127.0.0.1
+    port: 1143
+    security: none
+    auth:
+      mechanism: password
+      script: >-
+        ~/.config/not_yet_done/scripts/pass_credentials.py
+        username=mail/bridge/user
+        password=mail/bridge/pass
+      bindings:
+        - field: username
+          provider: { type: script-result }
+        - field: password
+          provider: { type: script-result }
+
+  # ── STARTTLS, and a password asked for once per session ───────────────────
+  - id: club
+    name: Club
+    host: mail.example.net
+    security: starttls
+    # Self-signed or internal CA: flip this. Defaults to strict verification.
+    # accept_invalid_certs: false
+    auth:
+      mechanism: password
+      bindings:
+        - field: username
+          provider: { type: literal, value: treasurer }
+        - field: password
+          provider: { type: prompt }
+
+  # ── OAuth 2 (XOAUTH2) ─────────────────────────────────────────────────────
+  # The adapter performs no OAuth flow itself: the access token is an ordinary
+  # credential, so a script that refreshes it is all this needs. Where the
+  # provider offers an app password, `mechanism: password` is the simpler
+  # route and needs no script at all.
+  # - id: gmail
+  #   name: Gmail
+  #   host: imap.gmail.com
+  #   security: tls
+  #   auth:
+  #     mechanism: xoauth2
+  #     bindings:
+  #       - field: username
+  #         provider: { type: literal, value: me@gmail.invalid }
+  #       - field: token
+  #         provider:
+  #           type: command
+  #           script: ~/.config/not_yet_done/scripts/gmail_oauth_token.sh
+  #           timeout_secs: 30
+
+# Optional override for the backing store (the envelope cache). Sea-orm
+# compatible URL; falls back to a private SQLite file under the user's local
+# data directory when omitted.
+# db:
+#   url: "sqlite:///home/me/.local/share/not_yet_done/mail.sqlite?mode=rwc"

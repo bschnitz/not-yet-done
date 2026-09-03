@@ -1,0 +1,414 @@
+//! One connection actor per account.
+//!
+//! IMAP has no request multiplexing: a session has *one* selected mailbox and
+//! runs *one* command at a time. Two concurrent callers on one session do not
+//! interleave — they corrupt each other's responses. The session therefore
+//! lives inside a task, and everything reaches it as a message on a channel.
+//! That the tree, the list and a background reload all ask at once is then a
+//! queue, not a race.
+//!
+//! The actor also owns the *lifecycle*: it connects lazily (opening the tab
+//! for one account must not log into the other five), and it reconnects once
+//! when a request dies on a session the server has timed out — an hour of
+//! idling followed by a folder switch is the normal case, not an error worth
+//! showing.
+//!
+//! Adding a command means: a function in [`super::ops`], a variant in
+//! [`Request`], one arm in [`Actor::serve`], and a method on [`Connection`].
+
+use std::sync::Arc;
+
+use not_yet_done_content::StatusReporter;
+use tokio::sync::{mpsc, oneshot};
+
+use super::login::{self, MailSession};
+use super::ops;
+use crate::config::AccountConfig;
+use crate::credentials::AccountCredentials;
+use crate::error::{MailError, MailResult};
+
+/// How many requests may queue up before the caller waits. Deep enough that
+/// a burst of view loads never blocks, shallow enough to notice a stall.
+const QUEUE_DEPTH: usize = 32;
+
+/// What the actor can be asked to do.
+pub(crate) enum Request {
+    /// Make sure the account is logged in, and report what the server can do.
+    Capabilities {
+        reply: oneshot::Sender<MailResult<Vec<String>>>,
+    },
+    /// Log out and drop the session. The actor stays alive: the next request
+    /// connects again.
+    Disconnect {
+        reply: oneshot::Sender<MailResult<()>>,
+    },
+}
+
+/// A handle on one account's connection. Cheap to clone; dropping the last
+/// one ends the actor, which logs out on its way down.
+#[derive(Clone)]
+pub(crate) struct Connection {
+    tx: mpsc::Sender<Request>,
+}
+
+impl Connection {
+    /// Start the actor. Nothing is connected yet — the first request is.
+    pub(crate) fn spawn(
+        account: Arc<AccountConfig>,
+        creds: Arc<AccountCredentials>,
+        status: StatusReporter,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
+        let actor = Actor {
+            account,
+            creds,
+            status,
+            session: None,
+        };
+        tokio::spawn(actor.run(rx));
+        Self { tx }
+    }
+
+    /// Connect if necessary and hand back the server's capability list.
+    pub(crate) async fn capabilities(&self) -> MailResult<Vec<String>> {
+        self.ask(|reply| Request::Capabilities { reply }).await
+    }
+
+    /// Drop the session (a manual reconnect, or a tab being put away).
+    pub(crate) async fn disconnect(&self) -> MailResult<()> {
+        self.ask(|reply| Request::Disconnect { reply }).await
+    }
+
+    async fn ask<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<MailResult<T>>) -> Request,
+    ) -> MailResult<T> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(build(tx))
+            .await
+            .map_err(|_| MailError::Closed)?;
+        rx.await.map_err(|_| MailError::Closed)?
+    }
+}
+
+struct Actor {
+    account: Arc<AccountConfig>,
+    creds: Arc<AccountCredentials>,
+    /// This account's own status channel. Labels here already name the
+    /// account; the adapter merges the channels and only has to name it in
+    /// the credential dialog's header, which the auth layer writes.
+    status: StatusReporter,
+    session: Option<MailSession>,
+}
+
+/// Run one command against the account's session, with the lifecycle around
+/// it: connect if there is nothing, announce the request, and — if a *reused*
+/// session died under it — reconnect and run it once more.
+///
+/// A macro rather than a function because the command borrows the session
+/// across an await, which a generic callback could only express by boxing
+/// every call site's future.
+macro_rules! on_session {
+    ($self:ident, $label:expr, |$s:ident| $call:expr) => {{
+        loop {
+            let (mut owned, fresh) = match $self.take_session().await {
+                Ok(v) => v,
+                Err(e) => break Err(e),
+            };
+            let announced = $self.status.busy($label, 0);
+            let outcome = {
+                let $s: &mut MailSession = &mut owned;
+                $call.await
+            };
+            drop(announced);
+            match outcome {
+                Ok(v) => {
+                    $self.session = Some(owned);
+                    break Ok(v);
+                }
+                Err(e) if e.is_fatal() => {
+                    // `owned` is not put back: the session is gone with it.
+                    if e.is_auth() {
+                        $self.creds.invalidate().await;
+                    }
+                    if fresh {
+                        // It failed on a session we had just built — trying
+                        // again would only repeat it.
+                        $self.status.failed(e.to_string());
+                        break Err(e);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    // The server refused the command; the session is fine.
+                    $self.session = Some(owned);
+                    break Err(e);
+                }
+            }
+        }
+    }};
+}
+
+impl Actor {
+    async fn run(mut self, mut rx: mpsc::Receiver<Request>) {
+        while let Some(req) = rx.recv().await {
+            self.serve(req).await;
+        }
+        // Every handle is gone: say goodbye rather than letting the server
+        // find out by timeout.
+        self.close().await;
+    }
+
+    async fn serve(&mut self, req: Request) {
+        match req {
+            Request::Capabilities { reply } => {
+                let out = on_session!(self, self.label("Contacting the server"), |s| {
+                    ops::capabilities(s)
+                });
+                let _ = reply.send(out);
+            }
+            Request::Disconnect { reply } => {
+                self.close().await;
+                let _ = reply.send(Ok(()));
+            }
+        }
+    }
+
+    /// The session, connecting first if there is none. The flag says whether
+    /// it was built just now — which decides whether a failure is worth a
+    /// second attempt.
+    async fn take_session(&mut self) -> MailResult<(MailSession, bool)> {
+        if let Some(session) = self.session.take() {
+            return Ok((session, false));
+        }
+        let session = self.establish().await?;
+        Ok((session, true))
+    }
+
+    /// Resolve credentials, open the transport, log in. Reports each step, so
+    /// a login that waits on a password store says so instead of looking
+    /// hung.
+    async fn establish(&mut self) -> MailResult<MailSession> {
+        let who = self.account.label().to_string();
+        self.status.begin_connect();
+        self.status
+            .connect_step(format!("{who}: unlocking credentials"));
+
+        let result = async {
+            let creds = self.creds.fields().await?;
+            let client = login::connect(&self.account, &self.status, &who).await?;
+            login::login(
+                client,
+                &self.account.auth.mechanism,
+                &creds,
+                &self.status,
+                &who,
+            )
+            .await
+        }
+        .await;
+
+        match result {
+            Ok(session) => {
+                self.status.connected();
+                Ok(session)
+            }
+            Err(e) => {
+                // A rejected password must not be replayed: some servers lock
+                // the account after a handful of tries, and the user would
+                // never be asked for the right one.
+                if e.is_auth() {
+                    self.creds.invalidate().await;
+                }
+                self.status.failed(format!("{who}: {e}"));
+                Err(e)
+            }
+        }
+    }
+
+    async fn close(&mut self) {
+        if let Some(mut session) = self.session.take() {
+            ops::logout(&mut session).await;
+        }
+    }
+
+    fn label(&self, what: &str) -> String {
+        format!("{}: {what}", self.account.label())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Security;
+    use crate::credentials::LoginLane;
+    use crate::imap::testserver::{FakeServer, Script};
+    use not_yet_done_content::{
+        AdapterStatus, AuthSpec, CredentialBinding, CredentialProvider, SessionCachePolicy,
+    };
+    use tokio::sync::watch;
+
+    const PASSWORD: &str = "right";
+
+    fn account(port: u16, password: &str) -> Arc<AccountConfig> {
+        Arc::new(AccountConfig {
+            id: "work".into(),
+            name: Some("Work".into()),
+            address: None,
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            security: Security::None,
+            accept_invalid_certs: false,
+            default_folder: "INBOX".into(),
+            exclude_folders: Vec::new(),
+            auth: literal_auth(password),
+            page_size: None,
+            retry: None,
+        })
+    }
+
+    fn literal_auth(password: &str) -> AuthSpec {
+        let literal = |value: &str| CredentialProvider::Literal {
+            value: value.to_string(),
+        };
+        AuthSpec {
+            mechanism: "password".into(),
+            session_cache: SessionCachePolicy::default(),
+            script: None,
+            script_timeout_secs: 120,
+            bindings: vec![
+                CredentialBinding {
+                    field: "username".into(),
+                    provider: literal("someone"),
+                    label: None,
+                    masked: None,
+                },
+                CredentialBinding {
+                    field: "password".into(),
+                    provider: literal(password),
+                    label: None,
+                    masked: None,
+                },
+            ],
+        }
+    }
+
+    /// A live connection plus its status handles. The receiver is returned
+    /// and must be kept: a `watch` channel whose receivers have all been
+    /// dropped is closed, and the reporter's updates would go nowhere.
+    fn connection(
+        account: Arc<AccountConfig>,
+    ) -> (Connection, StatusReporter, watch::Receiver<AdapterStatus>) {
+        let status = StatusReporter::new();
+        let watching = status.subscribe();
+        let creds = AccountCredentials::new(
+            account.id.clone(),
+            account.auth.clone(),
+            status.clone(),
+            LoginLane::new(),
+        )
+        .expect("spec is valid");
+        (
+            Connection::spawn(Arc::clone(&account), creds, status.clone()),
+            status,
+            watching,
+        )
+    }
+
+    /// Nothing connects until something is asked for — the reason six
+    /// accounts in one instance are affordable at all.
+    #[tokio::test]
+    async fn nothing_connects_until_a_request_arrives() {
+        let server = FakeServer::start(Script {
+            password: PASSWORD,
+            hang_up_after: None,
+        })
+        .await;
+        let (conn, status, _watching) = connection(account(server.addr.port(), PASSWORD));
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(server.connections(), 0, "spawning must not log in");
+        assert!(matches!(status.current(), AdapterStatus::Idle));
+
+        let caps = conn.capabilities().await.expect("logs in and answers");
+        assert!(caps.iter().any(|c| c == "IMAP4rev1"), "{caps:?}");
+        assert_eq!(server.connections(), 1);
+        assert!(matches!(status.current(), AdapterStatus::Ready));
+    }
+
+    /// The session is kept: a second request must not log in again.
+    #[tokio::test]
+    async fn the_session_is_reused() {
+        let server = FakeServer::start(Script {
+            password: PASSWORD,
+            hang_up_after: None,
+        })
+        .await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+        conn.capabilities().await.expect("first");
+        conn.capabilities().await.expect("second");
+        assert_eq!(server.connections(), 1, "one connection, two commands");
+        assert_eq!(server.logins(), 1);
+    }
+
+    /// A server that drops an idle session is routine, not an error: the
+    /// second request reconnects and succeeds, and the user sees nothing.
+    #[tokio::test]
+    async fn a_dead_session_costs_one_reconnect_not_the_request() {
+        let server = FakeServer::start(Script {
+            password: PASSWORD,
+            // LOGIN is command 1, the first CAPABILITY command 2; the second
+            // CAPABILITY (command 3) meets a server that has gone away.
+            hang_up_after: Some(3),
+        })
+        .await;
+        let (conn, status, _watching) = connection(account(server.addr.port(), PASSWORD));
+        conn.capabilities().await.expect("first request");
+
+        let caps = conn.capabilities().await.expect("survives the hang-up");
+        assert!(caps.iter().any(|c| c == "IMAP4rev1"), "{caps:?}");
+        assert_eq!(server.connections(), 2, "exactly one reconnect");
+        assert!(
+            !matches!(status.current(), AdapterStatus::Failed { .. }),
+            "a recovered timeout is not a failure the user should see"
+        );
+    }
+
+    /// A refused password must surface as an auth error — that is what makes
+    /// the adapter drop the credential and ask again rather than replay it.
+    #[tokio::test]
+    async fn a_refused_password_is_an_auth_error() {
+        let server = FakeServer::start(Script {
+            password: PASSWORD,
+            hang_up_after: None,
+        })
+        .await;
+        let (conn, status, _watching) = connection(account(server.addr.port(), "wrong"));
+        let err = conn.capabilities().await.expect_err("the server says no");
+        assert!(err.is_auth(), "{err}");
+        assert!(err.to_string().contains("Invalid credentials"), "{err}");
+        match status.current() {
+            AdapterStatus::Failed { reason } => {
+                assert!(reason.contains("Work"), "names the account: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// `disconnect` really ends the session; the next request builds a new
+    /// one. This is the manual-reconnect path.
+    #[tokio::test]
+    async fn disconnect_ends_the_session_and_the_next_request_rebuilds_it() {
+        let server = FakeServer::start(Script {
+            password: PASSWORD,
+            hang_up_after: None,
+        })
+        .await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+        conn.capabilities().await.expect("first");
+        conn.disconnect().await.expect("logs out");
+        conn.capabilities().await.expect("second");
+        assert_eq!(server.connections(), 2);
+        assert_eq!(server.logins(), 2);
+    }
+}

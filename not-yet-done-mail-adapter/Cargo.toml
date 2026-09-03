@@ -1,0 +1,29 @@
+[package]
+name = "not-yet-done-mail-adapter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+fieldsmith  = { workspace = true }
+serde       = { workspace = true }
+serde_yaml  = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+dirs        = { workspace = true }
+futures     = { workspace = true }
+thiserror   = { workspace = true }
+not-yet-done-content = { path = "../not-yet-done-content" }
+
+# IMAP. `async-imap` is the client Delta Chat drives; the workspace is
+# fully tokio-async, so the synchronous `imap` crate would mean a blocking
+# pool per account. native-tls (openssl) keeps us on the single TLS stack
+# reqwest and tokio-tungstenite already use.
+async-imap       = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+mail-parser      = "0.11"
+
+[dev-dependencies]
+tokio      = { workspace = true }
+serde_yaml = { workspace = true }
