@@ -260,14 +260,29 @@ pub(crate) fn scripted() -> Script {
     }
 }
 
+/// One message the client filed with `APPEND`.
+#[derive(Clone, Debug)]
+pub(crate) struct Appended {
+    pub(crate) folder: String,
+    /// The flag list, without its parentheses.
+    pub(crate) flags: String,
+    pub(crate) source: String,
+}
+
 /// What the server counted. Every claim about *cost* — one reconnect, no
 /// second `LIST`, a body fetched once — is a claim about one of these.
+///
+/// The write side records what arrived rather than how often: an `APPEND`
+/// that put the wrong bytes in the right folder is the failure worth
+/// catching, and a count cannot see it.
 #[derive(Default)]
 struct Counters {
     connections: AtomicUsize,
     logins: AtomicUsize,
     lists: AtomicUsize,
     fetches: AtomicUsize,
+    appended: std::sync::Mutex<Vec<Appended>>,
+    stored: std::sync::Mutex<Vec<String>>,
 }
 
 pub(crate) struct FakeServer {
@@ -314,6 +329,16 @@ impl FakeServer {
     /// read once or once per keystroke.
     pub(crate) fn fetches(&self) -> usize {
         self.counters.fetches.load(Ordering::SeqCst)
+    }
+
+    /// The messages the client filed, in the order they arrived.
+    pub(crate) fn appended(&self) -> Vec<Appended> {
+        self.counters.appended.lock().expect("not poisoned").clone()
+    }
+
+    /// The `UID STORE` command lines the client sent, verbatim.
+    pub(crate) fn stored(&self) -> Vec<String> {
+        self.counters.stored.lock().expect("not poisoned").clone()
     }
 }
 
@@ -461,8 +486,58 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
                         out.push_str(&format!("{tag} OK FETCH completed\r\n"));
                         out
                     }
+                    (Some(_), "STORE") => {
+                        counters
+                            .stored
+                            .lock()
+                            .expect("not poisoned")
+                            .push(line.clone());
+                        // `.SILENT` is what the client asks for, so there is
+                        // nothing untagged to send back.
+                        format!("{tag} OK STORE completed\r\n")
+                    }
                     (_, other) => format!("{tag} BAD unknown UID subcommand {other}\r\n"),
                 }
+            }
+            // The one command that is not a line: the client announces a
+            // byte count, waits for a continuation, and then writes the
+            // message. Reading it back line by line is exact as long as the
+            // literal ends where it says it does — which is the client's
+            // side of the same contract.
+            "APPEND" => {
+                let folder = quoted(0).unwrap_or_default();
+                let flags = line
+                    .split_once('(')
+                    .and_then(|(_, rest)| rest.split_once(')'))
+                    .map(|(flags, _)| flags.to_string())
+                    .unwrap_or_default();
+                let size: usize = line
+                    .rsplit_once('{')
+                    .and_then(|(_, rest)| rest.trim_end_matches('}').parse().ok())
+                    .unwrap_or(0);
+                if tx.write_all(b"+ ready for the literal\r\n").await.is_err() {
+                    return;
+                }
+                let mut source = String::new();
+                while source.len() < size {
+                    let Ok(Some(part)) = lines.next_line().await else {
+                        return;
+                    };
+                    source.push_str(&part);
+                    source.push_str("\r\n");
+                }
+                // The CRLF that closes the literal, and is not part of it.
+                let _ = lines.next_line().await;
+                counters
+                    .appended
+                    .lock()
+                    .expect("not poisoned")
+                    .push(Appended {
+                        folder,
+                        flags,
+                        source,
+                    });
+                format!("{tag} OK [APPENDUID 45 9] APPEND completed\r\n")
             }
             "CAPABILITY" => {
                 format!("* CAPABILITY IMAP4rev1 IDLE MOVE\r\n{tag} OK CAPABILITY completed\r\n")

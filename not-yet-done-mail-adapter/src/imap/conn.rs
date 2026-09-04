@@ -95,6 +95,24 @@ pub(crate) enum Request {
         uid: u32,
         reply: oneshot::Sender<MailResult<EnvelopeRow>>,
     },
+    /// Put a message we just sent into the account's Sent mailbox.
+    ///
+    /// Which mailbox that is, is decided *here* rather than by the caller:
+    /// the actor holds the account config, so the `sent_folder:` override and
+    /// the server's own `\Sent` are both within reach, and the reply names
+    /// the folder the copy landed in.
+    AppendToSent {
+        source: Vec<u8>,
+        reply: oneshot::Sender<MailResult<String>>,
+    },
+    /// Add IMAP flags to one message.
+    AddFlags {
+        path: String,
+        uid_validity: u32,
+        uid: u32,
+        flags: String,
+        reply: oneshot::Sender<MailResult<()>>,
+    },
     /// Log out and drop the session. The actor stays alive: the next request
     /// connects again.
     Disconnect {
@@ -223,6 +241,31 @@ impl Connection {
             path,
             uid_validity,
             uid,
+            reply,
+        })
+        .await
+    }
+
+    /// File a copy of an outgoing message in Sent, and say where it went.
+    pub(crate) async fn append_to_sent(&self, source: Vec<u8>) -> MailResult<String> {
+        self.ask(|reply| Request::AppendToSent { source, reply })
+            .await
+    }
+
+    /// Add flags to one message — `\Answered` after a reply went out.
+    pub(crate) async fn add_flags(
+        &self,
+        path: &str,
+        uid_validity: u32,
+        uid: u32,
+        flags: &str,
+    ) -> MailResult<()> {
+        let (path, flags) = (path.to_string(), flags.to_string());
+        self.ask(|reply| Request::AddFlags {
+            path,
+            uid_validity,
+            uid,
+            flags,
             reply,
         })
         .await
@@ -437,11 +480,56 @@ impl Actor {
                 });
                 let _ = reply.send(out);
             }
+            Request::AppendToSent { source, reply } => {
+                let out = self.file_in_sent(&source).await;
+                let _ = reply.send(out);
+            }
+            Request::AddFlags {
+                path,
+                uid_validity,
+                uid,
+                flags,
+                reply,
+            } => {
+                let out = on_session!(
+                    self,
+                    self.label(&format!("Flagging {path} #{uid} {flags}")),
+                    |s| ops::add_flags(s, &path, uid_validity, uid, &flags)
+                );
+                let _ = reply.send(out);
+            }
             Request::Disconnect { reply } => {
                 self.close().await;
                 let _ = reply.send(Ok(()));
             }
         }
+    }
+
+    /// Find the Sent mailbox and put the message in it.
+    ///
+    /// Two commands and therefore two `on_session!` blocks — the discovery
+    /// costs a `LIST` only where the config named no folder, and a server
+    /// that advertises no `\Sent` earns an error that says what to write in
+    /// the config rather than a silent skip.
+    async fn file_in_sent(&mut self, source: &[u8]) -> MailResult<String> {
+        let path = match self.account.sent_folder.clone() {
+            Some(path) => path,
+            None => {
+                let found = on_session!(self, self.label("Looking for the Sent folder"), |s| {
+                    ops::sent_folder(s)
+                })?;
+                found.ok_or_else(|| {
+                    MailError::Config(format!(
+                        "account `{}`: the server marks no Sent folder, so the copy has                          nowhere to go — name one with sent_folder:",
+                        self.account.id
+                    ))
+                })?
+            }
+        };
+        on_session!(self, self.label(&format!("Filing a copy in {path}")), |s| {
+            ops::append(s, &path, "(\\Seen)", source)
+        })?;
+        Ok(path)
     }
 
     /// The session, connecting first if there is none. The flag says whether
@@ -1109,6 +1197,77 @@ mod tests {
             .await
             .expect_err("no such message");
         assert!(err.to_string().contains("moved or deleted"), "{err}");
+    }
+
+    /// The copy in Sent, without a word of configuration: the server marks
+    /// a mailbox `\Sent` and that is the one the message lands in, with the
+    /// flag that keeps it from showing up as unread mail of one's own.
+    #[tokio::test]
+    async fn a_sent_message_is_filed_in_the_folder_the_server_marks() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let folder = conn
+            .append_to_sent(b"From: me@example.invalid\r\nSubject: hi\r\n\r\nbody\r\n".to_vec())
+            .await
+            .expect("files the copy");
+        assert_eq!(folder, "Sent Items");
+
+        let filed = server.appended();
+        assert_eq!(filed.len(), 1);
+        assert_eq!(filed[0].folder, "Sent Items");
+        assert_eq!(filed[0].flags, "\\Seen");
+        assert!(filed[0].source.contains("Subject: hi"), "{:?}", filed[0]);
+    }
+
+    /// A configured folder is not a suggestion: it is used, and the `LIST`
+    /// that would have looked for one never happens.
+    #[tokio::test]
+    async fn a_configured_sent_folder_wins_over_the_servers_own() {
+        let server = FakeServer::start(scripted()).await;
+        let mut account = account(server.addr.port(), PASSWORD);
+        Arc::get_mut(&mut account).expect("sole owner").sent_folder = Some("Archive".into());
+        let (conn, _status, _watching) = connection(account);
+
+        let folder = conn
+            .append_to_sent(b"Subject: hi\r\n\r\nbody\r\n".to_vec())
+            .await
+            .expect("files the copy");
+        assert_eq!(folder, "Archive");
+        assert_eq!(server.lists(), 0, "no discovery was needed");
+    }
+
+    /// The ↩ glyph in the message list is this command.
+    #[tokio::test]
+    async fn answering_a_message_flags_it() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        conn.add_flags("INBOX", 42, 4, "\\Answered")
+            .await
+            .expect("flags it");
+        let stored = server.stored();
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0].contains("UID STORE 4 +FLAGS.SILENT (\\Answered)"),
+            "{}",
+            stored[0]
+        );
+    }
+
+    /// A mailbox that was renumbered under us must not be flagged by uid:
+    /// the same number now addresses a different message.
+    #[tokio::test]
+    async fn a_flag_is_refused_when_the_folder_was_renumbered() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let err = conn
+            .add_flags("INBOX", 41, 4, "\\Answered")
+            .await
+            .expect_err("stale uid validity");
+        assert!(err.to_string().contains("renumbered"), "{err}");
+        assert!(server.stored().is_empty(), "nothing was flagged");
     }
 
     /// `disconnect` really ends the session; the next request builds a new
