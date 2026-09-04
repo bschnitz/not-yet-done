@@ -135,24 +135,33 @@ pub(crate) async fn append(
     Ok(())
 }
 
-/// Add flags to one message — `\Answered` on the mail that was just
-/// answered, and whatever phase 5 adds next.
+/// Set or clear flags on a set of messages — `\Answered` after a reply,
+/// `\Seen` and `\Flagged` from the message level's own actions.
 ///
-/// `.SILENT`: the updated flags are not wanted back. The row on screen is
-/// patched by the caller that knows which row it is, and an unsolicited
-/// `FETCH` here would only be drained.
-pub(crate) async fn add_flags(
+/// `.SILENT`: the updated flags are not wanted back. The pane reloads after
+/// the action either way, and an unsolicited `FETCH` here would only be
+/// drained.
+///
+/// The set is a slice rather than one uid because the command takes one:
+/// marking a selection read is a single round trip, and building that out of
+/// N calls would be N `SELECT`-checked round trips for no reason.
+pub(crate) async fn store_flags(
     state: &mut SessionState,
     path: &str,
     uid_validity: u32,
-    uid: u32,
+    uids: &[u32],
+    add: bool,
     flags: &str,
 ) -> MailResult<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     select_stable(state, path, uid_validity).await?;
+    let sign = if add { '+' } else { '-' };
     {
         let updates = state
             .session
-            .uid_store(uid.to_string(), format!("+FLAGS.SILENT ({flags})"))
+            .uid_store(uid_set(uids), format!("{sign}FLAGS.SILENT ({flags})"))
             .await
             .map_err(classify)?;
         futures::pin_mut!(updates);
@@ -163,6 +172,90 @@ pub(crate) async fn add_flags(
     drain_unsolicited(&mut state.session);
     Ok(())
 }
+
+/// Move messages to another mailbox.
+///
+/// Two ways there, and which one is available is the server's to say:
+///
+/// * `MOVE` (RFC 6851) does it in one command, and atomically per message —
+///   no message is ever in both mailboxes or in neither.
+/// * Without it, the move is `COPY` + `\Deleted` + expunge. That last step
+///   is the dangerous one: a plain `EXPUNGE` removes **every** message in
+///   the mailbox that carries `\Deleted`, including ones another client
+///   marked and has not expunged yet. `UID EXPUNGE` (RFC 4315, `UIDPLUS`)
+///   removes only ours.
+///
+/// A server offering neither is refused rather than served with a plain
+/// `EXPUNGE`: silently deleting mail nobody asked about is worse than a move
+/// that does not happen and says why.
+pub(crate) async fn move_messages(
+    state: &mut SessionState,
+    path: &str,
+    uid_validity: u32,
+    uids: &[u32],
+    dest: &str,
+) -> MailResult<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    select_stable(state, path, uid_validity).await?;
+    let set = uid_set(uids);
+    if has_capability(state, "MOVE").await? {
+        state
+            .session
+            .uid_mv(&set, dest)
+            .await
+            .map_err(classify)?;
+        drain_unsolicited(&mut state.session);
+        return Ok(());
+    }
+    if !has_capability(state, "UIDPLUS").await? {
+        return Err(MailError::Server(format!(
+            "this server offers neither MOVE nor UIDPLUS, so a message copied to `{dest}` \
+             could only be removed from `{path}` by an EXPUNGE that would also delete \
+             anything else marked deleted there"
+        )));
+    }
+    state
+        .session
+        .uid_copy(&set, dest)
+        .await
+        .map_err(classify)?;
+    // Only now: a copy that failed must leave the original alone.
+    store_flags(state, path, uid_validity, uids, true, "\\Deleted").await?;
+    {
+        let expunged = state.session.uid_expunge(&set).await.map_err(classify)?;
+        futures::pin_mut!(expunged);
+        while let Some(uid) = expunged.next().await {
+            uid.map_err(classify)?;
+        }
+    }
+    drain_unsolicited(&mut state.session);
+    Ok(())
+}
+
+/// Whether the server named `name` in its capability list, asking at most
+/// once per session (see [`SessionState::cached_caps`]).
+async fn has_capability(state: &mut SessionState, name: &str) -> MailResult<bool> {
+    if state.cached_caps().is_none() {
+        let caps = capabilities(state).await?;
+        state.remember_caps(caps);
+    }
+    Ok(state
+        .cached_caps()
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(name)))
+}
+
+/// A uid set in the form the command wants it: `4`, or `4,7,9`.
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 
 /// Message and unread counts for one mailbox, without selecting it.
 ///
