@@ -5,12 +5,19 @@
 //! folder, so they are fetched for the folders of the level being listed and
 //! not for the whole tree (see [`crate::imap::conn::Connection::folder_status`]).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
-use not_yet_done_content::{ColumnSchema, Metadata, Node, NodeSummary, NodeType};
+use not_yet_done_content::{
+    ActionInput, ActionOutcome, ColumnSchema, ContentError, EditorPrep, InputSpec, Metadata, Node,
+    NodeAction, NodeSummary, NodeType, Result,
+};
 
 use super::field;
+use super::message::{compose_prep, compose_send};
 use super::types::folder_type;
+use crate::compose::outbox::Outbox;
 use crate::ids::folder_id;
 use crate::model::FolderInfo;
 
@@ -66,19 +73,30 @@ pub(super) fn folder_row(account: &str, info: &FolderInfo, has_children: bool) -
     }
 }
 
+/// What a folder offers.
+///
+/// Only writing a new message — everything else on this level is a listing.
+/// It sits here as well as on the message below it for one reason: an empty
+/// folder has no row to stand on, and `target: parent` then finds the folder.
+pub(super) fn actions() -> Vec<NodeAction> {
+    vec![NodeAction::new("compose", "new message", InputSpec::Editor)]
+}
+
 /// One mailbox, as a node.
 pub(super) struct MailFolderNode {
     id: String,
     label: String,
     metadata: Metadata,
+    outbox: Arc<Outbox>,
 }
 
 impl MailFolderNode {
-    pub(super) fn new(account: &str, info: &FolderInfo) -> Self {
+    pub(super) fn new(account: &str, info: &FolderInfo, outbox: Arc<Outbox>) -> Self {
         Self {
             id: folder_id(account, &info.path),
             label: info.name.clone(),
             metadata: metadata_of(account, info),
+            outbox,
         }
     }
 }
@@ -99,5 +117,25 @@ impl Node for MailFolderNode {
 
     fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        match action_id {
+            "compose" => compose_prep(&self.outbox).await,
+            other => Err(ContentError::NotSupported(format!(
+                "`{other}` does not open an editor on a mail folder"
+            ))),
+        }
+    }
+
+    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("compose", ActionInput::Edited { text, .. }) => {
+                compose_send(&self.outbox, &text).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "`{other}` is not an action of a mail folder"
+            ))),
+        }
     }
 }

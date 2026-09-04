@@ -40,6 +40,8 @@ use not_yet_done_content::{
     PageInfo, Result, RetryConfig, StatusReporter, apply_sort,
 };
 
+use crate::compose::outbox::{ComposeDefaults, Outbox};
+use crate::compose::quote::DEFAULT_ATTRIBUTION;
 use crate::config::{AccountConfig, DEFAULT_COMMAND_TIMEOUT_SECS, MailConfig};
 use crate::credentials::{AccountCredentials, LoginLane};
 use crate::error::MailError;
@@ -139,7 +141,22 @@ struct AccountRuntime {
     command_timeout: Duration,
     /// How often logging this account in is attempted, resolved the same way.
     retry: RetryConfig,
+    /// Submission credentials, when the `smtp:` block carries an `auth:` of
+    /// its own. Absent in the common case, where reading and sending are the
+    /// same login and [`Self::creds`] answers for both.
+    smtp_creds: Option<Arc<AccountCredentials>>,
+    /// The mechanism those credentials speak — the `smtp:` block's when it
+    /// has one, the account's otherwise.
+    smtp_mechanism: String,
 }
+
+/// The suffix the login lane records for a submission login.
+///
+/// The lane names *who* is asking, and `submit_credentials` addresses the
+/// instance; with two orchestrators per account, "the account" is no longer a
+/// unique answer. So a submission prompt holds the lane under its own name
+/// and [`MailAdapter::asking`] reads it back.
+const SMTP_HOLDER: &str = "#smtp";
 
 pub struct MailAdapter {
     instance_id: String,
@@ -173,6 +190,12 @@ pub struct MailAdapter {
     /// instance hands out — a node lives for one call, the cache has to
     /// outlive it or reading the same mail twice fetches it twice.
     bodies: Arc<BodyCache>,
+    /// What an account inherits when it names no compose settings of its own.
+    compose: Arc<ComposeDefaults>,
+    /// Where unsent drafts wait: `<instance data>/drafts`, one directory per
+    /// account below it. Resolved once at construction rather than per
+    /// action, which is also what lets a test point it somewhere harmless.
+    drafts: std::path::PathBuf,
 }
 
 impl MailAdapter {
@@ -205,7 +228,27 @@ impl MailAdapter {
                     .or(instance_timeout)
                     .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS),
             );
-            let retry = account.retry.clone().unwrap_or_else(|| instance_retry.clone());
+            let retry = account
+                .retry
+                .clone()
+                .unwrap_or_else(|| instance_retry.clone());
+            let smtp_auth = account.smtp.as_ref().and_then(|s| s.auth.clone());
+            let smtp_mechanism = smtp_auth
+                .as_ref()
+                .map(|a| a.mechanism.clone())
+                .unwrap_or_else(|| account.auth.mechanism.clone());
+            let smtp_creds = match smtp_auth {
+                Some(spec) => Some(
+                    AccountCredentials::new(
+                        format!("{}{SMTP_HOLDER}", account.id),
+                        spec,
+                        status.clone(),
+                        Arc::clone(&lane),
+                    )
+                    .map_err(|e| format!("account `{}` smtp: {e}", account.id))?,
+                ),
+                None => None,
+            };
             order.push(account.id.clone());
             let (labelled, labelled_rx) = watch::channel(AdapterStatus::Idle);
             accounts.insert(
@@ -219,11 +262,13 @@ impl MailAdapter {
                     conn: OnceCell::new(),
                     command_timeout,
                     retry,
+                    smtp_creds,
+                    smtp_mechanism,
                 },
             );
         }
 
-        Ok(Self {
+        let mut adapter = Self {
             instance_id: instance_id.to_string(),
             name: cfg.name.unwrap_or_else(|| "Mail".to_string()),
             order,
@@ -236,7 +281,17 @@ impl MailAdapter {
             messages: RwLock::new(HashMap::new()),
             page_size: cfg.page_size,
             bodies: Arc::new(BodyCache::default()),
-        })
+            compose: Arc::new(ComposeDefaults {
+                format: cfg.compose_format,
+                images: cfg.quote_images,
+                attribution: cfg
+                    .reply_attribution
+                    .unwrap_or_else(|| DEFAULT_ATTRIBUTION.to_string()),
+            }),
+            drafts: std::path::PathBuf::new(),
+        };
+        adapter.drafts = adapter.instance_data_dir().join("drafts");
+        Ok(adapter)
     }
 
     /// The accounts in configuration order.
@@ -271,6 +326,41 @@ impl MailAdapter {
                 )
             })
             .await)
+    }
+
+    /// One account's sending side, built per call.
+    ///
+    /// Cheap — everything expensive in it is shared: the config, the
+    /// credentials and the connection are the account's own, and the
+    /// connection is opened here for the same reason every other call opens
+    /// it, namely that the copy in Sent and the `\Answered` flag are IMAP.
+    async fn outbox(&self, account: &str) -> Result<Arc<Outbox>> {
+        let conn = self.connection(account).await?.clone();
+        let rt = self.runtime(account)?;
+        Ok(Arc::new(Outbox::new(
+            Arc::clone(&rt.cfg),
+            Arc::clone(rt.smtp_creds.as_ref().unwrap_or(&rt.creds)),
+            rt.smtp_mechanism.clone(),
+            Arc::clone(&self.compose),
+            self.drafts.clone(),
+            conn,
+        )))
+    }
+
+    /// Whose credentials the answer in `submit_credentials` belongs to.
+    ///
+    /// The lane holds a name, not an account: reading and sending may be two
+    /// logins, and only the name says which of them put the dialog on screen.
+    fn asking(&self, holder: &str) -> Result<&Arc<AccountCredentials>> {
+        match holder.strip_suffix(SMTP_HOLDER) {
+            Some(account) => {
+                let rt = self.runtime(account)?;
+                rt.smtp_creds.as_ref().ok_or_else(|| {
+                    other_err(format!("account `{account}` has no submission login"))
+                })
+            }
+            None => Ok(&self.runtime(holder)?.creds),
+        }
     }
 
     /// Publish one account's status on both channels it belongs on: the
@@ -598,12 +688,14 @@ impl ContentAdapter for MailAdapter {
                 &row,
                 conn,
                 Arc::clone(&self.bodies),
+                self.outbox(&msg.account).await?,
             )));
         }
         if let Some((account, path)) = crate::ids::split_folder_id(id) {
             self.runtime(account)?;
             let info = self.known_folder(account, path).await;
-            return Ok(Box::new(MailFolderNode::new(account, &info)));
+            let outbox = self.outbox(account).await?;
+            return Ok(Box::new(MailFolderNode::new(account, &info, outbox)));
         }
         let rt = self.runtime(id)?;
         Ok(Box::new(MailAccountNode::new(&rt.cfg)))
@@ -745,6 +837,7 @@ impl ContentAdapter for MailAdapter {
         match node_type.type_id.as_str() {
             "mail:attachment" => attachment::actions(),
             "mail:message" => message::actions(),
+            "mail:folder" => folder::actions(),
             _ => Vec::new(),
         }
     }
@@ -786,8 +879,7 @@ impl ContentAdapter for MailAdapter {
             .holder()
             .await
             .ok_or_else(|| other_err("no account is currently asking for credentials"))?;
-        self.runtime(&asking)?
-            .creds
+        self.asking(&asking)?
             .submit(fields)
             .await
             .map_err(other_err)
@@ -797,11 +889,7 @@ impl ContentAdapter for MailAdapter {
         let Some(asking) = self.lane.holder().await else {
             return Ok(());
         };
-        self.runtime(&asking)?
-            .creds
-            .cancel()
-            .await
-            .map_err(other_err)
+        self.asking(&asking)?.cancel().await.map_err(other_err)
     }
 
     /// Drop every account's session. The next request reconnects the accounts
@@ -849,9 +937,14 @@ name: Mail
 accounts:
   - id: work
     name: Work
+    address: work@example.invalid
     host: 127.0.0.1
     port: {port}
     security: none
+    smtp:
+      host: 127.0.0.1
+      port: 1
+      security: none
     auth:
       mechanism: password
       bindings:
@@ -875,6 +968,18 @@ accounts:
         );
         let cfg: MailConfig = serde_yaml::from_str(&yaml).expect("config parses");
         MailAdapter::from_config("mail", cfg).expect("adapter builds")
+    }
+
+    /// The same adapter with its drafts pointed at a directory of this
+    /// test's own — the real one is the user's, and a test has no business
+    /// writing there.
+    fn adapter_with_drafts(port: u16, name: &str) -> (MailAdapter, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("nyd-mail-drafts-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut adapter = adapter_for(port);
+        adapter.drafts = dir.clone();
+        (adapter, dir)
     }
 
     /// The bug this is here for: one account's failure showed on every
@@ -1363,10 +1468,170 @@ accounts:
             .collect();
         assert_eq!(
             ids,
-            ["export_html"],
-            "a message can be handed to a viewer; the write actions (seen, \
-             flag, move) arrive with phase 5"
+            ["export_html", "reply", "compose"],
+            "a message can be handed to a viewer and answered; the other write \
+             actions (seen, flag, move) arrive with phase 5"
         );
+        let ids: Vec<String> = adapter
+            .actions_for_type(types::folder_type())
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["compose"],
+            "a folder offers the one action that needs an account and no row — \
+             which is what an empty mailbox has"
+        );
+    }
+
+    /// The buffer a reply opens on, end to end: the node is resolved from
+    /// its id, the message is fetched, and what comes back is a mail anyone
+    /// could send — addressed, prefixed, and with the original below the
+    /// marker as readable text.
+    #[tokio::test]
+    async fn a_reply_opens_on_the_message_it_answers() {
+        let server = FakeServer::start(scripted()).await;
+        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "reply-prep");
+
+        let node = adapter
+            .get_by_id("work/INBOX#42.1")
+            .await
+            .expect("resolves");
+        let prep = node.prepare("reply").await.expect("prepares");
+
+        assert!(
+            prep.template.contains("From: Work <work@example.invalid>"),
+            "the sender is the account, spelled out: {}",
+            prep.template
+        );
+        assert!(
+            prep.template.contains("To: juergen@example.org"),
+            "answered to whoever wrote it: {}",
+            prep.template
+        );
+        assert!(
+            prep.template.contains("Subject: Re: Grüße"),
+            "prefixed once, and the encoded subject decoded: {}",
+            prep.template
+        );
+        assert!(
+            prep.template.contains(crate::compose::buffer::QUOTE_MARKER),
+            "the marker is what makes the region below it a quote"
+        );
+        assert!(
+            prep.template.contains("> Grüße aus München"),
+            "the original is readable in the buffer: {}",
+            prep.template
+        );
+        assert_eq!(
+            prep.file_path.as_deref(),
+            Some(
+                drafts
+                    .join("work")
+                    .join("reply-work_INBOX_42.1.md")
+                    .as_path()
+            ),
+            "a real file, under the account it is sent from"
+        );
+        let _ = std::fs::remove_dir_all(&drafts);
+    }
+
+    /// The reason the draft is a file and not a temp buffer: a send that
+    /// failed must not cost the text. Pressing reply again opens what is
+    /// there, not a fresh template over it.
+    #[tokio::test]
+    async fn a_draft_that_is_still_on_disk_is_what_the_editor_opens() {
+        let server = FakeServer::start(scripted()).await;
+        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "reply-resume");
+
+        let node = adapter
+            .get_by_id("work/INBOX#42.1")
+            .await
+            .expect("resolves");
+        let path = node
+            .prepare("reply")
+            .await
+            .expect("prepares")
+            .file_path
+            .expect("a persistent draft");
+        let kept = "From: Work <work@example.invalid>\nTo: x@example.invalid\nCc: \nSubject: Re: Grüße\n\nhalb geschrieben\n";
+        std::fs::write(&path, kept).expect("writes the draft");
+
+        let again = node.prepare("reply").await.expect("prepares again");
+        assert_eq!(again.template, kept, "the text that was there survives");
+        let _ = std::fs::remove_dir_all(&drafts);
+    }
+
+    /// An account that cannot send says so where the user can still do
+    /// something about it — before the editor opens, not after a page of
+    /// text has been written into it.
+    #[tokio::test]
+    async fn an_account_without_an_address_refuses_before_the_editor_opens() {
+        let server = FakeServer::start(scripted()).await;
+        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "no-address");
+
+        let node = adapter
+            .get_by_id("private/INBOX#42.1")
+            .await
+            .expect("resolves");
+        let Err(err) = node.prepare("reply").await else {
+            panic!("an account without an address cannot send");
+        };
+        assert!(
+            err.to_string().contains("address:") && err.to_string().contains("private"),
+            "names the key and the account: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&drafts);
+    }
+
+    /// The guard the whole buffer design exists for: an answer written
+    /// *into* the quote would be dropped on the way out, because what
+    /// travels is the sender's own markup. So nothing is sent, the draft
+    /// stays, and the message says where to move the text.
+    #[tokio::test]
+    async fn an_answer_written_into_the_quote_is_refused_and_the_draft_survives() {
+        let server = FakeServer::start(scripted()).await;
+        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "edited-quote");
+
+        let mut node = adapter
+            .get_by_id("work/INBOX#42.1")
+            .await
+            .expect("resolves");
+        let prep = node.prepare("reply").await.expect("prepares");
+        let path = prep.file_path.clone().expect("a persistent draft");
+        // Exactly the gesture a mail client user makes out of habit: answer
+        // between the quoted lines.
+        let edited = prep
+            .template
+            .replace("> Grüße aus München", "> Grüße aus München\n\nja, gern!")
+            .replace("\n\n\n", "\n\nAntwort oben\n\n");
+        std::fs::write(&path, &edited).expect("writes the draft");
+
+        let Err(err) = node
+            .execute(
+                "reply",
+                ActionInput::Edited {
+                    text: edited,
+                    original: prep.template,
+                    version: String::new(),
+                },
+            )
+            .await
+        else {
+            panic!("an edited quote must not be sent");
+        };
+        assert!(
+            err.to_string().contains("quoted original was edited"),
+            "says what happened: {err}"
+        );
+        assert!(path.exists(), "and the text is still on disk");
+        assert_eq!(
+            server.appended().len(),
+            0,
+            "nothing was filed, because nothing was sent"
+        );
+        let _ = std::fs::remove_dir_all(&drafts);
     }
 
     /// The account level is pure config: it renders before anything is

@@ -6,6 +6,7 @@
 //! header block and the quote guard — cheap to test.
 
 pub(crate) mod buffer;
+pub(crate) mod outbox;
 pub(crate) mod quote;
 pub(crate) mod render;
 pub(crate) mod send;
