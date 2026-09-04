@@ -7220,6 +7220,16 @@ reading text sees text, and the copy in Sent is the same message.
       same message again → the buffer comes back with what was written, not a
       fresh template. The file is under
       `~/.local/share/not_yet_done/mail/drafts/<account>/`.
+- [ ] **The quote is the message, not the layout**: answer a newsletter — the
+      kind with a logo, a footer full of social icons and a tracking pixel. The
+      quoted region holds its text and its real links; no CSS, no `<title>`
+      line, no `![](https://…)`, no ladder of empty `>` lines, and no run of
+      invisible padding characters before the first sentence. An image with an
+      alt text stands as that text.
+- [ ] **A plain original is quoted verbatim**: answer a mail written by hand in
+      a text client → its blank lines and its spacing come through exactly as
+      the writer left them. The tidying above is for markup the adapter
+      converted, not for text somebody typed.
 
 ### The guard on the quote
 
