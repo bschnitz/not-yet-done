@@ -6,10 +6,14 @@
 //!
 //! Two entry points use it:
 //!
-//! - `edit_markdown` (the `E` action) opens `ticket.md` in place instead of a
-//!   throwaway `$TMPDIR` file and syncs attachments on demand;
+//! - `edit_markdown` (the `e e` action) opens [`EDIT_FILE`] in place instead
+//!   of a throwaway `$TMPDIR` file and syncs attachments on demand;
 //! - `export_workspace` materialises the same folder without an editor or a
-//!   Jira write-back.
+//!   Jira write-back, and writes [`TICKET_FILE`].
+//!
+//! Two files, because an export may overwrite the mirror at any moment and an
+//! editor's buffer must survive that — see the module docs of
+//! [`not_yet_done_content::workspace`].
 //!
 //! Attachments keep their plain Jira filename so the local path
 //! `attachments/<name>` matches the `!name!` wiki embed exactly — that's what
@@ -24,8 +28,12 @@ use not_yet_done_content::workspace::{self as shared, RemoteAttachment};
 use super::super::util::other_err;
 use crate::client::JiraClient;
 
-/// The single Markdown file inside a ticket folder.
+/// The ticket's Markdown mirror inside its folder — what `export_workspace`
+/// writes and the HTML preview reads.
 pub(in crate::adapter) const TICKET_FILE: &str = shared::TICKET_FILE;
+/// The `edit_markdown` buffer, next to the mirror so `attachments/<name>`
+/// still resolves. No export ever touches it.
+pub(in crate::adapter) const EDIT_FILE: &str = shared::EDIT_FILE;
 
 pub(in crate::adapter) use shared::ticket_dir;
 

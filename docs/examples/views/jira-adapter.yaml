@@ -75,12 +75,18 @@ auth:
 # bookmark_marker: "★"
 
 # Base directory for the persistent per-ticket workspace used by the
-# `edit (markdown)` action (E) and the `export workspace` action. Each ticket
-# gets its own folder `<base>/<KEY>-<slug>/` containing `ticket.md` plus an
+# `edit (markdown)` action and the `export workspace` action. Each ticket gets
+# its own folder `<base>/<KEY>-<slug>/` containing two Markdown files plus an
 # `attachments/` subfolder that is populated on demand (only missing files are
 # fetched; a `.attachments.json` sidecar tracks what was downloaded). Image
-# embeds in the Markdown resolve to these local files. A leading `~` is
-# expanded. When unset, defaults to
+# embeds in either file resolve to these local files.
+#
+# The two files are two contracts: `ticket.md` is the mirror `export workspace`
+# rewrites from the server on every run (and the HTML preview reads), while
+# `ticket.edit.md` is the editor's own buffer that no export ever touches — so
+# an export cannot land on text you are still typing.
+#
+# A leading `~` is expanded. When unset, defaults to
 # <data-local>/not_yet_done/jira/<instance>/tickets.
 # ticket_workspace: "~/jira-tickets"
 

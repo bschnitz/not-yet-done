@@ -457,14 +457,20 @@ impl Node for JiraIssueNode {
                 let template = self.ticket_markdown(true).await?;
                 let detail = self.detail().await?;
                 // When a workspace base is configured, open a persistent
-                // `<base>/<KEY>-<slug>/ticket.md` and sync attachments on
+                // `<base>/<KEY>-<slug>/ticket.edit.md` and sync attachments on
                 // demand so the image links resolve locally. Without one, fall
                 // back to the classic throwaway temp file.
+                //
+                // Deliberately *not* `ticket.md`: that one is the mirror
+                // `export_workspace` rewrites from the server whenever the HTML
+                // preview runs. Sharing the path let an export land between the
+                // editor's save and its `mv … .done`, so the frontend committed
+                // the export instead of the buffer — an edit lost without a word.
                 let file_path = match &self.workspace_base {
                     Some(base) => {
                         let dir = workspace::ticket_dir(base, &self.key, &detail.summary);
                         workspace::sync_attachments(&self.client, &self.key, &dir).await?;
-                        Some(dir.join(workspace::TICKET_FILE))
+                        Some(dir.join(workspace::EDIT_FILE))
                     }
                     None => None,
                 };
