@@ -33,6 +33,25 @@ retry:
   attempts: 2
   backoff_ms: 250
 
+# What a NEW message (`e n`) is sent as. A reply takes the decision from the
+# message it answers instead — HTML as soon as that one has an HTML part — so
+# this only ever decides a mail written from scratch.
+#   html  — Markdown, rendered, with the Markdown source as the text/plain
+#           alternative. What every graphical client sends.
+#   plain — the text as typed, and nothing else.
+compose_format: html
+
+# What happens to the inline images (`cid:`) of a quoted original:
+#   attach      — sent back with the reply, so the quote still shows them.
+#                 What Thunderbird does.
+#   placeholder — replaced by their alt text. For a thread that would
+#                 otherwise carry the same signature logo on every round.
+quote_images: attach
+
+# The line above a quoted original. `{date}`, `{name}` and `{address}` are
+# substituted. Default: "On {date}, {name} <{address}> wrote:"
+# reply_attribution: "Am {date} schrieb {name} <{address}>:"
+
 accounts:
   # ── A normal account over implicit TLS ────────────────────────────────────
   - id: work # stable and unique: the first segment of every node id below
@@ -45,6 +64,24 @@ accounts:
 
     # Folders never listed. A trailing `/*` hides a whole subtree.
     # exclude_folders: ["Junk", "Trash/*"]
+
+    # Where this account submits outgoing mail. Without it the account can
+    # read but not write, and `e r` / `e n` say so instead of failing at the
+    # moment the mail should leave.
+    smtp:
+      host: smtp.example.org
+      # Defaults: 465 for tls, 587 for starttls, 25 for none.
+      port: 587
+      security: starttls
+      # The display name in `From`. Defaults to the account's `name:`.
+      from_name: Me
+      # No `auth:` here means "the same credentials as for reading" — the
+      # normal case, and one place to change the password. A provider whose
+      # submission login differs takes a full `auth:` block of its own.
+
+    # Where the copy of a sent message is appended. Omitted: the server's
+    # own \Sent folder (SPECIAL-USE), which is right on almost every server.
+    # sent_folder: "Sent Items"
 
     auth:
       # IMAP LOGIN / AUTHENTICATE PLAIN. `username` is the LOGIN NAME the

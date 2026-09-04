@@ -599,6 +599,10 @@ mod tests {
             page_size: None,
             retry: None,
             command_timeout_secs: None,
+            smtp: None,
+            sent_folder: None,
+            compose_format: None,
+            quote_images: None,
         })
     }
 

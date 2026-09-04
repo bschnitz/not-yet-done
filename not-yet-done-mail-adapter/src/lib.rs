@@ -19,11 +19,13 @@
 //! - [`mime`] — turning a fetched message (or part) into text or bytes.
 //! - [`model`] — the protocol-free shapes the IMAP layer hands upwards.
 //! - [`imap`] — connecting, logging in, and the per-account connection actor.
+//! - [`compose`] — writing: the editor buffer, the quote, the outgoing MIME.
 //! - [`adapter`] — the `ContentAdapter`/`Node` impls over all of it.
 
 pub mod adapter;
 pub mod auth;
 pub mod config;
+pub(crate) mod compose;
 pub(crate) mod credentials;
 pub(crate) mod error;
 pub(crate) mod ids;

@@ -50,6 +50,18 @@ impl Security {
             Security::Starttls | Security::None => 143,
         }
     }
+
+    /// The submission port to use when the `smtp:` block names none. Not the
+    /// same numbers as reading: 465 is implicit TLS, 587 is the submission
+    /// port every provider wants STARTTLS on, and 25 is what is left for a
+    /// local relay that speaks plain text on purpose.
+    pub(crate) fn default_submission_port(self) -> u16 {
+        match self {
+            Security::Tls => 465,
+            Security::Starttls => 587,
+            Security::None => 25,
+        }
+    }
 }
 
 /// The `config:` block of a `type: mail` instance.
@@ -78,6 +90,47 @@ pub struct MailConfig {
     /// Optional override for the backing store (envelope cache, phase 4).
     #[serde(default)]
     pub(crate) db: Option<DbConfig>,
+    /// What a **new** message is sent as. A reply takes the decision from the
+    /// message it answers instead (HTML as soon as that one has an HTML part),
+    /// so this only ever decides `compose`. Inherited by every account.
+    #[serde(default)]
+    pub(crate) compose_format: ComposeFormat,
+    /// Whether the inline images of a quoted original travel back with the
+    /// reply. Inherited by every account.
+    #[serde(default)]
+    pub(crate) quote_images: QuoteImages,
+    /// The line above a quoted original. A template, because it is the one
+    /// string in an outgoing mail that is pure convention rather than
+    /// protocol: `{date}`, `{name}` and `{address}` are substituted.
+    #[serde(default)]
+    pub(crate) reply_attribution: Option<String>,
+}
+
+/// What a composed message is sent as.
+#[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ComposeFormat {
+    /// Markdown, rendered to HTML, with the Markdown source as the
+    /// `text/plain` alternative — what every graphical client sends.
+    #[default]
+    Html,
+    /// The text as typed, and nothing else. For mailing lists, and for people
+    /// who mean it.
+    Plain,
+}
+
+/// What happens to the `cid:` images of a quoted original.
+#[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QuoteImages {
+    /// Re-attached under their original Content-IDs, so the quote still shows
+    /// the logo and the screenshots it was written around. What Thunderbird
+    /// does, and the reason a quoted mail does not turn into broken boxes.
+    #[default]
+    Attach,
+    /// Replaced by their alt text (or their file name). For a thread that
+    /// would otherwise carry the same signature logo on every round.
+    Placeholder,
 }
 
 /// One mailbox: where it lives, how it is secured, and who logs in.
@@ -125,6 +178,51 @@ pub struct AccountConfig {
     /// Per-account override of the instance's `command_timeout_secs`.
     #[serde(default)]
     pub(crate) command_timeout_secs: Option<u64>,
+    /// Where this account submits outgoing mail. Without it the account can
+    /// read but not write: `reply` and `compose` refuse, naming the account,
+    /// rather than failing at the moment the user presses send.
+    #[serde(default)]
+    pub(crate) smtp: Option<SmtpConfig>,
+    /// Folder the sent copy is appended to. Without it the server's
+    /// `\Sent` (SPECIAL-USE) folder is used — name it for a server that
+    /// advertises none, or one whose Sent folder is not where it says.
+    #[serde(default)]
+    pub(crate) sent_folder: Option<String>,
+    /// Per-account override of the instance's `compose_format`.
+    #[serde(default)]
+    pub(crate) compose_format: Option<ComposeFormat>,
+    /// Per-account override of the instance's `quote_images`.
+    #[serde(default)]
+    pub(crate) quote_images: Option<QuoteImages>,
+}
+
+/// Where one account submits outgoing mail.
+///
+/// Separate from the account's IMAP settings because it is a different server,
+/// a different port scheme and — for some providers — a different login. What
+/// it is *not* is a second account: the `From` address, the display name and
+/// the folder the copy lands in all belong to the account this block sits in.
+#[derive(Deserialize, Buildable, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpConfig {
+    pub(crate) host: String,
+    /// Defaults to 465 for `tls`, 587 for `starttls`, 25 for `none`.
+    #[serde(default)]
+    pub(crate) port: Option<u16>,
+    #[serde(default)]
+    pub(crate) security: Security,
+    /// Accept a certificate that does not validate — same narrow purpose as
+    /// the account's own flag, and the same warning.
+    #[serde(default)]
+    pub(crate) accept_invalid_certs: bool,
+    /// Credentials for submission. Absent means "the same as for reading",
+    /// which is the normal case: same provider, same login, and one place to
+    /// change the password.
+    #[serde(default)]
+    pub(crate) auth: Option<AuthSpec>,
+    /// The display name in `From`. Defaults to the account's `name:`.
+    #[serde(default)]
+    pub(crate) from_name: Option<String>,
 }
 
 fn default_folder() -> String {
@@ -172,6 +270,13 @@ impl AccountConfig {
 
     pub(crate) fn port(&self) -> u16 {
         self.port.unwrap_or_else(|| self.security.default_port())
+    }
+}
+
+impl SmtpConfig {
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+            .unwrap_or_else(|| self.security.default_submission_port())
     }
 }
 
@@ -270,6 +375,48 @@ accounts:
             .expect_err("mechanism is not implemented here");
         assert!(err.contains("cookie"), "names the rejected one: {err}");
         assert!(err.contains("password"), "names a supported one: {err}");
+    }
+
+    /// The submission block is optional, and its defaults are the submission
+    /// ports — not the IMAP ones. An account that only reads must stay legal.
+    #[test]
+    fn an_account_without_smtp_parses_and_one_with_it_defaults_to_submission_ports() {
+        let cfg: MailConfig = serde_yaml::from_str(ONE_ACCOUNT).expect("parses");
+        assert!(cfg.accounts[0].smtp.is_none(), "sending is opt-in");
+        assert_eq!(cfg.compose_format, ComposeFormat::Html);
+        assert_eq!(cfg.quote_images, QuoteImages::Attach);
+
+        let yaml = format!(
+            "{ONE_ACCOUNT}    smtp:\n      host: smtp.example.invalid\n      security: starttls\n"
+        );
+        let cfg: MailConfig = serde_yaml::from_str(&yaml).expect("parses");
+        let smtp = cfg.accounts[0].smtp.as_ref().expect("block is there");
+        assert_eq!(smtp.port(), 587, "starttls submits on 587, not on 143");
+        assert!(
+            smtp.auth.is_none(),
+            "no auth block means: the account's own"
+        );
+    }
+
+    /// Reading and writing are two servers, and the ports say so.
+    #[test]
+    fn every_security_mode_has_its_own_pair_of_default_ports() {
+        for (mode, imap, smtp) in [
+            (Security::Tls, 993, 465),
+            (Security::Starttls, 143, 587),
+            (Security::None, 143, 25),
+        ] {
+            assert_eq!(mode.default_port(), imap);
+            assert_eq!(mode.default_submission_port(), smtp);
+        }
+    }
+
+    #[test]
+    fn rejects_an_unknown_field_in_the_smtp_block() {
+        let yaml =
+            format!("{ONE_ACCOUNT}    smtp:\n      host: smtp.example.invalid\n      tls: true\n");
+        let res: Result<MailConfig, _> = serde_yaml::from_str(&yaml);
+        assert!(res.is_err(), "deny_unknown_fields must reject `tls`");
     }
 
     #[test]

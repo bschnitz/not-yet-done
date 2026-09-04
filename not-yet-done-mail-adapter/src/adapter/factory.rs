@@ -47,6 +47,17 @@ impl TypedAdapterFactory for MailAdapterFactory {
                     format!("account `{}`: invalid auth spec: {e}", account.id).into(),
                 )
             })?;
+            // A submission block with its own credentials is checked against
+            // the same table: the mechanisms are the account's, and a typo
+            // there would otherwise only surface when a finished mail fails
+            // to leave.
+            if let Some(auth) = account.smtp.as_ref().and_then(|s| s.auth.as_ref()) {
+                auth.validate_against(MECHANISMS).map_err(|e| {
+                    ContentError::Other(
+                        format!("account `{}`: invalid smtp auth spec: {e}", account.id).into(),
+                    )
+                })?;
+            }
         }
         let adapter = MailAdapter::from_config(instance_id, cfg)
             .map_err(|e| ContentError::Other(e.into()))?;
