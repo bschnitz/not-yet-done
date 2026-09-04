@@ -41,6 +41,11 @@ pub(crate) struct InlinePart {
     /// markup can be pointed at it, prefixed with the part's number because
     /// two ids may sanitise down to the same string.
     pub file_name: String,
+    /// `type/subtype` as the sender declared it. A viewer that writes the
+    /// part to disk does not need it — the extension carries it — but a
+    /// reply that carries the part back out does: a MIME part without a
+    /// content type is a download prompt instead of an image.
+    pub content_type: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -81,6 +86,7 @@ fn html_of(msg: &Message) -> Option<HtmlBody> {
             }
             Some(InlinePart {
                 file_name: inline_file_name(index, id, part.content_type()),
+                content_type: part.content_type().map(content_type_of),
                 id: id.to_string(),
                 bytes: part.contents().to_vec(),
             })
@@ -257,6 +263,133 @@ pub(crate) fn decode_part(mime_headers: &[u8], body: &[u8]) -> Vec<u8> {
         Some(PartType::Binary(bytes)) | Some(PartType::InlineBinary(bytes)) => bytes.to_vec(),
         _ => body.to_vec(),
     }
+}
+
+/// `type/subtype`, lowercased by the parser already.
+fn content_type_of(ctype: &mail_parser::ContentType) -> String {
+    match ctype.subtype() {
+        Some(sub) => format!("{}/{}", ctype.ctype(), sub),
+        None => ctype.ctype().to_string(),
+    }
+}
+
+/// One address, still in two pieces.
+///
+/// [`addresses`] joins them into the line a reader sees; a reply has to hand
+/// the address itself to a mail builder and compare it against the accounts
+/// the instance carries, and neither survives being folded into a string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Contact {
+    pub name: Option<String>,
+    pub address: String,
+}
+
+impl Contact {
+    /// `Name <local@host>`, or the bare address when the sender wrote no name.
+    pub fn display(&self) -> String {
+        match &self.name {
+            Some(name) if !name.trim().is_empty() => format!("{name} <{}>", self.address),
+            _ => self.address.clone(),
+        }
+    }
+}
+
+fn contacts(addr: Option<&Address>) -> Vec<Contact> {
+    let Some(addr) = addr else {
+        return Vec::new();
+    };
+    addr.iter()
+        .filter_map(|one| {
+            Some(Contact {
+                name: one.name().map(str::to_string),
+                address: one.address()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Everything a reply needs from the message it answers.
+///
+/// Not [`Export`] with more fields: an export describes a message *to a
+/// reader*, and a reader has no use for a `References` chain, while a reply
+/// cannot be threaded without one. The two overlap in the obvious places and
+/// are asked different questions.
+pub(crate) struct Original {
+    pub subject: String,
+    /// The `Message-ID`, angle brackets stripped.
+    pub message_id: Option<String>,
+    /// The chain this message hangs in, oldest first, angle brackets
+    /// stripped. Its own id is *not* in here — the reply appends that.
+    pub references: Vec<String>,
+    pub from: Vec<Contact>,
+    /// Where the sender asked to be answered. Beats `from` when present:
+    /// that is the entire purpose of the header.
+    pub reply_to: Vec<Contact>,
+    pub to: Vec<Contact>,
+    pub cc: Vec<Contact>,
+    /// RFC 3339, or `None` when the message carries no readable `Date`.
+    pub date: Option<String>,
+    pub html: Option<HtmlBody>,
+    pub text: Option<String>,
+}
+
+/// One message, taken apart for an answer.
+pub(crate) fn original(raw: &[u8]) -> Original {
+    let Some(msg) = MessageParser::default().parse(raw) else {
+        return Original {
+            subject: String::new(),
+            message_id: None,
+            references: Vec::new(),
+            from: Vec::new(),
+            reply_to: Vec::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            date: None,
+            html: None,
+            text: None,
+        };
+    };
+    Original {
+        subject: msg.subject().unwrap_or_default().to_string(),
+        message_id: msg.message_id().map(bare_id),
+        references: reference_chain(&msg),
+        from: contacts(msg.from()),
+        reply_to: contacts(msg.reply_to()),
+        to: contacts(msg.to()),
+        cc: contacts(msg.cc()),
+        date: msg.date().map(|d| d.to_rfc3339()),
+        html: html_of(&msg),
+        text: msg
+            .text_bodies()
+            .find(|part| part.is_text() && !part.is_text_html())
+            .and_then(|part| part.text_contents())
+            .map(|text| text.replace("\r\n", "\n")),
+    }
+}
+
+/// `References`, falling back to `In-Reply-To` for the clients that only ever
+/// wrote that one. Duplicates are dropped: a chain that repeats an id makes
+/// some clients draw the thread twice.
+fn reference_chain(msg: &Message) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    let listed = msg
+        .references()
+        .as_text_list()
+        .into_iter()
+        .flatten()
+        .chain(msg.in_reply_to().as_text_list().into_iter().flatten());
+    for id in listed {
+        let id = bare_id(id.as_ref());
+        if !id.is_empty() && !chain.contains(&id) {
+            chain.push(id);
+        }
+    }
+    chain
+}
+
+/// A message id without its angle brackets, whichever form the header used.
+fn bare_id(id: &str) -> String {
+    id.trim().trim_matches(['<', '>']).trim().to_string()
 }
 
 #[cfg(test)]
