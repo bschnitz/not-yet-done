@@ -2002,11 +2002,11 @@ pub struct ActionDef {
     /// Required for that type, ignored otherwise.
     #[serde(default)]
     pub apply_query: Option<ApplyQueryConfig>,
-    /// For "tree_find" actions — optional UI prompt (CT-10). The
-    /// query itself is passed unmodified to
-    /// [`not_yet_done_content::ContentAdapter::search_in_tree`], so
-    /// there's no `query_template` here — the adapter chooses the
-    /// query language (CQL for Confluence, JQL for Jira, …).
+    /// For "tree_find" actions — optional UI prompt (CT-10) and the id
+    /// of the adapter action that produces the hits. The query itself
+    /// is passed unmodified as the action's text input, so there's no
+    /// `query_template` here — the adapter chooses the query language
+    /// (CQL for Confluence, JQL for Jira, …).
     #[serde(default)]
     pub tree_find: Option<TreeFindActionConfig>,
     /// Hide this action from the action bar (top bar).
@@ -2393,6 +2393,18 @@ pub struct TreeFindActionConfig {
     /// (`"Search pages"`) so the user knows what the field will do.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Id of the **adapter action** this binding invokes on the root
+    /// node — an ordinary action returning
+    /// [`ActionDispatch::Nodes`](not_yet_done_content::ActionDispatch::Nodes).
+    /// Defaults to `find`, which every searchable adapter exposes.
+    ///
+    /// `tree_find` itself is only the *binding*: it owns the prompt and
+    /// the hit-walking UI, and names here which action produces the
+    /// hits. That choice belongs to the docking point, not to the
+    /// adapter framework — which is why searching needs no trait method
+    /// of its own.
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

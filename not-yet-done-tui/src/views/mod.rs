@@ -597,17 +597,34 @@ pub enum ViewRequest {
         new_name: String,
     },
 
-    /// CT-6: kick off an adapter-side tree search for the active
-    /// pane. The App spawns `adapter.search_in_tree(query, limit)` and
-    /// lands the result on `pane.tree_find` via `tree_find_complete`
-    /// / `tree_find_fail`. `query` is the raw user input; the adapter
-    /// is responsible for any escaping or whitelist scoping (e.g.
-    /// Confluence's `space in (...)` injection). Emitted by the
-    /// `tree_find`-type action on Enter in the search bar.
+    /// CT-6: kick off the pane's search action (the `tree_find`
+    /// binding's `action:`, `find` by default). The App invokes it on
+    /// the adapter's root node with `query` as the action's text input
+    /// and lands the returned nodes on `pane.tree_find` via
+    /// `tree_find_complete` / `tree_find_fail`. `query` is the raw user
+    /// input; the adapter is responsible for any escaping or whitelist
+    /// scoping (e.g. Confluence's `space in (...)` injection). Emitted
+    /// by the `tree_find`-type action on Enter in the search bar.
     TreeFindStart {
         view_index: usize,
         pane_id: PaneId,
         query: String,
+    },
+
+    /// Land a set of node references an action answered with
+    /// ([`ActionDispatch::Nodes`](not_yet_done_content::ActionDispatch::Nodes))
+    /// in the pane's tree-find state, so `n`/`N` walk them and the
+    /// lazy-expand chain reveals them — the same treatment a search
+    /// gets, because a search *is* just an action that answers with
+    /// nodes. `label` names the origin in the status hint (the action
+    /// id for a key-bound action, the typed query for a search).
+    TreeFindLand {
+        view_index: usize,
+        pane_id: PaneId,
+        label: String,
+        hits: Vec<not_yet_done_content::NodeHit>,
+        truncated: bool,
+        message: Option<String>,
     },
 
     // ── Saved-query menu (tasks / trackings) ─────────────────────────

@@ -824,10 +824,10 @@ impl App {
             // hit we inject is what the walker follows.
             pane.tree_find_begin(format!("id:{label}"));
             pane.tree_find_complete(
-                vec![not_yet_done_content::TreeFindHit {
+                vec![not_yet_done_content::NodeHit {
                     path,
                     label: label.to_string(),
-                    space_key: String::new(),
+                    group_key: String::new(),
                 }],
                 false,
             );

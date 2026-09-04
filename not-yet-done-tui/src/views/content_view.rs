@@ -39,7 +39,7 @@ use not_yet_done_table::{
 
 use not_yet_done_content::{
     AdapterStatus, AutoConnect, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo,
-    PageRequest, QueryKind, SortDirection, SortKey, Subtree, TreeFindHit,
+    PageRequest, QueryKind, SortDirection, SortKey, Subtree, NodeHit,
 };
 
 use crate::active_surface::ActiveSurface;
@@ -352,7 +352,7 @@ pub struct TreeFindState {
     pub query: String,
     /// Hits in tree-render order. Empty while `loading`, and stays
     /// empty when the search returns no matches.
-    pub hits: Vec<TreeFindHit>,
+    pub hits: Vec<NodeHit>,
     /// Cursor into `hits`. Always `< hits.len()` when `hits` is
     /// non-empty; clamped to `0` when empty. Wrap-around on
     /// next/prev keeps it valid.
@@ -1625,7 +1625,7 @@ impl ContentPane {
     /// Land hits from a successful adapter response. No-op when the
     /// state was cleared in the meantime (CT-9: Esc/r/new-search wipe
     /// `tree_find` before the in-flight call returns).
-    pub fn tree_find_complete(&mut self, hits: Vec<TreeFindHit>, truncated: bool) {
+    pub fn tree_find_complete(&mut self, hits: Vec<NodeHit>, truncated: bool) {
         if let Some(state) = self.tree_find.as_mut() {
             state.hits = hits;
             state.current = 0;
@@ -1659,14 +1659,14 @@ impl ContentPane {
     /// over hits already proven unreachable. Returns the newly-selected
     /// hit (or `None` when there are no hits / no active state —
     /// caller should no-op).
-    pub fn tree_find_next(&mut self) -> Option<&TreeFindHit> {
+    pub fn tree_find_next(&mut self) -> Option<&NodeHit> {
         self.tree_find_step(TreeFindDirection::Forward)
     }
 
     /// Step the cursor to the previous hit with wrap-around, stepping
     /// over hits already proven unreachable. Returns the newly-selected
     /// hit (or `None` when empty / no state).
-    pub fn tree_find_prev(&mut self) -> Option<&TreeFindHit> {
+    pub fn tree_find_prev(&mut self) -> Option<&NodeHit> {
         self.tree_find_step(TreeFindDirection::Backward)
     }
 
@@ -1676,7 +1676,7 @@ impl ContentPane {
     /// already proved the tree cannot address, so offering them again
     /// would just replay the dead end. Stops after a full lap, which
     /// leaves the cursor where it started when every other hit is dead.
-    fn tree_find_step(&mut self, dir: TreeFindDirection) -> Option<&TreeFindHit> {
+    fn tree_find_step(&mut self, dir: TreeFindDirection) -> Option<&NodeHit> {
         let state = self.tree_find.as_mut()?;
         let len = state.hits.len();
         if len == 0 {
@@ -1703,7 +1703,7 @@ impl ContentPane {
     /// Reference to the hit at the current cursor — i.e. what `n`/`N`
     /// would land on if pressed without movement. `None` when no
     /// state is active or `hits` is empty.
-    pub fn tree_find_current(&self) -> Option<&TreeFindHit> {
+    pub fn tree_find_current(&self) -> Option<&NodeHit> {
         let state = self.tree_find.as_ref()?;
         state.hits.get(state.current)
     }
@@ -1739,7 +1739,7 @@ impl ContentPane {
     /// Matches on `(parent_path, leaf_id)` rather than `leaf_id`
     /// alone so two pages with the same id under different parents
     /// stay distinguishable.
-    pub fn find_tree_find_visible_row(&self, hit: &TreeFindHit) -> Option<usize> {
+    pub fn find_tree_find_visible_row(&self, hit: &NodeHit) -> Option<usize> {
         let tree = self.tree.as_ref()?;
         let (leaf_id, ancestors) = hit.path.split_last()?;
         for (row_idx, &entry_idx) in self.tree_visible_indices.iter().enumerate() {
@@ -1839,8 +1839,8 @@ impl ContentPane {
     /// Limitations of this first cut:
     /// - Single-load only (multi-load fan-out for heterogeneous tree
     ///   levels is reserved for the `Schemas + Scripts` pattern;
-    ///   Confluence — the only adapter with `search_in_tree` — is
-    ///   single-load).
+    ///   Confluence — the only adapter with a server-side `find`
+    ///   action — is single-load).
     /// - The hit's path must address nodes in the current root list;
     ///   if the root pane hasn't loaded yet, it returns
     ///   `NeedRootLoad` and the caller must dispatch
@@ -7761,6 +7761,20 @@ impl ContentView {
             .flat_map(|vd| vd.actions.iter())
             .find(|a| a.name() == name)
             .cloned()
+    }
+
+    /// Id of the adapter action the view's `tree_find` binding invokes,
+    /// or `find` when the binding names none. Resolved by *type*, not by
+    /// name: the config validator allows `tree_find` at only one level of
+    /// a tree chain, so there is nothing to disambiguate.
+    pub fn tree_find_action_id(&self) -> String {
+        self.view_defs
+            .iter()
+            .flat_map(|vd| vd.actions.iter())
+            .find(|a| a.action_type == "tree_find")
+            .and_then(|a| a.tree_find.as_ref())
+            .and_then(|c| c.action.clone())
+            .unwrap_or_else(|| "find".to_string())
     }
 
     /// Run the action named `name` in response to a bus event. Unlike the key
@@ -19719,7 +19733,10 @@ mod tests {
             search: None,
             text_search: None,
             apply_query: None,
-            tree_find: Some(crate::config::view_config::TreeFindActionConfig { prompt: None }),
+            tree_find: Some(crate::config::view_config::TreeFindActionConfig {
+                prompt: None,
+                action: None,
+            }),
             hide_from_bar: false,
             in_action_bar: false,
             editor: None,
@@ -22374,11 +22391,11 @@ mod tests {
 
     // ── CT-5: TreeFindState lifecycle ────────────────────────────────
 
-    fn make_hit(path: &[&str], label: &str, space: &str) -> TreeFindHit {
-        TreeFindHit {
+    fn make_hit(path: &[&str], label: &str, space: &str) -> NodeHit {
+        NodeHit {
             path: path.iter().map(|s| s.to_string()).collect(),
             label: label.to_string(),
-            space_key: space.to_string(),
+            group_key: space.to_string(),
         }
     }
 

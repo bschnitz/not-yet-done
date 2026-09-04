@@ -16,7 +16,7 @@
 //! `Arc<ForestSnapshot>`. Drilling never touches the DB again; a reload
 //! (or any structural domain event, see [`spawn_task_bridge`]) drops the
 //! snapshot so the next fetch rebuilds it. This is also what lets
-//! [`search_in_tree`](ContentAdapter::search_in_tree) walk the entire
+//! the root's `find` action walk the entire
 //! forest without a query per node.
 //!
 //! ## Scope (A1b — read + mutations)
@@ -57,7 +57,7 @@ use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
     ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec, Invalidation,
     Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
-    SortKey, Subtree, SubtreeNode, TreeFindHit, TreeSearchParams, TreeSearchResults,
+    SortKey, Subtree, SubtreeNode, NodeHit,
     TypedAdapterFactory, apply_sort,
 };
 use not_yet_done_task_core::entity::task;
@@ -470,7 +470,7 @@ impl ForestSnapshot {
     }
 
     /// Root-to-node chain of task ids (as strings) — the addressing a
-    /// [`TreeFindHit`] hands back to the TUI to expand to a hit.
+    /// [`NodeHit`] hands back to the TUI to expand to a hit.
     fn path_to(&self, id: Uuid) -> Vec<String> {
         let mut chain = Vec::new();
         let mut cur = Some(id);
@@ -482,8 +482,9 @@ impl ForestSnapshot {
         chain
     }
 
-    /// Pure tree-search backing [`ContentAdapter::search_in_tree`]. Two
-    /// modes, switched on the query shape:
+    /// Pure tree-search backing the root's `find` action. Returns the
+    /// hits plus whether `limit` cut the list short. Two modes, switched
+    /// on the query shape:
     ///
     /// - **`id:<uuid>`** — exact node match, independent of the
     ///   (possibly drifted) description. Scripted jumps that already
@@ -512,7 +513,7 @@ impl ForestSnapshot {
         query: &str,
         limit: u32,
         visible: Option<&HashSet<Uuid>>,
-    ) -> TreeSearchResults {
+    ) -> (Vec<NodeHit>, bool) {
         let addressable = |id: &Uuid| visible.map_or(true, |v| v.contains(id));
         if let Some(rest) = query.trim().strip_prefix("id:") {
             let hits = match Uuid::parse_str(rest.trim()) {
@@ -520,28 +521,22 @@ impl ForestSnapshot {
                     .by_id
                     .get(&uuid)
                     .filter(|_| addressable(&uuid))
-                    .map(|row| TreeFindHit {
+                    .map(|row| NodeHit {
                         path: self.path_to(uuid),
                         label: row.task.description.clone(),
-                        space_key: String::new(),
+                        group_key: String::new(),
                     })
                     .into_iter()
                     .collect(),
                 Err(_) => Vec::new(),
             };
-            return TreeSearchResults {
-                hits,
-                truncated: false,
-            };
+            return (hits, false);
         }
         let tokens: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if tokens.is_empty() {
-            return TreeSearchResults {
-                hits: Vec::new(),
-                truncated: false,
-            };
+            return (Vec::new(), false);
         }
-        let mut hits: Vec<TreeFindHit> = self
+        let mut hits: Vec<NodeHit> = self
             .by_id
             .iter()
             .filter(|(id, row)| {
@@ -551,17 +546,17 @@ impl ForestSnapshot {
                 let hay = row.task.description.to_lowercase();
                 tokens.iter().all(|t| hay.contains(t))
             })
-            .map(|(id, row)| TreeFindHit {
+            .map(|(id, row)| NodeHit {
                 path: self.path_to(*id),
                 label: row.task.description.clone(),
-                space_key: String::new(),
+                group_key: String::new(),
             })
             .collect();
         // Tree-render order: parents before children, siblings together.
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         let truncated = hits.len() > limit as usize;
         hits.truncate(limit as usize);
-        TreeSearchResults { hits, truncated }
+        (hits, truncated)
     }
 }
 
@@ -920,6 +915,11 @@ async fn list_item_children(
 /// through the view config's `type: create` to create a *top-level* task
 /// (the new node's parent comes from the buffer's `parent:` field, blank
 /// by default).
+/// Hit cap for the root's `find` action. The adapter picks it, not the
+/// caller: a frontend has no basis for a number here, and the
+/// `truncated` flag on [`ActionDispatch::Nodes`] says when it bit.
+const FIND_LIMIT: u32 = 200;
+
 fn task_root_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("add", "Add task", InputSpec::Editor),
@@ -932,6 +932,11 @@ fn task_root_actions() -> Vec<NodeAction> {
         // Container action: snapshot the whole task database (see
         // `invoke_backup`). DB-wide, so it lives on the root, not a task row.
         NodeAction::new("backup", "Backup database", InputSpec::None),
+        // Tree-wide search over the task descriptions. Like every other
+        // action it declares no widget: the search string arrives in
+        // `ctx.text`, sourced however the frontend likes (TUI prompt,
+        // CLI `--text`), and the answer is a set of node references.
+        NodeAction::new("find", "find tasks", InputSpec::None),
     ]
 }
 
@@ -1800,11 +1805,33 @@ impl Node for TaskRootNode {
         }
         outcome
     }
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    /// `find` searches the whole forest and answers with the matching
+    /// nodes; the search string is [`ActionContext::text`], the pane's
+    /// active query ([`ActionContext::query`]) scopes it to the same set
+    /// the tree levels show — otherwise the hits and the tree disagree
+    /// about what exists (see [`ForestSnapshot::tree_search`]).
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // Container action: back up the whole task database. No data
             // changes, so it returns `Notify` (the path) rather than `Reload`.
             "backup" => crate::invoke_backup(&self.handle).await,
+            "find" => {
+                let Some(needle) = ctx.text.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                else {
+                    return Ok(ActionDispatch::Error(
+                        "Search text must not be empty".to_string(),
+                    ));
+                };
+                let visible = resolve_visible_set(&self.snapshot, &self.handle, &ctx.query).await?;
+                let (hits, truncated) =
+                    self.snapshot
+                        .tree_search(needle, FIND_LIMIT, visible.as_ref());
+                ActionDispatch::Nodes {
+                    hits,
+                    truncated,
+                    message: None,
+                }
+            }
             _ => ActionDispatch::Noop,
         })
     }
@@ -2490,18 +2517,6 @@ impl ContentAdapter for TaskAdapter {
         Some(&self.saved_queries)
     }
 
-    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
-        let snapshot = self.snapshot().await?;
-        // Same filter the tree levels apply — otherwise the hits and
-        // the tree disagree about what exists (see `tree_search`).
-        let visible = resolve_visible_set(&snapshot, &self.handle, &params.view_query).await?;
-        Ok(Some(snapshot.tree_search(
-            &params.query,
-            params.limit,
-            visible.as_ref(),
-        )))
-    }
-
     /// Ancestor chain for a task id, so a link can be followed into a
     /// subtree that isn't expanded yet. `None` when the id isn't a uuid
     /// or the task is gone.
@@ -2932,20 +2947,20 @@ mod tests {
 
         // `id:<uuid>` resolves the one node and its full root→leaf path,
         // ignoring the description entirely.
-        let res = snap.tree_search(&format!("id:{child}"), 50, None);
-        assert_eq!(res.hits.len(), 1);
-        assert_eq!(res.hits[0].path, vec![root.to_string(), child.to_string()]);
-        assert_eq!(res.hits[0].label, "#42 - Fix the frobnicator");
-        assert!(!res.truncated);
+        let (hits, truncated) = snap.tree_search(&format!("id:{child}"), 50, None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, vec![root.to_string(), child.to_string()]);
+        assert_eq!(hits[0].label, "#42 - Fix the frobnicator");
+        assert!(!truncated);
 
         // Unknown / unparseable id → no hits (no panic, no fallback to
         // description search).
         assert!(
             snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50, None)
-                .hits
+                .0
                 .is_empty()
         );
-        assert!(snap.tree_search("id:not-a-uuid", 50, None).hits.is_empty());
+        assert!(snap.tree_search("id:not-a-uuid", 50, None).0.is_empty());
     }
 
     #[test]
@@ -2959,8 +2974,8 @@ mod tests {
 
         // Case-insensitive AND-substring across descriptions; both rows
         // contain "frobnicator", returned parent-before-child.
-        let res = snap.tree_search("frobnicator", 50, None);
-        let labels: Vec<&str> = res.hits.iter().map(|h| h.label.as_str()).collect();
+        let (hits, _) = snap.tree_search("frobnicator", 50, None);
+        let labels: Vec<&str> = hits.iter().map(|h| h.label.as_str()).collect();
         assert_eq!(labels, vec!["Frobnicator project", "Fix the Frobnicator"]);
     }
 
@@ -2983,8 +2998,8 @@ mod tests {
         // only `live`: the match plus its ancestors.
         let visible: HashSet<Uuid> = [root, live].into_iter().collect();
 
-        let res = snap.tree_search("frobnicator", 50, Some(&visible));
-        let paths: Vec<&Vec<String>> = res.hits.iter().map(|h| &h.path).collect();
+        let (hits, _) = snap.tree_search("frobnicator", 50, Some(&visible));
+        let paths: Vec<&Vec<String>> = hits.iter().map(|h| &h.path).collect();
         assert_eq!(
             paths,
             vec![&vec![root.to_string(), live.to_string()]],
@@ -2995,18 +3010,18 @@ mod tests {
         // task yields nothing rather than a hit that strands the walk.
         assert!(
             snap.tree_search(&format!("id:{hidden}"), 50, Some(&visible))
-                .hits
+                .0
                 .is_empty()
         );
         assert_eq!(
             snap.tree_search(&format!("id:{live}"), 50, Some(&visible))
-                .hits
+                .0
                 .len(),
             1
         );
 
         // No active query → the whole forest stays searchable.
-        assert_eq!(snap.tree_search("frobnicator", 50, None).hits.len(), 2);
+        assert_eq!(snap.tree_search("frobnicator", 50, None).0.len(), 2);
     }
 
     #[test]
@@ -3324,7 +3339,10 @@ mod tests {
         assert!(has(&root, "add-sibling"));
         // `backup` is a list-wide maintenance action on the root.
         assert!(has(&root, "backup"));
-        assert_eq!(root.len(), 3);
+        // `find` is the tree-wide search — an ordinary action, so every
+        // frontend gets it (TUI tree-find bar, CLI `--text`).
+        assert!(has(&root, "find"));
+        assert_eq!(root.len(), 4);
         let item = task_item_actions();
         for id in [
             "edit",

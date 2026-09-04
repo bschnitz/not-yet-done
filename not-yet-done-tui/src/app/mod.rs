@@ -42,6 +42,50 @@ enum AuthInvalidate {
     Credentials,
 }
 
+/// What a tree-find round-trip brought back — the frontend's own view of
+/// an [`ActionDispatch::Nodes`](not_yet_done_content::ActionDispatch::Nodes)
+/// payload, kept here (not in the content crate) because deciding how to
+/// present a set of nodes is the frontend's business.
+pub struct TreeFindHits {
+    pub hits: Vec<not_yet_done_content::NodeHit>,
+    pub truncated: bool,
+    /// Adapter-authored note about the result, if any.
+    pub message: Option<String>,
+}
+
+/// Invoke the search action on the adapter's root node and translate the
+/// dispatch into what the tree-find UI consumes.
+///
+/// `Ok(None)` = the adapter's root doesn't know this action (it answered
+/// `Noop`) — i.e. this connection cannot search. An adapter-authored
+/// `Error` becomes a failed round-trip so the message reaches the user;
+/// any other dispatch is a config error (the binding names an action that
+/// does something else entirely) and says so.
+async fn run_tree_find(
+    adapter: &dyn not_yet_done_content::ContentAdapter,
+    action_id: &str,
+    ctx: &not_yet_done_content::ActionContext,
+) -> not_yet_done_content::Result<Option<TreeFindHits>> {
+    use not_yet_done_content::{ActionDispatch, ContentError};
+    let root = adapter.root().await?;
+    match root.invoke_action(action_id, ctx).await? {
+        ActionDispatch::Nodes {
+            hits,
+            truncated,
+            message,
+        } => Ok(Some(TreeFindHits {
+            hits,
+            truncated,
+            message,
+        })),
+        ActionDispatch::Noop => Ok(None),
+        ActionDispatch::Error(msg) => Err(ContentError::Other(msg.into())),
+        _ => Err(ContentError::NotSupported(format!(
+            "action `{action_id}` does not answer with a set of nodes"
+        ))),
+    }
+}
+
 pub enum LoadMsg {
     /// Async-loaded items for a content view.
     ContentItems {
@@ -313,13 +357,14 @@ pub enum LoadMsg {
     /// for late-arrival sanity checks (compare against the pane's
     /// current `tree_find.query` and drop the result when they no
     /// longer match — the user typed a new query before this one
-    /// returned). `Ok(None)` means the adapter doesn't support tree
-    /// search at all; surfaced to the user as an explicit notice.
+    /// returned). `Ok(None)` means the adapter's root has no such
+    /// action — nothing here can search; surfaced to the user as an
+    /// explicit notice.
     TreeFindResult {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         query: String,
-        result: Result<Option<not_yet_done_content::TreeSearchResults>, String>,
+        result: Result<Option<TreeFindHits>, String>,
     },
     /// A [`BusEvent`](not_yet_done_content::BusEvent) received on the
     /// well-known [`EVENT_CHANNEL`](not_yet_done_content::EVENT_CHANNEL),
@@ -4014,27 +4059,23 @@ impl App {
         }
     }
 
-    /// CT-6: default per-call cap on tree-find hits. Picked low
-    /// enough that a single popup doesn't drown the user (refining
-    /// the query is cheaper than scrolling 500 hits), high enough to
-    /// cover most realistic results. Surfaced as `truncated = true`
-    /// when the server reports more.
-    pub const TREE_FIND_DEFAULT_LIMIT: u32 = 100;
-
-    /// CT-6: spawn an adapter-side tree search.
+    /// CT-6: spawn the adapter action behind the `tree_find` binding.
     ///
-    /// Mirrors [`spawn_tree_expand`] for the search-in-tree call: the
-    /// pane's `tree_find_begin(query)` is the caller's job (so the
-    /// loading hint shows up immediately on the keystroke), and this
-    /// helper drives the asynchronous round-trip. The response lands
-    /// as [`LoadMsg::TreeFindResult`] regardless of success/failure;
-    /// `poll_load` then routes it through `tree_find_complete` /
-    /// `tree_find_fail` / `tree_find_clear` per outcome.
+    /// Mirrors [`spawn_tree_expand`]: the pane's `tree_find_begin(query)`
+    /// is the caller's job (so the loading hint shows up immediately on
+    /// the keystroke), and this helper drives the asynchronous
+    /// round-trip. The response lands as [`LoadMsg::TreeFindResult`]
+    /// regardless of success/failure; `poll_load` then routes it through
+    /// `tree_find_complete` / `tree_find_fail` / `tree_find_clear` per
+    /// outcome.
     ///
-    /// `limit` caps the hit count the adapter returns. Picked at the
-    /// call site so future per-view tuning (e.g. a `tree_find.limit`
-    /// YAML knob) lands here without touching the trait. The default
-    /// caller in CT-7 uses [`TREE_FIND_DEFAULT_LIMIT`].
+    /// The search is an **ordinary action** on the root node (id from
+    /// [`ContentView::tree_find_action_id`], default `find`), invoked
+    /// with the typed query as [`ActionContext::text`]. It answers with
+    /// [`ActionDispatch::Nodes`]; an adapter that doesn't know the
+    /// action falls through to `Noop`, which reads here as "cannot
+    /// search". No hit cap is passed: how many nodes one round-trip
+    /// carries is the adapter's call, and `truncated` says when it bit.
     /// Consume a pane's queued `:tree-find` query (if any) and start it:
     /// stamp the loading state synchronously, then spawn the adapter
     /// search. No-op when nothing is queued.
@@ -4095,7 +4136,7 @@ impl App {
         {
             pane.tree_find_begin(query.clone());
         }
-        self.spawn_tree_find(view_index, pane_id, query, Self::TREE_FIND_DEFAULT_LIMIT);
+        self.spawn_tree_find(view_index, pane_id, query);
     }
 
     pub fn spawn_tree_find(
@@ -4103,7 +4144,6 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         query: String,
-        limit: u32,
     ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
@@ -4113,18 +4153,20 @@ impl App {
             Some(a) => Arc::clone(a),
             None => return,
         };
+        let action_id = cv.tree_find_action_id();
         let tx = self.load_tx.clone();
         // The pane's active query scopes the search exactly as it scopes
         // every tree level — without it the adapter offers hits that no
         // level will ever yield and the expand walk dead-ends on them.
-        let params = not_yet_done_content::TreeSearchParams {
-            query: query.clone(),
-            limit,
-            view_query: self.pane_active_query(view_index, pane_id),
+        let ctx = not_yet_done_content::ActionContext {
+            marked: None,
+            confirmed: false,
+            query: self.pane_active_query(view_index, pane_id),
+            value: None,
+            text: Some(query.clone()),
         };
         tokio::spawn(async move {
-            let result = adapter
-                .search_in_tree(&params)
+            let result = run_tree_find(adapter.as_ref(), &action_id, &ctx)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(LoadMsg::TreeFindResult {
@@ -4840,7 +4882,13 @@ impl App {
                     // assignments don't conflict.
                     enum Outcome {
                         Stale,
-                        Landed { count: usize, truncated: bool },
+                        Landed {
+                            count: usize,
+                            truncated: bool,
+                            /// Adapter-authored note, shown instead of the
+                            /// generic hit count when present.
+                            message: Option<String>,
+                        },
                         Unsupported,
                         Failed(String),
                     }
@@ -4863,13 +4911,19 @@ impl App {
                                 Ok(Some(res)) => {
                                     let count = res.hits.len();
                                     let truncated = res.truncated;
+                                    let message = res.message;
                                     pane.tree_find_complete(res.hits, truncated);
-                                    Outcome::Landed { count, truncated }
+                                    Outcome::Landed {
+                                        count,
+                                        truncated,
+                                        message,
+                                    }
                                 }
                                 Ok(None) => {
-                                    // Adapter doesn't support tree search.
-                                    // Drop the state (so n/N revert to local
-                                    // /-search) and notify outside the borrow.
+                                    // The adapter's root has no such action —
+                                    // this connection cannot search. Drop the
+                                    // state (so n/N revert to local /-search)
+                                    // and notify outside the borrow.
                                     pane.tree_find_clear();
                                     Outcome::Unsupported
                                 }
@@ -4886,8 +4940,9 @@ impl App {
                             "query={query:?} {outcome_summary}",
                             outcome_summary = match &outcome {
                                 Outcome::Stale => "stale (query changed, dropped)".to_string(),
-                                Outcome::Landed { count, truncated } =>
-                                    format!("landed hits={count} truncated={truncated}"),
+                                Outcome::Landed {
+                                    count, truncated, ..
+                                } => format!("landed hits={count} truncated={truncated}"),
                                 Outcome::Unsupported =>
                                     "unsupported (adapter has no tree search)".to_string(),
                                 Outcome::Failed(e) => format!("failed: {e}"),
@@ -4896,15 +4951,26 @@ impl App {
                     );
                     match outcome {
                         Outcome::Stale => {}
-                        Outcome::Landed { count, truncated } => {
+                        Outcome::Landed {
+                            count,
+                            truncated,
+                            message,
+                        } => {
                             let suffix = if truncated { ", truncated" } else { "" };
-                            if count == 0 {
+                            // An adapter that authored a note about the
+                            // result gets the last word — it knows more
+                            // about its own search than the hit count says.
+                            if let Some(msg) = message {
+                                self.notify(msg);
+                            } else if count == 0 {
                                 self.notify(format!("Tree find \"{query}\": no matches"));
                             } else {
                                 self.notify(format!(
                                     "Tree find \"{query}\": {count} hit{}{suffix} — n/N to navigate",
                                     if count == 1 { "" } else { "s" },
                                 ));
+                            }
+                            if count > 0 {
                                 // Kick off the lazy-expand walk so
                                 // the first hit becomes visible
                                 // without the user having to press
@@ -4913,7 +4979,9 @@ impl App {
                             }
                         }
                         Outcome::Unsupported => {
-                            self.notify_error("Adapter doesn't support tree search.".to_string());
+                            self.notify_error(
+                                "This connection has no tree-search action.".to_string(),
+                            );
                         }
                         Outcome::Failed(e) => {
                             not_yet_done_content::http_log::log_error("tree_find", &e);
@@ -9105,7 +9173,42 @@ impl App {
                         pane.tree_find_begin(query.clone());
                     }
                 }
-                self.spawn_tree_find(view_index, pane_id, query, Self::TREE_FIND_DEFAULT_LIMIT);
+                self.spawn_tree_find(view_index, pane_id, query);
+                EditorRequest::None
+            }
+            ViewRequest::TreeFindLand {
+                view_index,
+                pane_id,
+                label,
+                hits,
+                truncated,
+                message,
+            } => {
+                let count = hits.len();
+                if let Some(pane) = self
+                    .content_view_mut(view_index)
+                    .and_then(|cv| cv.find_pane_mut(pane_id))
+                {
+                    // `begin` + `complete` in one go: the round-trip is
+                    // already over when a dispatch reaches this point, so
+                    // there is no loading state to show.
+                    pane.tree_find_begin(label.clone());
+                    pane.tree_find_complete(hits, truncated);
+                }
+                let suffix = if truncated { ", truncated" } else { "" };
+                if let Some(msg) = message {
+                    self.notify(msg);
+                } else if count == 0 {
+                    self.notify(format!("{label}: no matches"));
+                } else {
+                    self.notify(format!(
+                        "{label}: {count} node{}{suffix} — n/N to navigate",
+                        if count == 1 { "" } else { "s" },
+                    ));
+                }
+                if count > 0 {
+                    self.drive_tree_find_chain(view_index, pane_id);
+                }
                 EditorRequest::None
             }
             ViewRequest::ApplyContentSavedQuery {
