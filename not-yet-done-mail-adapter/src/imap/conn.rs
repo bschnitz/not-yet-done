@@ -1332,6 +1332,109 @@ mod tests {
         assert!(server.stored().is_empty(), "nothing was flagged");
     }
 
+    /// A server that can `MOVE` is asked to, and that is the whole
+    /// exchange: nothing is copied, nothing is marked, nothing is expunged.
+    #[tokio::test]
+    async fn a_move_is_one_command_when_the_server_offers_move() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        conn.move_messages("INBOX", 42, &[4], "Archive")
+            .await
+            .expect("moves it");
+        let writes = server.uid_writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert!(
+            writes[0].contains("UID MOVE 4 \"Archive\""),
+            "{}",
+            writes[0]
+        );
+    }
+
+    /// Without `MOVE` the message is copied first and only then marked
+    /// deleted: a copy that failed must leave the original where it was.
+    /// The expunge names uids, so it cannot take anything else with it.
+    #[tokio::test]
+    async fn without_move_the_message_is_copied_then_marked_then_expunged() {
+        let server = FakeServer::start(Script {
+            capabilities: "IMAP4rev1 IDLE UIDPLUS",
+            ..scripted()
+        })
+        .await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        conn.move_messages("INBOX", 42, &[4], "Archive")
+            .await
+            .expect("moves it");
+        let writes = server.uid_writes();
+        assert_eq!(writes.len(), 3, "{writes:?}");
+        assert!(
+            writes[0].contains("UID COPY 4 \"Archive\""),
+            "{}",
+            writes[0]
+        );
+        assert!(
+            writes[1].contains("UID STORE 4 +FLAGS.SILENT (\\Deleted)"),
+            "{}",
+            writes[1]
+        );
+        assert!(writes[2].contains("UID EXPUNGE 4"), "{}", writes[2]);
+    }
+
+    /// A server with neither capability is refused rather than served: the
+    /// only way left to empty the source would be a bare `EXPUNGE`, and that
+    /// deletes every message in the mailbox another client marked deleted.
+    #[tokio::test]
+    async fn a_move_is_refused_when_the_server_can_neither_move_nor_expunge_by_uid() {
+        let server = FakeServer::start(Script {
+            capabilities: "IMAP4rev1 IDLE",
+            ..scripted()
+        })
+        .await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let err = conn
+            .move_messages("INBOX", 42, &[4], "Archive")
+            .await
+            .expect_err("cannot be done safely");
+        assert!(err.to_string().contains("EXPUNGE"), "{err}");
+        assert!(server.uid_writes().is_empty(), "nothing was written");
+    }
+
+    /// The copy is the step that can be refused, and when it is, the
+    /// original must still be there: unmarked and unexpunged.
+    #[tokio::test]
+    async fn a_refused_copy_leaves_the_original_untouched() {
+        let server = FakeServer::start(Script {
+            capabilities: "IMAP4rev1 IDLE UIDPLUS",
+            ..scripted()
+        })
+        .await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        conn.move_messages("INBOX", 42, &[4], "Nowhere")
+            .await
+            .expect_err("no such mailbox");
+        let writes = server.uid_writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert!(writes[0].contains("UID COPY"), "{}", writes[0]);
+    }
+
+    /// A renumbered mailbox stops a move for the same reason it stops a
+    /// flag: the uid now addresses a different message.
+    #[tokio::test]
+    async fn a_move_is_refused_when_the_folder_was_renumbered() {
+        let server = FakeServer::start(scripted()).await;
+        let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
+
+        let err = conn
+            .move_messages("INBOX", 41, &[4], "Archive")
+            .await
+            .expect_err("stale uid validity");
+        assert!(err.to_string().contains("renumbered"), "{err}");
+        assert!(server.uid_writes().is_empty(), "nothing was moved");
+    }
+
     /// `disconnect` really ends the session; the next request builds a new
     /// one. This is the manual-reconnect path.
     #[tokio::test]

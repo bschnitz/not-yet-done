@@ -76,6 +76,13 @@ pub(crate) struct Script {
     /// What `LIST` and `STATUS` report. Empty means the account has no
     /// mailboxes at all, which is itself worth being able to script.
     pub(crate) folders: &'static [FakeFolder],
+    /// What `CAPABILITY` answers, without the `* CAPABILITY ` prefix.
+    ///
+    /// Scriptable because it is the one answer that changes what the client
+    /// *does* rather than what it reports: a move is one command on a server
+    /// with `MOVE`, three on a server with only `UIDPLUS`, and refused on a
+    /// server with neither.
+    pub(crate) capabilities: &'static str,
 }
 
 /// The password the scripted server accepts.
@@ -257,6 +264,7 @@ pub(crate) fn scripted() -> Script {
         stall_at: None,
         close_first: 0,
         folders: FOLDERS,
+        capabilities: "IMAP4rev1 IDLE MOVE UIDPLUS",
     }
 }
 
@@ -282,7 +290,13 @@ struct Counters {
     lists: AtomicUsize,
     fetches: AtomicUsize,
     appended: std::sync::Mutex<Vec<Appended>>,
-    stored: std::sync::Mutex<Vec<String>>,
+    /// Every `UID` command that changes something, verbatim and in order.
+    ///
+    /// One log rather than one per verb, because the order across verbs is
+    /// itself the claim worth testing: the copy-and-expunge fallback is only
+    /// safe if the copy has already succeeded when the original is marked
+    /// deleted.
+    uid_writes: std::sync::Mutex<Vec<String>>,
 }
 
 pub(crate) struct FakeServer {
@@ -338,7 +352,19 @@ impl FakeServer {
 
     /// The `UID STORE` command lines the client sent, verbatim.
     pub(crate) fn stored(&self) -> Vec<String> {
-        self.counters.stored.lock().expect("not poisoned").clone()
+        self.uid_writes()
+            .into_iter()
+            .filter(|line| line.to_ascii_uppercase().contains("UID STORE"))
+            .collect()
+    }
+
+    /// Every `UID` command that wrote something, verbatim and in order.
+    pub(crate) fn uid_writes(&self) -> Vec<String> {
+        self.counters
+            .uid_writes
+            .lock()
+            .expect("not poisoned")
+            .clone()
     }
 }
 
@@ -461,14 +487,7 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
                     }
                     (Some(folder), "FETCH") => {
                         counters.fetches.fetch_add(1, Ordering::SeqCst);
-                        let wanted: Vec<u32> = args
-                            .get(1)
-                            .map(|set| {
-                                set.split(',')
-                                    .filter_map(|u| u.parse::<u32>().ok())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let wanted = uid_set(args.get(1));
                         // Which sections the client asked for. A real server
                         // answers what was requested and nothing else, and
                         // that is exactly what the body path depends on.
@@ -487,14 +506,38 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
                         out
                     }
                     (Some(_), "STORE") => {
-                        counters
-                            .stored
-                            .lock()
-                            .expect("not poisoned")
-                            .push(line.clone());
+                        record(&counters, &line);
                         // `.SILENT` is what the client asks for, so there is
                         // nothing untagged to send back.
                         format!("{tag} OK STORE completed\r\n")
+                    }
+                    // `UID MOVE <set> <mailbox>` and `UID COPY <set>
+                    // <mailbox>` differ only in what they leave behind, and
+                    // both fail the same way when the destination is not
+                    // there — which is the answer the client has to survive.
+                    (Some(_), verb @ ("MOVE" | "COPY")) => {
+                        record(&counters, &line);
+                        match quoted(0) {
+                            Some(dest) if script.folders.iter().any(|f| f.path == dest) => {
+                                format!("{tag} OK {verb} completed\r\n")
+                            }
+                            _ => format!("{tag} NO [TRYCREATE] no such mailbox\r\n"),
+                        }
+                    }
+                    (Some(folder), "EXPUNGE") => {
+                        record(&counters, &line);
+                        // Sequence numbers, not uids: `EXPUNGE` reports the
+                        // position that vanished, which is why a client that
+                        // reads them has to read them in order.
+                        let wanted = uid_set(args.get(1));
+                        let mut out = String::new();
+                        for (seq, mail) in folder.mails.iter().enumerate() {
+                            if wanted.contains(&mail.uid) {
+                                out.push_str(&format!("* {} EXPUNGE\r\n", seq + 1));
+                            }
+                        }
+                        out.push_str(&format!("{tag} OK EXPUNGE completed\r\n"));
+                        out
                     }
                     (_, other) => format!("{tag} BAD unknown UID subcommand {other}\r\n"),
                 }
@@ -540,7 +583,8 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
                 format!("{tag} OK [APPENDUID 45 9] APPEND completed\r\n")
             }
             "CAPABILITY" => {
-                format!("* CAPABILITY IMAP4rev1 IDLE MOVE\r\n{tag} OK CAPABILITY completed\r\n")
+                let caps = script.capabilities;
+                format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY completed\r\n")
             }
             "LOGOUT" => {
                 let _ = tx
@@ -554,6 +598,26 @@ async fn serve(sock: tokio::net::TcpStream, script: Script, nth: usize, counters
             return;
         }
     }
+}
+
+/// Notes a `UID` command that changed something.
+fn record(counters: &Counters, line: &str) {
+    counters
+        .uid_writes
+        .lock()
+        .expect("not poisoned")
+        .push(line.to_string());
+}
+
+/// The uids in a `4,7,9` set. Ranges are not parsed because the client does
+/// not send them — it names every uid, which is what makes the log readable.
+fn uid_set(arg: Option<&String>) -> Vec<u32> {
+    arg.map(|set| {
+        set.split(',')
+            .filter_map(|u| u.parse::<u32>().ok())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// One `* n FETCH (…)` line, in the shape a real server sends it.
