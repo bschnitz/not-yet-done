@@ -425,7 +425,7 @@ connects Work and nothing else.
 | **2** | **done.** Read messages: search + windowed fetch, columns, paging, default sort, body + preview, attachment level (list/open/save).                                                                                                                                     | A folder opens in the TUI, `p` shows the body, `o` opens an attachment.                            |
 | **3** | **done.** **Thunderbird importer** — `nyd config import-thunderbird` reads `prefs.js` and writes **one** adapter YAML holding every account plus **one** view YAML with a subtab per account (no secrets — a `pass_credentials.py` block with guessed store paths, §7). | Every Thunderbird account has a working subtab. **This is the goal line of the original request.** |
 | **4** | Envelope cache in SQLite (`(account, folder, uidvalidity, uid)`), so a tab opens instantly and survives offline.                                                                                                                                                        | Second open of a folder does no network round trip for rows already known.                         |
-| **5** | Write actions: seen/unseen, flag, move (folder `option_menu`), delete/archive, and the unread wiring end to end.                                                                                                                                                        | Marking read in nyd is visible in Thunderbird.                                                     |
+| **5** | **done.** Write actions on the message under the cursor: `a s` toggles `\Seen`, `a f` toggles `\Flagged`, `a m` moves it into a mailbox picked from the account's own folder list. Deleting _is_ that move, with the trash as the destination — see §10.                | Marking read in nyd is visible in Thunderbird.                                                     |
 | **6** | Live: `IDLE` per selected folder → `Invalidation`, so new mail appears without `r`.                                                                                                                                                                                     | A mail sent from elsewhere shows up in an open pane.                                               |
 | **7** | **done** (reply + new mail; forward is not built). Compose over SMTP (lettre), Markdown in, MIME out — see [`plan-mail-compose.md`](plan-mail-compose.md).                                                                                                              | A reply written in `$EDITOR` is sent and lands in Sent.                                            |
 | **8** | Gmail XOAUTH2 token script (or app password, see §10).                                                                                                                                                                                                                  | The OAuth account connects like the others.                                                        |
@@ -436,6 +436,9 @@ IMAP server, the importer against invented profiles in Thunderbird's own shape.
 Phase 7 was pulled forward out of that comfort layer, because a mail client one
 cannot answer with is a reader: `e r` and `e n` are built, and with them the one
 piece of phase 5 they need — `\Answered` on the message that was answered.
+Phase 5 followed and finished that write path, so what is left of the comfort
+layer is 4, 6 and 8 — none of which changes what the adapter can do, only what
+it costs.
 What is still owed is the live smoke run against real mailboxes (see
 [`smoke-tests.md`](smoke-tests.md), the Mail blocks).
 
@@ -482,8 +485,15 @@ What is still owed is the live smoke run against real mailboxes (see
   third question, distinct from the two above — whether the _session_ survives
   an error, and whether a _command_ is worth running again on a new one.
 - **Deleting mail** is destructive and irreversible in a way a ticket edit is
-  not. Phase 5 moves to Trash by default; a real `EXPUNGE` stays behind a
-  confirmation.
+  not. There is therefore no `delete` action at all: deleting is `a m` with the
+  trash as the destination, which is a move like any other and is undone by
+  moving the message back.
+- **A move is not one command everywhere.** With `MOVE` (RFC 6851) it is; with
+  only `UIDPLUS` it is `UID COPY`, then `+FLAGS \Deleted`, then `UID EXPUNGE`
+  — in that order, because a copy that failed must leave the original where it
+  was. A server offering neither is **refused**: the only step left would be a
+  bare `EXPUNGE`, and that deletes every message in the mailbox that anyone —
+  including another client, in another session — has marked deleted.
 
 ## 11. Test and smoke strategy
 

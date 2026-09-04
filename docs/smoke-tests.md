@@ -7322,6 +7322,72 @@ point: a mail begun in the TUI can be finished from a script, and back.
       not be filed. It must NOT read as a failed send: that is what makes
       somebody send a second copy.
 
+## Mail: marking, flagging and moving (`a s` / `a f` / `a m`)
+
+Prerequisite: a second mail client — Thunderbird, a webmailer — open on the
+same account. The point of every check here is that the _server_ changed, not
+that nyd redrew a row: what the other client shows is the verdict.
+
+Pick a mailbox you do not mind touching. A move is undone by moving the message
+back, and that is the only undo there is.
+
+### Marking and flagging
+
+- [ ] **`a s` toggles**: cursor on an unread mail, `a s` → the row loses its 📩
+      and the folder's unread count drops by one. `a s` again brings both back.
+      Thunderbird agrees, without a manual refresh in nyd.
+- [ ] **The status line says which way it went**: the message is
+      `marked read` or `marked unread` — never a bare "done", which would not
+      tell you what a toggle did.
+- [ ] **`a f` toggles the star**: `a f` on an unflagged mail puts ⭐ in the flag
+      gutter, `a f` again removes it. The gutter keeps its column alignment
+      while it happens — the flag mask is computed per page, so a page where
+      nothing is flagged has no ⭐ slot at all until the first flag arrives.
+- [ ] **Both survive a reload**: `r` after either toggle keeps the new state.
+      Anything that comes back is a row the pane redrew from a stale cache.
+- [ ] **Marked from the outside**: mark the same mail read in Thunderbird, then
+      `r` in nyd → nyd shows it read. `a s` from there marks it _unread_, which
+      is the toggle reading the server's state rather than its own memory.
+
+### Moving
+
+- [ ] **`a m` offers this account's mailboxes**: the picker lists the folders
+      of the account the message belongs to, and only selectable ones — no
+      `\Noselect` parent, and not the folder the message is already in.
+- [ ] **The list opens at once**: the picker appears on the keypress with no
+      pause. It is served from the folder cache the tree already filled; a
+      visible stall means it went to the network on the UI thread.
+- [ ] **A move moves**: pick a target → the status line says
+      `moved to <folder>`, the row is gone from the source pane, and the
+      message is in the target folder in Thunderbird. Its unread state and its
+      flag came along.
+- [ ] **The move is not a copy**: the source folder does not still hold it —
+      check in Thunderbird, not in nyd, because a stale pane would look the
+      same.
+- [ ] **Deleting is this action**: `a m` → the account's trash folder. That is
+      the whole delete story; there is deliberately no separate `delete`.
+- [ ] **A move back restores it**: from the trash, `a m` → the original folder.
+- [ ] **Cancel does nothing**: open the picker, press escape → no status
+      message, no change, no reload.
+- [ ] **Every account**: run the move once per subtab. Gmail is the one to
+      watch: its folders are labels, so a move into `[Gmail]/Trash` removes
+      the mail from `All Mail` too, and a move into a label does not remove it
+      from the inbox.
+
+### What must not happen
+
+- [ ] **Nobody else's mail is deleted**: on an account whose server has no
+      `MOVE` capability, nyd copies, marks and expunges _by uid_. Mark an
+      unrelated message deleted in Thunderbird first (without expunging), move
+      a different one in nyd, then look: the unrelated message must still be
+      there. A bare `EXPUNGE` would have taken it.
+- [ ] **A server that can do neither refuses**: an account offering neither
+      `MOVE` nor `UIDPLUS` reports that it cannot move safely and changes
+      nothing — no half-move that copied the mail and left the original.
+- [ ] **A renumbered mailbox stops all three**: if the folder's `UIDVALIDITY`
+      changed under you, `a s`, `a f` and `a m` are refused with the
+      "renumbered" error rather than acting on whatever now carries that uid.
+
 ## A view file that does not load: reading and copying the problems
 
 A broken `views/*.yaml` keeps its tab and draws a configuration-error panel
