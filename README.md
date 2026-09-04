@@ -1826,6 +1826,15 @@ writing. What actually goes out is the original's own HTML wrapped in
 `<blockquote type="cite">`, nested inside whatever quotes it already carried —
 so its tables, links and inline images survive, and a thread reads as a thread.
 
+Because the buffer's half is there to be read, it carries the message and not
+the layout around it. A `<style>` block, a `<title>`, a spacer cell, a tracking
+pixel, a logo linking to a home page, the few hundred zero-width characters a
+newsletter pads its preview line with — none of it is visible in the sender's
+own client, and none of it is quoted here. An image stands as its alt text
+where it has one, and as nothing where it does not. A message that arrived as
+plain text is quoted exactly as its writer typed it: the tidying is for markup
+we converted, never for text somebody wrote.
+
 That is also why the buffer's quoted region is guarded. Below the marker line:
 
 | What you do with it     | What happens                                                                                       |
