@@ -84,6 +84,86 @@ pub(crate) async fn list_folders(state: &mut SessionState) -> MailResult<Vec<Fol
     Ok(out)
 }
 
+/// The mailbox the server marks `\Sent` (RFC 6154 SPECIAL-USE), if it marks
+/// one.
+///
+/// A second `LIST` rather than a field on [`FolderInfo`]: the answer is
+/// wanted once per sent message and never while a folder tree is on screen,
+/// and the tree pays for every byte it carries per row.
+///
+/// The stream is read to its end even after a hit — abandoning a response
+/// mid-flight leaves the rest of it on the wire for the next command to
+/// stumble over.
+pub(crate) async fn sent_folder(state: &mut SessionState) -> MailResult<Option<String>> {
+    let session = &mut state.session;
+    let mut found: Option<String> = None;
+    {
+        let names = session
+            .list(Some(""), Some("\"*\""))
+            .await
+            .map_err(classify)?;
+        futures::pin_mut!(names);
+        while let Some(name) = names.next().await {
+            let name = name.map_err(classify)?;
+            if found.is_none() && name.attributes().contains(&NameAttribute::Sent) {
+                found = Some(name.name().to_string());
+            }
+        }
+    }
+    drain_unsolicited(session);
+    Ok(found)
+}
+
+/// Put a message into a mailbox — the copy of an outgoing mail that makes it
+/// appear in Sent.
+///
+/// SMTP hands a message to a server and forgets it; nothing shows up in Sent
+/// unless the client puts it there. `flags` is an IMAP flag list including
+/// its parentheses, `(\Seen)` for something the sender wrote themselves.
+pub(crate) async fn append(
+    state: &mut SessionState,
+    path: &str,
+    flags: &str,
+    source: &[u8],
+) -> MailResult<()> {
+    let session = &mut state.session;
+    session
+        .append(path, Some(flags), None, source)
+        .await
+        .map_err(classify)?;
+    drain_unsolicited(session);
+    Ok(())
+}
+
+/// Add flags to one message — `\Answered` on the mail that was just
+/// answered, and whatever phase 5 adds next.
+///
+/// `.SILENT`: the updated flags are not wanted back. The row on screen is
+/// patched by the caller that knows which row it is, and an unsolicited
+/// `FETCH` here would only be drained.
+pub(crate) async fn add_flags(
+    state: &mut SessionState,
+    path: &str,
+    uid_validity: u32,
+    uid: u32,
+    flags: &str,
+) -> MailResult<()> {
+    select_stable(state, path, uid_validity).await?;
+    {
+        let updates = state
+            .session
+            .uid_store(uid.to_string(), format!("+FLAGS.SILENT ({flags})"))
+            .await
+            .map_err(classify)?;
+        futures::pin_mut!(updates);
+        while let Some(update) = updates.next().await {
+            update.map_err(classify)?;
+        }
+    }
+    drain_unsolicited(&mut state.session);
+    Ok(())
+}
+
 /// Message and unread counts for one mailbox, without selecting it.
 ///
 /// Worth knowing: in a `STATUS` response `unseen` is the **count** of unseen
@@ -193,11 +273,7 @@ async fn search(
 ) -> MailResult<Vec<u32>> {
     let query = query.trim();
     let query = if query.is_empty() { "ALL" } else { query };
-    let found = state
-        .session
-        .uid_search(query)
-        .await
-        .map_err(classify)?;
+    let found = state.session.uid_search(query).await.map_err(classify)?;
     drain_unsolicited(&mut state.session);
     let mut uids: Vec<u32> = found.into_iter().collect();
     uids.sort_unstable_by(|a, b| b.cmp(a));

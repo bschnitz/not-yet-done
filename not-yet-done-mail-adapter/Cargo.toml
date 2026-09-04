@@ -26,14 +26,14 @@ mail-parser      = "0.11"
 
 # Composing. `lettre` builds the MIME message and speaks SMTP; it stays on
 # native-tls so the crate keeps the single TLS stack it already has for
-# IMAP. `comrak` turns what the user wrote into HTML (CommonMark *plus*
+# IMAP; no connection pool, because a transport is built per send and a
+# pooled one is an idle socket the provider closes anyway. `comrak` turns what the user wrote into HTML (CommonMark *plus*
 # GFM — tables are what people write in mail), `htmd` turns the original's
 # HTML into the Markdown quote the editor shows, which is read and never
 # sent, so readability is its whole job.
 lettre = { version = "0.11", default-features = false, features = [
     "builder",
     "hostname",
-    "pool",
     "smtp-transport",
     "tokio1",
     "tokio1-native-tls",
