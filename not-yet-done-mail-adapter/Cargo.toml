@@ -24,6 +24,23 @@ async-imap       = { version = "0.11", default-features = false, features = ["ru
 async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
 mail-parser      = "0.11"
 
+# Composing. `lettre` builds the MIME message and speaks SMTP; it stays on
+# native-tls so the crate keeps the single TLS stack it already has for
+# IMAP. `comrak` turns what the user wrote into HTML (CommonMark *plus*
+# GFM — tables are what people write in mail), `htmd` turns the original's
+# HTML into the Markdown quote the editor shows, which is read and never
+# sent, so readability is its whole job.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "hostname",
+    "pool",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-native-tls",
+] }
+comrak = { version = "0.54", default-features = false }
+htmd   = "0.5"
+
 [dev-dependencies]
 tokio      = { workspace = true }
 serde_yaml = { workspace = true }
