@@ -111,6 +111,20 @@ pub(crate) fn parse(text: &str, template: &str) -> MailResult<Draft> {
     })
 }
 
+/// Read a saved buffer back, judging its quoted region against a quote
+/// rendered fresh from the original.
+///
+/// The difference to [`parse`] is which baseline the guard uses, and it
+/// matters exactly once: a draft that is resumed *is* the template the editor
+/// was handed, so an edit that was refused before would read as untouched the
+/// second time round and travel as the sender's own words. The original is
+/// re-read when a reply is sent anyway, so the quote can simply be rendered
+/// again — no state has to survive between the two.
+pub(crate) fn parse_with_quote(text: &str, quoted: Option<&str>) -> MailResult<Draft> {
+    let baseline = render(&Headers::default(), "", quoted);
+    parse(text, &baseline)
+}
+
 /// Split at the blank line that ends the header block.
 fn split_head(text: &str) -> MailResult<(&str, &str)> {
     // Normalising CRLF here would mean copying the whole buffer; editors on
@@ -312,6 +326,31 @@ mod tests {
         assert_eq!(
             parse(&typed, &template).expect("parses").quote,
             QuoteState::Dropped
+        );
+    }
+
+    /// A resumed draft is its own template, so the guard cannot compare the
+    /// two: judged against the quote rendered fresh from the original, an
+    /// edit stays an edit however often the draft is re-opened.
+    #[test]
+    fn a_resumed_draft_is_judged_against_the_original_quote() {
+        let quoted = "> alt\n> mehr\n";
+        let edited = render(&headers(), "Hallo", Some("> alt\n> ANTWORT\n"));
+        assert_eq!(
+            parse(&edited, &edited).expect("parses").quote,
+            QuoteState::Intact,
+            "against itself a draft always looks untouched"
+        );
+        assert_eq!(
+            parse_with_quote(&edited, Some(quoted))
+                .expect("parses")
+                .quote,
+            QuoteState::Modified
+        );
+        let kept = render(&headers(), "Hallo", Some(quoted));
+        assert_eq!(
+            parse_with_quote(&kept, Some(quoted)).expect("parses").quote,
+            QuoteState::Intact
         );
     }
 

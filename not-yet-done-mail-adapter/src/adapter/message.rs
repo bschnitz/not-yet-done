@@ -11,16 +11,20 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ColumnSchema, Content, ContentError, InputSpec, Metadata, Node,
-    NodeAction, NodeSummary, NodeType, Result,
+    ActionInput, ActionOutcome, ColumnSchema, Content, ContentError, EditorPrep, InputSpec,
+    Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::field;
 use super::files::message_dir;
 use super::other_err;
 use super::types::message_type;
+use crate::compose::buffer::Headers;
+use crate::compose::outbox::Outbox;
+use crate::compose::{quote, render};
 use crate::ids::MessageId;
 use crate::imap::conn::Connection;
+use crate::mime::Original;
 use crate::model::EnvelopeRow;
 
 /// One slot of the flags column: the glyph, and the blank that stands in
@@ -130,12 +134,23 @@ const INLINE_DIR: &str = "inline";
 /// viewer means writing files, and the adapter is the only place that can:
 /// the markup never leaves it otherwise.
 pub(super) fn actions() -> Vec<NodeAction> {
-    vec![NodeAction::new(
-        "export_html",
-        "export html",
-        InputSpec::None,
-    )]
+    vec![
+        NodeAction::new("export_html", "export html", InputSpec::None),
+        NodeAction::new("reply", "reply", InputSpec::Editor),
+        NodeAction::new("compose", "new message", InputSpec::Editor),
+    ]
 }
+
+/// The draft of a reply is named after the message it answers, so pressing
+/// `reply` again after a failed send re-opens the text that was written and
+/// not an empty buffer.
+pub(super) fn reply_draft(id: &MessageId) -> String {
+    format!("reply-{}", id.encode())
+}
+
+/// A new message has nothing to be named after — one unsent draft per
+/// account, which is the one a second `compose` should continue.
+pub(super) const COMPOSE_DRAFT: &str = "compose";
 
 /// The one cell a slot contributes: its glyph when the flag is set, its
 /// blank when it is not.
@@ -318,6 +333,10 @@ pub(super) struct MailMessageNode {
     label: String,
     metadata: Metadata,
     body: MessageBody,
+    /// The account's sending side. Present on every message node, because
+    /// answering a mail is a gesture of the mailbox it is in — an account
+    /// that cannot send says so when the editor would have opened.
+    outbox: Arc<Outbox>,
 }
 
 impl MailMessageNode {
@@ -326,6 +345,7 @@ impl MailMessageNode {
         row: &EnvelopeRow,
         conn: Connection,
         cache: Arc<BodyCache>,
+        outbox: Arc<Outbox>,
     ) -> Self {
         Self {
             id: id.encode(),
@@ -337,6 +357,7 @@ impl MailMessageNode {
                 conn,
                 cache,
             },
+            outbox,
         }
     }
 }
@@ -398,6 +419,77 @@ impl MailMessageNode {
             message: Some(format!("exported message to {}", dir.display())),
         })
     }
+}
+
+impl MailMessageNode {
+    /// The message this one answers, parsed out of its own source.
+    ///
+    /// Fetched twice over one reply — once to fill the editor, once to build
+    /// what travels — and deliberately not cached: the second read is what
+    /// makes the quote guard stateless, and a body the server has since
+    /// changed is a body we should be quoting, not one we remember.
+    async fn original(&self) -> Result<Original> {
+        Ok(crate::mime::original(&self.body.raw().await?))
+    }
+
+    /// The buffer a reply opens on: the addresses filled in, the subject
+    /// prefixed, and the original below the marker as readable text.
+    async fn reply_prep(&self) -> Result<EditorPrep> {
+        let original = self.original().await?;
+        let headers = Headers {
+            from: self.outbox.identity().map_err(super::mail_err)?,
+            to: render::reply_recipients(&original, &self.outbox.own_addresses()),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: render::reply_subject(&original.subject),
+        };
+        let quoted = quote::quoted_text(&original, &self.outbox.attribution(&original));
+        self.outbox
+            .prep(&reply_draft(&self.body.id), &headers, Some(&quoted))
+            .map_err(super::mail_err)
+    }
+
+    async fn reply_send(&self, text: &str) -> Result<ActionOutcome> {
+        let original = self.original().await?;
+        let report = self
+            .outbox
+            .deliver(
+                &reply_draft(&self.body.id),
+                text,
+                Some(&original),
+                Some(&self.body.id),
+            )
+            .await
+            .map_err(super::mail_err)?;
+        Ok(ActionOutcome::Done {
+            message: Some(report),
+        })
+    }
+}
+
+/// The buffer a new message opens on, and what comes back from it.
+///
+/// Shared by the message level and the folder above it: `compose` needs an
+/// account and nothing else, and both levels know theirs. Which is why a
+/// folder with no messages in it can still start a mail.
+pub(super) async fn compose_prep(outbox: &Outbox) -> Result<EditorPrep> {
+    let headers = Headers {
+        from: outbox.identity().map_err(super::mail_err)?,
+        ..Headers::default()
+    };
+    outbox
+        .prep(COMPOSE_DRAFT, &headers, None)
+        .map_err(super::mail_err)
+}
+
+pub(super) async fn compose_send(outbox: &Outbox, text: &str) -> Result<ActionOutcome> {
+    let report = outbox
+        .deliver(COMPOSE_DRAFT, text, None, None)
+        .await
+        .map_err(super::mail_err)?;
+    Ok(ActionOutcome::Done {
+        message: Some(report),
+    })
 }
 
 async fn write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
@@ -496,9 +588,23 @@ impl Node for MailMessageNode {
         Some(&self.body)
     }
 
+    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+        match action_id {
+            "reply" => self.reply_prep().await,
+            "compose" => compose_prep(&self.outbox).await,
+            other => Err(ContentError::NotSupported(format!(
+                "`{other}` does not open an editor on a mail message"
+            ))),
+        }
+    }
+
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("export_html", ActionInput::None) => self.export_html().await,
+            ("reply", ActionInput::Edited { text, .. }) => self.reply_send(&text).await,
+            ("compose", ActionInput::Edited { text, .. }) => {
+                compose_send(&self.outbox, &text).await
+            }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "`{other}` is not an action of a mail message"
             ))),

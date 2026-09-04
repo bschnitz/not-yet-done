@@ -298,7 +298,12 @@ fn tag_end(text: &str) -> Option<usize> {
 /// that wrote `AW:` will read `Re: AW: …` as one thread all the same.
 pub(crate) fn reply_subject(subject: &str) -> String {
     let subject = subject.trim();
-    if subject.len() >= 3 && subject[..3].eq_ignore_ascii_case("re:") {
+    // `get`, not a slice: a subject that starts with a multi-byte character
+    // has no byte 3 to cut at, and a panic on `Grüße` is not a prefix check.
+    if subject
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("re:"))
+    {
         return subject.to_string();
     }
     format!("Re: {subject}")
@@ -423,6 +428,10 @@ mod tests {
         assert_eq!(reply_subject("Re: Angebot"), "Re: Angebot");
         assert_eq!(reply_subject("RE: Angebot"), "RE: Angebot");
         assert_eq!(reply_subject("AW: Angebot"), "Re: AW: Angebot");
+        // A subject whose first character is multi-byte has no byte 3 to
+        // cut at — the prefix check must ask, not slice.
+        assert_eq!(reply_subject("Grüße"), "Re: Grüße");
+        assert_eq!(reply_subject("ü"), "Re: ü");
     }
 
     #[test]
