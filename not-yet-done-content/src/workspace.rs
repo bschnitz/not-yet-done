@@ -12,6 +12,15 @@
 //! [`crate::download::safe_attachment_name`]) so a local path
 //! `attachments/<name>` matches an embed that names the file — that is what
 //! lets an adapter rewrite embeds to local links without an external map.
+//!
+//! [`TICKET_FILE`] and [`EDIT_FILE`] are two files because they are two
+//! contracts. The first is a *mirror*: every export overwrites it from the
+//! server, and that is the point. The second is a *draft*: it holds text the
+//! user has typed and nobody else may write it. Sharing one path made an
+//! export silently eat an open editor's buffer — the editor's `mv` then handed
+//! the frontend the export, which of course compared equal to what it opened
+//! with, so the edit vanished without an error. Both live in the same folder
+//! so `attachments/<name>` resolves from either.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,8 +34,11 @@ use crate::download::safe_attachment_name;
 const SIDECAR: &str = ".attachments.json";
 /// Subfolder holding the downloaded attachment files.
 pub const ATTACH_SUBDIR: &str = "attachments";
-/// The single Markdown file inside an item folder.
+/// The item's Markdown mirror — rewritten from the server on every export.
 pub const TICKET_FILE: &str = "ticket.md";
+/// The editor's own buffer inside the same folder. Never written by an
+/// export, so an editing session cannot lose its text to one.
+pub const EDIT_FILE: &str = "ticket.edit.md";
 
 #[derive(Default, Serialize, Deserialize)]
 struct Sidecar {

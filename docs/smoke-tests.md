@@ -7429,6 +7429,27 @@ lists them`), not N lines. With `notifications.max_messages: 1` and two
 - [ ] **A reload re-reports**: `:config` → save a still-broken file → the
       summary and the log entries appear again.
 
+## Jira: the editor's buffer is not the mirror an export overwrites
+
+The `e e` editor and `export_workspace` (what `o p` runs) used to share one
+`ticket.md`. An export landing between the editor's save and its `mv … .done`
+handed the frontend the export instead of the buffer — the edit vanished
+without a message. The editor now owns `ticket.edit.md` in the same folder.
+
+- [ ] Jira tab, a ticket with attachments: `e e` opens
+      `<workspace>/<KEY>-<slug>/ticket.edit.md`, not `ticket.md`
+- [ ] `attachments/<name>` image links in that buffer still resolve (the
+      file sits next to the `attachments/` folder)
+- [ ] **The regression**: with the editor open and edited but not yet
+      saved, press `o p` in the TUI (or run `export_workspace` from the
+      CLI), then save and quit the editor → the edit lands in Jira, the
+      TUI reports the write, nothing is silently swallowed
+- [ ] `o p` still shows the server state: `export_workspace` keeps
+      rewriting `ticket.md` on every run and never touches
+      `ticket.edit.md`
+- [ ] Without a configured `ticket_workspace`, `e e` still falls back to a
+      throwaway `$TMPDIR` file and commits normally
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
