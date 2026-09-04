@@ -94,6 +94,25 @@ fn report(accounts: &[Account], skipped: &[Skipped], pass_prefix: &str, profile:
             account.username,
         );
         eprintln!("    password from: {pass_prefix}/{}/pass   (a GUESS — check it)", account.id);
+        match &account.smtp {
+            Some(smtp) => {
+                let port = smtp
+                    .port
+                    .map(|p| format!(":{p}"))
+                    .unwrap_or_else(|| " (default port)".into());
+                eprintln!(
+                    "    sends through: {}{} over {}",
+                    smtp.host,
+                    port,
+                    smtp.security.as_yaml()
+                );
+            }
+            // Not an error and not a warning: an account can be worth reading
+            // without being one you write from. It is said out loud all the
+            // same, because "why does `e r` say it cannot send" is otherwise a
+            // question asked at the worst possible moment.
+            None => eprintln!("    sends through: nothing — reading only, no `smtp:` block"),
+        }
         for note in &account.notes {
             eprintln!("    note: {note}");
         }

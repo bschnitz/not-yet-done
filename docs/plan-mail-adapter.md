@@ -427,14 +427,17 @@ connects Work and nothing else.
 | **4** | Envelope cache in SQLite (`(account, folder, uidvalidity, uid)`), so a tab opens instantly and survives offline.                                                                                                                                                        | Second open of a folder does no network round trip for rows already known.                         |
 | **5** | Write actions: seen/unseen, flag, move (folder `option_menu`), delete/archive, and the unread wiring end to end.                                                                                                                                                        | Marking read in nyd is visible in Thunderbird.                                                     |
 | **6** | Live: `IDLE` per selected folder → `Invalidation`, so new mail appears without `r`.                                                                                                                                                                                     | A mail sent from elsewhere shows up in an open pane.                                               |
-| **7** | Compose / reply / forward via SMTP (lettre), reusing the editor-compose path Stoat's `n`/`e` already use.                                                                                                                                                               | A reply written in `$EDITOR` is sent and lands in Sent.                                            |
+| **7** | **done** (reply + new mail; forward is not built). Compose over SMTP (lettre), Markdown in, MIME out — see [`plan-mail-compose.md`](plan-mail-compose.md).                                                                                                              | A reply written in `$EDITOR` is sent and lands in Sent.                                            |
 | **8** | Gmail XOAUTH2 token script (or app password, see §10).                                                                                                                                                                                                                  | The OAuth account connects like the others.                                                        |
 
 Phases 0-3 are the "all my accounts work" milestone; 4-8 are the comfort layer.
 All four are implemented and covered by unit tests — the adapter against a fake
 IMAP server, the importer against invented profiles in Thunderbird's own shape.
+Phase 7 was pulled forward out of that comfort layer, because a mail client one
+cannot answer with is a reader: `e r` and `e n` are built, and with them the one
+piece of phase 5 they need — `\Answered` on the message that was answered.
 What is still owed is the live smoke run against real mailboxes (see
-[`smoke-tests.md`](smoke-tests.md), the four Mail blocks).
+[`smoke-tests.md`](smoke-tests.md), the Mail blocks).
 
 ## 10. Risks and open points
 

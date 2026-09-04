@@ -1714,12 +1714,13 @@ under one instance); what is new is that an account's credentials are an
 ordinary `auth:` block, so `nyd config auth mail` describes them and every
 credential provider works per account.
 
-> **Status: reading works end to end.** The folder tree of each account is
-> browsable — `LIST` for the hierarchy, `STATUS` for the unread/total counts,
-> mailbox names decoded from IMAP's modified UTF-7 (`Entw&APw-rfe` reads as
-> `Entwürfe`) — a folder opens its messages as envelope rows, `p` shows a
-> message, and a mail carrying files drills into them. Writing (marking read,
-> flagging, moving, sending) is the next phase; see
+> **Status: reading and answering work end to end.** The folder tree of each
+> account is browsable — `LIST` for the hierarchy, `STATUS` for the
+> unread/total counts, mailbox names decoded from IMAP's modified UTF-7
+> (`Entw&APw-rfe` reads as `Entwürfe`) — a folder opens its messages as
+> envelope rows, `p` shows a message, and a mail carrying files drills into
+> them. `e r` answers the message under the cursor and `e n` writes a new one.
+> The rest of writing (marking read, flagging, moving) is the next phase; see
 > [`docs/plan-mail-adapter.md`](docs/plan-mail-adapter.md) for the phase cut.
 
 ### Subtabs are accounts
@@ -1786,6 +1787,68 @@ in front of it promises — so the shipped view binds `m` to open the messages
 of the folder under the cursor. On a folder with nothing below it Enter opens
 the messages directly, and `m` does the same thing.
 
+### Answering and composing
+
+`e r` answers the message under the cursor. `e n` starts a new one — addressed
+to the **folder**, so it works in an empty mailbox as well as in a full one,
+and it is on the folder tree too.
+
+Both open `$EDITOR` on a buffer that begins with a header block:
+
+```
+From: Ada Lovelace <ada@example.org>
+To: Grace Hopper <grace@example.net>
+Cc:
+Subject: Re: The Q4 numbers
+
+<the answer, written as Markdown>
+
+>>> quoted from the original message — sent verbatim, edits below are discarded
+> On 2026-09-03 14:22, Grace Hopper <grace@example.net> wrote:
+>
+> ...
+```
+
+**What is written is Markdown; what leaves is a proper MIME message.** The
+conversion happens in the adapter — no pandoc, no helper script, so the CLI and
+the TUI send the same mail.
+
+**Plain or HTML is the original's decision, not a setting.** A reply to a mail
+that carried a `text/html` part is HTML, everything else is plain text. An HTML
+reply always ships a `text/plain` alternative beside it, built from the same
+Markdown, the way every mail client does — a recipient reading text sees text
+rather than an empty message. A _new_ mail has no original to take the decision
+from and follows `compose_format:` (`html` by default).
+
+**The quote is two different things at once.** In the buffer it is the original
+turned into Markdown and prefixed with `> `, and it exists to be _read_ while
+writing. What actually goes out is the original's own HTML wrapped in
+`<blockquote type="cite">`, nested inside whatever quotes it already carried —
+so its tables, links and inline images survive, and a thread reads as a thread.
+
+That is also why the buffer's quoted region is guarded. Below the marker line:
+
+| What you do with it     | What happens                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------- |
+| leave it alone          | the original's HTML is quoted, as above                                                            |
+| delete the whole region | a deliberate reply without a quote — fine, and not an error                                        |
+| edit inside it          | **refused**, and the draft is kept: an answer typed between somebody else's lines would be dropped |
+
+**A draft is a real file**, under `~/.local/share/not_yet_done/mail/drafts/`,
+not a temp file. An editor closed by accident, or a send the server refused, is
+one `e r` away from where it was. The file is deleted when the mail is out.
+
+**After the send**, a copy is appended to the account's `\Sent` folder
+(SPECIAL-USE, overridable with `sent_folder:`) and `\Answered` is set on the
+message that was answered — the ↩ glyph in the flag gutter. Neither can fail
+the action: they are reported as a warning on an otherwise successful send,
+because telling somebody "sending failed" after the mail has left invites a
+second copy.
+
+**Which account sends** is the account whose subtab the mail was written in. A
+`From:` naming a different account is refused rather than silently redirected —
+the address is a check, not a switch.
+
 ### Setup
 
 Two YAML files in `~/.config/not_yet_done/views/`:
@@ -1817,6 +1880,32 @@ route the Taiga/Kimai/Postgres adapters already use), so a locked store asks
 for its passphrase through the TUI instead of opening its own pinentry window
 somewhere off-screen.
 
+**Sending needs an `smtp:` block on the account.** Without one the account
+reads mail perfectly well and says so when asked to send, which is a better
+answer than a guessed host failing inside a handshake:
+
+```yaml
+- id: work
+  # ...
+  smtp:
+    host: smtp.example.org
+    security: starttls # port defaults to 465/587/25 by security
+    from_name: Ada Lovelace # the display name in From:
+    # auth: only when submission logs in under a different name than reading;
+    # without it the account's own credentials are reused.
+```
+
+| Key                       | Where              | Default              | What it decides                                                                                    |
+| ------------------------- | ------------------ | -------------------- | -------------------------------------------------------------------------------------------------- |
+| `smtp.host` / `smtp.port` | account            | — / by security      | Submission is a different server from reading, and 465/587/25 is a different port table from IMAP. |
+| `smtp.security`           | account            | `tls`                | `tls` / `starttls` / `none`, stated for the same reason as the reading side.                       |
+| `smtp.auth`               | account            | the account's        | Only for a provider whose submission login differs. One password in one place otherwise.           |
+| `smtp.from_name`          | account            | the account's `name` | The display name recipients see.                                                                   |
+| `sent_folder`             | account            | `\Sent` SPECIAL-USE  | For a server that advertises none, or whose Sent folder is not where it says.                      |
+| `compose_format`          | instance + account | `html`               | What a **new** mail is sent as. A reply takes it from the original instead.                        |
+| `quote_images`            | instance + account | `attach`             | Whether the quoted original's inline images travel back. `placeholder` keeps replies small.        |
+| `reply_attribution`       | instance           | convention           | The `On <date>, <who> wrote:` line — a template, because it is pure convention.                    |
+
 ### Importing from Thunderbird
 
 Writing six accounts out by hand is the boring half of setting this up, and
@@ -1831,7 +1920,13 @@ nyd config import-thunderbird --stdout     # print them and touch nothing
 
 It reads one profile's `prefs.js` and writes the pair described above:
 `mail-adapter.yaml` with an entry per IMAP account, and `mail.yaml` with one
-subtab per account, bound to it by `account:<id>`. Both files keep the
+subtab per account, bound to it by `account:<id>`. **Sending comes along**:
+Thunderbird's `mail.smtpserver.*` block becomes the account's `smtp:` block, so
+an imported config can answer mail and not only read it. An identity naming no
+server of its own falls back to Thunderbird's default one, and submission gets
+an `auth:` block of its own only where it logs in under a different name than
+reading does — which the command says out loud, because that is the one case
+where the guessed store path may be the wrong password. Both files keep the
 comments explaining what was decided; the view file shares one definition of
 the levels through YAML anchors, so a column or a keybinding is changed once
 rather than once per mailbox.

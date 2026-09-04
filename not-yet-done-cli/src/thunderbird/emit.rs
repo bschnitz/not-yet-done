@@ -27,6 +27,13 @@ pub(super) fn adapter_yaml(accounts: &[Account], pass_prefix: &str, profile: &st
          # it rather than protect anyone.\n#\n",
     );
     s.push_str(
+        "# Sending is imported too, from Thunderbird's own `mail.smtpserver.*` block:\n\
+         # an account with an `smtp:` block below can answer mail (`e r`) and write\n\
+         # new mail (`e n`); one without reads mail and says so when asked to send.\n\
+         # Submission has its own `auth:` only where it logs in under a different\n\
+         # name — otherwise it reuses the account's credentials.\n#\n",
+    );
+    s.push_str(
         "# NO SECRET IS IN THIS FILE, and none was read out of Thunderbird: its own\n\
          # password store is NSS-encrypted and is deliberately left alone. Each\n\
          # account below fetches its password from `pass` at login time, through\n\
@@ -70,7 +77,39 @@ pub(super) fn adapter_yaml(accounts: &[Account], pass_prefix: &str, profile: &st
             scalar(&account.username)
         ));
         s.push_str("        - field: password\n");
-        s.push_str("          provider: { type: script-result }\n\n");
+        s.push_str("          provider: { type: script-result }\n");
+        if let Some(smtp) = &account.smtp {
+            s.push_str("    smtp:\n");
+            s.push_str(&format!("      host: {}\n", scalar(&smtp.host)));
+            if let Some(port) = smtp.port {
+                s.push_str(&format!("      port: {port}\n"));
+            }
+            s.push_str(&format!("      security: {}\n", smtp.security.as_yaml()));
+            if let Some(from_name) = &smtp.from_name {
+                s.push_str(&format!("      from_name: {}\n", scalar(from_name)));
+            }
+            // Only when submission logs in under another name. Without an
+            // `auth:` here the adapter reuses the account's credentials,
+            // which is one password in one place.
+            if let Some(username) = &smtp.username {
+                s.push_str("      auth:\n        mechanism: password\n");
+                s.push_str("        script: >-\n");
+                s.push_str(&format!("          {CRED_SCRIPT}\n"));
+                s.push_str(&format!(
+                    "          password={pass_prefix}/{}/pass\n",
+                    account.id
+                ));
+                s.push_str("        bindings:\n");
+                s.push_str("          - field: username\n");
+                s.push_str(&format!(
+                    "            provider: {{ type: literal, value: {} }}\n",
+                    scalar(username)
+                ));
+                s.push_str("          - field: password\n");
+                s.push_str("            provider: { type: script-result }\n");
+            }
+        }
+        s.push('\n');
     }
     s.truncate(s.trim_end().len());
     s.push('\n');
@@ -87,8 +126,10 @@ pub(super) fn view_yaml(accounts: &[Account]) -> String {
          # the id is an `id:` from the adapter config. Renaming an id means renaming\n\
          # it in both files — an unknown id is refused by name rather than guessed.\n#\n\
          # Scope today: the FOLDER TREE, the MESSAGES under a folder, READING a\n\
-         # message and its ATTACHMENTS. Writing — marking read, flagging, moving,\n\
-         # sending — is the adapter's next phase.\n\n",
+         # message and its ATTACHMENTS, and WRITING one — `e r` answers the message\n\
+         # under the cursor, `e n` starts a new one. Sending needs an `smtp:` block\n\
+         # on the account in mail-adapter.yaml. Marking read, flagging and moving\n\
+         # are the adapter's next phase.\n\n",
     );
     s.push_str("tab:\n  name: Mail\n  icon: \"\u{2709}\u{fe0f}\"\n");
     s.push_str("  # While any folder in this tab holds unread mail, the tab bar\n");
@@ -158,6 +199,13 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
         type: fuzzy_filter
         fuzzy_filter:
           fields: [name]
+      # `e` is the leader for writing mail: `e n` here, `e r` on the message
+      # level below. Both open the editor on a buffer whose first block is the
+      # headers, and send what that block says.
+      - name: new message
+        key: "e n"
+        type: edit
+        id: compose
     children: &folder_children
       # One page = one UID SEARCH + one UID FETCH of exactly this window, so a
       # mailbox holding 40 000 mails opens as fast as one holding 40. A row is
@@ -212,6 +260,28 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
           - { key: account, label: Account, sizing: "fixed(10)", hidden: true }
         actions:
           - { name: refresh, key: r, type: reload }
+          # What is written is Markdown; what leaves is a proper MIME message,
+          # following the original rather than a setting: plain text for a
+          # plain mail, HTML — with a `text/plain` alternative beside it — as
+          # soon as the original carried an HTML part.
+          #
+          # The quoted original below the marker line is there to READ while
+          # writing and is never what gets sent; the sent quote is built from
+          # the original's own HTML. Deleting the whole quoted region replies
+          # without a quote; editing inside it is refused and the draft kept,
+          # because an answer typed between somebody else's lines would
+          # otherwise be dropped without a word.
+          - name: reply
+            key: "e r"
+            type: edit
+            id: reply
+          # Addressed to the folder, not to the message under the cursor: a new
+          # mail is no answer to it, and an empty folder has no row at all.
+          - name: new message
+            key: "e n"
+            type: edit
+            id: compose
+            target: parent
         # A header block (From / To / Subject / Date, plus `Attachments:` when
         # there are any) over the text. `markdown: false` is a decision, not an
         # omission: a mail is not markdown, and turning it on reflows the
@@ -324,7 +394,7 @@ fn wrap_comment(text: &str, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thunderbird::accounts::Security;
+    use crate::thunderbird::accounts::{Security, Smtp};
 
     fn account(id: &str, name: &str, host: &str) -> Account {
         Account {
@@ -335,8 +405,95 @@ mod tests {
             port: None,
             security: Security::Tls,
             username: format!("ada@{id}.example"),
+            smtp: None,
             notes: Vec::new(),
         }
+    }
+
+    /// Submission that logs in as the reading side gets a three-line block
+    /// and NO `auth:`: the adapter falls back to the account's credentials,
+    /// and a second copy of the same password is a second thing to rotate.
+    #[test]
+    fn an_smtp_block_without_its_own_login_stays_three_lines() {
+        let mut one = account("one", "One", "imap.example.org");
+        one.smtp = Some(Smtp {
+            host: "smtp.example.org".into(),
+            port: None,
+            security: Security::Starttls,
+            username: None,
+            from_name: Some("Ada Lovelace".into()),
+        });
+        let yaml = adapter_yaml(&[one], "mail", "/tmp/p");
+        assert!(
+            yaml.contains("    smtp:\n      host: smtp.example.org\n"),
+            "{yaml}"
+        );
+        assert!(yaml.contains("      security: starttls\n"), "{yaml}");
+        assert!(
+            yaml.contains("      from_name: \"Ada Lovelace\"\n"),
+            "{yaml}"
+        );
+        assert!(
+            !yaml.contains("      auth:"),
+            "submission should reuse the account's login:\n{yaml}"
+        );
+    }
+
+    /// A different submission login is the one case that needs a block of its
+    /// own — and it must be nested UNDER `smtp:`, not beside it, or the
+    /// reading side would silently start logging in as the sender.
+    #[test]
+    fn a_separate_submission_login_gets_its_own_auth_block() {
+        let mut one = account("one", "One", "imap.example.org");
+        one.smtp = Some(Smtp {
+            host: "smtp.example.org".into(),
+            port: Some(2525),
+            security: Security::Starttls,
+            username: Some("sender".into()),
+            from_name: None,
+        });
+        let yaml = adapter_yaml(&[one], "mail", "/tmp/p");
+        assert!(yaml.contains("      port: 2525\n"), "{yaml}");
+        assert!(
+            yaml.contains("      auth:\n        mechanism: password\n"),
+            "{yaml}"
+        );
+        assert!(
+            yaml.contains("            provider: { type: literal, value: sender }"),
+            "{yaml}"
+        );
+    }
+
+    /// An account Thunderbird cannot send from either is emitted without an
+    /// `smtp:` block rather than with a guessed host — the adapter then says
+    /// the account cannot send, which is true and fixable.
+    #[test]
+    fn an_account_without_submission_gets_no_smtp_block() {
+        let yaml = adapter_yaml(
+            &[account("one", "One", "imap.example.org")],
+            "mail",
+            "/tmp/p",
+        );
+        // The key, not the word: the file's header comment explains `smtp:`
+        // whether or not any account has one.
+        assert!(!yaml.contains("\n    smtp:"), "{yaml}");
+    }
+
+    /// Both keys reach the generated view, and `e n` is addressed to the
+    /// FOLDER: an imported config in which one cannot write the first mail
+    /// until some mail exists would be a poor first impression.
+    #[test]
+    fn the_generated_view_binds_both_writing_keys() {
+        let yaml = view_yaml(&[account("one", "One", "imap.example.org")]);
+        assert!(yaml.contains("id: reply"), "{yaml}");
+        assert!(
+            yaml.contains("            id: compose\n            target: parent\n"),
+            "compose on the message level must address the folder:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("        type: edit\n        id: compose\n"),
+            "the folder tree needs its own compose:\n{yaml}"
+        );
     }
 
     #[test]

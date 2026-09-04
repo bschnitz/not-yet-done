@@ -1,6 +1,10 @@
 # Plan — Mail: reply and compose (phase 7)
 
-> Status: **planned**. This is the detailed plan for phase 7 of
+> Status: **built** (steps 1-5 of §10). `e r` answers the message under the
+> cursor and `e n` writes a new one; both go out over SMTP, land a copy in
+> Sent and set `\Answered` on what they answered. What is left is the live
+> smoke run in §12 and the two open points marked below. This is the detailed
+> plan for phase 7 of
 > [`plan-mail-adapter.md`](plan-mail-adapter.md) §9 — the first phase in which
 > the mail adapter _writes_. Phases 0-3 (folders, messages, bodies,
 > attachments, the Thunderbird importer) are built; 4-6 (envelope cache, flag
@@ -214,8 +218,29 @@ Rejected: **pulldown-cmark 0.13** (<https://github.com/pulldown-cmark/pulldown-c
 | 4    | SMTP send, Sent `APPEND`, `\Answered`                                          | A reply lands in the recipient's mailbox and a copy in Sent.              |
 | 5    | Actions wired (`e r`, `e n`), view YAML, docs, smoke block                     | Both keys work in the TUI.                                                |
 
+All five are built. Two things came out differently from the plan above, both
+in §11.
+
 ## 11. Risks and open points
 
+- **`From` is checked, not obeyed** — a deviation from §2, decided while
+  wiring the actions. The plan had the `From` line select which account sends.
+  It does not: the account whose subtab the mail was written in sends, and a
+  `From` naming a different account is refused by name ("open the other
+  account's subtab to send as it"). The reason is that an outbox belongs to
+  one account and an account's connection is only opened when somebody opens
+  its subtab — sending as another mailbox would need that mailbox's connection
+  too, for the Sent copy and the `\Answered` flag, and would quietly log a
+  second account in on a keystroke that says nothing about logging in. Picking
+  the account by address stays possible; it needs a registry over all outboxes
+  and is worth doing only if the "wrong subtab" mistake actually happens.
+- **The quote guard is stateless, and had to be.** `ActionInput::Edited`
+  carries the template the editor was opened with — but a RESUMED draft is its
+  own template, because the frontend writes `template` to `file_path`. So the
+  guard would have compared the second attempt against itself and waved
+  through exactly the edit it refused the first time. It therefore re-renders
+  the expected quote from the original (which is fetched anyway to build the
+  outgoing HTML) and compares against that.
 - **The guard refuses rather than asks.** An editor submit has no confirmation
   channel — `ActionDispatch::Confirm` belongs to the shortcut path, not to
   `execute` — so a modified quote is a refusal with instructions, and the
