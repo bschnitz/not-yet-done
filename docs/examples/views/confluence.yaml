@@ -347,11 +347,20 @@ views:
       # filter-while-typing is still on `f` (fuzzy_filter above);
       # tree_find replaces the obsolete `search` action that could
       # only step through already-loaded space rows.
+      #
+      # `tree_find` is only the binding: the prompt, the n/N walk and
+      # the expand-to-hit chain. What actually searches is an ordinary
+      # adapter action on the root node, named by `action:` (default
+      # `find`) and answering with a set of node references — which is
+      # why the same search is reachable from the CLI:
+      #   nyd adapter <conn> action find --text 'frobnicator'
       - name: tree find
         key: /
         type: tree_find
         tree_find:
           prompt: Search pages
+          # action: find   # the default; name another action here to
+          #                # bind `/` to a different node-set action
       - name: refresh
         key: r
         type: reload

@@ -304,6 +304,21 @@ pub fn dispatch_to_view_request(
             action_name,
             prompt,
         }),
+        // A set of node references: the action answered "these nodes".
+        // Land them in the pane's tree-find state — the same place a
+        // search's hits go, since a search is just one such action.
+        ActionDispatch::Nodes {
+            hits,
+            truncated,
+            message,
+        } => Some(ViewRequest::TreeFindLand {
+            view_index,
+            pane_id,
+            label: action_name,
+            hits,
+            truncated,
+            message,
+        }),
         ActionDispatch::Noop => None,
         // Success-with-a-message (e.g. `backup` reporting its file path): no
         // data changed, so surface the text in the status bar without a reload.

@@ -33,7 +33,7 @@
 //! value-picker labels, tree-search hit titles.
 //!
 //! **Not** scrubbed, on purpose:
-//! - `id()` and `TreeFindHit::path` — internal addressing; scrubbing them would
+//! - `id()` and `NodeHit::path` — internal addressing; scrubbing them would
 //!   break navigation / get_by_id / lazy-expand.
 //! - editable bodies and edit-prefill (`content()`, `prepare()`, `form_prep()`,
 //!   `picker_options()` values, batch `downloaded` nodes, custom-query results)
@@ -661,17 +661,6 @@ impl ContentAdapter for AnonymizingAdapter {
     fn script_store(&self) -> Option<&dyn ScriptStore> {
         self.inner.script_store()
     }
-    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
-        let mut results = self.inner.search_in_tree(params).await?;
-        if let Some(results) = results.as_mut() {
-            for hit in results.hits.iter_mut() {
-                // `path` is addressing (node ids) — leave it; scrub display text.
-                hit.label = self.anon.scrub_value("label", &hit.label);
-                hit.space_key = self.anon.scrub_value("space_key", &hit.space_key);
-            }
-        }
-        Ok(results)
-    }
     /// Pure addressing (node ids) — nothing to scrub, just forward.
     async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
         self.inner.locate_node_path(node_id).await
@@ -790,8 +779,30 @@ impl Node for AnonymizingNode {
         // Editable/exportable body — left raw to avoid overwrite-on-save.
         self.inner.content()
     }
+    /// Scrubbed, unlike most dispatches: [`ActionDispatch::Nodes`] carries
+    /// display text (hit labels, the grouping key) straight out of the
+    /// backend. `path` is addressing — node ids — and stays raw, otherwise
+    /// the frontend could not follow the hit it was just handed.
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
-        self.inner.invoke_action(name, ctx).await
+        let dispatch = self.inner.invoke_action(name, ctx).await?;
+        Ok(match dispatch {
+            ActionDispatch::Nodes {
+                mut hits,
+                truncated,
+                message,
+            } => {
+                for hit in hits.iter_mut() {
+                    hit.label = self.anon.scrub_value("label", &hit.label);
+                    hit.group_key = self.anon.scrub_value("group_key", &hit.group_key);
+                }
+                ActionDispatch::Nodes {
+                    hits,
+                    truncated,
+                    message,
+                }
+            }
+            other => other,
+        })
     }
     async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
         self.inner.prepare(action_id).await

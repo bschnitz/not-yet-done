@@ -67,7 +67,7 @@ use crate::adapter_query;
 use not_yet_done_content::{
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, ContentError,
     EditorPrep, FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction,
-    NodeSummary, NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
+    NodeHit, NodeSummary, NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
 };
 
 /// Output format for the read verbs.
@@ -1417,6 +1417,17 @@ async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> 
             let outcome = node.execute(action_id, ActionInput::None).await?;
             report_outcome(outcome, action_id)
         }
+        // A set of node references — a search, a lookup. Nothing
+        // interactive about it: the adapter said *which* nodes match, and
+        // printing them is exactly what this frontend does with a set.
+        ActionDispatch::Nodes {
+            hits,
+            truncated,
+            message,
+        } => {
+            output_hits(&hits, truncated, message.as_deref(), inv.output);
+            Ok(())
+        }
         // Interactive-only dispatches: they drive a UI flow (editor
         // session, paginated result pane) the CLI can't stand in for.
         ActionDispatch::OpenEditor { session_kind, .. } => Err(anyhow!(
@@ -1933,6 +1944,59 @@ fn output_actions(actions: &[NodeAction], output: Output) {
                 .map(|a| vec![a.id.clone(), a.label.clone(), input_kind(a)])
                 .collect();
             print_table(&cols, &rows);
+        }
+    }
+}
+
+/// Print the node references an [`ActionDispatch::Nodes`] carries. The
+/// path is the addressing — joined with `/`, it is what `--path` takes
+/// back — so it is the first column and stays unabridged; `label` is
+/// only there to recognise the hit. `group_key` is printed when the
+/// adapter fills it (Confluence spaces) and dropped when it doesn't.
+fn output_hits(hits: &[NodeHit], truncated: bool, message: Option<&str>, output: Output) {
+    match output {
+        Output::Json => {
+            let arr: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "path": h.path,
+                        "label": h.label,
+                        "group_key": h.group_key,
+                    })
+                })
+                .collect();
+            let mut obj = serde_json::Map::new();
+            obj.insert("hits".into(), serde_json::Value::Array(arr));
+            obj.insert("truncated".into(), truncated.into());
+            if let Some(msg) = message {
+                obj.insert("message".into(), msg.into());
+            }
+            print_json(&serde_json::Value::Object(obj));
+        }
+        Output::Table => {
+            let grouped = hits.iter().any(|h| !h.group_key.is_empty());
+            let mut cols = vec!["path".to_string(), "label".to_string()];
+            if grouped {
+                cols.push("group".to_string());
+            }
+            let rows: Vec<Vec<String>> = hits
+                .iter()
+                .map(|h| {
+                    let mut row = vec![h.path.join("/"), h.label.clone()];
+                    if grouped {
+                        row.push(h.group_key.clone());
+                    }
+                    row
+                })
+                .collect();
+            print_table(&cols, &rows);
+            if let Some(msg) = message {
+                println!("{msg}");
+            }
+            if truncated {
+                println!("(truncated — more matches than the adapter returns at once)");
+            }
         }
     }
 }

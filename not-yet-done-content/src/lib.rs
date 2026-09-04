@@ -1019,73 +1019,26 @@ pub struct CustomQueryResult {
 }
 
 // ---------------------------------------------------------------------------
-// Tree search
+// Node hits
 // ---------------------------------------------------------------------------
 
-/// Request for an adapter-side tree search — the input side of
-/// [`ContentAdapter::search_in_tree`].
-///
-/// A struct rather than loose arguments so the contract can grow
-/// without breaking every adapter, mirroring [`ListParams`].
-#[derive(Debug, Clone)]
-pub struct TreeSearchParams {
-    /// Raw user-typed search string. The adapter translates it into
-    /// its native query language (CQL, JQL, SQL `ILIKE`, …).
-    pub query: String,
-    /// Cap on the returned hits; the adapter reports overflow via
-    /// [`TreeSearchResults::truncated`].
-    pub limit: u32,
-    /// The pane's currently active *view* query — the same string the
-    /// engine passes as [`ListParams::query`] when listing levels.
-    ///
-    /// A hit the view query filters out is not addressable in the
-    /// tree: every level applies that filter, so the lazy-expand walk
-    /// runs into a parent whose children simply don't contain the hit
-    /// and dead-ends. Adapters that can evaluate the view query must
-    /// therefore scope the search by it, so tree-find only ever offers
-    /// hits the tree can actually reach.
-    ///
-    /// `None` = no active query (everything visible). Adapters whose
-    /// query language can't be intersected with a text search may
-    /// ignore this — the front-end skips unreachable hits as a
-    /// fallback, it just wastes a round-trip per phantom hit.
-    pub view_query: Option<String>,
-}
-
-/// Result set for an adapter-side tree search.
-///
-/// Returned by [`ContentAdapter::search_in_tree`] — used by tree-mode
-/// views to perform a server-side search (e.g. CQL for Confluence,
-/// JQL `text ~` for Jira) and locate each hit inside the lazy tree
-/// without forcing the user to open every parent by hand.
-///
-/// Hits are pre-sorted in tree-render order by the adapter (e.g. for
-/// Confluence: configured space order, then ancestor DFS, then title),
-/// so the caller can step `current` forward / backward without
-/// re-sorting.
-#[derive(Debug, Clone)]
-pub struct TreeSearchResults {
-    pub hits: Vec<TreeFindHit>,
-    /// The server reported more matches than `hits.len()` (we hit the
-    /// per-call limit). UI surfaces this so the user knows to refine
-    /// the query for completeness.
-    pub truncated: bool,
-}
-
-/// One hit from [`ContentAdapter::search_in_tree`].
+/// One node reference produced by an action that yields a *set* of
+/// nodes — see [`ActionDispatch::Nodes`].
 ///
 /// `path` is the chain of node ids from the tree root down to and
 /// including the hit itself, ready to be fed into a lazy-expand
 /// driver. For Confluence: `["SPACE", "ancestor_id_1", …, "page_id"]`.
+/// A frontend that renders a flat list uses `path.last()` as the id and
+/// the rest as breadcrumb.
 #[derive(Debug, Clone)]
-pub struct TreeFindHit {
+pub struct NodeHit {
     pub path: Vec<String>,
     /// Display title for status-bar feedback.
     pub label: String,
     /// Root-level grouping key (e.g. Confluence space key). Empty when
     /// the adapter has no such notion. Cosmetic only — `path[0]` is
     /// the canonical addressing.
-    pub space_key: String,
+    pub group_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1609,6 +1562,26 @@ pub enum ActionDispatch {
     /// change) nor [`ActionDispatch::Noop`] (says "nothing happened") fit;
     /// `Notify` is the generic success-with-a-message channel.
     Notify { message: String },
+    /// The action produced a **set of node references** — a search, a
+    /// lookup, any action whose result is "these nodes match".
+    ///
+    /// This is the generic result-set channel: the adapter says *which*
+    /// nodes, every frontend decides how to show them. The TUI expands
+    /// its lazy tree to the hits and steps through them; the CLI prints
+    /// one line per hit, in the shape `ls` already uses. Neither needs
+    /// a bespoke code path per adapter, and an adapter that gains such
+    /// an action is reachable from every frontend the day it declares
+    /// it.
+    ///
+    /// `truncated` says the backend had more matches than the adapter's
+    /// page size, so the user knows to narrow the query rather than
+    /// trust the list as complete. `message` is an optional line to
+    /// show alongside (e.g. "42 hits in 3 spaces").
+    Nodes {
+        hits: Vec<NodeHit>,
+        truncated: bool,
+        message: Option<String>,
+    },
     /// Adapter rejected the action with a user-displayable error.
     Error(String),
 }
@@ -2687,41 +2660,14 @@ pub trait ContentAdapter: Send + Sync {
         None
     }
 
-    /// Adapter-side full-tree search.
-    ///
-    /// `Some(results)` when the adapter can return hits with full
-    /// ancestor paths (so the TUI can lazy-expand the tree to each
-    /// hit). `None` signals "not supported" — the frontend then falls
-    /// back to local in-memory filtering over the already-loaded rows.
-    ///
-    /// [`TreeSearchParams::query`] is the raw user-typed string; the
-    /// adapter is responsible for translating it into its native query
-    /// language (CQL, JQL, SQL `ILIKE`, …) and for applying any
-    /// per-instance scoping (e.g. space whitelist).
-    ///
-    /// Hits must be **addressable in the tree as the pane currently
-    /// renders it** — an adapter that filters its levels by
-    /// [`ListParams::query`] has to apply the same filter here (see
-    /// [`TreeSearchParams::view_query`]), otherwise the caller's
-    /// lazy-expand walk dead-ends on a hit no level will ever yield.
-    ///
-    /// The default impl returns `Ok(None)` — adapters opt in by
-    /// overriding.
-    async fn search_in_tree(
-        &self,
-        _params: &TreeSearchParams,
-    ) -> Result<Option<TreeSearchResults>> {
-        Ok(None)
-    }
-
     /// Resolve a single node id to its ancestor path, for jumping to a
     /// node that may not be loaded yet.
     ///
-    /// Same shape as [`TreeFindHit::path`]: the chain of node ids from
+    /// Same shape as [`NodeHit::path`]: the chain of node ids from
     /// the tree root down to and including `node_id`, ready to feed a
-    /// lazy-expand driver. This is the addressing counterpart to
-    /// [`Self::search_in_tree`] — no query language, no ranking, just
-    /// "where does this id live".
+    /// lazy-expand driver. This is the addressing counterpart to a
+    /// search action (one answering [`ActionDispatch::Nodes`]) — no
+    /// query language, no ranking, just "where does this id live".
     ///
     /// The host calls it when following a stored link (see `NodeRef`)
     /// whose target isn't among the currently loaded rows. `Ok(None)`

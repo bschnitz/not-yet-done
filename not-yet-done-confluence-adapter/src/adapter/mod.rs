@@ -112,6 +112,7 @@ impl ContentAdapter for ConfluenceAdapter {
             client,
             base_url: self.base_url.clone(),
             connection_name: self.connection_name.clone(),
+            space_keys: self.space_keys.clone(),
         }))
     }
 
@@ -271,6 +272,7 @@ impl ContentAdapter for ConfluenceAdapter {
 
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
+            "confluence:root" => root_actions(),
             "confluence:space" => space_actions(),
             "confluence:page" => page_actions(),
             "confluence:attachment" => attachment_actions(),
@@ -333,34 +335,6 @@ impl ContentAdapter for ConfluenceAdapter {
         Ok(row
             .map(|r| not_yet_done_content::sort_serde::parse(&r.sort))
             .unwrap_or_default())
-    }
-
-    /// The pane's `view_query` (CQL) is deliberately **not** folded in:
-    /// the Confluence tree lists levels by page hierarchy, not by the
-    /// view query, so every hit inside the configured spaces stays
-    /// addressable. Only the space whitelist scopes the search.
-    async fn search_in_tree(&self, params: &TreeSearchParams) -> Result<Option<TreeSearchResults>> {
-        let trimmed = params.query.trim();
-        if trimmed.is_empty() {
-            return Ok(Some(TreeSearchResults {
-                hits: Vec::new(),
-                truncated: false,
-            }));
-        }
-        let cql = build_tree_find_cql(trimmed, self.space_keys.as_deref());
-        let client = self.auth.get_client().await.map_err(other_err)?;
-        let results = client
-            .cql_search(&cql, 0, params.limit)
-            .await
-            .map_err(other_err)?;
-        let hits = sort_hits_in_tree_order(
-            results.items.into_iter().filter_map(row_to_hit).collect(),
-            self.space_keys.as_deref(),
-        );
-        Ok(Some(TreeSearchResults {
-            hits,
-            truncated: results.has_next,
-        }))
     }
 
     /// Where a linked node lives in the tree, so a deep link can be
@@ -444,6 +418,9 @@ struct ConfluenceRoot {
     client: Arc<ConfluenceClient>,
     base_url: String,
     connection_name: String,
+    /// CF-16 whitelist, mirrored from the adapter: scopes the `find`
+    /// action's CQL and orders its hits like the spaces listing.
+    space_keys: Option<Vec<String>>,
 }
 
 impl ConfluenceRoot {
@@ -458,6 +435,21 @@ impl ConfluenceRoot {
         &T
     }
 }
+
+/// Root-level actions. `find` is an ordinary action like any other — the
+/// tree-wide page search is not a special adapter capability, it is the
+/// action that answers "which pages match this text" with a set of node
+/// references ([`ActionDispatch::Nodes`]). Declaring no widget
+/// (`InputSpec::None`) leaves it to each frontend to source the search
+/// string: the TUI prompts, the CLI takes `--text`.
+fn root_actions() -> Vec<NodeAction> {
+    vec![NodeAction::new("find", "find pages", InputSpec::None)]
+}
+
+/// Page size for the `find` action's CQL search. The adapter picks it,
+/// not the caller: a frontend has no basis for a number here, and the
+/// `truncated` flag on [`ActionDispatch::Nodes`] says when it bit.
+const FIND_PAGE_SIZE: u32 = 200;
 
 /// Default page size for `/rest/api/space` — matches Confluence's own
 /// default of 25 if no `limit` is supplied. Kept conservative because the
@@ -486,6 +478,48 @@ impl Node for ConfluenceRoot {
     fn metadata(&self) -> &Metadata {
         static EMPTY: std::sync::LazyLock<Metadata> = std::sync::LazyLock::new(Metadata::default);
         &EMPTY
+    }
+
+    /// `find` — search every page below the root and answer with the
+    /// matching nodes. The search string arrives in
+    /// [`ActionContext::text`]; the frontend decides how it was typed.
+    ///
+    /// The pane's `view_query` (CQL, [`ActionContext::query`]) is
+    /// deliberately **not** folded in: the Confluence tree lists levels
+    /// by page hierarchy, not by the view query, so every hit inside the
+    /// configured spaces stays addressable. Only the space whitelist
+    /// scopes the search.
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "find" => {
+                let Some(needle) = ctx
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(ActionDispatch::Error(
+                        "Search text must not be empty".to_string(),
+                    ));
+                };
+                let cql = build_tree_find_cql(needle, self.space_keys.as_deref());
+                let results = self
+                    .client
+                    .cql_search(&cql, 0, FIND_PAGE_SIZE)
+                    .await
+                    .map_err(other_err)?;
+                let hits = sort_hits_in_tree_order(
+                    results.items.into_iter().filter_map(row_to_hit).collect(),
+                    self.space_keys.as_deref(),
+                );
+                Ok(ActionDispatch::Nodes {
+                    hits,
+                    truncated: results.has_next,
+                    message: None,
+                })
+            }
+            _ => Ok(ActionDispatch::Noop),
+        }
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -737,7 +771,7 @@ fn classify_id(id: &str) -> IdKind<'_> {
     IdKind::Space
 }
 
-/// CT-3: build the CQL for [`ContentAdapter::search_in_tree`]. Matches
+/// CT-3: build the CQL for the root's `find` action. Matches
 /// the query against title OR text, restricted to pages and (if the
 /// adapter carries a whitelist) the configured spaces. The user-typed
 /// query is sanitised — `"` and `\` are stripped rather than escaped
@@ -781,14 +815,14 @@ fn tree_path(row: &crate::client::SearchResultMeta) -> Option<Vec<String>> {
 }
 
 /// CT-3: lift a [`crate::client::SearchResultMeta`] row into a
-/// [`TreeFindHit`]. Skips rows the tree cannot address (see
+/// [`NodeHit`]. Skips rows the tree cannot address (see
 /// [`tree_path`]).
-fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<TreeFindHit> {
+fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<NodeHit> {
     let path = tree_path(&row)?;
-    Some(TreeFindHit {
+    Some(NodeHit {
         path,
         label: row.title,
-        space_key: row.space_key,
+        group_key: row.space_key,
     })
 }
 
@@ -848,9 +882,9 @@ fn space_is_listed(space_key: &str, space_keys: Option<&[String]>) -> bool {
 /// Secondary key: full path lexicographic — places parents in front of
 /// their children (shorter paths sort first) and siblings together.
 pub(crate) fn sort_hits_in_tree_order(
-    mut hits: Vec<TreeFindHit>,
+    mut hits: Vec<NodeHit>,
     space_keys: Option<&[String]>,
-) -> Vec<TreeFindHit> {
+) -> Vec<NodeHit> {
     use std::collections::HashMap;
     let space_rank: HashMap<String, usize> = space_keys
         .map(|keys| {
@@ -861,10 +895,10 @@ pub(crate) fn sort_hits_in_tree_order(
         })
         .unwrap_or_default();
     hits.sort_by(|a, b| {
-        let ra = space_rank.get(&a.space_key).copied().unwrap_or(usize::MAX);
-        let rb = space_rank.get(&b.space_key).copied().unwrap_or(usize::MAX);
+        let ra = space_rank.get(&a.group_key).copied().unwrap_or(usize::MAX);
+        let rb = space_rank.get(&b.group_key).copied().unwrap_or(usize::MAX);
         ra.cmp(&rb)
-            .then_with(|| a.space_key.cmp(&b.space_key))
+            .then_with(|| a.group_key.cmp(&b.group_key))
             .then_with(|| a.path.cmp(&b.path))
     });
     hits
@@ -1142,13 +1176,13 @@ mod tests {
         assert!(!cql.contains("space in"));
     }
 
-    fn mk_hit(space: &str, path_tail: &[&str], label: &str) -> TreeFindHit {
+    fn mk_hit(space: &str, path_tail: &[&str], label: &str) -> NodeHit {
         let mut path = vec![space.to_string()];
         path.extend(path_tail.iter().map(|s| s.to_string()));
-        TreeFindHit {
+        NodeHit {
             path,
             label: label.to_string(),
-            space_key: space.to_string(),
+            group_key: space.to_string(),
         }
     }
 
@@ -1173,8 +1207,8 @@ mod tests {
     fn sort_hits_in_tree_order_no_whitelist_falls_back_to_alpha() {
         let hits = vec![mk_hit("BETA", &["1"], "b1"), mk_hit("ALPHA", &["1"], "a1")];
         let sorted = sort_hits_in_tree_order(hits, None);
-        assert_eq!(sorted[0].space_key, "ALPHA");
-        assert_eq!(sorted[1].space_key, "BETA");
+        assert_eq!(sorted[0].group_key, "ALPHA");
+        assert_eq!(sorted[1].group_key, "BETA");
     }
 
     #[test]
@@ -1230,7 +1264,7 @@ mod tests {
         };
         let hit = row_to_hit(row).expect("non-orphan");
         assert_eq!(hit.path, vec!["DEMO", "1000", "1100", "12345"]);
-        assert_eq!(hit.space_key, "DEMO");
+        assert_eq!(hit.group_key, "DEMO");
         assert_eq!(hit.label, "Hit");
     }
 
