@@ -1485,6 +1485,55 @@ accounts:
         );
     }
 
+    /// The other half of the same promise: an account that reads mail but
+    /// has no `smtp:` block cannot send it, and that is settled before a
+    /// buffer is opened rather than after one has been filled.
+    #[tokio::test]
+    async fn an_account_that_cannot_send_refuses_before_the_editor_opens() {
+        let server = FakeServer::start(scripted()).await;
+        let yaml = format!(
+            r#"
+name: Mail
+accounts:
+  - id: reader
+    name: Reader
+    address: reader@example.invalid
+    host: 127.0.0.1
+    port: {port}
+    security: none
+    auth:
+      mechanism: password
+      bindings:
+        - field: username
+          provider: {{ type: literal, value: someone }}
+        - field: password
+          provider: {{ type: literal, value: {PASSWORD} }}
+"#,
+            port = server.addr.port(),
+        );
+        let cfg: MailConfig = serde_yaml::from_str(&yaml).expect("config parses");
+        let mut adapter = MailAdapter::from_config("mail", cfg).expect("adapter builds");
+        let drafts = std::env::temp_dir()
+            .join(format!("nyd-mail-drafts-{}-no-smtp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&drafts);
+        adapter.drafts = drafts.clone();
+
+        let node = adapter.get_by_id("reader/INBOX").await.expect("resolves");
+        let Err(err) = node.prepare("compose").await else {
+            panic!("an account with no `smtp:` block cannot compose");
+        };
+
+        assert!(
+            err.to_string().contains("smtp:") && err.to_string().contains("reader"),
+            "names the key and the account: {err}"
+        );
+        assert!(
+            !drafts.join("reader").join("compose.md").exists(),
+            "and nothing was seeded on disk for a mail that can never go out"
+        );
+        let _ = std::fs::remove_dir_all(&drafts);
+    }
+
     /// The buffer a reply opens on, end to end: the node is resolved from
     /// its id, the message is fetched, and what comes back is a mail anyone
     /// could send — addressed, prefixed, and with the original below the

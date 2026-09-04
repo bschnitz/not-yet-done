@@ -160,12 +160,18 @@ impl Outbox {
     /// The frontend writes `template` to `file_path`, so returning the file's
     /// own content is what makes resuming work — anything else would overwrite
     /// the text whose send just failed.
+    ///
+    /// An account that cannot send is turned away here rather than at
+    /// [`Self::deliver`]: the editor is where the writing happens, and finding
+    /// out afterwards that this mailbox was never able to send it is the one
+    /// moment where the answer arrives too late to be of use.
     pub(crate) fn prep(
         &self,
         name: &str,
         headers: &Headers,
         quoted: Option<&str>,
     ) -> MailResult<EditorPrep> {
+        self.smtp()?;
         let path = self.draft_file(name);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -253,6 +259,14 @@ impl Outbox {
         // Past this line the mail is gone and nothing may fail the action:
         // "sending failed" after it has left invites a second send.
         let mut report = format!("sent to {}", draft.headers.to.join(", "));
+        // Everyone the mail actually went to, said out loud: a `Cc` that is
+        // silently left out of the report reads as one that was left out of
+        // the envelope.
+        for (label, list) in [("cc", &draft.headers.cc), ("bcc", &draft.headers.bcc)] {
+            if !list.is_empty() {
+                report.push_str(&format!(" ({label} {})", list.join(", ")));
+            }
+        }
         match self.conn.append_to_sent(message.formatted()).await {
             Ok(folder) => report.push_str(&format!(", copy in {folder}")),
             Err(e) => report.push_str(&format!(" — but the copy could not be filed: {e}")),
