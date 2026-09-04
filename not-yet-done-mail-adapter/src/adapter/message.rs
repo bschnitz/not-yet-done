@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use not_yet_done_content::{
-    ActionInput, ActionOutcome, ColumnSchema, Content, ContentError, EditorPrep, InputSpec,
+    ActionInput, ActionOption, ActionOutcome, ColumnSchema, Content, ContentError, EditorPrep,
+    InputSpec,
     Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
@@ -138,6 +139,13 @@ pub(super) fn actions() -> Vec<NodeAction> {
         NodeAction::new("export_html", "export html", InputSpec::None),
         NodeAction::new("reply", "reply", InputSpec::Editor),
         NodeAction::new("compose", "new message", InputSpec::Editor),
+        // Toggles rather than a `seen`/`unseen` pair: the action list is
+        // per *type*, so a label chosen here cannot say which way this
+        // particular row would go. One key that flips what it finds is
+        // also how every mail client has spelled this.
+        NodeAction::new("toggle_seen", "toggle read", InputSpec::None),
+        NodeAction::new("toggle_flag", "toggle flag", InputSpec::None),
+        NodeAction::new("move", "move to folder", InputSpec::Picker),
     ]
 }
 
@@ -337,6 +345,26 @@ pub(super) struct MailMessageNode {
     /// answering a mail is a gesture of the mailbox it is in — an account
     /// that cannot send says so when the editor would have opened.
     outbox: Arc<Outbox>,
+    /// The account's own connection. The body has one too, but reading a
+    /// mail and writing its flags are not the same errand, and reaching
+    /// through the body to do the second would say they were.
+    conn: Connection,
+    /// The two flags this level can flip, as the listing last saw them.
+    ///
+    /// A toggle has to know which way it goes, and the only thing that knows
+    /// is the row — so it travels with the node instead of being read back
+    /// off the glyph column, where `📩` and its blank have already lost the
+    /// distinction between "not set" and "no slot for it".
+    seen: bool,
+    flagged: bool,
+    /// Where this message could be moved: every selectable mailbox of the
+    /// account except the one it is already in.
+    ///
+    /// Handed in rather than fetched on demand, because the front-end asks
+    /// for picker options **on the keypress**, blocking its own event loop
+    /// while it waits. Resolving the list where the node is built keeps that
+    /// wait in the async path, and a warm folder cache makes it free.
+    destinations: Vec<String>,
 }
 
 impl MailMessageNode {
@@ -346,6 +374,7 @@ impl MailMessageNode {
         conn: Connection,
         cache: Arc<BodyCache>,
         outbox: Arc<Outbox>,
+        destinations: Vec<String>,
     ) -> Self {
         Self {
             id: id.encode(),
@@ -354,10 +383,14 @@ impl MailMessageNode {
             body: MessageBody {
                 id: id.clone(),
                 header: header_block(row),
-                conn,
+                conn: conn.clone(),
                 cache,
             },
             outbox,
+            conn,
+            seen: row.seen,
+            flagged: row.flagged,
+            destinations,
         }
     }
 }
@@ -447,6 +480,42 @@ impl MailMessageNode {
         self.outbox
             .prep(&reply_draft(&self.body.id), &headers, Some(&quoted))
             .map_err(super::mail_err)
+    }
+
+    /// Flip one flag on this message and say which way it went.
+    ///
+    /// The pane reloads on `Done`, so the row re-reads its flags from the
+    /// server rather than from anything patched here — which is also why a
+    /// `.SILENT` store is enough down in the IMAP layer.
+    async fn toggle_flag(
+        &self,
+        flag: &str,
+        currently: bool,
+        set: &str,
+        cleared: &str,
+    ) -> Result<ActionOutcome> {
+        let id = &self.body.id;
+        self.conn
+            .store_flags(&id.folder, id.uid_validity, &[id.uid], !currently, flag)
+            .await
+            .map_err(super::mail_err)?;
+        Ok(ActionOutcome::Done {
+            message: Some(if currently { cleared } else { set }.to_string()),
+        })
+    }
+
+    async fn move_to(&self, dest: &str) -> Result<ActionOutcome> {
+        let id = &self.body.id;
+        if dest == id.folder {
+            return Ok(ActionOutcome::NoChanges);
+        }
+        self.conn
+            .move_messages(&id.folder, id.uid_validity, &[id.uid], dest)
+            .await
+            .map_err(super::mail_err)?;
+        Ok(ActionOutcome::Done {
+            message: Some(format!("moved to {dest}")),
+        })
     }
 
     async fn reply_send(&self, text: &str) -> Result<ActionOutcome> {
@@ -598,6 +667,26 @@ impl Node for MailMessageNode {
         }
     }
 
+    /// Where `move` can put this message.
+    ///
+    /// Its own mailbox is left out: a move that lands where it started is not
+    /// a choice worth offering, and offering it invites the round trip that
+    /// [`Self::move_to`] then declines anyway.
+    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
+        if action_id != "move" {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .destinations
+            .iter()
+            .filter(|path| *path != &self.body.id.folder)
+            .map(|path| ActionOption {
+                label: path.clone(),
+                value: path.clone(),
+            })
+            .collect())
+    }
+
     async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("export_html", ActionInput::None) => self.export_html().await,
@@ -605,6 +694,15 @@ impl Node for MailMessageNode {
             ("compose", ActionInput::Edited { text, .. }) => {
                 compose_send(&self.outbox, &text).await
             }
+            ("toggle_seen", ActionInput::None) => {
+                self.toggle_flag("\\Seen", self.seen, "marked read", "marked unread")
+                    .await
+            }
+            ("toggle_flag", ActionInput::None) => {
+                self.toggle_flag("\\Flagged", self.flagged, "flagged", "flag removed")
+                    .await
+            }
+            ("move", ActionInput::Picked(dest)) => self.move_to(&dest).await,
             (other, _) => Err(ContentError::NotSupported(format!(
                 "`{other}` is not an action of a mail message"
             ))),

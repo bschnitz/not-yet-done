@@ -683,12 +683,28 @@ impl ContentAdapter for MailAdapter {
             self.runtime(&msg.account)?;
             let conn = self.connection(&msg.account).await?.clone();
             let row = self.known_message(&msg).await;
+            // Resolved here, where waiting is allowed. The front-end asks a
+            // node for its picker options synchronously, on the keypress that
+            // opened the menu — so `move` gets its mailbox list from the
+            // folder cache the tree above already filled, and only a cold
+            // cache pays a `LIST`.
+            let destinations = self
+                .folders_of(&msg.account, false)
+                .await
+                .map(|all| {
+                    all.iter()
+                        .filter(|f| f.selectable)
+                        .map(|f| f.path.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             return Ok(Box::new(MailMessageNode::new(
                 &msg,
                 &row,
                 conn,
                 Arc::clone(&self.bodies),
                 self.outbox(&msg.account).await?,
+                destinations,
             )));
         }
         if let Some((account, path)) = crate::ids::split_folder_id(id) {
@@ -702,7 +718,11 @@ impl ContentAdapter for MailAdapter {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        // Reading only, until phase 5 brings seen/flag/move.
+        // None of these flags describes what this adapter writes. `\Seen`,
+        // `\Flagged` and a move are node actions, which need no capability
+        // declared; `supports_delete` would promise a `delete` action this
+        // level does not have — a mail is moved to the trash, and that is
+        // `move` with a destination.
         AdapterCapabilities::default()
     }
 
@@ -1468,9 +1488,15 @@ accounts:
             .collect();
         assert_eq!(
             ids,
-            ["export_html", "reply", "compose"],
-            "a message can be handed to a viewer and answered; the other write \
-             actions (seen, flag, move) arrive with phase 5"
+            [
+                "export_html",
+                "reply",
+                "compose",
+                "toggle_seen",
+                "toggle_flag",
+                "move"
+            ],
+            "a message can be handed to a viewer, answered, flagged and moved"
         );
         let ids: Vec<String> = adapter
             .actions_for_type(types::folder_type())

@@ -274,7 +274,7 @@ impl Outbox {
         if let Some(msg) = answering {
             if let Err(e) = self
                 .conn
-                .add_flags(&msg.folder, msg.uid_validity, msg.uid, "\\Answered")
+                .store_flags(&msg.folder, msg.uid_validity, &[msg.uid], true, "\\Answered")
                 .await
             {
                 report.push_str(&format!(" — but the original was not flagged: {e}"));

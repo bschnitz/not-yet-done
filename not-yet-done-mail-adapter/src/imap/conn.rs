@@ -105,12 +105,22 @@ pub(crate) enum Request {
         source: Vec<u8>,
         reply: oneshot::Sender<MailResult<String>>,
     },
-    /// Add IMAP flags to one message.
-    AddFlags {
+    /// Set or clear IMAP flags on a set of messages.
+    StoreFlags {
         path: String,
         uid_validity: u32,
-        uid: u32,
+        uids: Vec<u32>,
+        /// `true` adds the flags, `false` removes them.
+        add: bool,
         flags: String,
+        reply: oneshot::Sender<MailResult<()>>,
+    },
+    /// Move a set of messages to another mailbox of the same account.
+    MoveMessages {
+        path: String,
+        uid_validity: u32,
+        uids: Vec<u32>,
+        dest: String,
         reply: oneshot::Sender<MailResult<()>>,
     },
     /// Log out and drop the session. The actor stays alive: the next request
@@ -252,20 +262,44 @@ impl Connection {
             .await
     }
 
-    /// Add flags to one message — `\Answered` after a reply went out.
-    pub(crate) async fn add_flags(
+    /// Set or clear flags on messages — `\Answered` after a reply went out,
+    /// `\Seen` and `\Flagged` from the message level's own actions.
+    pub(crate) async fn store_flags(
         &self,
         path: &str,
         uid_validity: u32,
-        uid: u32,
+        uids: &[u32],
+        add: bool,
         flags: &str,
     ) -> MailResult<()> {
         let (path, flags) = (path.to_string(), flags.to_string());
-        self.ask(|reply| Request::AddFlags {
+        let uids = uids.to_vec();
+        self.ask(|reply| Request::StoreFlags {
             path,
             uid_validity,
-            uid,
+            uids,
+            add,
             flags,
+            reply,
+        })
+        .await
+    }
+
+    /// Move messages into another mailbox of the same account.
+    pub(crate) async fn move_messages(
+        &self,
+        path: &str,
+        uid_validity: u32,
+        uids: &[u32],
+        dest: &str,
+    ) -> MailResult<()> {
+        let (path, dest) = (path.to_string(), dest.to_string());
+        let uids = uids.to_vec();
+        self.ask(|reply| Request::MoveMessages {
+            path,
+            uid_validity,
+            uids,
+            dest,
             reply,
         })
         .await
@@ -484,17 +518,33 @@ impl Actor {
                 let out = self.file_in_sent(&source).await;
                 let _ = reply.send(out);
             }
-            Request::AddFlags {
+            Request::StoreFlags {
                 path,
                 uid_validity,
-                uid,
+                uids,
+                add,
                 flags,
+                reply,
+            } => {
+                let verb = if add { "Flagging" } else { "Unflagging" };
+                let out = on_session!(
+                    self,
+                    self.label(&format!("{verb} {} in {path}", counted(&uids))),
+                    |s| ops::store_flags(s, &path, uid_validity, &uids, add, &flags)
+                );
+                let _ = reply.send(out);
+            }
+            Request::MoveMessages {
+                path,
+                uid_validity,
+                uids,
+                dest,
                 reply,
             } => {
                 let out = on_session!(
                     self,
-                    self.label(&format!("Flagging {path} #{uid} {flags}")),
-                    |s| ops::add_flags(s, &path, uid_validity, uid, &flags)
+                    self.label(&format!("Moving {} to {dest}", counted(&uids))),
+                    |s| ops::move_messages(s, &path, uid_validity, &uids, &dest)
                 );
                 let _ = reply.send(out);
             }
@@ -654,6 +704,18 @@ impl Actor {
 
     fn label(&self, what: &str) -> String {
         format!("{}: {what}", self.account.label())
+    }
+}
+
+/// How a set of messages is named in a progress banner.
+///
+/// One message is named by its uid, because that is what the user is looking
+/// at; several are counted, because a banner listing forty uids says less
+/// than a number does.
+fn counted(uids: &[u32]) -> String {
+    match uids {
+        [one] => format!("#{one}"),
+        many => format!("{} messages", many.len()),
     }
 }
 
@@ -1243,7 +1305,7 @@ mod tests {
         let server = FakeServer::start(scripted()).await;
         let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
 
-        conn.add_flags("INBOX", 42, 4, "\\Answered")
+        conn.store_flags("INBOX", 42, &[4], true, "\\Answered")
             .await
             .expect("flags it");
         let stored = server.stored();
@@ -1263,7 +1325,7 @@ mod tests {
         let (conn, _status, _watching) = connection(account(server.addr.port(), PASSWORD));
 
         let err = conn
-            .add_flags("INBOX", 41, 4, "\\Answered")
+            .store_flags("INBOX", 41, &[4], true, "\\Answered")
             .await
             .expect_err("stale uid validity");
         assert!(err.to_string().contains("renumbered"), "{err}");

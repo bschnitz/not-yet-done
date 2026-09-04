@@ -25,6 +25,15 @@ pub(crate) struct Selection {
 pub(crate) struct SessionState {
     pub(crate) session: MailSession,
     selected: Option<Selection>,
+    /// What the server said it can do, asked once.
+    ///
+    /// Here for the same reason the selection is: a capability belongs to a
+    /// connection, so a session that dies takes its answer with it. What it
+    /// saves is a round trip before every command that has to *choose* a
+    /// strategy — `MOVE` against copy-and-expunge is the first one — and
+    /// that choice is made on a keypress, where a second round trip is
+    /// something the user can feel.
+    caps: Option<Vec<String>>,
 }
 
 impl SessionState {
@@ -32,7 +41,17 @@ impl SessionState {
         Self {
             session,
             selected: None,
+            caps: None,
         }
+    }
+
+    /// The remembered capability list, or `None` before anyone asked.
+    pub(crate) fn cached_caps(&self) -> Option<&[String]> {
+        self.caps.as_deref()
+    }
+
+    pub(crate) fn remember_caps(&mut self, caps: Vec<String>) {
+        self.caps = Some(caps);
     }
 
     /// Select `path` unless it is already selected, and report what the
