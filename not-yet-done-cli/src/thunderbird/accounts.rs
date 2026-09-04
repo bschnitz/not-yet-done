@@ -33,6 +33,39 @@ impl Security {
             Security::Starttls | Security::None => 143,
         }
     }
+
+    /// The same for SUBMISSION, which has an entirely different port scheme —
+    /// 465/587/25 against reading's 993/143. One table per direction, because
+    /// a submission port derived from the reading defaults would land on 993
+    /// and fail in a way that reads like a firewall.
+    fn default_submission_port(self) -> u16 {
+        match self {
+            Security::Tls => 465,
+            Security::Starttls => 587,
+            Security::None => 25,
+        }
+    }
+}
+
+/// Where an account submits outgoing mail, as Thunderbird states it.
+///
+/// Separate from the account because it is a separate server with a separate
+/// port scheme and, often enough, a separate login. An account without one is
+/// not broken: it reads mail and refuses to send, which is exactly what
+/// Thunderbird does with it too.
+#[derive(Debug)]
+pub(super) struct Smtp {
+    pub(super) host: String,
+    /// Emitted only when it differs from this adapter's default for the
+    /// security, the same rule the reading side follows.
+    pub(super) port: Option<u16>,
+    pub(super) security: Security,
+    /// Only when submission logs in under a different name than reading.
+    /// Absent means "the account's own credentials", which is the normal case
+    /// and keeps the emitted block to three lines.
+    pub(super) username: Option<String>,
+    /// The identity's display name — what the recipient sees in `From`.
+    pub(super) from_name: Option<String>,
 }
 
 /// One importable mailbox.
@@ -52,6 +85,10 @@ pub(super) struct Account {
     /// The login name, which is not the address often enough that the two are
     /// separate fields all the way down.
     pub(super) username: String,
+    /// The outgoing server, when the profile names one for this account.
+    /// `None` leaves the emitted account without an `smtp:` block, and the
+    /// adapter then says so when asked to send rather than guessing a host.
+    pub(super) smtp: Option<Smtp>,
     /// Lines to print after the run and to leave in the file as comments —
     /// everything the importer had to decide rather than read.
     pub(super) notes: Vec<String>,
@@ -102,7 +139,11 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
         let port = prefs.get_u16(&format!("mail.server.{server}.port"));
         let security = security_of(prefs, server, port, &mut notes);
         let username = g("userName").unwrap_or_default().to_string();
-        let address = identity_address(prefs, &key);
+        let identity = first_identity(prefs, &key);
+        let address = identity
+            .as_deref()
+            .and_then(|id| prefs.get(&format!("mail.identity.{id}.useremail")))
+            .map(str::to_string);
 
         if username.is_empty() {
             skipped.push(Skipped { label, reason: "no login name in the profile".into() });
@@ -116,6 +157,7 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
             }
         }
         note_auth_method(prefs, server, &mut notes);
+        let smtp = smtp_of(prefs, identity.as_deref(), &username, &mut notes);
 
         // Leave `port:` out when Thunderbird did AND the adapter's default for
         // this security agrees with Thunderbird's — otherwise state it, so
@@ -134,6 +176,7 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
             port,
             security,
             username,
+            smtp,
             notes,
         });
     }
@@ -189,12 +232,110 @@ fn note_auth_method(prefs: &Prefs, server: &str, notes: &mut Vec<String>) {
     }
 }
 
-/// The address of the account's first identity.
-fn identity_address(prefs: &Prefs, account: &str) -> Option<String> {
+/// The account's first identity — the one carrying its address, its display
+/// name and the outgoing server it submits through. Thunderbird allows several
+/// per account (an alias, a second signature); the first is the one it sends
+/// with unless told otherwise, and importing all of them would mean inventing
+/// a concept this adapter does not have.
+fn first_identity(prefs: &Prefs, account: &str) -> Option<String> {
     prefs
         .list(&format!("mail.account.{account}.identities"))
         .into_iter()
-        .find_map(|id| prefs.get(&format!("mail.identity.{id}.useremail")).map(str::to_string))
+        .find(|id| {
+            prefs
+                .get(&format!("mail.identity.{id}.useremail"))
+                .is_some()
+        })
+}
+
+/// The outgoing server for one identity.
+///
+/// Thunderbird keeps submission in its own `mail.smtpserver.*` block and links
+/// it from the identity; an identity naming none rides on
+/// `mail.smtp.defaultserver`. Both indirections are followed here, because the
+/// alternative is an account that reads mail and cannot answer it.
+fn smtp_of(
+    prefs: &Prefs,
+    identity: Option<&str>,
+    imap_username: &str,
+    notes: &mut Vec<String>,
+) -> Option<Smtp> {
+    let key = identity
+        .and_then(|id| prefs.get(&format!("mail.identity.{id}.smtpServer")))
+        .filter(|k| !k.is_empty())
+        .or_else(|| prefs.get("mail.smtp.defaultserver"))
+        .filter(|k| !k.is_empty())?;
+
+    let g = |field: &str| prefs.get(&format!("mail.smtpserver.{key}.{field}"));
+    let Some(host) = g("hostname").filter(|h| !h.is_empty()) else {
+        notes.push(
+            "Thunderbird names an outgoing server for this account but no hostname for it, so no `smtp:` block was written — the account reads mail and refuses to send".into(),
+        );
+        return None;
+    };
+
+    let port = prefs.get_u16(&format!("mail.smtpserver.{key}.port"));
+    // `try_ssl` is the submission side's spelling of `socketType`, same enum.
+    let security = match prefs.get_i32(&format!("mail.smtpserver.{key}.try_ssl")) {
+        Some(0) => Security::None,
+        Some(1) => {
+            notes.push(
+                "the outgoing server is on Thunderbird's retired \"try STARTTLS\" setting; imported as starttls, which does not fall back to plain text".into(),
+            );
+            Security::Starttls
+        }
+        Some(2) => Security::Starttls,
+        Some(3) => Security::Tls,
+        other => {
+            let derived = match port {
+                Some(25) => Security::None,
+                Some(587) => Security::Starttls,
+                _ => Security::Tls,
+            };
+            notes.push(format!(
+                "the outgoing server states no try_ssl{}, so its `security: {}` was derived from the port — check it",
+                other
+                    .map(|v| format!(" this importer knows (it says {v})"))
+                    .unwrap_or_default(),
+                derived.as_yaml()
+            ));
+            derived
+        }
+    };
+
+    if prefs.get_i32(&format!("mail.smtpserver.{key}.authMethod")) == Some(10) {
+        notes.push(
+            "Thunderbird submits through this server with OAuth2 as well, so the app password the store holds for reading is what sending needs too".into(),
+        );
+    }
+
+    // A submission login that matches the reading one needs no `auth:` at
+    // all — the adapter falls back to the account's credentials, which is one
+    // password in one place rather than the same password in two.
+    let username = g("username")
+        .filter(|u| !u.is_empty() && *u != imap_username)
+        .map(str::to_string);
+    if let Some(name) = &username {
+        notes.push(format!(
+            "submission logs in as `{name}`, not as the reading login — its own `auth:` block was written, pointing at the SAME store path; correct it if the two passwords differ"
+        ));
+    }
+
+    let from_name = identity
+        .and_then(|id| prefs.get(&format!("mail.identity.{id}.fullName")))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+
+    Some(Smtp {
+        host: host.to_string(),
+        port: match port {
+            Some(p) if p == security.default_submission_port() => None,
+            other => other,
+        },
+        security,
+        username,
+        from_name,
+    })
 }
 
 /// A short, stable id derived from the account's own domain.
@@ -249,6 +390,8 @@ user_pref("mail.server.server1.socketType", 3);
 user_pref("mail.server.server1.userName", "ada@example.org");
 user_pref("mail.server.server1.name", "Private");
 user_pref("mail.identity.id1.useremail", "ada@example.org");
+user_pref("mail.identity.id1.fullName", "Ada Lovelace");
+user_pref("mail.identity.id1.smtpServer", "smtp1");
 
 user_pref("mail.account.account2.server", "server2");
 user_pref("mail.account.account2.identities", "id2");
@@ -258,6 +401,7 @@ user_pref("mail.server.server2.socketType", 2);
 user_pref("mail.server.server2.userName", "shortname");
 user_pref("mail.server.server2.name", "Club");
 user_pref("mail.identity.id2.useremail", "ada@example.net");
+user_pref("mail.identity.id2.smtpServer", "smtp2");
 
 user_pref("mail.account.account3.server", "server3");
 user_pref("mail.account.account3.identities", "id3");
@@ -287,6 +431,18 @@ user_pref("mail.server.server5.port", 1143);
 user_pref("mail.server.server5.socketType", 0);
 user_pref("mail.server.server5.userName", "ada@second.example");
 user_pref("mail.identity.id5.useremail", "ada@second.example");
+
+user_pref("mail.smtpservers", "smtp1,smtp2");
+user_pref("mail.smtp.defaultserver", "smtp1");
+user_pref("mail.smtpserver.smtp1.hostname", "smtp.example.org");
+user_pref("mail.smtpserver.smtp1.port", 465);
+user_pref("mail.smtpserver.smtp1.try_ssl", 3);
+user_pref("mail.smtpserver.smtp1.username", "ada@example.org");
+
+user_pref("mail.smtpserver.smtp2.hostname", "smtp.example.net");
+user_pref("mail.smtpserver.smtp2.port", 587);
+user_pref("mail.smtpserver.smtp2.try_ssl", 2);
+user_pref("mail.smtpserver.smtp2.username", "sender");
 
 user_pref("mail.account.account9.server", "server9");
 user_pref("mail.server.server9.type", "none");
@@ -335,6 +491,63 @@ user_pref("mail.server.server9.userName", "nobody");
         let starttls = accounts.iter().find(|a| a.id == "example-net").unwrap();
         assert_eq!(starttls.security, Security::Starttls);
         assert_eq!(starttls.port, None);
+    }
+
+    /// Submission is read from the identity's own `smtpServer`, with its port
+    /// dropped when it already is this adapter's default — 465 for `tls`,
+    /// which is a different table from reading's 993 and the reason the two
+    /// defaults are not shared.
+    #[test]
+    fn the_outgoing_server_of_an_identity_is_imported() {
+        let (accounts, _) = imported();
+        let smtp = accounts
+            .iter()
+            .find(|a| a.id == "example-org")
+            .unwrap()
+            .smtp
+            .as_ref()
+            .expect("the identity names an outgoing server");
+        assert_eq!(smtp.host, "smtp.example.org");
+        assert_eq!(smtp.security, Security::Tls);
+        assert_eq!(smtp.port, None);
+        assert_eq!(smtp.from_name.as_deref(), Some("Ada Lovelace"));
+        // Same login as reading, so no second credential block: one password,
+        // one place to change it.
+        assert_eq!(smtp.username, None);
+    }
+
+    /// The Club account submits as `sender` while it reads as `shortname` —
+    /// the case that needs a credential block of its own, and the case a
+    /// silent reuse would turn into a rejected login nobody can explain.
+    #[test]
+    fn a_submission_login_of_its_own_is_kept_and_said_out_loud() {
+        let (accounts, _) = imported();
+        let club = accounts.iter().find(|a| a.id == "example-net").unwrap();
+        let smtp = club
+            .smtp
+            .as_ref()
+            .expect("the Club identity submits somewhere");
+        assert_eq!(smtp.username.as_deref(), Some("sender"));
+        assert_eq!(smtp.security, Security::Starttls);
+        assert_eq!(smtp.port, None, "587 is the starttls default already");
+        assert!(
+            club.notes
+                .iter()
+                .any(|n| n.contains("submission logs in as")),
+            "notes: {:?}",
+            club.notes
+        );
+    }
+
+    /// An identity that names no server falls back to Thunderbird's default
+    /// one — the two bridged mailboxes do exactly that, and an account that
+    /// reads but cannot answer would be a silent downgrade.
+    #[test]
+    fn an_identity_without_a_server_of_its_own_falls_back_to_the_default() {
+        let (accounts, _) = imported();
+        let bridged = accounts.iter().find(|a| a.id == "first-example").unwrap();
+        let smtp = bridged.smtp.as_ref().expect("the default server applies");
+        assert_eq!(smtp.host, "smtp.example.org");
     }
 
     #[test]

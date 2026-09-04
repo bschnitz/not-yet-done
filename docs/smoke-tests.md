@@ -7188,6 +7188,108 @@ Both preview engines use it, so the Jira and Taiga `o p` are part of this.
       passes, and running it without arguments prints the plan for the focused
       window (`anchor con_id=… → join|split|none`).
 
+## Mail: answering and composing (`e r` / `e n`)
+
+Prerequisite: at least one account in `mail-adapter.yaml` carries an `smtp:`
+block, and a second account deliberately does **not** — the refusal is part of
+the test. Send to an address you own; there is no undo and no send-later queue.
+
+The point of this block is that what leaves the machine is a proper mail: a
+recipient reading HTML sees the reply above the quoted thread, a recipient
+reading text sees text, and the copy in Sent is the same message.
+
+### The buffer
+
+- [ ] **`e r` opens on the right message**: cursor on a mail, `e r` → `$EDITOR`
+      comes up with `From` (this account), `To` (the sender), `Subject`
+      prefixed `Re: `, an empty line for the answer, and below the marker line
+      the original quoted with `> `.
+- [ ] **`Re:` is not stacked**: answering a mail whose subject already begins
+      `Re:` (any case) leaves it alone. A subject beginning with a non-ASCII
+      letter (`Grüße`) survives too — it is a prefix check, not a byte slice.
+- [ ] **`AW:` is left alone**: a German client's `AW:` prefix is not rewritten;
+      the reply is `Re: AW: …`.
+- [ ] **Reply-To wins**: a mail carrying `Reply-To:` prefills that address, not
+      the `From:`. A mail sitting in the account's own Sent folder prefills its
+      `To:` instead — answering yourself is not what that gesture means.
+- [ ] **`e n` needs no message**: `e n` on a folder row in the tree opens an
+      empty buffer with only the headers. The same key on the message list
+      opens the same buffer — including in an **empty** folder, which has no
+      row to stand on.
+- [ ] **The draft survives**: quit `$EDITOR` without saving, press `e r` on the
+      same message again → the buffer comes back with what was written, not a
+      fresh template. The file is under
+      `~/.local/share/not_yet_done/mail/drafts/<account>/`.
+
+### The guard on the quote
+
+- [ ] **Untouched is quoted**: write an answer above the marker, save → the
+      mail goes out and the recipient sees the original below the reply.
+- [ ] **Deleted is no quote**: delete the marker line and everything below it,
+      save → the mail goes out with the answer only. Not an error.
+- [ ] **Edited is refused**: type a word INSIDE the quoted region, save → the
+      action is refused with a message naming the marker line, nothing is sent,
+      and `e r` re-opens the draft with that word still in it. Repeat the same
+      edit on the re-opened draft: it is refused again (the second attempt is
+      the one a template-against-template comparison would have let through).
+
+### What goes out
+
+- [ ] **A plain mail stays plain**: answer a mail that has no HTML part → the
+      received message is `text/plain`, and `>`-quoting is what the recipient
+      sees. No HTML alternative.
+- [ ] **An HTML mail is answered in HTML**: answer a newsletter or a mail from
+      a web client → the received message is `multipart/alternative`, the HTML
+      part shows the reply above a `<blockquote>` with the original's own
+      formatting (tables, links, inline images intact), and the text part is
+      readable on its own.
+- [ ] **Markdown is rendered**: `**bold**`, a list, a table and a fenced code
+      block arrive as such in the HTML part, and as the source in the text
+      part.
+- [ ] **Own quotes look like inherited ones**: a `> quoted line` written by
+      hand above the marker arrives as a `<blockquote>` styled like the
+      original's — same left border, same indent.
+- [ ] **The thread holds**: the answer appears IN the thread in the
+      recipient's client (`In-Reply-To` and `References` are set), not as a new
+      conversation beside it.
+- [ ] **Nesting**: answering a mail that is itself an answer produces a quote
+      inside a quote, the way a mail client shows a thread.
+- [ ] **`quote_images: placeholder`**: set it on an account, answer a mail with
+      a signature logo → the reply is small and the image is a placeholder, not
+      a re-attached copy.
+
+### After the send
+
+- [ ] **The copy is in Sent**: the sent mail appears in the account's Sent
+      folder (in nyd after `r`, and in Thunderbird), marked read.
+- [ ] **`sent_folder:`**: name a different folder on the account → the copy
+      lands there instead.
+- [ ] **The ↩ glyph**: the answered message shows the answered flag in the flag
+      gutter after a refresh, and Thunderbird shows it too.
+- [ ] **The draft is gone**: the file under `drafts/<account>/` no longer
+      exists.
+
+### When it cannot send
+
+- [ ] **No `smtp:` block**: `e r` on a message of the account without one is
+      refused with a message saying the account can read mail but not send any.
+      Nothing opens half-way.
+- [ ] **A foreign `From`**: change the `From:` line to another account's
+      address, save → refused by name, with the advice to open that account's
+      subtab. Nothing is sent from either mailbox.
+- [ ] **An empty body**: save a buffer with headers and quote but nothing
+      written → refused, draft kept.
+- [ ] **A server that is not there**: point `smtp.host` at an unreachable host
+      → the send fails with the transport error, the draft is still on disk,
+      and `e r` re-opens it. Nothing is in Sent, and the original carries no ↩.
+- [ ] **A rejected password**: a wrong submission password is reported as an
+      authentication failure and asks again on the next attempt, rather than
+      being replayed silently.
+- [ ] **Sent, but the copy failed**: point `sent_folder:` at a folder that does
+      not exist → the mail still goes out and the result says the copy could
+      not be filed. It must NOT read as a failed send: that is what makes
+      somebody send a second copy.
+
 ## A view file that does not load: reading and copying the problems
 
 A broken `views/*.yaml` keeps its tab and draws a configuration-error panel

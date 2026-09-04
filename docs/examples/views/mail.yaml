@@ -40,8 +40,10 @@
 # over and leave the highlight permanently dark.
 #
 # SCOPE: this file covers what the adapter implements today — the folder tree,
-# the messages under a folder, reading a message and its attachments. Writing
-# (marking read, flagging, moving, sending) is phase 5 and is not here.
+# the messages under a folder, reading a message and its attachments, and
+# writing one: `e r` answers the message under the cursor, `e n` starts a new
+# one. The other half of writing — marking read, flagging, moving — is phase 5
+# and is not here.
 
 tab:
   name: Mail
@@ -119,6 +121,19 @@ views:
         type: fuzzy_filter
         fuzzy_filter:
           fields: [name]
+      # `e` is the leader for writing mail: `e n` starts a new message here,
+      # `e r` answers one on the message level below. Both open the editor on
+      # a buffer whose first block is the headers — From / To / Cc / Subject —
+      # and the message that goes out is what that block says, not what the
+      # cursor happened to stand on.
+      #
+      # Sending needs an `smtp:` block on the account (mail-adapter.yaml). An
+      # account without one reads mail perfectly well and says so when asked
+      # to send, rather than failing somewhere inside a handshake.
+      - name: new message
+        key: "e n"
+        type: edit
+        id: compose
     # Auto-expanding costs one `STATUS` per folder brought on screen, so the
     # tree opens collapsed. Uncomment on a small mailbox where seeing every
     # subfolder at once is worth the extra round trips:
@@ -213,6 +228,35 @@ views:
           - { key: account, label: Account, sizing: "fixed(10)", hidden: true }
         actions:
           - { name: refresh, key: r, type: reload }
+          # Answering. What is written is Markdown; what leaves is a proper
+          # MIME message. The reply follows the original rather than a
+          # setting: plain text for a plain mail, HTML — with a `text/plain`
+          # alternative beside it, as every client sends — as soon as the
+          # original carried an HTML part.
+          #
+          # Under the reply sits the original, quoted below a marker line.
+          # That text is there to READ while writing and is never what gets
+          # sent: the sent quote is built from the original's own HTML, so it
+          # keeps its tables, its links and its inline images. Deleting the
+          # whole quoted region is a deliberate reply without a quote and is
+          # fine; EDITING inside it is refused and the draft kept, because an
+          # answer typed between somebody else's lines would otherwise be
+          # dropped without a word.
+          #
+          # A draft is a real file, not a temp file: an editor closed by
+          # accident, or a send the SMTP server refused, is one `e r` away.
+          - name: reply
+            key: "e r"
+            type: edit
+            id: reply
+          # Addressed to the FOLDER, not to the message under the cursor: a
+          # new mail is not an answer to that message, and an empty folder has
+          # no row to stand on at all.
+          - name: new message
+            key: "e n"
+            type: edit
+            id: compose
+            target: parent
           # Scripts. A level without this action can run none at all: the
           # script scope — and with it every script shortcut and every
           # script hook that could be bound here — exists only where a

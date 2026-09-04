@@ -4024,7 +4024,40 @@ views: []
                 "subtab `{}` needs a key that navigates to the messages",
                 view.name
             );
+
+            // Writing. `reply` fires on the message under the cursor, which
+            // is the message it answers. `compose` does NOT: it is addressed
+            // to the folder, because a new mail is no answer to the row the
+            // cursor happened to rest on and an empty folder has no row at
+            // all. Losing that `target: parent` leaves `e n` dead in exactly
+            // the mailbox where one writes the first mail.
+            let reply = messages
+                .actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some("reply"))
+                .unwrap_or_else(|| panic!("subtab `{}` needs a reply key", view.name));
+            assert_eq!(reply.action_type, "edit");
+            assert_eq!(reply.target, ActionTarget::Selected);
+            let compose = messages
+                .actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some("compose"))
+                .unwrap_or_else(|| panic!("subtab `{}` needs a compose key", view.name));
+            assert_eq!(compose.target, ActionTarget::Parent);
         }
+
+        // The same key one level up, where the folder itself is the row:
+        // having to open somebody's mail before writing a new one is a
+        // detour. Only the first subtab is checked — the ones after it are
+        // deliberately trimmed to show what a minimal subtab looks like.
+        let work = &cfg.views[0];
+        assert!(
+            work.actions
+                .iter()
+                .any(|a| a.id.as_deref() == Some("compose") && a.action_type == "edit"),
+            "the folder tree should compose too"
+        );
+
 
         cfg.validate(
             &KeyBindingConfig::default(),
