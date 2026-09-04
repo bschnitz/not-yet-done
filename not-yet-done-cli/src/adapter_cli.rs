@@ -56,7 +56,7 @@
 //! remaining `tusks` built-ins (`tag`/`backup`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -1204,12 +1204,31 @@ fn find_action(node: &dyn Node, adapter: &dyn ContentAdapter, id: &str) -> Optio
 /// none of them `$EDITOR` opens on the template. Shared by the node-scoped
 /// ([`do_editor`]) and level-scoped ([`cmd_do_level`]) paths so a document can
 /// be piped into either the same way.
+///
+/// [`EditorPrep::file_path`] is honoured exactly as the TUI honours it: the
+/// buffer *is* that file. It is seeded with the template and left behind when
+/// the editor closes, so an adapter that keeps a draft (a mail whose send was
+/// refused, a ticket workspace) finds the text again on the next call. Text
+/// that arrives by `-m`/`--file` is written there too — it never passed
+/// through an editor, but it is just as much the buffer's content, and a
+/// refused send must not swallow it.
 fn edited_text(prep: &EditorPrep, inv: &Invocation) -> Result<String> {
-    match (&inv.message, inv.files.first()) {
-        (Some(m), _) if m == "-" => read_stdin_to_string(),
-        (Some(m), _) => Ok(m.clone()),
-        (None, Some(path)) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading edited text from {}", path.display())),
+    let supplied = match (&inv.message, inv.files.first()) {
+        (Some(m), _) if m == "-" => Some(read_stdin_to_string()?),
+        (Some(m), _) => Some(m.clone()),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading edited text from {}", path.display()))?,
+        ),
+        (None, None) => None,
+    };
+    match (prep.file_path.as_deref(), supplied) {
+        (Some(path), Some(text)) => {
+            seed_buffer(path, &text)?;
+            Ok(text)
+        }
+        (Some(path), None) => edit_materialised(path, &prep.template),
+        (None, Some(text)) => Ok(text),
         (None, None) => edit_in_editor(&prep.template, &prep.suffix),
     }
 }
@@ -1478,12 +1497,7 @@ fn read_stdin_to_string() -> Result<String> {
 fn edit_in_editor(template: &str, suffix: &str) -> Result<String> {
     use std::io::Write;
 
-    // Fail fast with the `-m` hint before seeding a temp file we'd discard.
-    if std::env::var_os("EDITOR").is_none() && std::env::var_os("VISUAL").is_none() {
-        return Err(anyhow!(
-            "no $EDITOR set — pass -m <text> to supply the input non-interactively"
-        ));
-    }
+    require_editor()?;
 
     let mut tmp = tempfile::Builder::new()
         .suffix(suffix)
@@ -1496,6 +1510,37 @@ fn edit_in_editor(template: &str, suffix: &str) -> Result<String> {
 
     crate::cli_config::launch_editor(&path)?;
     std::fs::read_to_string(&path).context("reading edited buffer")
+}
+
+/// Fail fast with the `-m` hint before seeding a buffer we would discard.
+fn require_editor() -> Result<()> {
+    if std::env::var_os("EDITOR").is_none() && std::env::var_os("VISUAL").is_none() {
+        return Err(anyhow!(
+            "no $EDITOR set — pass -m <text> to supply the input non-interactively"
+        ));
+    }
+    Ok(())
+}
+
+/// Write the buffer to the persistent path an adapter named, creating the
+/// directories on the way. The adapter owns the file afterwards: it is the
+/// adapter that removes it once the content it held has gone out.
+fn seed_buffer(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
+}
+
+/// `$EDITOR` on the adapter's own file rather than a temp file — the
+/// materialised half of [`edited_text`].
+fn edit_materialised(path: &Path, template: &str) -> Result<String> {
+    require_editor()?;
+    seed_buffer(path, template)?;
+    crate::cli_config::launch_editor(path)?;
+    std::fs::read_to_string(path)
+        .with_context(|| format!("reading edited buffer from {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2052,6 +2097,76 @@ fn print_table(cols: &[String], rows: &[Vec<String>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inv_from(args: &[&str]) -> Invocation {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        parse_adapter(&args).unwrap()
+    }
+
+    fn prep_at(dir: &std::path::Path, template: &str) -> EditorPrep {
+        EditorPrep {
+            template: template.to_string(),
+            version: String::new(),
+            suffix: ".md".into(),
+            file_path: Some(dir.join("drafts").join("reply.md")),
+        }
+    }
+
+    /// An adapter that names a file wants the buffer to *be* that file. Text
+    /// handed in with `-m` never passes an editor, but it is the same buffer,
+    /// and an action that refuses it (a mail whose quote was edited) must
+    /// leave the writer something to come back to.
+    #[test]
+    fn a_message_supplied_inline_still_lands_in_the_adapters_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let prep = prep_at(dir.path(), "fresh template");
+        let inv = inv_from(&["nyd", "adapter", "mail", "reply", "-m", "my answer"]);
+
+        let text = edited_text(&prep, &inv).unwrap();
+
+        assert_eq!(text, "my answer");
+        let path = prep.file_path.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "my answer");
+    }
+
+    /// The same for `--file`: the path it reads is a source, not the buffer.
+    #[test]
+    fn a_file_is_read_into_the_buffer_not_used_as_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("elsewhere.md");
+        std::fs::write(&source, "written elsewhere").unwrap();
+        let prep = prep_at(dir.path(), "fresh template");
+        let inv = inv_from(&[
+            "nyd",
+            "adapter",
+            "mail",
+            "reply",
+            "--file",
+            source.to_str().unwrap(),
+        ]);
+
+        let text = edited_text(&prep, &inv).unwrap();
+
+        assert_eq!(text, "written elsewhere");
+        assert_eq!(
+            std::fs::read_to_string(prep.file_path.unwrap()).unwrap(),
+            "written elsewhere"
+        );
+    }
+
+    /// Without a `file_path` the CLI keeps its old habits: the text is taken
+    /// and nothing is left on disk.
+    #[test]
+    fn an_adapter_that_names_no_file_gets_no_file() {
+        let prep = EditorPrep {
+            template: "t".into(),
+            version: String::new(),
+            suffix: ".md".into(),
+            file_path: None,
+        };
+        let inv = inv_from(&["nyd", "adapter", "mail", "reply", "-m", "my answer"]);
+        assert_eq!(edited_text(&prep, &inv).unwrap(), "my answer");
+    }
 
     #[test]
     fn parse_sort_defaults_to_asc_and_reads_desc() {

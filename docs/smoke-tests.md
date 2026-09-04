@@ -7270,6 +7270,9 @@ reading text sees text, and the copy in Sent is the same message.
 
 ### After the send
 
+- [ ] **Every recipient is named**: a mail carrying a `Cc:` (and a `Bcc:`)
+      reports `sent to … (cc …)`. A silent `Cc` in the report reads as a `Cc`
+      that never made it into the envelope.
 - [ ] **The copy is in Sent**: the sent mail appears in the account's Sent
       folder (in nyd after `r`, and in Thunderbird), marked read.
 - [ ] **`sent_folder:`**: name a different folder on the account → the copy
@@ -7278,6 +7281,25 @@ reading text sees text, and the copy in Sent is the same message.
       gutter after a refresh, and Thunderbird shows it too.
 - [ ] **The draft is gone**: the file under `drafts/<account>/` no longer
       exists.
+
+### From the command line
+
+The same actions run headless, and the draft is the same file — which is the
+point: a mail begun in the TUI can be finished from a script, and back.
+
+- [ ] **The editor opens the adapter's own file**: a `reply` run from
+      `nyd adapter mail` with no `-m`/`--file` launches `$EDITOR` on
+      `drafts/<account>/reply-….md`, not on a file in `$TMPDIR`. Saving and
+      quitting sends it, and the file is gone afterwards.
+- [ ] **Text supplied non-interactively lands in the draft too**: send with
+      `-m -` (stdin), `-m '<text>'` or `--file <path>`. If the send is refused,
+      the buffer is on disk holding exactly that text, and the next `reply`
+      opens on it rather than on a fresh template.
+- [ ] **A refusal is said once**: the `nyd: …` line names the reason a single
+      time, not twice separated by a colon.
+- [ ] **The guard holds headless**: `--file` a buffer with a word typed into
+      the quoted region → refused, exit status 1, nothing sent, draft kept.
+      Sending the same file again is refused again.
 
 ### When it cannot send
 

@@ -67,6 +67,17 @@ Subject: Re: Angebot Q4
   long reply whose SMTP handshake fails is then one `e r` away, not gone. The
   file is deleted once the message is actually out.
 
+  Both frontends honour it. The CLI opens `$EDITOR` on that same file, and
+  writes text handed to it with `-m`/`--file`/stdin there as well: the buffer
+  is the file, whoever filled it, so a refused send leaves something to come
+  back to no matter which frontend wrote it.
+
+- **An account that cannot send says so before the editor opens.** The missing
+  `smtp:` block and the missing `address:` are both settled in `prepare`, not
+  in `deliver`. There is nothing about either that only an attempt could
+  reveal, and the alternative is a page of text written into a mailbox that
+  was never able to send it.
+
 ## 3. Plain or HTML
 
 Decided: **HTML as soon as the original has a `text/html` part**, even when a

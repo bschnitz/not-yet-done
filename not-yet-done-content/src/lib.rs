@@ -72,8 +72,19 @@ pub enum ContentError {
     #[error("not supported: {0}")]
     NotSupported(String),
 
+    /// A message that speaks for itself.
+    ///
+    /// The box is deliberately *not* a `#[source]`: this variant displays it
+    /// in full, so anything that also walks the chain (`anyhow`'s `{:#}`, the
+    /// CLI's error line) would print the very same sentence a second time.
     #[error("{0}")]
-    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for ContentError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::Other(e)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ContentError>;
@@ -1480,6 +1491,11 @@ pub struct EditorPrep {
     /// creating parent directories and seeding the file's initial content via
     /// [`Self::template`] (the frontend writes `template` to `file_path`).
     /// `None` (the default) keeps the classic `$TMPDIR` temp-file behaviour.
+    ///
+    /// Every frontend honours it, the CLI included — where text handed in
+    /// with `-m`/`--file` is written to the file too. An adapter that keeps a
+    /// draft may therefore rely on finding it again whichever frontend the
+    /// buffer was filled in.
     pub file_path: Option<std::path::PathBuf>,
 }
 
