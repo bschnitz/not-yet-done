@@ -336,3 +336,312 @@ mod tests {
         assert_eq!(args.text("missing"), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Declaration: what an action says it accepts
+// ---------------------------------------------------------------------------
+
+/// The type a [`ParamSpec`] asks for, named apart from [`ArgValue`] because a
+/// declaration carries no value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgKind {
+    Text,
+    Int,
+    Bool,
+    List,
+    Path,
+}
+
+impl ArgKind {
+    /// The name used in messages and in `help`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Int => "int",
+            Self::Bool => "bool",
+            Self::List => "list",
+            Self::Path => "path",
+        }
+    }
+
+    /// Read `value` as this kind, applying the coercions in [`ArgValue`].
+    /// `None` means the value cannot be this kind — a rejection, not an
+    /// absence.
+    fn read(self, value: &ArgValue) -> Option<ArgValue> {
+        match self {
+            Self::Text => value.as_text().map(ArgValue::Text),
+            Self::Int => value.as_int().map(ArgValue::Int),
+            Self::Bool => value.as_bool().map(ArgValue::Bool),
+            Self::List => value.as_list().map(ArgValue::List),
+            Self::Path => value.as_path().map(ArgValue::Path),
+        }
+    }
+}
+
+/// One parameter an action accepts.
+///
+/// Declaring is optional, and what it buys is worth naming: `help` can print
+/// the parameter, a frontend can validate a typo instead of ignoring it, and
+/// the value an adapter reads back is already the declared type rather than
+/// whatever text the command line produced. An action that declares nothing
+/// takes its arguments as they come — see [`resolve_args`].
+///
+/// Unlike a form field, a parameter is **optional by default**. A form asks
+/// the user to fill it in, so requiring is the norm there; a parameter mostly
+/// overrides something that already has a sensible value, so requiring is the
+/// exception and has to be asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamSpec {
+    /// The key the value travels under in [`ActionArgs`].
+    pub key: String,
+    /// Human-readable description, shown by `help`.
+    pub label: String,
+    /// The type the value is read as.
+    pub kind: ArgKind,
+    /// Whether the action refuses to run without it.
+    pub required: bool,
+    /// Value used when the invocation supplies none.
+    pub default: Option<ArgValue>,
+}
+
+impl ParamSpec {
+    /// A parameter of the given kind — optional, with no default.
+    pub fn new(key: impl Into<String>, label: impl Into<String>, kind: ArgKind) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind,
+            required: false,
+            default: None,
+        }
+    }
+
+    /// A text parameter.
+    pub fn text(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, ArgKind::Text)
+    }
+
+    /// A whole-number parameter.
+    pub fn int(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, ArgKind::Int)
+    }
+
+    /// A flag parameter.
+    pub fn bool(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, ArgKind::Bool)
+    }
+
+    /// A list parameter.
+    pub fn list(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, ArgKind::List)
+    }
+
+    /// A path parameter.
+    pub fn path(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, ArgKind::Path)
+    }
+
+    /// The action refuses to run without this parameter.
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// The value to use when the invocation supplies none.
+    pub fn with_default(mut self, value: impl Into<ArgValue>) -> Self {
+        self.default = Some(value.into());
+        self
+    }
+}
+
+/// Why a set of arguments does not satisfy an action's declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArgProblem {
+    /// A key the action does not declare. Carries the declared keys, because
+    /// the useful half of "unknown argument" is the list of known ones.
+    Unknown { key: String, known: Vec<String> },
+    /// A required parameter nobody supplied and that has no default.
+    Missing { key: String },
+    /// A value that cannot be read as the declared kind.
+    WrongType {
+        key: String,
+        expected: ArgKind,
+        got: ArgValue,
+    },
+}
+
+impl std::fmt::Display for ArgProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown { key, known } if known.is_empty() => {
+                write!(f, "unknown argument '{key}' (this action takes none)")
+            }
+            Self::Unknown { key, known } => {
+                write!(f, "unknown argument '{key}' (known: {})", known.join(", "))
+            }
+            Self::Missing { key } => write!(f, "missing required argument '{key}'"),
+            Self::WrongType { key, expected, got } => write!(
+                f,
+                "argument '{key}' expects {}, got {}",
+                expected.name(),
+                got.type_name()
+            ),
+        }
+    }
+}
+
+/// Check `supplied` against what the action declares, and return the arguments
+/// the action should actually see: declared defaults first, the invocation's
+/// values over them, every value already read as its declared kind — so an
+/// adapter that asked for a number gets [`ArgValue::Int`] whatever the
+/// frontend was able to produce.
+///
+/// **An action that declares nothing is not validated**: `supplied` comes back
+/// untouched. Validation is what declaring buys, and making it retroactive
+/// would break every adapter that reads an argument it never announced.
+///
+/// Problems are collected rather than returned one at a time: a user who
+/// mistyped two arguments should learn both on the first run.
+pub fn resolve_args(
+    params: &[ParamSpec],
+    supplied: &ActionArgs,
+) -> Result<ActionArgs, Vec<ArgProblem>> {
+    if params.is_empty() {
+        return Ok(supplied.clone());
+    }
+
+    let known: Vec<String> = params.iter().map(|p| p.key.clone()).collect();
+    let mut problems = Vec::new();
+    for key in supplied.keys() {
+        if !known.iter().any(|k| k == key) {
+            problems.push(ArgProblem::Unknown {
+                key: key.to_string(),
+                known: known.clone(),
+            });
+        }
+    }
+
+    // Declaration order, so the resolved set reads the way `help` prints it.
+    let mut resolved = ActionArgs::new();
+    for param in params {
+        let raw = supplied.get(&param.key).or(param.default.as_ref());
+        let Some(raw) = raw else {
+            if param.required {
+                problems.push(ArgProblem::Missing {
+                    key: param.key.clone(),
+                });
+            }
+            continue;
+        };
+        match param.kind.read(raw) {
+            Some(value) => resolved.insert(param.key.clone(), value),
+            None => problems.push(ArgProblem::WrongType {
+                key: param.key.clone(),
+                expected: param.kind,
+                got: raw.clone(),
+            }),
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(problems)
+    }
+}
+
+/// The problems as one message, for a frontend that has a single line to say
+/// it in.
+pub fn describe_problems(problems: &[ArgProblem]) -> String {
+    problems
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::*;
+
+    fn params() -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::path("buffer", "file the editor opens"),
+            ParamSpec::int("limit", "how many rows").with_default(50i64),
+            ParamSpec::text("reason", "why").required(),
+        ]
+    }
+
+    #[test]
+    fn resolution_normalises_to_the_declared_type() {
+        let supplied: ActionArgs = [("limit", "20"), ("reason", "cleanup")]
+            .into_iter()
+            .collect();
+
+        let resolved = resolve_args(&params(), &supplied).unwrap();
+
+        // The command line only had text; the adapter sees the declared type.
+        assert_eq!(resolved.get("limit"), Some(&ArgValue::Int(20)));
+        // Declaration order, not the order the user typed.
+        assert_eq!(resolved.keys().collect::<Vec<_>>(), ["limit", "reason"]);
+    }
+
+    #[test]
+    fn a_default_fills_in_and_an_invocation_overrides_it() {
+        let empty: ActionArgs = [("reason", "cleanup")].into_iter().collect();
+        let resolved = resolve_args(&params(), &empty).unwrap();
+        assert_eq!(resolved.int("limit"), Some(50));
+
+        let given: ActionArgs = [("reason", "cleanup"), ("limit", "5")]
+            .into_iter()
+            .collect();
+        let resolved = resolve_args(&params(), &given).unwrap();
+        assert_eq!(resolved.int("limit"), Some(5));
+    }
+
+    #[test]
+    fn every_problem_is_reported_on_the_first_run() {
+        let supplied: ActionArgs = [("limt", "20"), ("buffer", "true")].into_iter().collect();
+
+        let problems = resolve_args(&params(), &supplied).unwrap_err();
+        let message = describe_problems(&problems);
+
+        // The typo, and the required argument it was meant to be — both.
+        assert!(message.contains("unknown argument 'limt'"), "{message}");
+        assert!(
+            message.contains("known: buffer, limit, reason"),
+            "{message}"
+        );
+        assert!(
+            message.contains("missing required argument 'reason'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_the_declared_kind_is_refused() {
+        let supplied: ActionArgs = [("reason", "cleanup"), ("limit", "soon")]
+            .into_iter()
+            .collect();
+
+        let problems = resolve_args(&params(), &supplied).unwrap_err();
+
+        assert_eq!(
+            problems,
+            vec![ArgProblem::WrongType {
+                key: "limit".into(),
+                expected: ArgKind::Int,
+                got: ArgValue::Text("soon".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_action_that_declares_nothing_takes_its_arguments_as_they_come() {
+        let supplied: ActionArgs = [("anything", "at all")].into_iter().collect();
+
+        // Validating retroactively would break every adapter reading an
+        // argument it never announced.
+        assert_eq!(resolve_args(&[], &supplied).unwrap(), supplied);
+    }
+}

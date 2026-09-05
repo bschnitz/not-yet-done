@@ -277,6 +277,22 @@ async fn render_body(
     for a in &actions {
         let suffix = format!("input: {}", input_kind(&a.input));
         let _ = writeln!(out, "- `{}` — {} _({suffix})_", a.id, a.label);
+        // Parameters are nested under their action rather than listed apart:
+        // a name like `limit` means nothing without the action it belongs to.
+        for p in &a.params {
+            let required = if p.required { ", required" } else { "" };
+            let default = match p.default.as_ref().and_then(|v| v.as_text()) {
+                Some(t) => format!(", default `{t}`"),
+                None => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "  - `{}` — {} _({}{required}{default})_",
+                p.key,
+                p.label,
+                p.kind.name(),
+            );
+        }
     }
     let _ = writeln!(out);
 

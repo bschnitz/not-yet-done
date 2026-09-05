@@ -29,7 +29,9 @@ pub mod status_reporter;
 pub mod text;
 pub mod workspace;
 
-pub use action_args::{ActionArgs, ArgValue};
+pub use action_args::{
+    ActionArgs, ArgKind, ArgProblem, ArgValue, ParamSpec, describe_problems, resolve_args,
+};
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
 pub use auto_connect::AutoConnect;
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
@@ -1088,6 +1090,16 @@ pub struct NodeAction {
     /// Only set this where it is literally true. An action that reads *any*
     /// node state — even to prefill a form — is not local.
     pub local: bool,
+    /// The named arguments this action accepts — its parameters, as opposed to
+    /// [`Self::input`], which is the shape of the prompt it puts to the user.
+    ///
+    /// Empty means the action declares nothing, and then nothing is validated:
+    /// arguments reach it as they come. Declaring buys three things — `help`
+    /// prints the parameters, a mistyped key is refused instead of ignored,
+    /// and [`resolve_args`] hands the adapter each value already read as the
+    /// declared type, so an action wanting a number is not left parsing the
+    /// text a command line produced.
+    pub params: Vec<ParamSpec>,
 }
 
 impl NodeAction {
@@ -1098,7 +1110,21 @@ impl NodeAction {
             label: label.into(),
             input,
             local: false,
+            params: Vec::new(),
         }
+    }
+
+    /// Declare one parameter. Repeatable; declaration order is the order
+    /// `help` prints and [`resolve_args`] returns.
+    pub fn param(mut self, spec: ParamSpec) -> Self {
+        self.params.push(spec);
+        self
+    }
+
+    /// Declare the whole parameter set at once.
+    pub fn params(mut self, specs: impl IntoIterator<Item = ParamSpec>) -> Self {
+        self.params.extend(specs);
+        self
     }
 
     /// Mark the action as servable from the node's address alone — see
