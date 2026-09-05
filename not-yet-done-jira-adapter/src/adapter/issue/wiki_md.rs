@@ -1086,37 +1086,72 @@ fn collect_until<'a>(
 /// close — most visibly making the *following* titled panel lose its heading.
 const GLUED_TERMINATORS: [&str; 4] = ["{panel}", "{code}", "{noformat}", "{quote}"];
 
-/// Move any block terminator glued to the end of a content line onto its own
-/// line, so the block scanner sees it as a standalone close. A terminator
-/// already alone on its line has no content before it and is left untouched,
-/// which makes this idempotent — safe to run at the top of [`wiki_to_md`]
-/// (including its recursive calls for panel/quote bodies) and inside
-/// [`normalize_ws`], so the decoupled form the converter produces compares
-/// equal to the glued original under the round-trip guard.
+/// Block macros whose *opener* Jira also accepts glued to the start of a
+/// content line: `{code}x = 1{code}` is a one-line code block, and the same
+/// goes for `{noformat}`, `{quote}` and `{panel:…}`. The scanner wants the
+/// opener alone on its line ([`parse_code_open`] and friends match the whole
+/// trimmed line), so a glued opener would read as prose — and the terminator,
+/// once decoupled, as a fresh opener that swallows the rest of the text.
+const GLUED_OPENERS: [&str; 4] = ["code", "noformat", "quote", "panel"];
+
+/// Move any block terminator glued to the end of a content line, and any
+/// block opener glued to its start, onto their own lines, so the block
+/// scanner sees standalone macros. A macro already alone on its line has no
+/// content beside it and is left untouched, which makes this idempotent —
+/// safe to run at the top of [`wiki_to_md`] (including its recursive calls
+/// for panel/quote bodies) and inside [`normalize_ws`], so the decoupled form
+/// the converter produces compares equal to the glued original under the
+/// round-trip guard.
 ///
-/// A terminator that is genuinely part of verbatim `{code}`/`{noformat}` body
-/// text (a code line literally ending in `{code}`) would be split too, but that
-/// only makes the round-trip diverge and the guard fall back to `edit_full` —
-/// it never corrupts the ticket.
+/// A macro that is genuinely part of verbatim `{code}`/`{noformat}` body text
+/// (a code line literally ending in `{code}`, or starting with it) would be
+/// split too, but that only makes the round-trip diverge and the guard fall
+/// back to `edit_full` — it never corrupts the ticket.
 fn split_block_macros(wiki: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for line in wiki.split('\n') {
         let trimmed = line.trim_end();
-        let split = GLUED_TERMINATORS.iter().find_map(|term| {
-            trimmed
-                .strip_suffix(*term)
-                .filter(|head| !head.trim().is_empty())
-                .map(|head| (head.trim_end().to_string(), *term))
-        });
-        match split {
-            Some((head, term)) => {
-                out.push(head);
-                out.push(term.to_string());
+        let (head, term) = GLUED_TERMINATORS
+            .iter()
+            .find_map(|term| {
+                trimmed
+                    .strip_suffix(*term)
+                    .filter(|head| !head.trim().is_empty())
+                    .map(|head| (head.trim_end().to_string(), Some(*term)))
+            })
+            .unwrap_or_else(|| (line.to_string(), None));
+        match split_glued_opener(&head) {
+            Some((opener, rest)) => {
+                out.push(opener);
+                out.push(rest);
             }
-            None => out.push(line.to_string()),
+            None => out.push(head),
+        }
+        if let Some(term) = term {
+            out.push(term.to_string());
         }
     }
     out.join("\n")
+}
+
+/// `{code}x`, `{code:java}x`, `{panel:title=T}x` → the opener and the content
+/// that followed it, or `None` when the line carries no glued opener (a macro
+/// alone on its line, prose, or a macro outside [`GLUED_OPENERS`] such as
+/// `{color:red}` or the monospace `{{x}}`).
+fn split_glued_opener(line: &str) -> Option<(String, String)> {
+    let t = line.trim_start();
+    let inner = t.strip_prefix('{')?;
+    let close = inner.find('}')?;
+    let name = inner[..close].split(':').next().unwrap_or("");
+    if !GLUED_OPENERS.contains(&name) {
+        return None;
+    }
+    let opener = &t[..close + 2];
+    let rest = t[close + 2..].trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some((opener.to_string(), rest.to_string()))
 }
 
 /// Parse `{panel}` / `{panel:k=v|k2=v2}`; returns the ordered attribute list
@@ -2661,6 +2696,47 @@ a title-less panel whose sole attribute makes its opener marker long enough
             "second panel heading missing (glued close was swallowed): {md:?}"
         );
         assert!(roundtrip_diff(wiki).is_none(), "{:?}", roundtrip_diff(wiki));
+    }
+
+    /// Jira renders `{code}x = 1{code}` — opener, body and terminator on one
+    /// line — as a one-line code block. The scanner only knew the standalone
+    /// forms: the glued opener read as prose and the decoupled terminator as a
+    /// fresh opener that swallowed everything after it, so a ticket with a
+    /// one-liner came back as an empty fence plus a stray `{code}` pair.
+    #[test]
+    fn one_line_code_block_is_decoupled() {
+        assert_eq!(wiki_to_md("{code}x = `y`{code}"), "```\nx = `y`\n```");
+        assert_eq!(
+            wiki_to_md("{code:java}int x;{code}"),
+            "```java\nint x;\n```"
+        );
+        assert_eq!(
+            wiki_to_md("{noformat}raw *text*{noformat}"),
+            format!("{DIV_FENCE} noformat\nraw *text*\n{DIV_FENCE}")
+        );
+        for wiki in [
+            "{code}x = `y`{code}",
+            "{code:java}int x;{code}",
+            "{noformat}raw *text*{noformat}",
+            "{quote}one line{quote}",
+            "{panel:title=T}one line{panel}\nafter",
+            "before\n{code}x{code}\nafter",
+        ] {
+            assert!(
+                roundtrip_diff(wiki).is_none(),
+                "{wiki}: {:?}",
+                roundtrip_diff(wiki)
+            );
+        }
+        // Idempotent, and blind to macros that are not block openers.
+        let split = split_block_macros("{code:sh}ls{code}");
+        assert_eq!(split, "{code:sh}\nls\n{code}");
+        assert_eq!(split_block_macros(&split), split);
+        assert_eq!(
+            split_block_macros("{color:red}x{color}"),
+            "{color:red}x{color}"
+        );
+        assert_eq!(split_block_macros("{{code}} is mono"), "{{code}} is mono");
     }
 
     #[test]

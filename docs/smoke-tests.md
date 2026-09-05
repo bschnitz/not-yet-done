@@ -7469,6 +7469,24 @@ command in backticks. `wiki_to_md` now escapes a literal backtick (`\``) and
       `nyd jira do from_markdown <KEY> --file t.md` on such a ticket → no
       write, no refusal
 
+## Jira: a one-line `{code}x{code}` survives the Markdown editor
+
+Jira renders opener, body and terminator on one line as a one-line code
+block. The converter only knew the standalone forms: the glued opener read as
+prose and the decoupled terminator as a fresh opener that swallowed the rest
+of the text, so the round-trip guard refused the ticket (or, unguarded,
+`ticket.md` showed an empty fence). Glued openers are now decoupled like
+glued terminators, for `{code}`, `{noformat}`, `{quote}` and `{panel}`.
+
+- [ ] A ticket whose description contains `{code}ls -la{code}` on one line →
+      `e e` opens; the buffer shows a three-line fence with `ls -la` inside
+- [ ] Save untouched → `No changes`; edit prose elsewhere and save → the
+      one-liner in Jira still renders as a code block
+- [ ] `{quote}one line{quote}` and `{panel:title=T}one line{panel}` in a
+      comment → `e e` opens, the quote and the titled panel survive a save
+- [ ] `o p` on such a ticket → the preview shows the code block, not an empty
+      one followed by a stray `{code}`
+
 ## Actions take named arguments from the view YAML
 
 A `type: node` (or `on_container` custom) binding can carry `args:`. Each
