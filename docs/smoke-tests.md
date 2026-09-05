@@ -7450,6 +7450,40 @@ without a message. The editor now owns `ticket.edit.md` in the same folder.
 - [ ] Without a configured `ticket_workspace`, `e e` still falls back to a
       throwaway `$TMPDIR` file and commits normally
 
+## Actions take named arguments from the view YAML
+
+A `type: node` (or `on_container` custom) binding can carry `args:`. Each
+value keeps its YAML type, text values expand placeholders on the parsed
+value, and the App checks the result against the parameters the adapter
+declares (`NodeAction::params`, listed by `nyd <instance> help --full`) before
+the action runs. Hooks take the same block as `with: { args: {…} }`.
+
+- [ ] A binding with `args: { limit: 20, name: "{cell:key}" }` on an action
+      that echoes its context → the adapter sees `limit` as an integer and
+      `name` as the selected row's key column
+- [ ] `args: { limit: "20" }` → the adapter sees text; against a declared
+      `int` parameter the reader coerces it, so the action still runs
+- [ ] `{node_id}` with `target: parent` → the parent's id, not the row's
+- [ ] `{query}` with an applied query → its text; without one → empty string
+- [ ] `{workspace}` on Jira → the instance's data directory
+- [ ] `{cell:nope}` (a column the row lacks) → a notification
+      `action '…': argument 'name': nothing resolves the placeholder
+    {cell:nope}`; the action does not run
+- [ ] A required declared parameter left out of `args:` → one notification
+      naming it; the action does not run
+- [ ] Confirm loop: an action that asks for confirmation and takes args →
+      after confirming, the adapter sees the same arguments on the second
+      call
+- [ ] `args:` on a `type: edit` action → the view file is refused at load
+      with a message that names the level and points at the plan
+- [ ] `args: { limit: 2.5 }`, `args: { limit: null }`,
+      `args: { limit: { a: b } }` → each refused at load with a message
+      naming the key
+- [ ] Hook: `with: { args: { limit: 20 } }` on a `connected` binding → the
+      action receives it; a wrong kind against a declared parameter → the
+      hook fails with `arguments for '<action>': …` in the log and startup
+      continues
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

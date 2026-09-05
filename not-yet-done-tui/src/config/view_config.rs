@@ -728,6 +728,16 @@ fn check_action(
             ));
         }
     }
+    // Arguments reach the adapter through `ActionContext`, which only the
+    // `invoke_action` path carries today. Refuse them elsewhere rather than
+    // let a configured value silently go nowhere.
+    let args_reach = a.action_type == "node" || (a.action_type == "custom" && a.on_container);
+    if !a.args.is_empty() && !args_reach {
+        errors.push(format!(
+            "{scope}: `args:` reaches only `type: node` actions (and `on_container` \
+             custom ones) so far — see docs/plan-action-args.md"
+        ));
+    }
     match a.action_type.as_str() {
         // The default type. Without an `id` there is nothing to invoke, and
         // since `type:` may be omitted, a typo'd or forgotten field lands
@@ -1985,6 +1995,19 @@ pub struct ActionDef {
     /// to a ticket). Empty/missing values cause the action to be a no-op.
     #[serde(default)]
     pub node_id_from: Option<String>,
+    /// Named arguments handed to the adapter action — for `type: node` (and
+    /// `on_container` custom) actions, the only ones that reach the adapter
+    /// through an `ActionContext` today. Data, not behaviour: an argument
+    /// changes *what* the action acts on, never *which* action runs. Each
+    /// value keeps its YAML type (`20` is a number, `"20"` text, `[a, b]` a
+    /// list). `{placeholder}`s are expanded on the parsed value when the
+    /// action fires: `{node_id}` (the target node), `{node_type}` and
+    /// `{cell:<key>}` (the selected row), `{query}` (the pane's active
+    /// query text) and `{workspace}` (the adapter's data directory). A
+    /// placeholder nothing resolves refuses the action instead of leaving a
+    /// hole. Checked against the adapter's declared parameters at dispatch.
+    #[serde(default)]
+    pub args: not_yet_done_content::ActionArgs,
     /// For "navigate" actions: target child node-type id.
     #[serde(default)]
     pub navigate_to: Option<String>,
@@ -3142,19 +3165,58 @@ views:
     /// checks below, which stand in for the loader a user runs these
     /// files through the first time they copy one into their config.
     const SHIPPED_EXAMPLES: &[(&str, &str)] = &[
-        ("calendar.yaml", include_str!("../../../docs/examples/views/calendar.yaml")),
-        ("cards.yaml", include_str!("../../../docs/examples/views/cards.yaml")),
-        ("confluence.yaml", include_str!("../../../docs/examples/views/confluence.yaml")),
-        ("jira.yaml", include_str!("../../../docs/examples/views/jira.yaml")),
-        ("kimai.yaml", include_str!("../../../docs/examples/views/kimai.yaml")),
-        ("mail.yaml", include_str!("../../../docs/examples/views/mail.yaml")),
-        ("postgres.yaml", include_str!("../../../docs/examples/views/postgres.yaml")),
-        ("projects.yaml", include_str!("../../../docs/examples/views/projects.yaml")),
-        ("sqlite.yaml", include_str!("../../../docs/examples/views/sqlite.yaml")),
-        ("stoat.yaml", include_str!("../../../docs/examples/views/stoat.yaml")),
-        ("taiga.yaml", include_str!("../../../docs/examples/views/taiga.yaml")),
-        ("tasks.yaml", include_str!("../../../docs/examples/views/tasks.yaml")),
-        ("trackings.yaml", include_str!("../../../docs/examples/views/trackings.yaml")),
+        (
+            "calendar.yaml",
+            include_str!("../../../docs/examples/views/calendar.yaml"),
+        ),
+        (
+            "cards.yaml",
+            include_str!("../../../docs/examples/views/cards.yaml"),
+        ),
+        (
+            "confluence.yaml",
+            include_str!("../../../docs/examples/views/confluence.yaml"),
+        ),
+        (
+            "jira.yaml",
+            include_str!("../../../docs/examples/views/jira.yaml"),
+        ),
+        (
+            "kimai.yaml",
+            include_str!("../../../docs/examples/views/kimai.yaml"),
+        ),
+        (
+            "mail.yaml",
+            include_str!("../../../docs/examples/views/mail.yaml"),
+        ),
+        (
+            "postgres.yaml",
+            include_str!("../../../docs/examples/views/postgres.yaml"),
+        ),
+        (
+            "projects.yaml",
+            include_str!("../../../docs/examples/views/projects.yaml"),
+        ),
+        (
+            "sqlite.yaml",
+            include_str!("../../../docs/examples/views/sqlite.yaml"),
+        ),
+        (
+            "stoat.yaml",
+            include_str!("../../../docs/examples/views/stoat.yaml"),
+        ),
+        (
+            "taiga.yaml",
+            include_str!("../../../docs/examples/views/taiga.yaml"),
+        ),
+        (
+            "tasks.yaml",
+            include_str!("../../../docs/examples/views/tasks.yaml"),
+        ),
+        (
+            "trackings.yaml",
+            include_str!("../../../docs/examples/views/trackings.yaml"),
+        ),
     ];
 
     /// Every shipped view example is something a user copies wholesale, so
@@ -3197,7 +3259,11 @@ views:
                     .map(|e| format!("{file}: {e}")),
             );
         }
-        assert!(all.is_empty(), "shipped examples claim a key twice:\n{}", all.join("\n"));
+        assert!(
+            all.is_empty(),
+            "shipped examples claim a key twice:\n{}",
+            all.join("\n")
+        );
     }
 
     /// A `key:` on a `children:` entry parses but does nothing, because
@@ -3415,6 +3481,7 @@ views:
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -3464,6 +3531,7 @@ views:
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -4070,7 +4138,6 @@ views: []
             "the folder tree should compose too"
         );
 
-
         cfg.validate(
             &KeyBindingConfig::default(),
             &crate::config::editor::EditorsConfig::default(),
@@ -4193,6 +4260,37 @@ views:
         assert_eq!(errs.len(), 1);
         assert!(
             errs[0].contains("nope") && errs[0].contains("editors"),
+            "got: {}",
+            errs[0]
+        );
+    }
+
+    #[test]
+    fn validate_rejects_args_on_edit_action() {
+        // `args:` reaches the adapter only through `invoke_action`, which a
+        // `type: edit` binding never calls — so a block there is a load-time
+        // error, not a key that silently does nothing. The node binding next
+        // to it carries the same block and is fine.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: edit, key: e, type: edit, id: edit_full, args: { limit: 20 } }
+      - { key: x, id: export, args: { limit: 20 } }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert_eq!(errs.len(), 1, "got: {errs:?}");
+        assert!(
+            errs[0].contains("args:") && errs[0].contains("edit"),
             "got: {}",
             errs[0]
         );
@@ -5796,7 +5894,8 @@ views:
             )
             .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("`target: parent` only applies")),
+            errs.iter()
+                .any(|e| e.contains("`target: parent` only applies")),
             "expected a target error for the reload action, got: {errs:?}"
         );
     }

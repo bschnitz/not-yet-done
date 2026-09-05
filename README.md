@@ -2337,7 +2337,7 @@ hooks:
   connected:
     - run: backup # adapter action id (same one the `B` key triggers)
       on: {} # target node: omit for root | { id: <node-id> } | { query: <q> }
-      with: {} # action inputs: { value: …, text: … } (none needed for backup)
+      with: {} # action inputs: { value: …, text: …, args: { k: v } } (none needed for backup)
       when: { throttle: 24h } # fire at most once per window (s/m/h/d); omit to always fire
 ```
 
@@ -2345,7 +2345,10 @@ Each binding runs an adapter action, throttled via the host state file
 `~/.local/state/not_yet_done/hooks.json` (shared across front-ends, so the
 backup fires once a day whichever front-end you launch first). Change the
 `throttle`, point `run` at a different action, or drop the block to disable
-auto-backup. Hooks are best-effort: a bad action or unwritable state file is
+auto-backup. `with.args` hands the action named arguments, checked against
+the parameters the adapter declares (see
+[`args:` in the view spec](docs/generic-view-spec.md#handing-the-action-data--args)).
+Hooks are best-effort: a bad action or unwritable state file is
 logged and never blocks startup. See
 [decision 0005](docs/decisions/0005-host-crate-and-lifecycle-hooks.md) for the
 design.

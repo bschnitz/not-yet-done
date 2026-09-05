@@ -433,6 +433,9 @@ pub enum ViewRequest {
         pane_id: PaneId,
         node_id: String,
         action_name: String,
+        /// The arguments the first invocation ran with — the re-invoke
+        /// must run with the same ones.
+        args: not_yet_done_content::ActionArgs,
         /// Adapter-authored prompt; the adapter knows what the action will
         /// do (e.g. how many successor intervals a restore purges).
         prompt: String,
@@ -447,6 +450,8 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
         action_name: String,
+        /// The binding's `args:`, placeholders already expanded.
+        args: not_yet_done_content::ActionArgs,
     },
     /// DSF-4: stash the focused node id as the marked source for a
     /// subsequent move. App stores it in `marked_db_script_for_move`
@@ -525,6 +530,8 @@ pub enum ViewRequest {
         pane_id: PaneId,
         node_id: String,
         action_name: String,
+        /// The binding's `args:`, placeholders already expanded.
+        args: not_yet_done_content::ActionArgs,
     },
     /// Drop the cached auth session for a content view's adapter and
     /// trigger a reload — the next list call drives a fresh login.

@@ -222,6 +222,9 @@ pub enum LoadMsg {
         node_id: String,
         action_name: String,
         result: Result<not_yet_done_content::ActionDispatch, String>,
+        /// The arguments the action ran with, carried so a `Confirm`
+        /// re-invoke runs it with the same ones.
+        args: not_yet_done_content::ActionArgs,
         /// Label + type of the resolved node, captured while it was
         /// fetched in the spawn task (M7/E6). `None` when the fetch
         /// itself failed. Used to build the [`MarkedNode`] for a
@@ -715,6 +718,8 @@ pub enum PendingConfirmation {
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
         action_name: String,
+        /// The arguments the first invocation ran with.
+        args: not_yet_done_content::ActionArgs,
     },
 }
 
@@ -796,6 +801,23 @@ fn render_payload_template(template: &str, payload: &serde_json::Value) -> Strin
         }
     }
     out
+}
+
+/// Check a binding's arguments against what the adapter action declares and
+/// hand back the set the action should see (defaults filled, values read as
+/// their declared kind). An action the adapter does not list — or one that
+/// declares no parameters — takes the arguments as they come; see
+/// [`not_yet_done_content::resolve_args`].
+fn resolve_action_args(
+    declared: Option<&not_yet_done_content::NodeAction>,
+    supplied: &not_yet_done_content::ActionArgs,
+) -> not_yet_done_content::Result<not_yet_done_content::ActionArgs> {
+    let params = declared.map(|a| a.params.as_slice()).unwrap_or(&[]);
+    not_yet_done_content::resolve_args(params, supplied).map_err(|problems| {
+        not_yet_done_content::ContentError::Other(
+            not_yet_done_content::describe_problems(&problems).into(),
+        )
+    })
 }
 
 /// State for the content action selection popup (e.g. Jira transitions).
@@ -3480,6 +3502,7 @@ impl App {
         pane_id: crate::views::content_view::PaneId,
         node_id: String,
         action_name: String,
+        args: not_yet_done_content::ActionArgs,
         prompt: String,
     ) {
         self.modal_message = Some(prompt.clone());
@@ -3490,6 +3513,7 @@ impl App {
                 pane_id,
                 node_id,
                 action_name,
+                args,
             },
         ));
     }
@@ -4791,6 +4815,7 @@ impl App {
                     node_id,
                     action_name,
                     result,
+                    args,
                     node_label,
                     node_type,
                 } => {
@@ -4800,6 +4825,7 @@ impl App {
                         node_id,
                         action_name,
                         result,
+                        args,
                         node_label,
                         node_type,
                     );
@@ -9397,17 +9423,26 @@ impl App {
                 pane_id,
                 node_id,
                 action_name,
+                args,
                 prompt,
             } => {
-                self.confirm_invoke_node_action(view_index, pane_id, node_id, action_name, prompt);
+                self.confirm_invoke_node_action(
+                    view_index,
+                    pane_id,
+                    node_id,
+                    action_name,
+                    args,
+                    prompt,
+                );
                 EditorRequest::None
             }
             ViewRequest::InvokeContainerAction {
                 view_index,
                 pane_id,
                 action_name,
+                args,
             } => {
-                self.spawn_invoke_container_action(view_index, pane_id, action_name);
+                self.spawn_invoke_container_action(view_index, pane_id, action_name, args);
                 EditorRequest::None
             }
             ViewRequest::MarkDbScriptForMove { node_id } => {
@@ -9474,6 +9509,7 @@ impl App {
                 pane_id,
                 node_id,
                 action_name,
+                args,
             } => {
                 self.spawn_invoke_node_action(
                     view_index,
@@ -9482,6 +9518,7 @@ impl App {
                     action_name,
                     false,
                     None,
+                    args,
                 );
                 EditorRequest::None
             }
@@ -9699,6 +9736,7 @@ impl App {
         action_name: String,
         confirmed: bool,
         value: Option<String>,
+        args: not_yet_done_content::ActionArgs,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -9711,6 +9749,9 @@ impl App {
         let tx = self.load_tx.clone();
         let action_name_for_task = action_name.clone();
         let node_id_for_task = node_id.clone();
+        // The binding's arguments: one copy goes into the context, the other
+        // rides back with the dispatch so a `Confirm` re-invoke carries them.
+        let args_for_ctx = args.clone();
         // M7/E6: hand the current move clipboard to the adapter so a
         // `paste-move` invocation can read the marked node out of the
         // context and relocate it. Every other action ignores it.
@@ -9724,21 +9765,6 @@ impl App {
             // gate the form-popup reroute (a value-carrying invocation is an
             // option-menu/confirm path, never a form).
             let has_value = value.is_some();
-            let ctx = not_yet_done_content::ActionContext {
-                marked,
-                confirmed,
-                query,
-                // Frontend-sourced value for value-accepting actions (e.g.
-                // an `option_menu` toggle hands over the chosen option id).
-                value,
-                // Typed free-text is sourced only by the option-menu mutation
-                // path ([`App::spawn_option_menu_mutation`]); this generic
-                // per-node dispatch carries none.
-                text: None,
-                // Named arguments are declared in the view config; until that
-                // binding exists this path supplies none.
-                args: Default::default(),
-            };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.
             let outcome: not_yet_done_content::Result<
@@ -9749,6 +9775,10 @@ impl App {
                 )>,
             > = async {
                 let node = adapter.get_by_id(&node_id_for_task).await?;
+                let declared = adapter
+                    .actions_for_type(node.node_type())
+                    .into_iter()
+                    .find(|a| a.id == action_name_for_task);
                 // Form-collecting row actions can't go through `invoke_action`
                 // (there is no form dispatch): route them to the popup /
                 // `execute` path against this row's node id, mirroring the
@@ -9756,17 +9786,13 @@ impl App {
                 // dispatches never carry a form spec, so guard on the plain
                 // first invocation only.
                 if !confirmed && !has_value {
-                    let wants_form = adapter
-                        .actions_for_type(node.node_type())
-                        .into_iter()
-                        .find(|a| a.id == action_name_for_task)
-                        .is_some_and(|a| {
-                            matches!(
-                                a.input,
-                                not_yet_done_content::InputSpec::Form { .. }
-                                    | not_yet_done_content::InputSpec::ColumnForm
-                            )
-                        });
+                    let wants_form = declared.as_ref().is_some_and(|a| {
+                        matches!(
+                            a.input,
+                            not_yet_done_content::InputSpec::Form { .. }
+                                | not_yet_done_content::InputSpec::ColumnForm
+                        )
+                    });
                     if wants_form {
                         let _ = tx.send(LoadMsg::OpenContentActionPopup {
                             view_index,
@@ -9779,6 +9805,19 @@ impl App {
                 }
                 let label = node.label().to_string();
                 let node_type = node.node_type().clone();
+                let ctx = not_yet_done_content::ActionContext {
+                    marked,
+                    confirmed,
+                    query,
+                    // Frontend-sourced value for value-accepting actions (e.g.
+                    // an `option_menu` toggle hands over the chosen option id).
+                    value,
+                    // Typed free-text is sourced only by the option-menu mutation
+                    // path ([`App::spawn_option_menu_mutation`]); this generic
+                    // per-node dispatch carries none.
+                    text: None,
+                    args: resolve_action_args(declared.as_ref(), &args_for_ctx)?,
+                };
                 let dispatch = node.invoke_action(&action_name_for_task, &ctx).await?;
                 Ok(Some((dispatch, label, node_type)))
             }
@@ -9801,6 +9840,7 @@ impl App {
                 node_id: node_id_for_task,
                 action_name: action_name_for_task,
                 result,
+                args,
                 node_label,
                 node_type,
             });
@@ -9824,6 +9864,7 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         action_name: String,
+        args: not_yet_done_content::ActionArgs,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -9849,6 +9890,7 @@ impl App {
                         node_id: String::new(),
                         action_name: action_name_for_task.clone(),
                         result: Err(format!("Action '{action_name_for_task}': {e}")),
+                        args,
                         node_label: None,
                         node_type: None,
                     });
@@ -9862,17 +9904,17 @@ impl App {
             // like a per-row form action. Every other container action keeps
             // the `invoke_action` → `ActionDispatch` dispatch (Confirm, mark /
             // paste-move, Reload, …).
-            let wants_form = adapter
+            let declared = adapter
                 .actions_for_type(root.node_type())
                 .into_iter()
-                .find(|a| a.id == action_name_for_task)
-                .is_some_and(|a| {
-                    matches!(
-                        a.input,
-                        not_yet_done_content::InputSpec::Form { .. }
-                            | not_yet_done_content::InputSpec::ColumnForm
-                    )
-                });
+                .find(|a| a.id == action_name_for_task);
+            let wants_form = declared.as_ref().is_some_and(|a| {
+                matches!(
+                    a.input,
+                    not_yet_done_content::InputSpec::Form { .. }
+                        | not_yet_done_content::InputSpec::ColumnForm
+                )
+            });
             if wants_form {
                 let _ = tx.send(LoadMsg::OpenContentActionPopup {
                     view_index,
@@ -9885,25 +9927,30 @@ impl App {
 
             let label = root.label().to_string();
             let node_type = root.node_type().clone();
-            let ctx = not_yet_done_content::ActionContext {
-                query,
-                ..Default::default()
-            };
-            let (result, node_label, node_type) =
-                match root.invoke_action(&action_name_for_task, &ctx).await {
-                    Ok(dispatch) => (Ok(dispatch), Some(label), Some(node_type)),
-                    Err(e) => (
-                        Err(format!("Action '{action_name_for_task}': {e}")),
-                        None,
-                        None,
-                    ),
+            let invoked = async {
+                let ctx = not_yet_done_content::ActionContext {
+                    query,
+                    args: resolve_action_args(declared.as_ref(), &args)?,
+                    ..Default::default()
                 };
+                root.invoke_action(&action_name_for_task, &ctx).await
+            }
+            .await;
+            let (result, node_label, node_type) = match invoked {
+                Ok(dispatch) => (Ok(dispatch), Some(label), Some(node_type)),
+                Err(e) => (
+                    Err(format!("Action '{action_name_for_task}': {e}")),
+                    None,
+                    None,
+                ),
+            };
             let _ = tx.send(LoadMsg::NodeActionDispatched {
                 view_index,
                 pane_id,
                 node_id,
                 action_name: action_name_for_task,
                 result,
+                args,
                 node_label,
                 node_type,
             });
@@ -9921,6 +9968,7 @@ impl App {
         node_id: String,
         action_name: String,
         result: Result<not_yet_done_content::ActionDispatch, String>,
+        args: not_yet_done_content::ActionArgs,
         node_label: Option<String>,
         node_type: Option<not_yet_done_content::NodeType>,
     ) {
@@ -9997,6 +10045,7 @@ impl App {
             pane_id,
             node_id,
             action_name,
+            args,
             editor_in_place,
         ) {
             // Routes back through the same dispatcher as in-band view
@@ -12542,6 +12591,7 @@ impl App {
                 pane_id,
                 node_id,
                 action_name,
+                args,
             } => {
                 // Re-invoke the same action on the same node, now with
                 // `confirmed: true`, so the adapter does the work instead of
@@ -12553,6 +12603,7 @@ impl App {
                     action_name,
                     true,
                     None,
+                    args,
                 );
             }
             PendingConfirmation::BulkDeleteStaleLinks(link_ids) => {

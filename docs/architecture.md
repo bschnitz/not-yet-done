@@ -293,6 +293,19 @@ through the context means `--arg` serves `invoke_action` today;
 `prepare`/`execute` take an input rather than a context and gain one when the
 editor path needs it. See [`plan-action-args.md`](plan-action-args.md).
 
+The TUI's view YAML is the third writer. A binding's `args:` block is
+deserialised straight into `ActionArgs`, so each value keeps the type the YAML
+parser saw (`20` is an `Int`, `"20"` is `Text`) — the one place where data
+has a type before it reaches the adapter. Text values may carry placeholders
+(`{node_id}`, `{node_type}`, `{cell:<key>}`, `{query}`, `{workspace}`) that
+the view resolves on the parsed value, never by substituting into YAML text —
+the Taiga search once lost its query to a `#` that way. An unresolved
+placeholder refuses the action, because a value with a hole in it is worse
+than no invocation. The App checks the result against the adapter's declared
+parameters at the one point that dispatches, and the arguments ride the
+confirm loop so a confirmed re-invoke runs with the same data. Hooks take the
+same block as `with: { args: {…} }`.
+
 Implementations: `jira-`, `taiga-`, `postgres-`, `sqlite-`, `confluence-`
 and `stoat-adapter`.
 

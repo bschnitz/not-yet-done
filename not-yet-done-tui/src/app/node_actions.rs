@@ -24,7 +24,7 @@
 //! that don't override `actions()` keep the legacy `LevelAction`
 //! behaviour.
 
-use not_yet_done_content::ActionDispatch;
+use not_yet_done_content::{ActionArgs, ActionDispatch};
 
 use crate::config::view_config::{ChildDef, ViewDef};
 use crate::views::{ViewRequest, content_view::PaneId};
@@ -163,7 +163,6 @@ pub fn editor_in_place_for_node_id(view_def: &ViewDef, _node_id: &str) -> bool {
     walk(&view_def.children)
 }
 
-
 /// Translate an [`ActionDispatch`] into the [`ViewRequest`] the App
 /// should fire next. `view_index` / `pane_id` are the originating
 /// pane's coordinates; `node_id` is the node the action was invoked
@@ -183,6 +182,7 @@ pub fn dispatch_to_view_request(
     pane_id: PaneId,
     node_id: String,
     action_name: String,
+    args: ActionArgs,
     editor_in_place: bool,
 ) -> Option<ViewRequest> {
     // DSF-4: certain action names are TUI-owned — the adapter exposes
@@ -302,6 +302,7 @@ pub fn dispatch_to_view_request(
             pane_id,
             node_id,
             action_name,
+            args,
             prompt,
         }),
         // A set of node references: the action answered "these nodes".
@@ -340,6 +341,7 @@ mod tests {
             1,
             "node-1".into(),
             "execute".into(),
+            Default::default(),
             false,
         );
         assert!(req.is_none());
@@ -353,6 +355,7 @@ mod tests {
             3,
             "node-1".into(),
             "reload".into(),
+            Default::default(),
             false,
         );
         // Not `SpawnContentLoad`: that re-lists the root, which inside a drill
@@ -383,6 +386,7 @@ mod tests {
             7,
             "live/db_scripts/report".into(),
             "execute".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -417,6 +421,7 @@ mod tests {
             1,
             "live/db_scripts/foo".into(),
             "execute".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -439,6 +444,7 @@ mod tests {
             4,
             "live/db_scripts/report".into(),
             "edit".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -472,6 +478,7 @@ mod tests {
             1,
             "live/db_scripts/report".into(),
             "edit".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -539,6 +546,7 @@ mod tests {
             8,
             "live/db_scripts/report".into(),
             "delete".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -568,6 +576,7 @@ mod tests {
             0,
             "live/db_scripts/maint/vacuum/full".into(),
             "delete".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -588,6 +597,7 @@ mod tests {
             0,
             "live/db_scripts/maint/vacuum".into(),
             "delete-dir".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -614,6 +624,7 @@ mod tests {
             0,
             "live/db_scripts/report".into(),
             "mark-move".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -633,6 +644,7 @@ mod tests {
             0,
             "live/db_scripts/maint".into(),
             "paste-move".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -655,6 +667,7 @@ mod tests {
             3,
             "live/db_scripts/maint/vacuum".into(),
             "rename".into(),
+            Default::default(),
             false,
         );
         assert!(req.is_none(), "got: {req:?}");
@@ -670,6 +683,7 @@ mod tests {
             0,
             "TICKET-1".into(),
             "mark-move".into(),
+            Default::default(),
             false,
         );
         // Noop → None, plus no db_script interception → None.
@@ -689,6 +703,7 @@ mod tests {
             1,
             "live/schemas/public/tables/users".into(),
             "delete".into(),
+            Default::default(),
             false,
         );
         match req {
@@ -717,6 +732,7 @@ mod tests {
             1,
             "node-1".into(),
             "execute".into(),
+            Default::default(),
             false,
         );
         match req {

@@ -11,7 +11,7 @@
 //!   connected:
 //!     - run: backup            # adapter action id to invoke
 //!       on: { }                # target: root (default) | { id: <node-id> } | { query: <q> }
-//!       with: { }              # ActionContext inputs: value / text
+//!       with: { }              # ActionContext inputs: value / text / args: { k: v }
 //!       when: { throttle: 24h } # fire at most once per window
 //! ```
 //!
@@ -100,6 +100,11 @@ pub struct HookInputs {
     /// Free-text input (e.g. a new name for a create/rename action).
     #[serde(default)]
     pub text: Option<String>,
+    /// Named arguments (`args: { key: value, … }`), the general channel; a
+    /// hook has no row, so no `{placeholder}` is expanded here. Checked
+    /// against the action's declared parameters before it runs.
+    #[serde(default)]
+    pub args: ActionArgs,
 }
 
 /// When a binding is allowed to fire.
@@ -228,7 +233,7 @@ fn context_for(binding: &HookBinding) -> ActionContext {
         query: binding.on.query.clone(),
         value: binding.with.value.clone(),
         text: binding.with.text.clone(),
-        args: ActionArgs::default(),
+        args: binding.with.args.clone(),
     }
 }
 
@@ -272,7 +277,25 @@ async fn process_binding(
         Err(e) => return HookOutcome::Failed(format!("resolving target node: {e}")),
     };
 
-    let ctx = context_for(binding);
+    let mut ctx = context_for(binding);
+    // Check the configured arguments against what the action declares (an
+    // action that declares nothing takes them as they come).
+    let declared = adapter
+        .actions_for_type(node.node_type())
+        .into_iter()
+        .find(|a| a.id == binding.run)
+        .map(|a| a.params)
+        .unwrap_or_default();
+    ctx.args = match not_yet_done_content::resolve_args(&declared, &ctx.args) {
+        Ok(args) => args,
+        Err(problems) => {
+            return HookOutcome::Failed(format!(
+                "arguments for '{}': {}",
+                binding.run,
+                not_yet_done_content::describe_problems(&problems)
+            ));
+        }
+    };
     let outcome = match node.invoke_action(&binding.run, &ctx).await {
         Ok(dispatch) => outcome_for(dispatch),
         Err(e) => HookOutcome::Failed(format!("invoking '{}': {e}", binding.run)),
@@ -424,16 +447,24 @@ connected:
   - run: notify
     on: { id: abc123 }
     with: { value: hi, text: there }
+  - run: prune
+    with: { args: { limit: 20, dry_run: true, folders: [a, b] } }
 "#;
         let cfg: HookConfig = serde_yaml::from_str(yaml).unwrap();
         let connected = &cfg["connected"];
-        assert_eq!(connected.len(), 2);
+        assert_eq!(connected.len(), 3);
         assert_eq!(connected[0].run, "backup");
         assert_eq!(connected[0].when.throttle.as_deref(), Some("24h"));
         assert!(connected[0].on.id.is_none());
         assert_eq!(connected[1].on.id.as_deref(), Some("abc123"));
         assert_eq!(connected[1].with.value.as_deref(), Some("hi"));
         assert_eq!(connected[1].with.text.as_deref(), Some("there"));
+        assert!(connected[1].with.args.is_empty());
+        // `args:` keeps the YAML types: an int stays an int, a bool a bool.
+        let args = &connected[2].with.args;
+        assert_eq!(args.int("limit"), Some(20));
+        assert_eq!(args.bool("dry_run"), Some(true));
+        assert_eq!(args.list("folders"), Some(vec!["a".into(), "b".into()]));
     }
 
     #[test]
