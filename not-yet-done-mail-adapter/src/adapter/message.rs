@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOption, ActionOutcome, ColumnSchema, Content, ContentError, EditorPrep,
     InputSpec,
     Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
@@ -657,7 +657,7 @@ impl Node for MailMessageNode {
         Some(&self.body)
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "reply" => self.reply_prep().await,
             "compose" => compose_prep(&self.outbox).await,
@@ -687,7 +687,7 @@ impl Node for MailMessageNode {
             .collect())
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("export_html", ActionInput::None) => self.export_html().await,
             ("reply", ActionInput::Edited { text, .. }) => self.reply_send(&text).await,

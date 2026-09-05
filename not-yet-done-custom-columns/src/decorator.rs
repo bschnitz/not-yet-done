@@ -901,8 +901,8 @@ impl Node for CustomColumnsNode {
         self.inner.invoke_action(name, ctx).await
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
-        self.inner.prepare(action_id).await
+    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
+        self.inner.prepare(action_id, args).await
     }
 
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
@@ -923,7 +923,7 @@ impl Node for CustomColumnsNode {
         self.inner.form_prep(action_id).await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &ActionArgs) -> Result<ActionOutcome> {
         // The address-only actions share their implementation with
         // `CustomColumnsAdapter::execute_addressed`, so a cell written from a
         // node and one written from an address cannot drift apart.
@@ -1007,7 +1007,7 @@ impl Node for CustomColumnsNode {
                     }),
                 })
             }
-            _ => self.inner.execute(action_id, input).await,
+            _ => self.inner.execute(action_id, input, args).await,
         }
     }
 }
@@ -1084,6 +1084,7 @@ mod tests {
             .execute(
                 EDIT_CELLS_ACTION_ID,
                 ActionInput::ColumnForm(vec![cell("estimate", "5", "number")]),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1119,6 +1120,7 @@ mod tests {
             node.execute(
                 EDIT_CELLS_ACTION_ID,
                 ActionInput::ColumnForm(vec![cell("rank", rank, "text")]),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1134,7 +1136,7 @@ mod tests {
         // `later` blocks the retype and is named with its row id.
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         let err = match node
-            .execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")))
+            .execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")), &Default::default())
             .await
         {
             Err(e) => format!("{e}"),
@@ -1151,11 +1153,12 @@ mod tests {
         node.execute(
             EDIT_CELLS_ACTION_ID,
             ActionInput::ColumnForm(vec![cell("rank", "40", "text")]),
+            &Default::default(),
         )
         .await
         .unwrap();
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
-        node.execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")))
+        node.execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")), &Default::default())
             .await
             .unwrap();
 
@@ -1180,6 +1183,7 @@ mod tests {
             node.execute(
                 EDIT_CELLS_ACTION_ID,
                 ActionInput::ColumnForm(vec![cell("note", "look into", "text")]),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1194,6 +1198,7 @@ mod tests {
                 cell("note", "look into", "text"),
                 cell("estimate", "", "number"),
             ]),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1244,6 +1249,7 @@ mod tests {
         node.execute(
             EDIT_CELLS_ACTION_ID,
             ActionInput::ColumnForm(vec![cell("estimate", "5", "number")]),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1298,6 +1304,7 @@ mod tests {
         node.execute(
             EDIT_CELLS_ACTION_ID,
             ActionInput::ColumnForm(vec![cell("status", "42", "number")]),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1348,6 +1355,7 @@ mod tests {
             node.execute(
                 EDIT_CELLS_ACTION_ID,
                 ActionInput::ColumnForm(vec![cell("rank", rank, "number")]),
+                &Default::default(),
             )
             .await
             .unwrap();

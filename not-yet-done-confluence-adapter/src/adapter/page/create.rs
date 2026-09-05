@@ -36,6 +36,7 @@ impl ConfluencePageNode {
             version: String::new(),
             suffix: ".html".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 

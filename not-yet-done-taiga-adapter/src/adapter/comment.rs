@@ -110,7 +110,7 @@ impl Node for TaigaCommentNode {
         }
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit_full" => {
                 let c = &self.comment;
@@ -123,6 +123,7 @@ impl Node for TaigaCommentNode {
                     version: c.created.clone(),
                     suffix: ".md".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -131,7 +132,7 @@ impl Node for TaigaCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit_full", ActionInput::Edited { text, .. }) => {
                 let body = parse_comment_buffer(&text);

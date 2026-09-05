@@ -7468,13 +7468,13 @@ the action runs. Hooks take the same block as `with: { args: {…} }`.
 - [ ] `{workspace}` on Jira → the instance's data directory
 - [ ] `{cell:nope}` (a column the row lacks) → a notification
       `action '…': argument 'name': nothing resolves the placeholder
-    {cell:nope}`; the action does not run
+{cell:nope}`; the action does not run
 - [ ] A required declared parameter left out of `args:` → one notification
       naming it; the action does not run
 - [ ] Confirm loop: an action that asks for confirmation and takes args →
       after confirming, the adapter sees the same arguments on the second
       call
-- [ ] `args:` on a `type: edit` action → the view file is refused at load
+- [ ] `args:` on a `type: create` action → the view file is refused at load
       with a message that names the level and points at the plan
 - [ ] `args: { limit: 2.5 }`, `args: { limit: null }`,
       `args: { limit: { a: b } }` → each refused at load with a message
@@ -7483,6 +7483,41 @@ the action runs. Hooks take the same block as `with: { args: {…} }`.
       action receives it; a wrong kind against a declared parameter → the
       hook fails with `arguments for '<action>': …` in the log and startup
       continues
+
+## Named arguments reach the editor path
+
+`prepare` and `execute` take the action's arguments, `type: edit` bindings
+carry `args:`, and the CLI's `--arg` serves every input shape. The editor
+session resolves the set once before `$EDITOR` opens and reuses it on every
+save. The return direction is `EditorPrep::args` and
+`ActionDispatch::OpenEditor { args }`.
+
+- [ ] Jira view, `- { key: 'e e', id: edit_markdown, type: edit, args: { workspace: /tmp/nyd-smoke, buffer: draft.md } }`
+      → `e e` opens `/tmp/nyd-smoke/<KEY>-<slug>/draft.md`, `attachments/`
+      sits next to it, and a save lands in Jira
+- [ ] Same binding with `args: { workspace: "{workspace}/tickets" }` → the
+      folder lives under the instance's data directory
+- [ ] `args: { buffer: 20 }` (an int against a text parameter) → the
+      notification names `buffer` and the editor never opens
+- [ ] `args: { nope: x }` → refused before the editor opens, message names
+      `nope`
+- [ ] `commit_on_save` editor with args → the second and third save still
+      write (the same set reaches every `execute`)
+- [ ] CLI: `nyd adapter jira:issue <KEY> edit_markdown --arg workspace=/tmp/nyd-smoke`
+      → `$EDITOR` opens on a buffer under `/tmp/nyd-smoke`; `--arg buffer=`
+      (empty) falls back to `ticket.edit.md`
+- [ ] CLI: `--arg` on a form, picker and files action of any adapter → no
+      refusal ("named arguments reach only dispatch actions" is gone); an
+      undeclared key on an action without parameters is accepted
+- [ ] CLI: `nyd adapter jira:issue help --full` lists
+      `--arg workspace=<path>` and `--arg buffer=<text>` with the default
+- [ ] Postgres tab, open the query editor on a schema → the editor session
+      knows database and schema (they arrive as `OpenEditor.args`, no
+      behaviour change visible)
+- [ ] SQL-core script level, `e` on a script → the editor opens the right
+      script (`OpenEditor.args["script"]`)
+- [ ] `args:` on a `type: create` binding → refused at load, the message
+      points at the plan
 
 ## Refinements / deferred tasks
 

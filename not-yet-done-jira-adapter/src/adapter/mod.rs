@@ -493,7 +493,7 @@ impl Node for JiraRoot {
         ))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => {
                 create::execute_create(&self.client, &values).await

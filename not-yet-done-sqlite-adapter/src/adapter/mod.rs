@@ -30,7 +30,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use not_yet_done_content::script_buffer;
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, AdapterCapabilities, AdapterStatus, ContentAdapter, ContentError,
     CustomQueryContext, CustomQueryResult, EditorPrep, ListParams, ListResult, Metadata,
     MetadataField, Node, NodeRef, NodeSummary, NodeType, PageInfo, Result,
@@ -1093,7 +1093,7 @@ impl Node for TableNode {
     /// A table's one editor action is adding a row — the key works here
     /// as well as on the rows so that an empty table can be filled at
     /// all. See [`NewRow`].
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a table has no editor action `{action_id}`"
@@ -1102,7 +1102,7 @@ impl Node for TableNode {
         self.new_row().prepare().await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a table has no editor action `{action_id}`"
@@ -1285,7 +1285,7 @@ impl Node for ViewNode {
     /// The buffer is the stored statement verbatim, and `version` is that
     /// same text — so a concurrent change is detectable by comparison
     /// alone, without a modification timestamp SQLite does not keep.
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id != EDIT_VIEW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a view has no editor action `{action_id}`"
@@ -1300,6 +1300,7 @@ impl Node for ViewNode {
             version: definition,
             suffix: ".sql".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -1307,7 +1308,7 @@ impl Node for ViewNode {
     /// than failing the action: the user's text is the only copy of what
     /// they wrote, and a rejected definition is usually one edit away from
     /// a good one.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id != EDIT_VIEW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a view has no editor action `{action_id}`"
@@ -1456,6 +1457,7 @@ impl NewRow<'_> {
             version: String::new(),
             suffix: ".yaml".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -1630,7 +1632,7 @@ impl Node for RowNode {
     /// concurrent change on save) and the key values (so the `UPDATE`
     /// addresses the row that was actually shown, not whatever now sits at
     /// the same offset).
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().prepare().await;
         }
@@ -1663,6 +1665,7 @@ impl Node for RowNode {
             version: row_edit::version_token(&read.key_values, &row),
             suffix: ".yaml".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -1672,7 +1675,7 @@ impl Node for RowNode {
     /// from a good one. When the statement itself is refused by SQLite,
     /// the statement is shown next to the complaint — an "unknown column"
     /// is far easier to place with the `UPDATE` in front of you.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().execute(input).await;
         }
@@ -1875,6 +1878,7 @@ mod tests {
                 original: String::new(),
                 version: version.to_string(),
             },
+            &Default::default(),
         )
         .await
         .expect("execute must answer with an outcome, not an error")
@@ -2256,7 +2260,7 @@ mod tests {
             .await
             .expect("view");
 
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
         assert_eq!(prep.suffix, ".sql");
         assert!(prep.version.starts_with("CREATE VIEW"), "{}", prep.version);
         let body = script_buffer::parse_query_area(&prep.template);
@@ -2305,7 +2309,7 @@ mod tests {
             .get_by_id(&format!("{key}/views/recent"))
             .await
             .expect("view");
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("id > 1", "id > 0");
         match save(view.as_mut(), &edited, &prep.version).await {
@@ -2346,7 +2350,7 @@ mod tests {
             .get_by_id(&format!("{key}/views/recent"))
             .await
             .expect("view");
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
 
         match save(view.as_mut(), &prep.template, &prep.version).await {
             ActionOutcome::NoChanges => {}
@@ -2364,7 +2368,7 @@ mod tests {
             .get_by_id(&format!("{key}/views/recent"))
             .await
             .expect("view");
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
 
         for (label, body, needle) in [
             // A rename would leave the old view in place beside a new one.
@@ -2419,7 +2423,7 @@ mod tests {
             .get_by_id(&format!("{key}/views/recent"))
             .await
             .expect("view");
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("id > 1", "id > 0");
         match save(view.as_mut(), &edited, &prep.version).await {
@@ -2441,7 +2445,7 @@ mod tests {
             .get_by_id(&format!("{key}/views/recent"))
             .await
             .expect("view");
-        let prep = view.prepare(EDIT_VIEW_ACTION).await.expect("prepare");
+        let prep = view.prepare(EDIT_VIEW_ACTION, &Default::default()).await.expect("prepare");
 
         // The "other session".
         adapter
@@ -2539,6 +2543,7 @@ mod tests {
                 original: String::new(),
                 version: version.to_string(),
             },
+            &Default::default(),
         )
         .await
         .expect("execute must answer with an outcome, not an error")
@@ -2589,7 +2594,7 @@ mod tests {
         let (adapter, key) = adapter_for(tmp.path()).await;
         let row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
 
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
         assert_eq!(prep.suffix, ".yaml");
         assert!(prep.template.contains("id: '1'"), "{}", prep.template);
         assert!(prep.template.contains("body: 'one'"), "{}", prep.template);
@@ -2605,7 +2610,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("body: 'one'", "body: 'first'");
         match save_row(row.as_mut(), &edited, &prep.version).await {
@@ -2630,7 +2635,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("body: 'one'", "body: null");
         match save_row(row.as_mut(), &edited, &prep.version).await {
@@ -2646,7 +2651,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         match save_row(row.as_mut(), &prep.template, &prep.version).await {
             ActionOutcome::NoChanges => {}
@@ -2661,7 +2666,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = format!("{}note: 'typo in the column name'\n", prep.template);
         match save_row(row.as_mut(), &edited, &prep.version).await {
@@ -2688,7 +2693,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         // The other row already holds this key.
         let edited = prep.template.replace("id: '1'", "id: '2'");
@@ -2710,7 +2715,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("id: '1'", "id: '7'");
         match save_row(row.as_mut(), &edited, &prep.version).await {
@@ -2728,7 +2733,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("body: 'one'", "body: 'nope'");
         match save_row(row.as_mut(), &edited, &prep.version).await {
@@ -2748,7 +2753,7 @@ mod tests {
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let row = row_node(&adapter, &format!("{key}/views/recent/rows/0")).await;
 
-        match row.prepare(EDIT_ROW_ACTION).await {
+        match row.prepare(EDIT_ROW_ACTION, &Default::default()).await {
             Err(ContentError::NotSupported(message)) => {
                 assert!(message.contains("is a view"), "{message}");
                 assert!(message.contains("underlying table"), "{message}");
@@ -2766,7 +2771,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         adapter
             .client
@@ -2812,7 +2817,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         adapter
             .client
@@ -2837,7 +2842,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = loose_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/loose/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
         assert!(prep.template.contains("rowid"), "{}", prep.template);
 
         let edited = prep.template.replace("name: 'first'", "name: 'renamed'");
@@ -2861,7 +2866,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = loose_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/loose/rows/0")).await;
-        let prep = row.prepare(EDIT_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(EDIT_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         assert!(prep.template.contains("#   payload:"), "{}", prep.template);
         assert!(
@@ -2919,6 +2924,7 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .expect("execute must answer with an outcome, not an error")
@@ -2948,7 +2954,7 @@ mod tests {
         let (adapter, key) = adapter_for(tmp.path()).await;
         let table = row_node(&adapter, &format!("{key}/tables/notes")).await;
 
-        let prep = table.prepare(NEW_ROW_ACTION).await.expect("prepare");
+        let prep = table.prepare(NEW_ROW_ACTION, &Default::default()).await.expect("prepare");
         assert_eq!(prep.suffix, ".yaml");
         assert!(prep.template.contains("# id: null"), "{}", prep.template);
         assert!(prep.template.contains("\nbody: null"), "{}", prep.template);
@@ -2966,7 +2972,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let mut row = row_node(&adapter, &format!("{key}/tables/notes/rows/0")).await;
-        let prep = row.prepare(NEW_ROW_ACTION).await.expect("prepare");
+        let prep = row.prepare(NEW_ROW_ACTION, &Default::default()).await.expect("prepare");
 
         let edited = prep.template.replace("body: null", "body: 'three'");
         match save_new_row(row.as_mut(), &edited).await {
@@ -3049,7 +3055,7 @@ mod tests {
         let (adapter, key) = writable_adapter_for(tmp.path()).await;
         let row = row_node(&adapter, &format!("{key}/views/recent/rows/0")).await;
 
-        let message = match row.prepare(NEW_ROW_ACTION).await {
+        let message = match row.prepare(NEW_ROW_ACTION, &Default::default()).await {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a view cannot be inserted into"),
         };

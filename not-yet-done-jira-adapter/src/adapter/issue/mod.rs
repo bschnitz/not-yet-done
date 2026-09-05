@@ -53,7 +53,18 @@ use template::{edit_full_fields, strip_template_comments};
 pub(super) fn issue_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("edit_full", "edit", InputSpec::Editor),
-        NodeAction::new("edit_markdown", "edit (markdown)", InputSpec::Editor),
+        // The buffer's location is the frontend's business; where the
+        // buffer sits *inside* the ticket folder is not — it must stay next
+        // to `attachments/` or its image links break. So the parameters name
+        // the base and the file, and `prepare` still computes the folder.
+        NodeAction::new("edit_markdown", "edit (markdown)", InputSpec::Editor).params([
+            ParamSpec::path(
+                "workspace",
+                "base directory for the ticket folder (overrides ticket_workspace)",
+            ),
+            ParamSpec::text("buffer", "file name of the editor buffer inside the ticket folder")
+                .with_default(workspace::EDIT_FILE),
+        ]),
         // CLI-oriented counterparts of `edit_markdown`, sharing its exact
         // buffer and write-back pipeline: `to_markdown` prints the Markdown to
         // stdout (`ActionOutcome::Done`), `from_markdown` takes that same
@@ -439,7 +450,7 @@ impl Node for JiraIssueNode {
         Some(self)
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit_full" => {
                 let detail = self.detail().await?;
@@ -449,6 +460,7 @@ impl Node for JiraIssueNode {
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             "edit_markdown" => {
@@ -466,19 +478,34 @@ impl Node for JiraIssueNode {
                 // preview runs. Sharing the path let an export land between the
                 // editor's save and its `mv … .done`, so the frontend committed
                 // the export instead of the buffer — an edit lost without a word.
-                let file_path = match &self.workspace_base {
+                //
+                // A `workspace` argument names the base for this invocation
+                // and beats the adapter's `ticket_workspace`; `buffer` names
+                // the file inside the ticket folder. The folder itself is
+                // always ours to compute — the buffer must sit next to
+                // `attachments/`.
+                let base = args
+                    .path("workspace")
+                    .or_else(|| self.workspace_base.as_deref().map(|b| b.to_path_buf()));
+                let buffer = args
+                    .text("buffer")
+                    .filter(|b| !b.trim().is_empty())
+                    .unwrap_or_else(|| workspace::EDIT_FILE.to_string());
+                let (file_path, prep_args) = match base {
                     Some(base) => {
-                        let dir = workspace::ticket_dir(base, &self.key, &detail.summary);
+                        let dir = workspace::ticket_dir(&base, &self.key, &detail.summary);
                         workspace::sync_attachments(&self.client, &self.key, &dir).await?;
-                        Some(dir.join(workspace::EDIT_FILE))
+                        let prep_args = ActionArgs::new().with("ticket_dir", ArgValue::Path(dir.clone()));
+                        (Some(dir.join(&buffer)), prep_args)
                     }
-                    None => None,
+                    None => (None, ActionArgs::new()),
                 };
                 Ok(EditorPrep {
                     template,
                     version: detail.updated.clone(),
                     suffix: ".md".into(),
                     file_path,
+                    args: prep_args,
                 })
             }
             "from_markdown" => {
@@ -493,6 +520,7 @@ impl Node for JiraIssueNode {
                     version: detail.updated.clone(),
                     suffix: ".md".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             "edit_with_comments" => {
@@ -517,6 +545,7 @@ impl Node for JiraIssueNode {
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             "create_comment" => Ok(EditorPrep {
@@ -524,6 +553,7 @@ impl Node for JiraIssueNode {
                 version: String::new(),
                 suffix: ".jira".into(),
                 file_path: None,
+                args: Default::default(),
             }),
             "clone" => self.prepare_clone().await,
             other => Err(ContentError::NotSupported(format!(
@@ -620,7 +650,7 @@ impl Node for JiraIssueNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             (
                 "edit_full",

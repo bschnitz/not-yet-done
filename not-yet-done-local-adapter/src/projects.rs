@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema, ContentAdapter, ContentError,
     FormFieldSpec, HostContext, InputSpec, Invalidation, ListParams, ListResult, Metadata,
     MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, TypedAdapterFactory,
@@ -317,7 +317,7 @@ impl Node for ProjectRootNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         ProjectItemNode::fetch(&self.handle, id).await
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => execute_create(&self.handle, &values).await,
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -392,7 +392,7 @@ impl Node for ProjectItemNode {
         }
         Ok(prefill)
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit", ActionInput::Form(values)) => {
                 execute_edit(&self.handle, self.project_id()?, &values).await
@@ -651,6 +651,7 @@ mod tests {
             .execute(
                 "create",
                 form(&[("name", "Acme"), ("description", "Widgets")]),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -681,7 +682,7 @@ mod tests {
         let (adapter, _db) = setup().await;
         let mut root = adapter.root().await.unwrap();
         let err = root
-            .execute("create", form(&[("description", "no name")]))
+            .execute("create", form(&[("description", "no name")]), &Default::default())
             .await
             .err()
             .expect("missing name must error");
@@ -695,7 +696,7 @@ mod tests {
             .root()
             .await
             .unwrap()
-            .execute("create", form(&[("name", "Old")]))
+            .execute("create", form(&[("name", "Old")]), &Default::default())
             .await
             .unwrap()
         {
@@ -709,7 +710,7 @@ mod tests {
         assert_eq!(prep.get("name").map(String::as_str), Some("Old"));
 
         let mut node = adapter.get_by_id(&id).await.unwrap();
-        node.execute("edit", form(&[("name", "New")]))
+        node.execute("edit", form(&[("name", "New")]), &Default::default())
             .await
             .unwrap();
         let reloaded = adapter.get_by_id(&id).await.unwrap();
@@ -723,7 +724,7 @@ mod tests {
             .root()
             .await
             .unwrap()
-            .execute("create", form(&[("name", "Doomed")]))
+            .execute("create", form(&[("name", "Doomed")]), &Default::default())
             .await
             .unwrap()
         {
@@ -732,7 +733,7 @@ mod tests {
         };
 
         let mut node = adapter.get_by_id(&id).await.unwrap();
-        node.execute("delete", form(&[("cascade", "false")]))
+        node.execute("delete", form(&[("cascade", "false")]), &Default::default())
             .await
             .unwrap();
 

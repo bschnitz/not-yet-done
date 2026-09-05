@@ -268,7 +268,7 @@ impl Node for JiraAttachmentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_via_xdg().await,
             ("download_all", ActionInput::Form(values)) => {

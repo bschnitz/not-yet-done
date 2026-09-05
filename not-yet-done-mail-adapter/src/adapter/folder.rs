@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, ColumnSchema, ContentError, EditorPrep, InputSpec, Metadata, Node,
     NodeAction, NodeSummary, NodeType, Result,
 };
@@ -119,7 +119,7 @@ impl Node for MailFolderNode {
         &self.metadata
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "compose" => compose_prep(&self.outbox).await,
             other => Err(ContentError::NotSupported(format!(
@@ -128,7 +128,7 @@ impl Node for MailFolderNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("compose", ActionInput::Edited { text, .. }) => {
                 compose_send(&self.outbox, &text).await

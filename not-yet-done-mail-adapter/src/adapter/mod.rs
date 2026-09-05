@@ -1290,7 +1290,7 @@ accounts:
             .await
             .expect("resolves");
         let outcome = node
-            .execute("export_html", ActionInput::None)
+            .execute("export_html", ActionInput::None, &Default::default())
             .await
             .expect("exports");
         let ActionOutcome::Done {
@@ -1346,7 +1346,7 @@ accounts:
         let ActionOutcome::Done {
             message: Some(message),
         } = node
-            .execute("export_html", ActionInput::None)
+            .execute("export_html", ActionInput::None, &Default::default())
             .await
             .expect("exports")
         else {
@@ -1545,7 +1545,7 @@ accounts:
         adapter.drafts = drafts.clone();
 
         let node = adapter.get_by_id("reader/INBOX").await.expect("resolves");
-        let Err(err) = node.prepare("compose").await else {
+        let Err(err) = node.prepare("compose", &Default::default()).await else {
             panic!("an account with no `smtp:` block cannot compose");
         };
 
@@ -1573,7 +1573,7 @@ accounts:
             .get_by_id("work/INBOX#42.1")
             .await
             .expect("resolves");
-        let prep = node.prepare("reply").await.expect("prepares");
+        let prep = node.prepare("reply", &Default::default()).await.expect("prepares");
 
         assert!(
             prep.template.contains("From: Work <work@example.invalid>"),
@@ -1625,7 +1625,7 @@ accounts:
             .await
             .expect("resolves");
         let path = node
-            .prepare("reply")
+            .prepare("reply", &Default::default())
             .await
             .expect("prepares")
             .file_path
@@ -1633,7 +1633,7 @@ accounts:
         let kept = "From: Work <work@example.invalid>\nTo: x@example.invalid\nCc: \nSubject: Re: Grüße\n\nhalb geschrieben\n";
         std::fs::write(&path, kept).expect("writes the draft");
 
-        let again = node.prepare("reply").await.expect("prepares again");
+        let again = node.prepare("reply", &Default::default()).await.expect("prepares again");
         assert_eq!(again.template, kept, "the text that was there survives");
         let _ = std::fs::remove_dir_all(&drafts);
     }
@@ -1650,7 +1650,7 @@ accounts:
             .get_by_id("private/INBOX#42.1")
             .await
             .expect("resolves");
-        let Err(err) = node.prepare("reply").await else {
+        let Err(err) = node.prepare("reply", &Default::default()).await else {
             panic!("an account without an address cannot send");
         };
         assert!(
@@ -1673,7 +1673,7 @@ accounts:
             .get_by_id("work/INBOX#42.1")
             .await
             .expect("resolves");
-        let prep = node.prepare("reply").await.expect("prepares");
+        let prep = node.prepare("reply", &Default::default()).await.expect("prepares");
         let path = prep.file_path.clone().expect("a persistent draft");
         // Exactly the gesture a mail client user makes out of habit: answer
         // between the quoted lines.
@@ -1691,6 +1691,7 @@ accounts:
                     original: prep.template,
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await
         else {

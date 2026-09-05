@@ -1478,6 +1478,13 @@ pub struct EditorPrep {
     /// draft may therefore rely on finding it again whichever frontend the
     /// buffer was filled in.
     pub file_path: Option<std::path::PathBuf>,
+    /// Named data the adapter hands back with the buffer — the return
+    /// direction of [`ActionContext::args`]. An adapter answers here with
+    /// whatever a frontend might want to know about the buffer it just
+    /// prepared (Jira: `ticket_dir`, the folder the buffer and its
+    /// attachments live in) instead of the struct growing a field per case.
+    /// Empty by default; nothing in the framework depends on a key.
+    pub args: ActionArgs,
 }
 
 /// A selectable option for an `InputSpec::Picker` action.
@@ -1539,11 +1546,12 @@ pub enum ActionDispatch {
     ///   the user re-executes separately (Postgres uses it for DB-level
     ///   scripts).
     ///
-    /// `params` carries the session's setup data as opaque string
-    /// key/value pairs (e.g. `{"database": "live", "script": "report"}`).
+    /// `args` carries the session's setup data as named values (e.g.
+    /// `{database: "live", script: "report"}`) — the same [`ActionArgs`]
+    /// that travel into an action, mirrored on the way back.
     OpenEditor {
         session_kind: String,
-        params: std::collections::HashMap<String, String>,
+        args: ActionArgs,
     },
     /// Execute a query and (optionally) open a paginated result pane.
     /// Used by per-node `execute` shortcuts (e.g. `x` on a DB script).
@@ -2879,8 +2887,14 @@ pub trait Node: Send + Sync {
     }
 
     /// Render the initial buffer for an `InputSpec::Editor` action.
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
-        let _ = action_id;
+    ///
+    /// `args` are the action's named arguments (see [`ActionContext::args`]):
+    /// what a binding's `args:` or the CLI's `--arg` handed in, already
+    /// checked against [`NodeAction::params`] by the frontend. An action that
+    /// declares no parameters receives whatever was supplied; one that does
+    /// can rely on the declared kinds and required keys.
+    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
+        let _ = (action_id, args);
         Err(ContentError::NotSupported("prepare not supported".into()))
     }
 
@@ -2903,9 +2917,15 @@ pub trait Node: Send + Sync {
         Ok(std::collections::HashMap::new())
     }
 
-    /// Execute an action with the user's input.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
-        let _ = (action_id, input);
+    /// Execute an action with the user's input. `args` are the same named
+    /// arguments [`Self::prepare`] saw for this invocation.
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
+        let _ = (action_id, input, args);
         Err(ContentError::NotSupported("execute not supported".into()))
     }
 }
@@ -4042,7 +4062,7 @@ mod form_contract_tests {
             Ok(m)
         }
 
-        async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
             assert_eq!(action_id, "edit");
             match input {
                 ActionInput::Form(values) => {
@@ -4116,7 +4136,7 @@ mod form_contract_tests {
         values.insert("urgent".to_string(), "true".to_string());
 
         let outcome = node
-            .execute("edit", ActionInput::Form(values))
+            .execute("edit", ActionInput::Form(values), &Default::default())
             .await
             .unwrap();
         assert!(matches!(outcome, ActionOutcome::Done { .. }));

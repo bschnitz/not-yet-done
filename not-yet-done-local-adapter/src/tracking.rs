@@ -80,7 +80,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
     ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket, GroupSpec, HostContext,
     HostEvent, InputSpec, Invalidation, MarkedNode, Metadata, MetadataField, Node, NodeAction,
@@ -2275,7 +2275,7 @@ impl Node for TrackingEntryNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             // Reached via the generic `DeleteSelf` confirm flow, which calls
             // `execute("delete")` after the user confirms.

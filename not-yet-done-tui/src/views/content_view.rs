@@ -7490,6 +7490,10 @@ impl ContentPane {
                 };
                 if let Some(id) = node_id {
                     let action_id = action.id.clone().unwrap_or_else(|| "edit_full".into());
+                    let args = match self.expand_action_args(action, Some(&id), view_defs) {
+                        Ok(args) => args,
+                        Err(msg) => return SubViewMessage::Request(ViewRequest::Notify(msg)),
+                    };
                     return SubViewMessage::Request(ViewRequest::OpenContentEditor {
                         view_index,
                         pane_id,
@@ -7498,6 +7502,7 @@ impl ContentPane {
                         label: action.name().to_string(),
                         editor_profile: action.editor.clone(),
                         commit_on_save: action.commit_on_save,
+                        args,
                     });
                 }
             }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::DateTime;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
     InputSpec, Metadata, MetadataField, Node, NodeAction, NodeType, Result,
 };
@@ -375,7 +375,7 @@ impl Node for StoatMessageNode {
         })
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if self.deleted {
             return Err(Self::deleted_err());
         }
@@ -395,6 +395,7 @@ impl Node for StoatMessageNode {
                     version: String::new(),
                     suffix: ".md".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -419,7 +420,7 @@ impl Node for StoatMessageNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         // Nothing behind a tombstone to edit, delete, react to or download.
         if self.deleted {
             return Err(Self::deleted_err());
@@ -611,9 +612,9 @@ mod tests {
         assert!(!state.read().await.is_channel_unread("C1"));
 
         // Nothing behind the row to act on.
-        assert!(node.prepare("edit_message").await.is_err());
+        assert!(node.prepare("edit_message", &Default::default()).await.is_err());
         assert!(
-            node.execute("delete_message", ActionInput::None)
+            node.execute("delete_message", ActionInput::None, &Default::default())
                 .await
                 .is_err()
         );
@@ -689,7 +690,7 @@ mod tests {
         // No header is added — Markdown messages may start with `#`, which
         // a header-strip would eat. The template is the verbatim body.
         let node = StoatMessageNode::new(test_client(), sample_view(), no_users(), no_state());
-        let prep = node.prepare("edit_message").await.unwrap();
+        let prep = node.prepare("edit_message", &Default::default()).await.unwrap();
         assert_eq!(prep.template, "line one\nline two");
         assert_eq!(prep.suffix, ".md");
         assert!(prep.version.is_empty());
@@ -706,6 +707,7 @@ mod tests {
                     original: "line one\nline two".into(),
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -775,7 +777,7 @@ mod tests {
             users_with_alice(),
             no_state(),
         );
-        let prep = node.prepare("edit_message").await.unwrap();
+        let prep = node.prepare("edit_message", &Default::default()).await.unwrap();
         // The wire `<@ID>` becomes a `@uu_…` slug in the buffer …
         assert!(prep.template.starts_with("hi @uu_alice"));
         // … and the CACHE section advertises it.
@@ -793,7 +795,7 @@ mod tests {
             users_with_alice(),
             no_state(),
         );
-        let prep = node.prepare("edit_message").await.unwrap();
+        let prep = node.prepare("edit_message", &Default::default()).await.unwrap();
         let outcome = node
             .execute(
                 "edit_message",
@@ -802,6 +804,7 @@ mod tests {
                     original: prep.template,
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -930,6 +933,7 @@ mod tests {
                     original: "hi <@01AAA>".into(),
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await;
         match result {

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use not_yet_done_content::{ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec};
+use not_yet_done_content::{ActionArgs, ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec};
 
 use crate::views::content_view::PaneId;
 
@@ -39,6 +39,11 @@ pub struct NodeActionEditSession {
     /// Persistent editor file requested by the adapter's `prepare`
     /// ([`EditorPrep::file_path`]). `None` → classic temp-file editing.
     file_path: Option<std::path::PathBuf>,
+    /// The binding's named arguments, checked against the action's declared
+    /// parameters once at construction; every `prepare`/`execute` of this
+    /// session — the first, each `:w` under `commit_on_save`, the retarget
+    /// after a create — sees the same set.
+    args: ActionArgs,
     label: String,
     nav: Option<NavContext>,
     reload: Option<ReloadTarget>,
@@ -72,18 +77,31 @@ impl NodeActionEditSession {
         reload: Option<ReloadTarget>,
         editor_profile: Option<String>,
         commit_on_save: bool,
+        args: ActionArgs,
     ) -> Result<Self, ContentError> {
         let node = adapter.get_by_id(&node_id).await?;
-        if !adapter
+        let Some(declared) = adapter
             .actions_for_type(node.node_type())
-            .iter()
-            .any(|a| a.id == action_id)
-        {
+            .into_iter()
+            .find(|a| a.id == action_id)
+        else {
             return Err(ContentError::NotSupported(format!(
                 "action `{action_id}` not available on this node"
             )));
-        }
-        let prep = node.prepare(&action_id).await?;
+        };
+        // Checked once, here: a missing required argument or a wrong kind
+        // costs a message before `$EDITOR` ever opens, not a half-prepared
+        // buffer.
+        let args = not_yet_done_content::resolve_args(&declared.params, &args).map_err(|problems| {
+            ContentError::Other(
+                format!(
+                    "action `{action_id}`: {}",
+                    not_yet_done_content::describe_problems(&problems)
+                )
+                .into(),
+            )
+        })?;
+        let prep = node.prepare(&action_id, &args).await?;
         Ok(Self {
             adapter,
             node_id,
@@ -93,6 +111,7 @@ impl NodeActionEditSession {
             version: prep.version,
             suffix: prep.suffix,
             file_path: prep.file_path,
+            args,
             label,
             nav,
             reload,
@@ -158,7 +177,7 @@ impl EditSession for NodeActionEditSession {
             version: self.version.clone(),
         };
 
-        match node.execute(&self.action_id, input).await {
+        match node.execute(&self.action_id, input, &self.args).await {
             Ok(ActionOutcome::Done { message }) => {
                 self.mark_applied(text);
                 let msg = message.unwrap_or_else(|| format!("{} updated", self.node_id));
@@ -294,7 +313,7 @@ impl NodeActionEditSession {
         };
         self.node_id = new_id;
         self.action_id = edit_id;
-        if let Ok(prep) = node.prepare(&self.action_id).await {
+        if let Ok(prep) = node.prepare(&self.action_id, &self.args).await {
             self.version = prep.version;
         }
     }
@@ -419,18 +438,20 @@ mod tests {
         fn metadata(&self) -> &Metadata {
             &self.meta
         }
-        async fn prepare(&self, _action_id: &str) -> ContentResult<EditorPrep> {
+        async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
                 template: String::new(),
                 version: "v1".into(),
                 suffix: ".md".into(),
                 file_path: None,
+                args: Default::default(),
             })
         }
         async fn execute(
             &mut self,
             action_id: &str,
             input: ActionInput,
+            _args: &ActionArgs,
         ) -> ContentResult<ActionOutcome> {
             let ActionInput::Edited { text, .. } = input else {
                 unreachable!("mock only handles editor input");
@@ -468,6 +489,7 @@ mod tests {
             None,
             None,
             commit_on_save,
+            Default::default(),
         )
         .await
         .expect("session builds");
@@ -536,6 +558,7 @@ mod tests {
             }),
             None,
             false,
+            Default::default(),
         )
         .await
         .expect("session builds");
@@ -581,6 +604,7 @@ mod tests {
             }),
             None,
             false,
+            Default::default(),
         )
         .await
         .expect("session builds");
@@ -653,18 +677,20 @@ mod tests {
         fn metadata(&self) -> &Metadata {
             &self.meta
         }
-        async fn prepare(&self, _action_id: &str) -> ContentResult<EditorPrep> {
+        async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
                 template: "orig".into(),
                 version: "v1".into(),
                 suffix: ".md".into(),
                 file_path: None,
+                args: Default::default(),
             })
         }
         async fn execute(
             &mut self,
             _action_id: &str,
             _input: ActionInput,
+            _args: &ActionArgs,
         ) -> ContentResult<ActionOutcome> {
             Ok(ActionOutcome::Reopen {
                 content: "merged".into(),
@@ -689,6 +715,7 @@ mod tests {
             None,
             None,
             false,
+            Default::default(),
         )
         .await
         .expect("session builds");

@@ -89,8 +89,10 @@ Declaring rather than passing an untyped bag buys three things:
 ```yaml
 - key: e e
   id: edit_markdown
+  type: edit
   args:
-    buffer: "{workspace}/{node_id}/ticket.edit.md"
+    workspace: "{workspace}/tickets"
+    buffer: ticket.edit.md
 ```
 
 Runtime supply is `--arg k=v` on the CLI (repeatable; the name is free, no
@@ -131,12 +133,12 @@ args map so an adapter can _answer_ with named data instead of the framework
 growing a field per case.
 
 This is what makes the editor-file question answerable without inventing a
-second templating language. The adapter says `buffer_name: "ticket.edit.md"`
-and keeps its veto on the directory (Jira's buffer must sit next to
-`attachments/` or its image links break); the frontend resolves the location
-from config. One place still computes the final path, and it is still the place
-that creates the folder — the invariant whose absence let an export overwrite
-an open editor buffer.
+second templating language. The binding says where (`workspace`) and what the
+file is called (`buffer`); the adapter keeps its veto on the directory (Jira's
+buffer must sit next to `attachments/` or its image links break) and answers
+with the folder it chose (`EditorPrep::args["ticket_dir"]`). One place still
+computes the final path, and it is still the place that creates the folder —
+the invariant whose absence let an export overwrite an open editor buffer.
 
 ## Where the line is
 
@@ -158,21 +160,26 @@ something else_? The second is an arg.
 
 ## Phases
 
-Phases 1 to 3 are implemented. Building them made one thing explicit that the
-design above had left implicit: arguments reach an adapter through
-`ActionContext`, and only
-`invoke_action` receives one — `prepare` and `execute` take an _input_, not a
-context. So `--arg` serves the dispatch path today, and the editor path gets
-its arguments in phase 4, where a context (or an args parameter) joins
-`prepare`. That is the same phase that gives `EditorPrep` its own args, so the
-two halves of the editor-file question land together.
+All four phases are implemented. Building the first three made one thing
+explicit that the design above had left implicit: `ActionContext` reaches only
+`invoke_action`, while `prepare` and `execute` take an _input_, not a context.
+Phase 4 therefore gave them an `args: &ActionArgs` parameter of their own
+rather than a context — the editor path has no use for `marked`, `confirmed`
+or `query`, and a second context type would have been a field per case in
+disguise. The TUI's editor session resolves the arguments once, before
+`$EDITOR` opens, and hands the same set to every `prepare`/`execute` of that
+session, including the saves a `commit_on_save` editor makes and the re-prepare
+after a create retargets. What still passes an empty set: `type: create`
+bindings, the App's non-editor flows (delete, option menu, files, form, picker)
+and the create-child paths — the `args:` block is refused there at load until
+one of them needs it.
 
-| #   | what                                                                                                                                                                                                                                                                                                                  |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **done.** `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move — on the `invoke_action` path.                                                                                                                                                                   |
-| 2   | **done.** `ParamSpec`, `ArgKind`, `NodeAction::params`, `resolve_args` (collects every problem, normalises to the declared type), CLI validation before anything runs, and both help views print the parameters.                                                                                                      |
-| 3   | **done.** View YAML `args:` on `ActionDef` (each value keeps its YAML type), placeholders (`{node_id}`, `{node_type}`, `{cell:<key>}`, `{query}`, `{workspace}`) expanded on the parsed value, validation at the TUI's dispatch point and in the host's hooks (`with.args`), and the arguments ride the confirm loop. |
-| 4   | Arguments into `prepare`/`execute`, and the return direction: args on `EditorPrep` and `ActionDispatch::OpenEditor`; the Jira editor file uses it.                                                                                                                                                                    |
+| #   | what                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **done.** `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move — on the `invoke_action` path.                                                                                                                                                                                                                                                                                                         |
+| 2   | **done.** `ParamSpec`, `ArgKind`, `NodeAction::params`, `resolve_args` (collects every problem, normalises to the declared type), CLI validation before anything runs, and both help views print the parameters.                                                                                                                                                                                                                                            |
+| 3   | **done.** View YAML `args:` on `ActionDef` (each value keeps its YAML type), placeholders (`{node_id}`, `{node_type}`, `{cell:<key>}`, `{query}`, `{workspace}`) expanded on the parsed value, validation at the TUI's dispatch point and in the host's hooks (`with.args`), and the arguments ride the confirm loop.                                                                                                                                       |
+| 4   | **done.** `prepare(action_id, args)` / `execute(action_id, input, args)` on `Node`; `EditorPrep::args` and `ActionDispatch::OpenEditor { session_kind, args }` for the return direction (Postgres and the SQL-core script nodes answer `database`/`schema`/`script` that way); `--arg` reaches every `InputSpec`; `type: edit` bindings take `args:`; Jira's `edit_markdown` declares `workspace` (path) and `buffer` (text) and answers with `ticket_dir`. |
 
 ## Sources
 

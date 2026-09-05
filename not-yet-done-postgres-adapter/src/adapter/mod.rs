@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterStatus,
     ContentAdapter, ContentError, CursorIntent, CustomQueryContext, CustomQueryResult, EditorPrep,
     InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeRef,
@@ -1660,15 +1660,14 @@ impl Node for TableNode {
         match name {
             "edit_sql" => Ok(ActionDispatch::OpenEditor {
                 session_kind: "query_editor".into(),
-                // Params are informational — the TUI uses `node_id`
+                // The args are informational — the TUI uses `node_id`
                 // (the TableNode's path id) to address the editor.
                 // We pass the parts back too so future session_kinds
                 // could read them without re-parsing.
-                params: std::collections::HashMap::from([
-                    ("database".into(), self.database.clone()),
-                    ("schema".into(), self.schema.clone()),
-                    ("table".into(), self.name.clone()),
-                ]),
+                args: ActionArgs::new()
+                    .with("database", self.database.clone())
+                    .with("schema", self.schema.clone())
+                    .with("table", self.name.clone()),
             }),
             other => Err(ContentError::NotSupported(format!(
                 "table node action '{other}' is not supported"
@@ -1678,7 +1677,7 @@ impl Node for TableNode {
 
     /// A table's only editor action is adding a row — the query editor is
     /// `edit_sql`, which goes through `invoke_action` above.
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a table has no editor action `{action_id}`"
@@ -1687,7 +1686,7 @@ impl Node for TableNode {
         self.new_row().prepare().await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a table has no editor action `{action_id}`"
@@ -1831,6 +1830,7 @@ impl NewRow<'_> {
             version: String::new(),
             suffix: ".yaml".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -2006,7 +2006,7 @@ impl Node for RowNode {
     /// `version` token carries both the cell values (to detect a concurrent
     /// change on save) and the key values (so the `UPDATE` addresses the row
     /// that was actually shown, not whatever now sits at the same offset).
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().prepare().await;
         }
@@ -2045,6 +2045,7 @@ impl Node for RowNode {
             version: row_edit::version_token(&read.key_values, &row),
             suffix: ".yaml".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -2054,7 +2055,7 @@ impl Node for RowNode {
     /// from a good one. When the statement itself is refused, the statement
     /// is shown next to the complaint — a type or constraint error is far
     /// easier to place with the `UPDATE` in front of you.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().execute(input).await;
         }
@@ -2324,11 +2325,10 @@ impl Node for ViewNode {
             // the same way, so `Q` has to work the same way.
             "edit_sql" => Ok(ActionDispatch::OpenEditor {
                 session_kind: "query_editor".into(),
-                params: std::collections::HashMap::from([
-                    ("database".into(), self.database.clone()),
-                    ("schema".into(), self.schema.clone()),
-                    ("table".into(), self.name.clone()),
-                ]),
+                args: ActionArgs::new()
+                    .with("database", self.database.clone())
+                    .with("schema", self.schema.clone())
+                    .with("table", self.name.clone()),
             }),
             // `edit_view` is an `InputSpec::Editor` action and never
             // arrives here: it goes through `prepare`/`execute` below.
@@ -2342,7 +2342,7 @@ impl Node for ViewNode {
     /// `version` is that same text — so a concurrent change is detectable
     /// by comparison alone, without a modification timestamp postgres does
     /// not keep for a relation.
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().prepare().await;
         }
@@ -2360,6 +2360,7 @@ impl Node for ViewNode {
             version: definition,
             suffix: ".sql".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -2367,7 +2368,7 @@ impl Node for ViewNode {
     /// than failing the action: the user's text is the only copy of what
     /// they wrote, and a rejected definition is usually one edit away from
     /// a good one.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().execute(input).await;
         }
@@ -2907,6 +2908,7 @@ mod db_script_tree_tests {
                     original: String::new(),
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await
             .expect("an empty buffer is not an error");
@@ -2925,7 +2927,7 @@ mod db_script_tree_tests {
             "users".into(),
             Arc::clone(&adapter.client),
         );
-        let message = match table.prepare("edit_row").await {
+        let message = match table.prepare("edit_row", &Default::default()).await {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a table has no row editor"),
         };
@@ -3075,6 +3077,7 @@ mod db_script_tree_tests {
                         original: stored.to_string(),
                         version: stored.to_string(),
                     },
+                    &Default::default(),
                 )
                 .await
                 .expect("a rejected save is an outcome, not an error")
@@ -3140,6 +3143,7 @@ mod db_script_tree_tests {
                     original: stored.to_string(),
                     version: stored.to_string(),
                 },
+                &Default::default(),
             )
             .await
             .expect("outcome");
@@ -3230,7 +3234,7 @@ mod db_script_tree_tests {
     async fn a_row_answers_only_its_own_editor_action() {
         let (adapter, tmp) = build_adapter();
         let mut node = users_row(&adapter, 0);
-        assert!(node.prepare("edit_full").await.is_err());
+        assert!(node.prepare("edit_full", &Default::default()).await.is_err());
         assert!(
             node.execute(
                 "edit_full",
@@ -3239,6 +3243,7 @@ mod db_script_tree_tests {
                     original: String::new(),
                     version: String::new(),
                 },
+                &Default::default(),
             )
             .await
             .is_err()
@@ -3261,6 +3266,7 @@ mod db_script_tree_tests {
                     original: String::new(),
                     version: "not a token".into(),
                 },
+                &Default::default(),
             )
             .await;
         assert!(outcome.is_err(), "a lost session cannot be saved");
@@ -3291,6 +3297,7 @@ mod db_script_tree_tests {
                         original: String::new(),
                         version: version.clone(),
                     },
+                    &Default::default(),
                 )
                 .await
                 .expect("a rejected save is an outcome, not an error");
@@ -3325,6 +3332,7 @@ mod db_script_tree_tests {
                     original: String::new(),
                     version: row_edit::version_token(&keys, &row),
                 },
+                &Default::default(),
             )
             .await
             .expect("outcome");

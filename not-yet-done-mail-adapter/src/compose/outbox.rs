@@ -187,6 +187,7 @@ impl Outbox {
             version: String::new(),
             suffix: ".md".to_string(),
             file_path: Some(path),
+            args: Default::default(),
         })
     }
 

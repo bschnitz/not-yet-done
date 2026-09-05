@@ -66,6 +66,7 @@ impl TaigaItemNode {
             version: self.detail.version.to_string(),
             suffix: ".md".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 

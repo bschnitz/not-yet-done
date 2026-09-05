@@ -40,10 +40,9 @@
 //! Picker      → --value <v>
 //! FilePicker  → --file <path>  (repeatable)
 //! None        → invoke_action; ctx fed from --value / --text / --query / --yes
-//! (any)       → --arg k=v  (repeatable): named arguments. They reach the
-//!               adapter through `ActionContext`, so today that is the
-//!               `None` row above — `prepare`/`execute` take an input, not
-//!               a context, and gain one when the editor path needs it.
+//! (any)       → --arg k=v  (repeatable): named arguments. Every row above
+//!               takes them: the `None` row through `ActionContext::args`,
+//!               the others as the `args` parameter of `prepare`/`execute`.
 //! ```
 //!
 //! For `InputSpec::None` actions the returned [`ActionDispatch`] is handled
@@ -131,9 +130,10 @@ struct Invocation {
     /// `--text`: `ActionContext::text` (typed free text, e.g. a new tag name).
     text: Option<String>,
     /// `--arg k=v` (repeatable): named arguments for the action, delivered as
-    /// [`ActionContext::args`]. Unlike `--field` (which answers a form the
-    /// adapter asked for) these are the action's own parameters, and they
-    /// travel whatever the action's `InputSpec` happens to be. Everything
+    /// [`ActionContext::args`] on the dispatch path and as the `args` of
+    /// `prepare`/`execute` on every other. Unlike `--field` (which answers a
+    /// form the adapter asked for) these are the action's own parameters, and
+    /// they travel whatever the action's `InputSpec` happens to be. Everything
     /// arrives as [`ArgValue::Text`] — a command line cannot tell `007` from
     /// the number 7, so the type is the reader's business, never the parser's.
     /// A repeated key wins over the earlier one.
@@ -1245,20 +1245,14 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
                 not_yet_done_content::describe_problems(&problems)
             )
         })?;
-    // Arguments reach an adapter through `ActionContext`, and only
-    // `invoke_action` is handed one. Saying so beats accepting `--arg` on an
-    // editor action and quietly dropping it.
-    if !action_args.is_empty() && !matches!(action.input, InputSpec::None) {
-        return Err(anyhow!(
-            "action '{action_id}' takes its input through {}, and named arguments reach only \
-             dispatch actions so far — see docs/plan-action-args.md",
-            input_shape_name(&action.input)
-        ));
-    }
-
+    // Every input shape takes them: the dispatch path through
+    // `ActionContext`, the editor/form/picker/file paths straight into
+    // `prepare` and `execute`.
     match action.input {
-        InputSpec::Editor => do_editor(node.as_mut(), &action_id, inv).await,
-        InputSpec::Form { fields } => do_form(node.as_mut(), &action_id, &fields, inv).await,
+        InputSpec::Editor => do_editor(node.as_mut(), &action_id, inv, &action_args).await,
+        InputSpec::Form { fields } => {
+            do_form(node.as_mut(), &action_id, &fields, inv, &action_args).await
+        }
         InputSpec::ColumnForm => {
             // Fields are the columns the adapter describes for this node's
             // type; map them the same way every front-end does, then reuse the
@@ -1270,10 +1264,12 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
                 .iter()
                 .map(|c| c.to_form_field())
                 .collect();
-            do_form(node.as_mut(), &action_id, &fields, inv).await
+            do_form(node.as_mut(), &action_id, &fields, inv, &action_args).await
         }
-        InputSpec::Picker => do_picker(node.as_mut(), &action_id, inv).await,
-        InputSpec::FilePicker { multi } => do_files(node.as_mut(), &action_id, multi, inv).await,
+        InputSpec::Picker => do_picker(node.as_mut(), &action_id, inv, &action_args).await,
+        InputSpec::FilePicker { multi } => {
+            do_files(node.as_mut(), &action_id, multi, inv, &action_args).await
+        }
         InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv, action_args).await,
     }
 }
@@ -1330,9 +1326,14 @@ fn edited_text(prep: &EditorPrep, inv: &Invocation) -> Result<String> {
 /// inline value; `--file <path>` reads that file; otherwise `$EDITOR` is
 /// launched. The stdin/file paths make it practical to feed a whole document
 /// (e.g. `jira do from_markdown KEY --file ticket.md`) without shell-quoting it.
-async fn do_editor(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+async fn do_editor(
+    node: &mut dyn Node,
+    action_id: &str,
+    inv: &Invocation,
+    args: &ActionArgs,
+) -> Result<()> {
     let prep = node
-        .prepare(action_id)
+        .prepare(action_id, args)
         .await
         .with_context(|| format!("preparing editor for '{action_id}'"))?;
     let text = edited_text(&prep, inv)?;
@@ -1341,7 +1342,7 @@ async fn do_editor(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Re
         original: prep.template,
         version: prep.version,
     };
-    let outcome = node.execute(action_id, input).await?;
+    let outcome = node.execute(action_id, input, args).await?;
     report_outcome(outcome, action_id)
 }
 
@@ -1353,10 +1354,13 @@ async fn do_form(
     action_id: &str,
     specs: &[FormFieldSpec],
     inv: &Invocation,
+    args: &ActionArgs,
 ) -> Result<()> {
     let prep = node.form_prep(action_id).await.unwrap_or_default();
     let values = form_values(prep, specs, inv)?;
-    let outcome = node.execute(action_id, ActionInput::Form(values)).await?;
+    let outcome = node
+        .execute(action_id, ActionInput::Form(values), args)
+        .await?;
     report_outcome(outcome, action_id)
 }
 
@@ -1396,11 +1400,18 @@ fn form_values(
 /// not adapter state, so `values` (which is [`ContentAdapter::list_values`],
 /// one level up) cannot answer the question. This is the same call the TUI
 /// makes to fill its selection popup, so both frontends show the same list.
-async fn do_picker(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+async fn do_picker(
+    node: &mut dyn Node,
+    action_id: &str,
+    inv: &Invocation,
+    args: &ActionArgs,
+) -> Result<()> {
     let Some(value) = inv.value.clone() else {
         return list_picker_options(node, action_id, inv).await;
     };
-    let outcome = node.execute(action_id, ActionInput::Picked(value)).await?;
+    let outcome = node
+        .execute(action_id, ActionInput::Picked(value), args)
+        .await?;
     report_outcome(outcome, action_id)
 }
 
@@ -1437,6 +1448,7 @@ async fn do_files(
     action_id: &str,
     multi: bool,
     inv: &Invocation,
+    args: &ActionArgs,
 ) -> Result<()> {
     if inv.files.is_empty() {
         return Err(anyhow!(
@@ -1447,7 +1459,7 @@ async fn do_files(
         return Err(anyhow!("action '{action_id}' accepts only one --file"));
     }
     let outcome = node
-        .execute(action_id, ActionInput::Files(inv.files.clone()))
+        .execute(action_id, ActionInput::Files(inv.files.clone()), args)
         .await?;
     report_outcome(outcome, action_id)
 }
@@ -1481,7 +1493,7 @@ async fn do_dispatch(
         // `export-bundle` do their work in `execute`, not `invoke_action`.
         // Fall back to it so those are CLI-invocable too; a genuinely
         // no-op action (no `execute` arm) still reports "ok (no change)".
-        ActionDispatch::Noop => match node.execute(action_id, ActionInput::None).await {
+        ActionDispatch::Noop => match node.execute(action_id, ActionInput::None, &ctx.args).await {
             Ok(outcome) => report_outcome(outcome, action_id),
             Err(ContentError::NotSupported(_)) => {
                 println!("ok (no change)");
@@ -1508,7 +1520,9 @@ async fn do_dispatch(
                 let prompt = confirm.unwrap_or_else(|| format!("Delete '{}'? (y/n)", node.label()));
                 return Err(anyhow!("{prompt}\n  (re-run with --yes to confirm)"));
             }
-            let outcome = node.execute(action_id, ActionInput::None).await?;
+            let outcome = node
+                .execute(action_id, ActionInput::None, &ctx.args)
+                .await?;
             report_outcome(outcome, action_id)
         }
         // A set of node references — a search, a lookup. Nothing
@@ -2267,6 +2281,7 @@ mod tests {
             version: String::new(),
             suffix: ".md".into(),
             file_path: Some(dir.join("drafts").join("reply.md")),
+            args: Default::default(),
         }
     }
 
@@ -2321,6 +2336,7 @@ mod tests {
             version: String::new(),
             suffix: ".md".into(),
             file_path: None,
+            args: Default::default(),
         };
         let inv = inv_from(&["nyd", "adapter", "mail", "reply", "-m", "my answer"]);
         assert_eq!(edited_text(&prep, &inv).unwrap(), "my answer");

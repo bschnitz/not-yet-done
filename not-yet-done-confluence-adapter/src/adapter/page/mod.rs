@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
     InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
     NodeType, PageInfo, PageRequest, Result,
@@ -595,7 +595,7 @@ impl Node for ConfluencePageNode {
         )))
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit" => self.prepare_edit().await,
             "create-child" => self.prepare_create_child().await,
@@ -619,7 +619,7 @@ impl Node for ConfluencePageNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open-in-browser", ActionInput::None) => self.open_via_xdg().await,
             (
@@ -902,7 +902,7 @@ mod tests {
             "https://wiki.example.invalid",
             sample_page(),
         );
-        match node.execute("nope", ActionInput::None).await {
+        match node.execute("nope", ActionInput::None, &Default::default()).await {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }
@@ -926,7 +926,7 @@ mod tests {
         };
         let mut node =
             ConfluencePageNode::new(synthetic_client(), "https://wiki.example.invalid", page);
-        match node.execute("open-in-browser", ActionInput::None).await {
+        match node.execute("open-in-browser", ActionInput::None, &Default::default()).await {
             Err(_) => {}
             Ok(_) => panic!("empty webui must never spawn a browser"),
         }
