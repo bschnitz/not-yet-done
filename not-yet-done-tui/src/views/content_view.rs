@@ -38,8 +38,8 @@ use not_yet_done_table::{
 };
 
 use not_yet_done_content::{
-    AdapterStatus, AutoConnect, ContentAdapter, CursorIntent, GroupSpec, NodeSummary, PageInfo,
-    PageRequest, QueryKind, SortDirection, SortKey, Subtree, NodeHit,
+    AdapterStatus, AutoConnect, ContentAdapter, CursorIntent, GroupSpec, NodeHit, NodeSummary,
+    PageInfo, PageRequest, QueryKind, SortDirection, SortKey, Subtree,
 };
 
 use crate::active_surface::ActiveSurface;
@@ -407,6 +407,10 @@ pub struct ContentPane {
     view_def_index: usize,
     theme: Arc<Theme>,
     pub table: DataTable,
+    /// The adapter's per-instance data directory, what `{workspace}` in an
+    /// action's `args:` expands to. The pane holds no adapter, so the view
+    /// hands this down before it delegates a key or an action.
+    pub workspace: Option<std::path::PathBuf>,
 
     pub items: Vec<NodeSummary>,
     /// For a record-detail follower: what the *source* level's `highlights:`
@@ -1486,6 +1490,7 @@ impl ContentPane {
             view_def_index,
             theme,
             table,
+            workspace: None,
             images,
             items: Vec::new(),
             detail_paint: DetailPaint::default(),
@@ -3480,6 +3485,7 @@ impl ContentPane {
                 pane_id,
                 node_id,
                 action_name: action_name.to_string(),
+                args: Default::default(),
             }));
         }
         // Children of the entry's ChildDef — the candidates we may
@@ -4790,6 +4796,54 @@ impl ContentPane {
             }
         }
         false
+    }
+
+    /// Expand the `{placeholder}`s in an action's configured `args:` for the
+    /// row it is about to fire on. `target` is the id of the node the action
+    /// addresses (`None` for a container action, whose root id the pane does
+    /// not know). `{node_type}` and `{cell:<key>}` always read the selected
+    /// row, `{query}` the pane's active query text (empty when none) and
+    /// `{workspace}` the adapter's data directory. The error is the message
+    /// to show when a placeholder resolves to nothing: the action must not
+    /// run with a hole in its arguments.
+    fn expand_action_args(
+        &self,
+        action: &ActionDef,
+        target: Option<&str>,
+        view_defs: &[ViewDef],
+    ) -> Result<not_yet_done_content::ActionArgs, String> {
+        if action.args.is_empty() {
+            return Ok(Default::default());
+        }
+        let selected = self.selected_item();
+        let query = self.current_query_text(view_defs);
+        let workspace = self
+            .workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        action
+            .args
+            .expand(|name| match name {
+                "node_id" => target.map(str::to_string),
+                "node_type" => selected.map(|s| s.node_type.type_id.clone()),
+                "query" => Some(query.trim().to_string()),
+                "workspace" => workspace.clone(),
+                other => other.strip_prefix("cell:").and_then(|key| {
+                    selected?
+                        .metadata
+                        .fields
+                        .iter()
+                        .find(|f| f.key == key)
+                        .map(|f| f.value.clone())
+                }),
+            })
+            .map_err(|problems| {
+                format!(
+                    "action '{}': {}",
+                    action.name(),
+                    not_yet_done_content::describe_problems(&problems)
+                )
+            })
     }
 
     /// Resolve the `node_id` an adapter-routed action should target.
@@ -6995,6 +7049,7 @@ impl ContentPane {
                         pane_id,
                         node_id: item.id.clone(),
                         action_name: action_name.to_string(),
+                        args: Default::default(),
                     }));
                 }
                 let children = self.current_children(view_defs).to_vec();
@@ -7409,11 +7464,16 @@ impl ContentPane {
                     ActionTarget::Parent => self.selected_parent_node_id(),
                 };
                 if let Some(node_id) = node_id {
+                    let args = match self.expand_action_args(action, Some(&node_id), view_defs) {
+                        Ok(args) => args,
+                        Err(msg) => return SubViewMessage::Request(ViewRequest::Notify(msg)),
+                    };
                     return SubViewMessage::Request(ViewRequest::InvokeNodeAction {
                         view_index,
                         pane_id,
                         node_id,
                         action_name,
+                        args,
                     });
                 }
             }
@@ -7558,10 +7618,17 @@ impl ContentPane {
                 // the default `custom` still uses the popup/`execute` path.
                 if action.on_container {
                     if let Some(action_id) = &action.id {
+                        // The container's id is the adapter root's, which the
+                        // pane does not hold — `{node_id}` stays unresolved here.
+                        let args = match self.expand_action_args(action, None, view_defs) {
+                            Ok(args) => args,
+                            Err(msg) => return SubViewMessage::Request(ViewRequest::Notify(msg)),
+                        };
                         return SubViewMessage::Request(ViewRequest::InvokeContainerAction {
                             view_index,
                             pane_id,
                             action_name: action_id.clone(),
+                            args,
                         });
                     }
                     return SubViewMessage::Request(ViewRequest::Notify(format!(
@@ -7795,8 +7862,10 @@ impl ContentView {
         else {
             return SubViewMessage::Unhandled;
         };
-        self.active_pane_mut()
-            .execute_action(&action, view_index, pane_id, &view_defs)
+        let workspace = self.adapter.as_ref().map(|a| a.instance_data_dir());
+        let pane = self.active_pane_mut();
+        pane.workspace = workspace;
+        pane.execute_action(&action, view_index, pane_id, &view_defs)
     }
 
     pub fn new(
@@ -10179,6 +10248,7 @@ impl ContentView {
                 pane_id,
                 node_id,
                 action_name,
+                args: Default::default(),
             });
         }
         self.sync_action_bar_hints();
@@ -10384,8 +10454,7 @@ impl ContentView {
     /// what is *configured*, not whether the clock is currently running, so
     /// the bar keeps its width instead of twitching around every load.
     pub fn auto_reload_label(&self) -> Option<String> {
-        self.auto_reload
-            .map(not_yet_done_host::format_interval)
+        self.auto_reload.map(not_yet_done_host::format_interval)
     }
 
     /// When this tab is next due for an automatic reload, or `None` if it
@@ -10992,14 +11061,14 @@ impl ContentView {
         // Selection row before the key, so the mark-read hook can tell an
         // arrival at the last row from a key pressed while already there.
         let before_row = self.focused_pane_selected_row();
+        let workspace = self.adapter.as_ref().map(|a| a.instance_data_dir());
         let msg = {
             let view_defs = &self.view_defs;
             let common_kb = &self.common_kb;
             let content_kb = &self.content_kb;
-            self.pane_trees[self.active_subtab]
-                .focused_leaf_mut()
-                .pane
-                .handle_key(key, view_index, pane_id, view_defs, common_kb, content_kb)
+            let pane = &mut self.pane_trees[self.active_subtab].focused_leaf_mut().pane;
+            pane.workspace = workspace;
+            pane.handle_key(key, view_index, pane_id, view_defs, common_kb, content_kb)
         };
         if let SubViewMessage::ContentDrill {
             item_id,
@@ -11050,6 +11119,7 @@ impl ContentView {
                 pane_id,
                 node_id,
                 action_name,
+                args: Default::default(),
             });
         }
     }
@@ -14969,6 +15039,7 @@ mod tests {
                     id: None,
                     target: Default::default(),
                     node_id_from: None,
+                    args: Default::default(),
                     navigate_to: None,
                     fuzzy_filter: None,
                     search: None,
@@ -15636,6 +15707,7 @@ mod tests {
             id: Some("create_channel".into()),
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -18978,6 +19050,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
                 fields: Vec::new(),
@@ -19664,6 +19737,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -19694,6 +19768,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: Some(crate::config::view_config::FuzzyFilterConfig {
                 fields: Vec::new(),
@@ -19728,6 +19803,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -19762,6 +19838,7 @@ mod tests {
             id: Some("inspect_schema".into()),
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -19862,6 +19939,7 @@ mod tests {
             id: Some("root_x".into()),
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -19895,6 +19973,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: Some(crate::config::view_config::SearchConfig {
@@ -19929,6 +20008,7 @@ mod tests {
             id: Some("child_x".into()),
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -21183,6 +21263,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -21228,6 +21309,7 @@ mod tests {
             id: Some("add".into()),
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -21268,6 +21350,62 @@ mod tests {
     }
 
     #[test]
+    fn node_action_args_expand_placeholders_on_the_parsed_value() {
+        // A node binding's `args:` ride the InvokeNodeAction with every
+        // placeholder resolved from the selected row; a non-text value keeps
+        // the type the YAML parser gave it instead of becoming a string.
+        let mut config = test_config_with_children();
+        let action: ActionDef = serde_yaml::from_str(
+            r#"{ key: x, id: export, args: { ticket: "{cell:key}", node: "{node_id}", kind: "{node_type}", limit: 20, all: true } }"#,
+        )
+        .unwrap();
+        config.views[0].actions.push(action);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let issues = mock_issues();
+        let type_id = issues[0].node_type.type_id.clone();
+        view.set_items(issues, Vec::new(), None, Vec::new(), None);
+        match view.handle_key("x") {
+            SubViewMessage::Request(ViewRequest::InvokeNodeAction {
+                node_id,
+                action_name,
+                args,
+                ..
+            }) => {
+                assert_eq!(node_id, "ISS-1");
+                assert_eq!(action_name, "export");
+                assert_eq!(args.text("ticket").as_deref(), Some("ISS-1"));
+                assert_eq!(args.text("node").as_deref(), Some("ISS-1"));
+                assert_eq!(args.text("kind"), Some(type_id));
+                assert_eq!(args.int("limit"), Some(20));
+                assert_eq!(args.bool("all"), Some(true));
+            }
+            other => panic!("expected InvokeNodeAction with args, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn node_action_unresolved_placeholder_refuses_the_action() {
+        // A `{cell:…}` the row does not carry refuses the whole invocation
+        // with a notification — never an InvokeNodeAction with a hole in it.
+        let mut config = test_config_with_children();
+        let action: ActionDef =
+            serde_yaml::from_str(r#"{ key: x, id: export, args: { name: "{cell:nope}" } }"#)
+                .unwrap();
+        config.views[0].actions.push(action);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        match view.handle_key("x") {
+            SubViewMessage::Request(ViewRequest::Notify(msg)) => {
+                assert!(
+                    msg.contains("export") && msg.contains("{cell:nope}"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected a Notify, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn script_action_shows_in_action_bar() {
         // shows_in_action_bar() must return true for `type: script` so the
         // top action bar lists it alongside `edit` / `create` / etc.
@@ -21279,6 +21417,7 @@ mod tests {
             id: None,
             target: Default::default(),
             node_id_from: None,
+            args: Default::default(),
             navigate_to: None,
             fuzzy_filter: None,
             search: None,
@@ -21537,8 +21676,7 @@ mod tests {
         second.name = "Second".into();
         second.default = false;
         config.views.push(second);
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
 
         view.set_auth_status_for(
             1,
@@ -21918,6 +22056,7 @@ mod tests {
                 id: None,
                 target: Default::default(),
                 node_id_from: None,
+                args: Default::default(),
                 navigate_to: None,
                 fuzzy_filter: None,
                 search: None,
@@ -25439,6 +25578,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     id: Some("edit_full".into()),
                     target: Default::default(),
                     node_id_from: None,
+                    args: Default::default(),
                     navigate_to: None,
                     fuzzy_filter: None,
                     search: None,
@@ -25469,6 +25609,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     id: None,
                     target: Default::default(),
                     node_id_from: None,
+                    args: Default::default(),
                     navigate_to: None,
                     fuzzy_filter: None,
                     search: None,

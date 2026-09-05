@@ -2320,6 +2320,63 @@ actions:
 Because a node action is an ordinary `actions:` entry, its `key:` is a full
 key binding, so a chord such as `key: 'a d'` works here too.
 
+#### Handing the action data — `args:`
+
+A binding can give the action **named arguments**. They reach the adapter as
+`ActionContext::args`, and when the adapter declares parameters for the action
+(`nyd <instance> help --full` lists them) the App checks the arguments against
+that declaration before anything runs: a missing required argument, an unknown
+key or a value of the wrong kind refuses the invocation with one message that
+names every problem. An action that declares no parameters takes what it is
+given. The block exists so that a binding can say _what_ an action works on
+without the framework growing a typed field per case — arguments carry data,
+action types carry behaviour.
+
+```yaml
+actions:
+  - key: x
+    id: export
+    args:
+      format: pdf # Text
+      limit: 20 # Int — `"20"` would be Text
+      include_closed: true # Bool
+      labels: [urgent, ops] # List of scalars
+      folder: "{workspace}/exports" # a placeholder, see below
+```
+
+Each value keeps the type the YAML parser gave it — nothing guesses a type
+from the shape of a string, so a quoted ticket key that happens to look like a
+number stays text. Maps, decimals, nested lists and `null` are refused when the
+view file loads (drop the key instead of writing `null`). YAML has no path
+type: a `path` parameter is written as a string, and the adapter's declaration
+turns it into one.
+
+Text values may carry **placeholders** that the TUI resolves from the row and
+pane the key was pressed on. Expansion happens on the parsed value, never on
+the YAML text, so a resolved value containing `#` or `:` cannot turn into a
+comment or a map on the way.
+
+| placeholder    | resolves to                                                    |
+| -------------- | -------------------------------------------------------------- |
+| `{node_id}`    | the id of the node the action targets (after `target: parent`) |
+| `{node_type}`  | the selected row's type id                                     |
+| `{cell:<key>}` | a metadata field of the selected row, by column key            |
+| `{query}`      | the pane's active query text (empty when none is applied)      |
+| `{workspace}`  | the adapter instance's data directory                          |
+
+A placeholder nothing resolves — an unknown name, a `{cell:…}` the row does
+not carry, `{workspace}` on an adapter without a data directory, `{node_id}`
+on an `on_container` action (there is no target node) — refuses the action
+with a notification instead of sending a value with a hole in it. Braces that
+do not form a placeholder (`{}`, `{1}`, `{a b}`) are left as they are.
+
+`args:` reaches `type: node` actions and `on_container` custom actions, the
+two that arrive at the adapter through `invoke_action`. On any other type it
+is a config error reported like every other view-file problem, not a key that
+silently does nothing. Lifecycle hooks take the same block as
+`with: { args: {…} }` (no placeholders there: a hook has no row), and the CLI
+has `--arg key=value`.
+
 #### Taking a key from a built-in — `force: true`
 
 A key that a built-in handler already claims (a global hotkey, a common

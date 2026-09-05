@@ -158,7 +158,7 @@ something else_? The second is an arg.
 
 ## Phases
 
-Phases 1 and 2 are implemented. Building them made one thing explicit that the
+Phases 1 to 3 are implemented. Building them made one thing explicit that the
 design above had left implicit: arguments reach an adapter through
 `ActionContext`, and only
 `invoke_action` receives one — `prepare` and `execute` take an _input_, not a
@@ -167,12 +167,12 @@ its arguments in phase 4, where a context (or an args parameter) joins
 `prepare`. That is the same phase that gives `EditorPrep` its own args, so the
 two halves of the editor-file question land together.
 
-| #   | what                                                                                                                                                                                                             |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **done.** `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move — on the `invoke_action` path.                                                              |
-| 2   | **done.** `ParamSpec`, `ArgKind`, `NodeAction::params`, `resolve_args` (collects every problem, normalises to the declared type), CLI validation before anything runs, and both help views print the parameters. |
-| 3   | View YAML `args:` on `ActionDef` plus placeholder expansion on the parsed value.                                                                                                                                 |
-| 4   | Arguments into `prepare`/`execute`, and the return direction: args on `EditorPrep` and `ActionDispatch::OpenEditor`; the Jira editor file uses it.                                                               |
+| #   | what                                                                                                                                                                                                                                                                                                                  |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **done.** `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move — on the `invoke_action` path.                                                                                                                                                                   |
+| 2   | **done.** `ParamSpec`, `ArgKind`, `NodeAction::params`, `resolve_args` (collects every problem, normalises to the declared type), CLI validation before anything runs, and both help views print the parameters.                                                                                                      |
+| 3   | **done.** View YAML `args:` on `ActionDef` (each value keeps its YAML type), placeholders (`{node_id}`, `{node_type}`, `{cell:<key>}`, `{query}`, `{workspace}`) expanded on the parsed value, validation at the TUI's dispatch point and in the host's hooks (`with.args`), and the arguments ride the confirm loop. |
+| 4   | Arguments into `prepare`/`execute`, and the return direction: args on `EditorPrep` and `ActionDispatch::OpenEditor`; the Jira editor file uses it.                                                                                                                                                                    |
 
 ## Sources
 

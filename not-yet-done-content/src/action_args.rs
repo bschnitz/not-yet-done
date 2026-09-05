@@ -258,6 +258,225 @@ impl<K: Into<String>, V: Into<ArgValue>> FromIterator<(K, V)> for ActionArgs {
     }
 }
 
+// ---------------------------------------------------------------------------
+// YAML
+// ---------------------------------------------------------------------------
+
+/// A YAML value becomes the [`ArgValue`] its **YAML type** names: a bare
+/// `true` is a [`ArgValue::Bool`], `20` an [`ArgValue::Int`], a quoted or
+/// unquoted string a [`ArgValue::Text`], a sequence of scalars an
+/// [`ArgValue::List`]. That is the parser's type, not a guess from the shape
+/// of a string: `"20"` in quotes stays text, and the declared parameter kind
+/// coerces it later if the action wants a number. A path is never produced
+/// here — YAML has no path type — so a `path` parameter arrives as text and
+/// is read as a path by [`ArgKind::Path`].
+///
+/// Maps, decimals and `null` are refused: an argument is a scalar or a list
+/// of scalars, and a key with no value is a key to leave out.
+impl<'de> serde::Deserialize<'de> for ArgValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ArgValueVisitor)
+    }
+}
+
+struct ArgValueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ArgValueVisitor {
+    type Value = ArgValue;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a string, a whole number, a boolean, or a list of those")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<ArgValue, E> {
+        Ok(ArgValue::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<ArgValue, E> {
+        Ok(ArgValue::Int(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<ArgValue, E> {
+        i64::try_from(v)
+            .map(ArgValue::Int)
+            .map_err(|_| E::custom(format!("{v} does not fit a 64-bit signed integer")))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<ArgValue, E> {
+        Err(E::custom(format!(
+            "{v} is a decimal; an argument carries a whole number or text (quote it to pass it as text)"
+        )))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<ArgValue, E> {
+        Ok(ArgValue::Text(v.to_string()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<ArgValue, E> {
+        Ok(ArgValue::Text(v))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<ArgValue, E> {
+        Err(E::custom(
+            "an argument carries a value; drop the key to leave it unset",
+        ))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<ArgValue, E> {
+        self.visit_unit()
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<ArgValue, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element::<ArgValue>()? {
+            match item.as_text() {
+                Some(text) => items.push(text),
+                None => {
+                    return Err(serde::de::Error::custom(
+                        "a list argument holds scalars, not nested lists",
+                    ));
+                }
+            }
+        }
+        Ok(ArgValue::List(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, _map: A) -> Result<ArgValue, A::Error> {
+        Err(serde::de::Error::custom(
+            "a mapping is not an argument value; an argument is a scalar or a list of scalars",
+        ))
+    }
+}
+
+/// A YAML mapping of names to values, in the order written.
+impl<'de> serde::Deserialize<'de> for ActionArgs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(ActionArgsVisitor)
+    }
+}
+
+struct ActionArgsVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ActionArgsVisitor {
+    type Value = ActionArgs;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a mapping of argument names to values")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ActionArgs, A::Error> {
+        let mut args = ActionArgs::new();
+        while let Some((key, value)) = map.next_entry::<String, ArgValue>()? {
+            if key.trim().is_empty() {
+                return Err(serde::de::Error::custom(
+                    "an argument name must not be empty",
+                ));
+            }
+            args.insert(key, value);
+        }
+        Ok(args)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Placeholders
+// ---------------------------------------------------------------------------
+
+impl ActionArgs {
+    /// Expand `{name}` placeholders in every text-bearing value — a
+    /// [`ArgValue::Text`], a [`ArgValue::Path`], each item of an
+    /// [`ArgValue::List`]; numbers and flags carry no text and pass through.
+    /// `resolve` answers a placeholder's name with its value, or `None` when
+    /// it knows no such name. Every unresolved placeholder becomes an
+    /// [`ArgProblem::Unresolved`] and the whole set is refused: a path with a
+    /// hole in it must not be silently created.
+    ///
+    /// This runs on the **parsed** value, never on YAML text. Substituting
+    /// into the raw file once turned a search string containing `#` into a
+    /// comment and produced a null query without a word of complaint.
+    ///
+    /// A placeholder is a `{`, a name, a `}`. A name starts with a letter or
+    /// an underscore and continues with letters, digits, `_`, `-`, `.` or
+    /// `:` — the colon is what lets `{cell:<key>}` address a field. Braces
+    /// around anything else (`{}`, `{ x }`, `{1}`) are not placeholders and
+    /// stay as they are.
+    pub fn expand(
+        &self,
+        resolve: impl Fn(&str) -> Option<String>,
+    ) -> Result<ActionArgs, Vec<ArgProblem>> {
+        let mut problems = Vec::new();
+        let mut out = ActionArgs::new();
+        for (key, value) in self.iter() {
+            let expanded = match value {
+                ArgValue::Text(s) => ArgValue::Text(expand_text(s, key, &resolve, &mut problems)),
+                ArgValue::Path(p) => ArgValue::Path(PathBuf::from(expand_text(
+                    &p.to_string_lossy(),
+                    key,
+                    &resolve,
+                    &mut problems,
+                ))),
+                ArgValue::List(items) => ArgValue::List(
+                    items
+                        .iter()
+                        .map(|s| expand_text(s, key, &resolve, &mut problems))
+                        .collect(),
+                ),
+                ArgValue::Int(_) | ArgValue::Bool(_) => value.clone(),
+            };
+            out.insert(key.clone(), expanded);
+        }
+        if problems.is_empty() {
+            Ok(out)
+        } else {
+            Err(problems)
+        }
+    }
+}
+
+/// Expand the placeholders in one string; each one nobody resolves is
+/// recorded against `key` and contributes nothing to the output.
+fn expand_text(
+    text: &str,
+    key: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+    problems: &mut Vec<ArgProblem>,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) if is_placeholder_name(&after[..close]) => {
+                let name = &after[..close];
+                match resolve(name) {
+                    Some(value) => out.push_str(&value),
+                    None => problems.push(ArgProblem::Unresolved {
+                        key: key.to_string(),
+                        placeholder: name.to_string(),
+                    }),
+                }
+                rest = &after[close + 1..];
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +687,9 @@ pub enum ArgProblem {
         expected: ArgKind,
         got: ArgValue,
     },
+    /// A `{placeholder}` in a configured value that nothing resolved (see
+    /// [`ActionArgs::expand`]).
+    Unresolved { key: String, placeholder: String },
 }
 
 impl std::fmt::Display for ArgProblem {
@@ -485,6 +707,10 @@ impl std::fmt::Display for ArgProblem {
                 "argument '{key}' expects {}, got {}",
                 expected.name(),
                 got.type_name()
+            ),
+            Self::Unresolved { key, placeholder } => write!(
+                f,
+                "argument '{key}': nothing resolves the placeholder {{{placeholder}}}"
             ),
         }
     }
@@ -643,5 +869,133 @@ mod param_tests {
         // Validating retroactively would break every adapter reading an
         // argument it never announced.
         assert_eq!(resolve_args(&[], &supplied).unwrap(), supplied);
+    }
+}
+
+#[cfg(test)]
+mod yaml_tests {
+    use super::*;
+
+    #[test]
+    fn a_yaml_value_has_the_parsers_type_not_a_guessed_one() {
+        let args: ActionArgs = serde_yaml::from_str(
+            "limit: 20\nforce: true\nbuild: \"007\"\ntags: [a, b]\nbuffer: ~/x.md\n",
+        )
+        .unwrap();
+
+        assert_eq!(args.get("limit"), Some(&ArgValue::Int(20)));
+        assert_eq!(args.get("force"), Some(&ArgValue::Bool(true)));
+        assert_eq!(args.get("build"), Some(&ArgValue::Text("007".into())));
+        assert_eq!(
+            args.get("tags"),
+            Some(&ArgValue::List(vec!["a".into(), "b".into()]))
+        );
+        // YAML has no path type: a path arrives as text and the declared
+        // parameter kind turns it into one.
+        assert_eq!(args.get("buffer"), Some(&ArgValue::Text("~/x.md".into())));
+    }
+
+    #[test]
+    fn the_order_written_is_the_order_kept() {
+        let args: ActionArgs = serde_yaml::from_str("z: 1\na: 2\nm: 3\n").unwrap();
+        assert_eq!(args.keys().collect::<Vec<_>>(), vec!["z", "a", "m"]);
+    }
+
+    #[test]
+    fn a_mapping_a_decimal_and_a_null_are_refused() {
+        let err = serde_yaml::from_str::<ActionArgs>("nested: {a: 1}\n").unwrap_err();
+        assert!(err.to_string().contains("mapping"), "{err}");
+
+        let err = serde_yaml::from_str::<ActionArgs>("ratio: 0.5\n").unwrap_err();
+        assert!(err.to_string().contains("decimal"), "{err}");
+
+        let err = serde_yaml::from_str::<ActionArgs>("unset: ~\n").unwrap_err();
+        assert!(err.to_string().contains("drop the key"), "{err}");
+    }
+
+    #[test]
+    fn a_list_holds_scalars_only() {
+        let err = serde_yaml::from_str::<ActionArgs>("tags: [[a], b]\n").unwrap_err();
+        assert!(err.to_string().contains("nested lists"), "{err}");
+
+        // Scalars of any kind are fine and become their text.
+        let args: ActionArgs = serde_yaml::from_str("ids: [1, true, x]\n").unwrap();
+        assert_eq!(
+            args.list("ids"),
+            Some(vec!["1".into(), "true".into(), "x".into()])
+        );
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    fn resolver(name: &str) -> Option<String> {
+        match name {
+            "node_id" => Some("ABC-1".into()),
+            "workspace" => Some("/data/jira".into()),
+            n => n.strip_prefix("cell:").and_then(|k| match k {
+                "summary" => Some("fix the thing".into()),
+                _ => None,
+            }),
+        }
+    }
+
+    #[test]
+    fn placeholders_expand_on_every_text_bearing_value() {
+        let args = ActionArgs::new()
+            .with(
+                "buffer",
+                ArgValue::path("{workspace}/{node_id}/ticket.edit.md"),
+            )
+            .with("title", "{node_id}: {cell:summary}")
+            .with(
+                "labels",
+                ArgValue::List(vec!["{node_id}".into(), "plain".into()]),
+            )
+            .with("limit", 20i64);
+
+        let out = args.expand(resolver).unwrap();
+
+        assert_eq!(
+            out.path("buffer"),
+            Some(PathBuf::from("/data/jira/ABC-1/ticket.edit.md"))
+        );
+        assert_eq!(out.text("title").as_deref(), Some("ABC-1: fix the thing"));
+        assert_eq!(
+            out.list("labels"),
+            Some(vec!["ABC-1".into(), "plain".into()])
+        );
+        assert_eq!(out.int("limit"), Some(20));
+    }
+
+    #[test]
+    fn an_unresolved_placeholder_refuses_the_whole_set() {
+        let args = ActionArgs::new()
+            .with("buffer", "{workspace}/{cell:missing}/x")
+            .with("other", "{nobody}");
+
+        let problems = args.expand(resolver).unwrap_err();
+
+        assert_eq!(problems.len(), 2);
+        assert_eq!(
+            problems[0],
+            ArgProblem::Unresolved {
+                key: "buffer".into(),
+                placeholder: "cell:missing".into()
+            }
+        );
+        assert_eq!(
+            problems[0].to_string(),
+            "argument 'buffer': nothing resolves the placeholder {cell:missing}"
+        );
+    }
+
+    #[test]
+    fn braces_around_anything_else_are_left_alone() {
+        let args = ActionArgs::new().with("fmt", "{} { x } {1} {node_id} {");
+        let out = args.expand(resolver).unwrap();
+        assert_eq!(out.text("fmt").as_deref(), Some("{} { x } {1} ABC-1 {"));
     }
 }

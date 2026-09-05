@@ -319,6 +319,7 @@ impl App {
                     target.toggle_action,
                     false,
                     Some(value),
+                    Default::default(),
                 );
             }
             OptionMenuMessage::Submit { verb, value, text } => {
