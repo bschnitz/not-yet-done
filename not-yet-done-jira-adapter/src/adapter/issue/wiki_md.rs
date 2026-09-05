@@ -29,6 +29,7 @@
 //! | `_italic_`                    | `_italic_` (already valid MD)     |
 //! | `-strike-`                    | `~~strike~~`                      |
 //! | `{{mono}}`, `{{{}mono{}}}`    | `` `mono` `` (padding dropped)    |
+//! | literal `` ` ``               | `` \` `` (a backtick is plain text in Jira) |
 //! | `[text\|url]`                 | `[text](url)`                     |
 //! | `{color:c}…{color}`           | `<span style="color:c">…</span>`  |
 //! | single newline (in paragraph) | line + trailing `\` (hard break)  |
@@ -1770,6 +1771,11 @@ fn convert_inline_w2m(text: &str) -> String {
     });
     let s = W_COLOR_CLOSE.replace_all(&s, |_: &Captures| shield(&mut sh, "</span>".to_string()));
     let s = W_MONO.replace_all(&s, |c: &Captures| shield(&mut sh, format!("`{}`", &c[1])));
+    // A backtick is plain text in Jira but an inline-code delimiter in
+    // Markdown, so `md_to_wiki` would turn a literal pair into `{{…}}`. Every
+    // backtick still standing after the mono pass is literal: escape it the
+    // CommonMark way (`\``) so it renders as itself and comes back as itself.
+    let s = W_LITERAL_TICK.replace_all(&s, |_: &Captures| shield(&mut sh, "\\`".to_string()));
     let s = W_LINK.replace_all(&s, |c: &Captures| {
         shield(&mut sh, format!("[{}]({})", &c[1], &c[2]))
     });
@@ -1790,6 +1796,13 @@ static M_IMAGE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static M_MONO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+/// A backtick left over once wiki monospace has been converted — plain text in
+/// Jira, so it must not reach Markdown unescaped (see [`M_ESCAPED_TICK`]).
+static W_LITERAL_TICK: LazyLock<Regex> = LazyLock::new(|| Regex::new("`").unwrap());
+/// The CommonMark escape `\`` that [`wiki_to_md`] writes for a literal
+/// backtick. Shielded before [`M_MONO`] runs so the escaped tick is never taken
+/// for a code delimiter, and restored as the bare character.
+static M_ESCAPED_TICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\`").unwrap());
 static M_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
 static M_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(\S(?:.*?\S)?)\*\*").unwrap());
 static M_STRIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~(\S(?:.*?\S)?)~~").unwrap());
@@ -1817,6 +1830,9 @@ fn convert_inline_m2w(text: &str) -> String {
     let s = M_IMAGE.replace_all(&s, |c: &Captures| {
         shield(&mut sh, image_m2w(&c[1], c.get(2).map(|m| m.as_str())))
     });
+    // An escaped backtick is a literal one (the reverse of `wiki_to_md`'s
+    // escape). Shielding it first keeps the code pass below from pairing it.
+    let s = M_ESCAPED_TICK.replace_all(&s, |_: &Captures| shield(&mut sh, "`".to_string()));
     let s = M_MONO.replace_all(&s, |c: &Captures| {
         shield(&mut sh, format!("{{{{{}}}}}", &c[1]))
     });
@@ -2585,6 +2601,22 @@ a title-less panel whose sole attribute makes its opener marker long enough
         // emphasis passes; they round-trip verbatim.
         assert!(roundtrip_diff("text {*}with{*} escapes and {_}more{_}").is_none());
         assert_roundtrip("a {*}b{*} c", "a {*}b{*} c");
+    }
+
+    /// A backtick is plain text in Jira. Left as it is, `md_to_wiki` would read
+    /// a literal pair as inline code and hand back `{{…}}` — which made the
+    /// round-trip guard refuse every ticket whose description or any comment
+    /// mentioned a shell command in backticks. Escaped on the way out, restored
+    /// on the way back; a backtick the user types in the editor still means
+    /// monospace.
+    #[test]
+    fn literal_backticks_survive_the_round_trip() {
+        assert_roundtrip("run `ls -la` now", "run \\`ls -la\\` now");
+        assert_roundtrip("a lone ` tick", "a lone \\` tick");
+        assert_roundtrip("{{mono}} and `lit`", "`mono` and \\`lit\\`");
+        assert!(roundtrip_diff("see `git log` and {{git show}}").is_none());
+        // Authored in the editor: an unescaped pair is still monospace.
+        assert_eq!(md_to_wiki("use `code` here"), "use {{code}} here");
     }
 
     #[test]

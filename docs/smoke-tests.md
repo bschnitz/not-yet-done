@@ -7450,6 +7450,25 @@ without a message. The editor now owns `ticket.edit.md` in the same folder.
 - [ ] Without a configured `ticket_workspace`, `e e` still falls back to a
       throwaway `$TMPDIR` file and commits normally
 
+## Jira: a literal backtick no longer blocks the Markdown editor
+
+A backtick is plain text in Jira, but the Markdown→wiki direction read a
+literal pair as inline code and handed back `{{…}}`, so the round-trip guard
+refused `e e` for every ticket whose description or any comment mentioned a
+command in backticks. `wiki_to_md` now escapes a literal backtick (`\``) and
+`md_to_wiki` restores it.
+
+- [ ] A ticket with a comment containing `` `ls -la` `` (typed literally in
+      Jira) → `e e` opens; the buffer shows `` \`ls -la\` ``
+- [ ] Save without touching that comment → `No changes`, nothing written
+- [ ] Edit another comment in the same buffer and save → only that comment
+      changes; the backtick comment stays byte-identical in Jira
+- [ ] Type `` `code` `` (unescaped) into the description and save → Jira
+      shows it as monospace (`{{code}}`)
+- [ ] CLI: `nyd jira do to_markdown <KEY> > t.md` then
+      `nyd jira do from_markdown <KEY> --file t.md` on such a ticket → no
+      write, no refusal
+
 ## Actions take named arguments from the view YAML
 
 A `type: node` (or `on_container` custom) binding can carry `args:`. Each
