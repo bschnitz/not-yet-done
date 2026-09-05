@@ -4164,6 +4164,7 @@ impl App {
             query: self.pane_active_query(view_index, pane_id),
             value: None,
             text: Some(query.clone()),
+            args: Default::default(),
         };
         tokio::spawn(async move {
             let result = run_tree_find(adapter.as_ref(), &action_id, &ctx)
@@ -9734,6 +9735,9 @@ impl App {
                 // path ([`App::spawn_option_menu_mutation`]); this generic
                 // per-node dispatch carries none.
                 text: None,
+                // Named arguments are declared in the view config; until that
+                // binding exists this path supplies none.
+                args: Default::default(),
             };
             // Capture the node's label + type alongside the dispatch so a
             // `mark-move` can populate the clipboard without re-fetching.

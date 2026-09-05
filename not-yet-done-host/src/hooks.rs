@@ -50,7 +50,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
-use not_yet_done_content::{ActionContext, ActionDispatch, ContentAdapter};
+use not_yet_done_content::{ActionArgs, ActionContext, ActionDispatch, ContentAdapter};
 
 // ---------------------------------------------------------------------------
 // Config schema (the `hooks:` block of a view file)
@@ -228,6 +228,7 @@ fn context_for(binding: &HookBinding) -> ActionContext {
         query: binding.on.query.clone(),
         value: binding.with.value.clone(),
         text: binding.with.text.clone(),
+        args: ActionArgs::default(),
     }
 }
 

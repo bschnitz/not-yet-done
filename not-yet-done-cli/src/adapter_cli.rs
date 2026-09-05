@@ -40,6 +40,10 @@
 //! Picker      → --value <v>
 //! FilePicker  → --file <path>  (repeatable)
 //! None        → invoke_action; ctx fed from --value / --text / --query / --yes
+//! (any)       → --arg k=v  (repeatable): named arguments. They reach the
+//!               adapter through `ActionContext`, so today that is the
+//!               `None` row above — `prepare`/`execute` take an input, not
+//!               a context, and gain one when the editor path needs it.
 //! ```
 //!
 //! For `InputSpec::None` actions the returned [`ActionDispatch`] is handled
@@ -65,9 +69,10 @@ use anyhow::{Context, Result, anyhow};
 use crate::adapter_connect;
 use crate::adapter_query;
 use not_yet_done_content::{
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter, ContentError,
-    EditorPrep, FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node, NodeAction,
-    NodeHit, NodeSummary, NodeType, SortDirection, SortKey, Subtree, ValueOption, children,
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentAdapter,
+    ContentError, EditorPrep, FormFieldSpec, GroupBucket, GroupSpec, InputSpec, ListParams, Node,
+    NodeAction, NodeHit, NodeSummary, NodeType, SortDirection, SortKey, Subtree, ValueOption,
+    children,
 };
 
 /// Output format for the read verbs.
@@ -125,6 +130,14 @@ struct Invocation {
     value: Option<String>,
     /// `--text`: `ActionContext::text` (typed free text, e.g. a new tag name).
     text: Option<String>,
+    /// `--arg k=v` (repeatable): named arguments for the action, delivered as
+    /// [`ActionContext::args`]. Unlike `--field` (which answers a form the
+    /// adapter asked for) these are the action's own parameters, and they
+    /// travel whatever the action's `InputSpec` happens to be. Everything
+    /// arrives as [`ArgValue::Text`] — a command line cannot tell `007` from
+    /// the number 7, so the type is the reader's business, never the parser's.
+    /// A repeated key wins over the earlier one.
+    args: Vec<(String, String)>,
     /// `--file` (repeatable): paths for an `InputSpec::FilePicker` action.
     files: Vec<PathBuf>,
     /// `--yes`/`-y`: pre-confirm a `Confirm`/`DeleteSelf`-gated action.
@@ -132,6 +145,15 @@ struct Invocation {
     /// `--full`: on `help`, print the full level reference (capabilities, child
     /// types, sort columns) instead of the default CLI-usage view.
     full: bool,
+}
+
+impl Invocation {
+    /// The `--arg` pairs as an [`ActionArgs`] set. Everything a command line
+    /// carries is text; the reader coerces. A repeated key overrides the
+    /// earlier one in place, so the set reads in the order it was typed.
+    fn action_args(&self) -> ActionArgs {
+        self.args.iter().cloned().collect()
+    }
 }
 
 /// Route the top-level argv. Returns `Some(code)` when this module handled it
@@ -443,6 +465,7 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
     let mut output = Output::Table;
     let mut message = None;
     let mut fields: Vec<(String, String)> = Vec::new();
+    let mut action_args: Vec<(String, String)> = Vec::new();
     let mut value = None;
     let mut text = None;
     let mut files: Vec<PathBuf> = Vec::new();
@@ -498,6 +521,13 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
                     .split_once('=')
                     .ok_or_else(|| anyhow!("--field expects key=value, got '{kv}'"))?;
                 fields.push((k.to_string(), v.to_string()));
+            }
+            "--arg" => {
+                let kv = take_value(&mut i, "--arg")?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("--arg expects key=value, got '{kv}'"))?;
+                action_args.push((k.to_string(), v.to_string()));
             }
             "--value" => value = Some(take_value(&mut i, "--value")?),
             "--text" => text = Some(take_value(&mut i, "--text")?),
@@ -568,6 +598,7 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
         fields,
         value,
         text,
+        args: action_args,
         files,
         yes,
         full,
@@ -1374,6 +1405,7 @@ async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> 
         query: inv.query.clone(),
         value: inv.value.clone(),
         text: inv.text.clone(),
+        args: inv.action_args(),
     };
     let dispatch = node.invoke_action(action_id, &ctx).await?;
     match dispatch {
@@ -2350,6 +2382,48 @@ mod tests {
         );
         assert_eq!(inv.message.as_deref(), Some("new body"));
         assert!(inv.yes);
+    }
+
+    #[test]
+    fn parse_do_collects_named_arguments_and_the_last_key_wins() {
+        let args: Vec<String> = [
+            "nyd",
+            "adapter",
+            "jira",
+            "edit_markdown",
+            "ABC-1",
+            "--arg",
+            "buffer=draft.md",
+            "--arg",
+            "limit=20",
+            "--arg",
+            "buffer=ticket.edit.md",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let inv = parse_adapter(&args).unwrap();
+        let named = inv.action_args();
+
+        // Repeating a key overrides in place: the set still reads in the order
+        // it was typed, so `help` and the frontends show a stable order.
+        assert_eq!(named.text("buffer"), Some("ticket.edit.md".to_string()));
+        assert_eq!(named.keys().collect::<Vec<_>>(), ["buffer", "limit"]);
+        // A command line only produces text; the reader does the typing.
+        assert_eq!(named.int("limit"), Some(20));
+    }
+
+    #[test]
+    fn parse_do_rejects_an_argument_without_a_value() {
+        let args: Vec<String> = ["nyd", "adapter", "jira", "edit_markdown", "--arg", "buffer"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = match parse_adapter(&args) {
+            Ok(_) => panic!("an --arg without a value must not parse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("--arg expects key=value"), "{err}");
     }
 
     #[test]

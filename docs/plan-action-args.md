@@ -159,12 +159,20 @@ something else_? The second is an arg.
 
 ## Phases
 
-| #   | what                                                                                                        |
-| --- | ----------------------------------------------------------------------------------------------------------- |
-| 1   | `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move. |
-| 2   | `ParamSpec`, `NodeAction::params`, load-time validation, `help --full` prints the parameters.               |
-| 3   | View YAML `args:` on `ActionDef` plus placeholder expansion on the parsed value.                            |
-| 4   | The return direction: args on `EditorPrep` and `ActionDispatch::OpenEditor`; the Jira editor file uses it.  |
+Phase 1 is implemented. One thing it made explicit that the design above had
+left implicit: arguments reach an adapter through `ActionContext`, and only
+`invoke_action` receives one — `prepare` and `execute` take an _input_, not a
+context. So `--arg` serves the dispatch path today, and the editor path gets
+its arguments in phase 4, where a context (or an args parameter) joins
+`prepare`. That is the same phase that gives `EditorPrep` its own args, so the
+two halves of the editor-file question land together.
+
+| #   | what                                                                                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **done.** `ArgValue` / `ActionArgs` in `not-yet-done-content`, `ActionContext::args`, CLI `--arg k=v`. Data can move — on the `invoke_action` path. |
+| 2   | `ParamSpec`, `NodeAction::params`, load-time validation, `help --full` prints the parameters.                                                       |
+| 3   | View YAML `args:` on `ActionDef` plus placeholder expansion on the parsed value.                                                                    |
+| 4   | Arguments into `prepare`/`execute`, and the return direction: args on `EditorPrep` and `ActionDispatch::OpenEditor`; the Jira editor file uses it.  |
 
 ## Sources
 
