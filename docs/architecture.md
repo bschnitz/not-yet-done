@@ -276,6 +276,23 @@ factory plus YAML — no core code changes.
   the three-stage action flow (render the editor buffer or supply the picker
   options → user input → finalize)
 
+An action can also be **given** data, through `ActionContext::args` — an
+ordered set of named values (`ActionArgs`, over the closed `ArgValue` enum
+`Text`/`Int`/`Bool`/`List`/`Path`). It exists because the alternative was the
+habit the framework had already fallen into: a field per case, five on
+`ActionContext` and twenty-eight on the TUI's view YAML. The rule that
+replaces it is that arguments carry **data** while action types carry
+**behaviour** — if a different value would make the action do the same thing
+to something else, it is an argument.
+
+Readers coerce, so a frontend that can only produce strings still satisfies a
+typed parameter: the CLI's `--arg key=value` (repeatable, last key wins)
+delivers `Text` and never guesses a type from the shape of a string, because a
+command line that reads `007` as a number is a trap. Reaching the adapter
+through the context means `--arg` serves `invoke_action` today;
+`prepare`/`execute` take an input rather than a context and gain one when the
+editor path needs it. See [`plan-action-args.md`](plan-action-args.md).
+
 Implementations: `jira-`, `taiga-`, `postgres-`, `sqlite-`, `confluence-`
 and `stoat-adapter`.
 

@@ -7,6 +7,7 @@
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
+pub mod action_args;
 pub mod anonymize;
 pub mod auth;
 pub mod auto_connect;
@@ -28,6 +29,7 @@ pub mod status_reporter;
 pub mod text;
 pub mod workspace;
 
+pub use action_args::{ActionArgs, ArgValue};
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
 pub use auto_connect::AutoConnect;
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
@@ -1665,6 +1667,20 @@ pub struct ActionContext {
     /// the TUI's `option_menu` prompts for a line of text on a create/rename
     /// binding and sets this to what the user typed.
     pub text: Option<String>,
+    /// Named arguments for this invocation — the general channel that every
+    /// other field here predates.
+    ///
+    /// The five fields above are the shapes the framework grew one at a time,
+    /// each for a single case. They stay: two ways to read the same datum
+    /// during a long migration costs more than the tidiness would buy. But
+    /// nothing new joins them — **new data travels as an argument**, sourced
+    /// wherever the frontend can source it (the view config's `args:`, the
+    /// CLI's `--arg key=value`, a prompt) and read through
+    /// [`ActionArgs`]'s coercing accessors, so an adapter asking for a number
+    /// is satisfied by a frontend that can only produce strings.
+    ///
+    /// Empty for the actions that take none, which is most of them.
+    pub args: ActionArgs,
 }
 
 // ---------------------------------------------------------------------------
@@ -4173,6 +4189,7 @@ mod mark_move_contract_tests {
             query: None,
             value: None,
             text: None,
+            args: ActionArgs::default(),
         };
 
         let dispatch = node.invoke_action("paste-move", &ctx).await.unwrap();
