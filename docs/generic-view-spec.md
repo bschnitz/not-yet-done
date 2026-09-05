@@ -2370,12 +2370,32 @@ on an `on_container` action (there is no target node) — refuses the action
 with a notification instead of sending a value with a hole in it. Braces that
 do not form a placeholder (`{}`, `{1}`, `{a b}`) are left as they are.
 
-`args:` reaches `type: node` actions and `on_container` custom actions, the
-two that arrive at the adapter through `invoke_action`. On any other type it
-is a config error reported like every other view-file problem, not a key that
-silently does nothing. Lifecycle hooks take the same block as
-`with: { args: {…} }` (no placeholders there: a hook has no row), and the CLI
-has `--arg key=value`.
+`args:` reaches `type: node` actions and `on_container` custom actions (the
+two that arrive at the adapter through `invoke_action`) and `type: edit`
+actions, whose arguments go to the adapter's `prepare` and `execute`. On any
+other type — `create` among them — it is a config error reported like every
+other view-file problem, not a key that silently does nothing. Lifecycle hooks
+take the same block as `with: { args: {…} }` (no placeholders there: a hook
+has no row), and the CLI has `--arg key=value` for every input shape.
+
+For an editor binding the arguments are checked **before the editor opens**,
+so a wrong value is one notification and no `$EDITOR` to quit, and the same
+set is handed to every save the session makes. Jira's `edit_markdown` is the
+first action that takes some: `workspace` (a path; the base directory for the
+ticket folder, beating the adapter's `ticket_workspace`) and `buffer` (the
+file name inside that folder, default `ticket.edit.md`). The folder itself
+stays the adapter's decision, because the buffer must sit next to
+`attachments/` or its image links break:
+
+```yaml
+actions:
+  - key: e e
+    id: edit_markdown
+    type: edit
+    args:
+      workspace: "{workspace}/tickets"
+      buffer: ticket.edit.md
+```
 
 #### Taking a key from a built-in — `force: true`
 

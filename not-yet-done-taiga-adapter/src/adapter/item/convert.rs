@@ -176,6 +176,7 @@ impl TaigaItemNode {
             version: String::new(),
             suffix: ".md".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 

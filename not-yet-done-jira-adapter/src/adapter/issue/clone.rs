@@ -41,6 +41,7 @@ impl JiraIssueNode {
             version: String::new(),
             suffix: ".jira".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 

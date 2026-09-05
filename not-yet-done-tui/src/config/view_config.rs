@@ -731,11 +731,12 @@ fn check_action(
     // Arguments reach the adapter through `ActionContext`, which only the
     // `invoke_action` path carries today. Refuse them elsewhere rather than
     // let a configured value silently go nowhere.
-    let args_reach = a.action_type == "node" || (a.action_type == "custom" && a.on_container);
+    let args_reach = matches!(a.action_type.as_str(), "node" | "edit")
+        || (a.action_type == "custom" && a.on_container);
     if !a.args.is_empty() && !args_reach {
         errors.push(format!(
-            "{scope}: `args:` reaches only `type: node` actions (and `on_container` \
-             custom ones) so far — see docs/plan-action-args.md"
+            "{scope}: `args:` reaches only `type: node` and `type: edit` actions (and \
+             `on_container` custom ones) so far — see docs/plan-action-args.md"
         ));
     }
     match a.action_type.as_str() {
@@ -1995,9 +1996,10 @@ pub struct ActionDef {
     /// to a ticket). Empty/missing values cause the action to be a no-op.
     #[serde(default)]
     pub node_id_from: Option<String>,
-    /// Named arguments handed to the adapter action — for `type: node` (and
-    /// `on_container` custom) actions, the only ones that reach the adapter
-    /// through an `ActionContext` today. Data, not behaviour: an argument
+    /// Named arguments handed to the adapter action — for `type: node` and
+    /// `on_container` custom actions (through the `ActionContext`) and for
+    /// `type: edit` (into the node's `prepare`/`execute`). Data, not
+    /// behaviour: an argument
     /// changes *what* the action acts on, never *which* action runs. Each
     /// value keeps its YAML type (`20` is a number, `"20"` text, `[a, b]` a
     /// list). `{placeholder}`s are expanded on the parsed value when the
@@ -4266,11 +4268,12 @@ views:
     }
 
     #[test]
-    fn validate_rejects_args_on_edit_action() {
-        // `args:` reaches the adapter only through `invoke_action`, which a
-        // `type: edit` binding never calls — so a block there is a load-time
-        // error, not a key that silently does nothing. The node binding next
-        // to it carries the same block and is fine.
+    fn validate_rejects_args_on_create_action() {
+        // `args:` reaches the adapter through `invoke_action` (node, container
+        // custom) and the editor session (edit); a `type: create` binding
+        // takes neither road yet — so a block there is a load-time error, not
+        // a key that silently does nothing. The node and edit bindings next
+        // to it carry the same block and are fine.
         let yaml = r#"
 tab: { name: T }
 adapter: { type: x }
@@ -4278,6 +4281,7 @@ views:
   - name: v
     node_type: t
     actions:
+      - { name: add, key: A, type: create, id: add, args: { limit: 20 } }
       - { name: edit, key: e, type: edit, id: edit_full, args: { limit: 20 } }
       - { key: x, id: export, args: { limit: 20 } }
 "#;
@@ -4290,7 +4294,7 @@ views:
             .unwrap_err();
         assert_eq!(errs.len(), 1, "got: {errs:?}");
         assert!(
-            errs[0].contains("args:") && errs[0].contains("edit"),
+            errs[0].contains("args:") && errs[0].contains("add"),
             "got: {}",
             errs[0]
         );

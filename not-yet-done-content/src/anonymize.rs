@@ -804,8 +804,8 @@ impl Node for AnonymizingNode {
             other => other,
         })
     }
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
-        self.inner.prepare(action_id).await
+    async fn prepare(&self, action_id: &str, args: &crate::ActionArgs) -> Result<EditorPrep> {
+        self.inner.prepare(action_id, args).await
     }
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         self.inner.picker_options(action_id).await
@@ -813,8 +813,8 @@ impl Node for AnonymizingNode {
     async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
         self.inner.form_prep(action_id).await
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
-        self.inner.execute(action_id, input).await
+    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &crate::ActionArgs) -> Result<ActionOutcome> {
+        self.inner.execute(action_id, input, args).await
     }
 }
 

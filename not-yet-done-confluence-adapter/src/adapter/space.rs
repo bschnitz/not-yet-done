@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, ContentError, EditorPrep, InputSpec, ListParams, ListResult,
     Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, PageInfo, PageRequest,
     Result,
@@ -201,6 +201,7 @@ impl ConfluenceSpaceNode {
             version: String::new(),
             suffix: ".html".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -295,7 +296,7 @@ impl Node for ConfluenceSpaceNode {
         )))
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "create-page" => self.prepare_create_page().await,
             other => Err(ContentError::NotSupported(format!(
@@ -304,7 +305,7 @@ impl Node for ConfluenceSpaceNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open-in-browser", ActionInput::None) => self.open_via_xdg(),
             ("create-page", ActionInput::Edited { text, .. }) => {
@@ -414,7 +415,7 @@ mod tests {
             "https://wiki.example.invalid/confluence",
             sample_space(),
         );
-        match node.execute("nope", ActionInput::None).await {
+        match node.execute("nope", ActionInput::None, &Default::default()).await {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }
@@ -436,7 +437,7 @@ mod tests {
             "https://wiki.example.invalid/confluence",
             space,
         );
-        match node.execute("open-in-browser", ActionInput::None).await {
+        match node.execute("open-in-browser", ActionInput::None, &Default::default()).await {
             Err(e) => assert!(
                 format!("{e}").contains("NOWEB"),
                 "error mentions space key: {e}"

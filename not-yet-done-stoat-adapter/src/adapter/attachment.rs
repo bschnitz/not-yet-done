@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, ContentError, FormFieldSpec, InputSpec, Metadata, MetadataField,
     Node, NodeAction, NodeType, Result,
 };
@@ -366,7 +366,7 @@ impl Node for StoatAttachmentNode {
         &self.metadata
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_external().await,
             ("download_all", input) => {

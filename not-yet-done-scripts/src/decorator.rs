@@ -450,8 +450,8 @@ impl Node for ScriptsNode {
         self.inner.invoke_action(name, ctx).await
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
-        self.inner.prepare(action_id).await
+    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
+        self.inner.prepare(action_id, args).await
     }
 
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
@@ -462,7 +462,7 @@ impl Node for ScriptsNode {
         self.inner.form_prep(action_id).await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &ActionArgs) -> Result<ActionOutcome> {
         match action_id {
             SCRIPTS_ACTION_ID => Ok(ActionOutcome::Done {
                 message: Some(self.list_message()?),
@@ -482,7 +482,7 @@ impl Node for ScriptsNode {
                     )),
                 })
             }
-            _ => self.inner.execute(action_id, input).await,
+            _ => self.inner.execute(action_id, input, args).await,
         }
     }
 }
@@ -558,7 +558,7 @@ impl Node for ScriptNode {
         }
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == SCRIPT_EDIT_ACTION_ID {
             let template = self.repo.read(&self.scope, &self.name).map_err(io_err)?;
             return Ok(EditorPrep {
@@ -566,6 +566,7 @@ impl Node for ScriptNode {
                 version: String::new(),
                 suffix: self.node_type.file_extension.clone(),
                 file_path: None,
+                args: Default::default(),
             });
         }
         Err(ContentError::NotSupported(format!(
@@ -573,7 +574,7 @@ impl Node for ScriptNode {
         )))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             (SCRIPT_EDIT_ACTION_ID, ActionInput::Edited { text, .. }) => {
                 self.repo
@@ -692,7 +693,7 @@ mod tests {
         // The scripts action lists this level's (empty) directory.
         let mut node = node;
         let outcome = node
-            .execute(SCRIPTS_ACTION_ID, ActionInput::None)
+            .execute(SCRIPTS_ACTION_ID, ActionInput::None, &Default::default())
             .await
             .unwrap();
         match outcome {
@@ -713,13 +714,14 @@ mod tests {
         node.execute(
             SCRIPT_NEW_ACTION_ID,
             ActionInput::Form(HashMap::from([("name".to_string(), "report".to_string())])),
+            &Default::default(),
         )
         .await
         .unwrap();
 
         // List surfaces the addressable id.
         let listed = match node
-            .execute(SCRIPTS_ACTION_ID, ActionInput::None)
+            .execute(SCRIPTS_ACTION_ID, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {
@@ -739,6 +741,7 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -755,7 +758,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(dispatch, ActionDispatch::DeleteSelf { .. }));
-        leaf.execute(SCRIPT_DELETE_ACTION_ID, ActionInput::None)
+        leaf.execute(SCRIPT_DELETE_ACTION_ID, ActionInput::None, &Default::default())
             .await
             .unwrap();
 
@@ -764,7 +767,7 @@ mod tests {
             .get_by_id("ISS-1")
             .await
             .unwrap()
-            .execute(SCRIPTS_ACTION_ID, ActionInput::None)
+            .execute(SCRIPTS_ACTION_ID, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {

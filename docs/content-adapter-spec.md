@@ -750,6 +750,22 @@ timestamp of the whole node is sufficient.
    help renderers hide the section at the root rather than print a command that
    cannot run.
 
+9. **Named arguments, one type in every direction** — an action declares its
+   parameters (`NodeAction::params`, a `ParamSpec` per name with an `ArgKind`
+   and optional default) and receives them as an `ActionArgs` map: through
+   `ActionContext::args` on `invoke_action`, and as the trailing
+   `args: &ActionArgs` of `prepare(action_id, args)` and
+   `execute(action_id, input, args)`. Frontends resolve a supplied set against
+   the declaration (`resolve_args`) before anything runs, so an adapter reads
+   `args.text("buffer")` / `args.path("workspace")` / `args.int("limit")` and
+   never validates. The answer direction uses the same type: `EditorPrep::args`
+   and `ActionDispatch::OpenEditor { session_kind, args }` carry what the
+   frontend needs to open the editor (`database` and `schema` for Postgres,
+   `ticket_dir` for Jira) instead of a struct field per case. Arguments carry
+   **data**, action types carry **behaviour** — see
+   [`plan-action-args.md`](plan-action-args.md). A wrapping adapter forwards
+   `args` untouched on both `prepare` and `execute`.
+
 ---
 
 ## Open Questions

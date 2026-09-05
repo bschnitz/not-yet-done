@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionInput, ActionOutcome, ColumnSchema, ContentError, FormFieldSpec, InputSpec, ListResult,
     Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
@@ -264,7 +264,7 @@ impl Node for MailAttachmentNode {
         &self.metadata
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_external().await,
             ("download_all", input) => {

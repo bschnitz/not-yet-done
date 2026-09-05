@@ -155,6 +155,7 @@ impl ConfluenceCommentNode {
             version: detail.version_number.to_string(),
             suffix: ".html".into(),
             file_path: None,
+            args: Default::default(),
         })
     }
 
@@ -258,7 +259,7 @@ impl Node for ConfluenceCommentNode {
         Err(ContentError::NotFound(format!("No child: {id}")))
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit" => self.prepare_edit().await,
             other => Err(ContentError::NotSupported(format!(
@@ -278,7 +279,7 @@ impl Node for ConfluenceCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             (
                 "edit",
@@ -406,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_unknown_action() {
         let mut node = ConfluenceCommentNode::new(synthetic_client(), sample_comment(), "12345");
-        match node.execute("nope", ActionInput::None).await {
+        match node.execute("nope", ActionInput::None, &Default::default()).await {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }

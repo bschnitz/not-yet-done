@@ -175,6 +175,9 @@ pub enum ViewRequest {
         label: String,
         editor_profile: Option<String>,
         commit_on_save: bool,
+        /// The binding's `args:`, placeholders already expanded; handed to
+        /// the node's `prepare` and `execute`.
+        args: not_yet_done_content::ActionArgs,
     },
     /// Reload items for a content view (async). Always re-lists the **root**
     /// level — use [`Self::ReloadContentCurrentLevel`] for a pane that may sit

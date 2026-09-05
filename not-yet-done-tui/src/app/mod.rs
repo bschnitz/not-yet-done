@@ -3544,8 +3544,12 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(&action_id, not_yet_done_content::ActionInput::None)
-                    .await
+                node.execute(
+                    &action_id,
+                    not_yet_done_content::ActionInput::None,
+                    &Default::default(),
+                )
+                .await
             }
             .await;
             let result = match outcome {
@@ -4752,7 +4756,14 @@ impl App {
                     label,
                 } => {
                     self.open_content_editor(
-                        view_index, pane_id, node_id, action_id, label, None, false,
+                        view_index,
+                        pane_id,
+                        node_id,
+                        action_id,
+                        label,
+                        None,
+                        false,
+                        Default::default(),
                     );
                 }
                 LoadMsg::ContentOpenExternal { target, message } => {
@@ -9126,7 +9137,7 @@ impl App {
                         return;
                     };
                     let text = match action_id.as_deref() {
-                        Some(action) => match node.prepare(action).await {
+                        Some(action) => match node.prepare(action, &Default::default()).await {
                             Ok(prep) => Some(prep.template),
                             Err(_) => None,
                         },
@@ -9154,6 +9165,7 @@ impl App {
                 label,
                 editor_profile,
                 commit_on_save,
+                args,
             } => {
                 self.open_content_editor(
                     view_index,
@@ -9163,6 +9175,7 @@ impl App {
                     label,
                     editor_profile,
                     commit_on_save,
+                    args,
                 );
                 EditorRequest::None
             }
@@ -9580,6 +9593,7 @@ impl App {
                             reload,
                             editor_profile,
                             commit_on_save,
+                            Default::default(),
                         )
                         .await
                         .map_err(|e| e.to_string())
@@ -10148,8 +10162,12 @@ impl App {
                 tokio::spawn(async move {
                     let outcome = async {
                         let mut node = adapter.get_by_id(&node_id).await?;
-                        node.execute(&action_id, not_yet_done_content::ActionInput::None)
-                            .await
+                        node.execute(
+                            &action_id,
+                            not_yet_done_content::ActionInput::None,
+                            &Default::default(),
+                        )
+                        .await
                     }
                     .await;
                     // `OpenExternal` takes its own message so the app can hand
@@ -10611,8 +10629,12 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(&action_id, not_yet_done_content::ActionInput::Files(paths))
-                    .await
+                node.execute(
+                    &action_id,
+                    not_yet_done_content::ActionInput::Files(paths),
+                    &Default::default(),
+                )
+                .await
             }
             .await;
             let result = match outcome {
@@ -10676,7 +10698,7 @@ impl App {
         tokio::spawn(async move {
             let outcome = async {
                 let mut node = adapter.get_by_id(&node_id).await?;
-                node.execute(&action_id, input).await
+                node.execute(&action_id, input, &Default::default()).await
             }
             .await;
             let result = match outcome {
@@ -10709,6 +10731,7 @@ impl App {
         label: String,
         editor_profile: Option<String>,
         commit_on_save: bool,
+        args: not_yet_done_content::ActionArgs,
     ) {
         let adapter = self
             .content_view(view_index)
@@ -10756,6 +10779,7 @@ impl App {
                 reload,
                 editor_profile,
                 commit_on_save,
+                args,
             )
             .await
             .map(|s| Box::new(s) as Box<dyn crate::edit_session::EditSession>)
@@ -10798,7 +10822,11 @@ impl App {
                 Err(e) => Err(format!("Action failed: {action_id}: {e}")),
                 Ok(mut node) => {
                     match node
-                        .execute(&action_id, not_yet_done_content::ActionInput::Picked(value))
+                        .execute(
+                            &action_id,
+                            not_yet_done_content::ActionInput::Picked(value),
+                            &Default::default(),
+                        )
                         .await
                     {
                         Ok(not_yet_done_content::ActionOutcome::Done { message }) => {

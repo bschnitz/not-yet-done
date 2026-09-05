@@ -388,7 +388,7 @@ impl Node for TaigaItemNode {
         Ok(prefill)
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         // A `convert:<target>` id routes to the target-specific convert editor.
         if let Some(target) = convert::parse_convert_target(action_id) {
             return self.prepare_convert(target).await;
@@ -403,7 +403,7 @@ impl Node for TaigaItemNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             (
                 "edit_full",

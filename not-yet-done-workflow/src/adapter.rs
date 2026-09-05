@@ -607,7 +607,7 @@ impl Node for WorkflowRoot {
         Err(ContentError::NotFound(id.to_string()))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match action_id {
             CREATE_ACTION => {
                 let fields = form_fields(input)?;
@@ -694,7 +694,7 @@ impl Node for WorkflowNode {
         }
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == EDIT_ACTION {
             let template = self.ctx.repo.read(&self.name).map_err(io_err)?;
             return Ok(EditorPrep {
@@ -702,6 +702,7 @@ impl Node for WorkflowNode {
                 version: String::new(),
                 suffix: ".md".into(),
                 file_path: None,
+                args: Default::default(),
             });
         }
         Err(ContentError::NotSupported(format!(
@@ -720,7 +721,7 @@ impl Node for WorkflowNode {
         Ok(map)
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             (EDIT_ACTION, ActionInput::Edited { text, .. }) => {
                 self.ctx.repo.write(&self.name, &text).map_err(io_err)?;
@@ -881,7 +882,7 @@ impl Node for RunNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, _input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, _input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         let now = Utc::now().to_rfc3339();
         match action_id {
             ADVANCE_ACTION => match self.ctx.store.next_pending_step(&self.row.id).await? {
@@ -1238,7 +1239,7 @@ impl Node for StepNode {
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-    async fn execute(&mut self, action_id: &str, _input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, _input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         Err(ContentError::NotSupported(format!(
             "step node is read-only — drive the run instead of '{action_id}'"
         )))
@@ -1335,6 +1336,7 @@ mod tests {
             .execute(
                 CREATE_ACTION,
                 ActionInput::Form(HashMap::from([("name".into(), "release".into())])),
+                &Default::default(),
             )
             .await
             .unwrap();
@@ -1353,7 +1355,7 @@ mod tests {
 
         // Start a run; it snapshots the template's single step.
         let mut wf = a.get_by_id("wf:release").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1383,6 +1385,7 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1392,7 +1395,7 @@ mod tests {
 
         // Delete the workflow → the root lists nothing.
         let mut wf = a.get_by_id("wf:release").await.unwrap();
-        wf.execute(DELETE_ACTION, ActionInput::None).await.unwrap();
+        wf.execute(DELETE_ACTION, ActionInput::None, &Default::default()).await.unwrap();
         let root = a.root().await.unwrap();
         let listed = children::list(&a, root.as_ref(), params(workflow_type()))
             .await
@@ -1412,6 +1415,7 @@ mod tests {
         root.execute(
             CREATE_ACTION,
             ActionInput::Form(HashMap::from([("name".into(), "flow".into())])),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1423,13 +1427,14 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
 
         // Start a run — only the entry step is seeded.
         let mut wf = a.get_by_id("wf:flow").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1442,7 +1447,7 @@ mod tests {
         // Advance completes "one" and appends "two"; the run is now running.
         let mut run = a.get_by_id(&run_id).await.unwrap();
         match run
-            .execute(ADVANCE_ACTION, ActionInput::None)
+            .execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {
@@ -1459,7 +1464,7 @@ mod tests {
 
         // Advance completes "two"; it is the last step, so the run is done.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1468,7 +1473,7 @@ mod tests {
         // Advancing past the end is a no-op.
         let mut run = a.get_by_id(&run_id).await.unwrap();
         match run
-            .execute(ADVANCE_ACTION, ActionInput::None)
+            .execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {
@@ -1478,7 +1483,7 @@ mod tests {
 
         // Reset takes the run back to a single pending entry visit.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(RESET_ACTION, ActionInput::None).await.unwrap();
+        run.execute(RESET_ACTION, ActionInput::None, &Default::default()).await.unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
         assert_eq!(run_node.metadata().fields[0].value, "pending");
         let run = a.get_by_id(&run_id).await.unwrap();
@@ -1495,6 +1500,7 @@ mod tests {
         root.execute(
             CREATE_ACTION,
             ActionInput::Form(HashMap::from([("name".into(), name.to_string())])),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1506,11 +1512,12 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
         let mut wf = a.get_by_id(&format!("wf:{name}")).await.unwrap();
-        match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         }
@@ -1528,7 +1535,7 @@ mod tests {
 
         // Build succeeds → no failure route → linear fall-through appends Test.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1541,7 +1548,7 @@ mod tests {
 
         // Test's else route ends the run.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1560,7 +1567,7 @@ mod tests {
 
         let mut run = a.get_by_id(&run_id).await.unwrap();
         match run
-            .execute(ADVANCE_ACTION, ActionInput::None)
+            .execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {
@@ -1588,10 +1595,10 @@ mod tests {
 
         // Two advances → three visits of "loop" (row0 done, row1 done, row2 pending).
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1615,7 +1622,7 @@ mod tests {
 
         // Build exits 0 → `exit == 0` matches → Deploy is queued (Skip is jumped).
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run = a.get_by_id(&run_id).await.unwrap();
@@ -1627,7 +1634,7 @@ mod tests {
 
         // Deploy's else route finishes the run.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1643,6 +1650,7 @@ mod tests {
         root.execute(
             CREATE_ACTION,
             ActionInput::Form(HashMap::from([("name".into(), "auto".into())])),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1656,19 +1664,20 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
 
         let mut wf = a.get_by_id("wf:auto").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
 
         // Advancing runs the command; the run completes.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
@@ -1694,6 +1703,7 @@ mod tests {
         root.execute(
             CREATE_ACTION,
             ActionInput::Form(HashMap::from([("name".into(), "ai".into())])),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1706,18 +1716,19 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
 
         let mut wf = a.get_by_id("wf:ai").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
 
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(ADVANCE_ACTION, ActionInput::None)
+        run.execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap();
 
@@ -1740,6 +1751,7 @@ mod tests {
         root.execute(
             CREATE_ACTION,
             ActionInput::Form(HashMap::from([("name".into(), "ai".into())])),
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -1751,18 +1763,19 @@ mod tests {
                 original: String::new(),
                 version: String::new(),
             },
+            &Default::default(),
         )
         .await
         .unwrap();
 
         let mut wf = a.get_by_id("wf:ai").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None).await.unwrap() {
+        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
         let mut run = a.get_by_id(&run_id).await.unwrap();
         match run
-            .execute(ADVANCE_ACTION, ActionInput::None)
+            .execute(ADVANCE_ACTION, ActionInput::None, &Default::default())
             .await
             .unwrap()
         {

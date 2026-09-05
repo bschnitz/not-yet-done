@@ -148,7 +148,7 @@ impl Node for JiraCommentNode {
         }
     }
 
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit_full" => {
                 let c = &self.comment;
@@ -161,6 +161,7 @@ impl Node for JiraCommentNode {
                     version: self.comment.updated.clone(),
                     suffix: ".jira".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -169,7 +170,7 @@ impl Node for JiraCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit_full", ActionInput::Edited { text, version, .. }) => {
                 let body = parse_comment_buffer(&text);
@@ -340,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn comment_prepare_contains_header_and_body() {
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        let prep = node.prepare("edit_full").await.unwrap();
+        let prep = node.prepare("edit_full", &Default::default()).await.unwrap();
 
         assert!(prep.template.contains("# Comment on PROJ-42"));
         assert!(prep.template.contains("# Author: bob"));
@@ -377,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn comment_editor_roundtrip() {
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        let prep = node.prepare("edit_full").await.unwrap();
+        let prep = node.prepare("edit_full", &Default::default()).await.unwrap();
         let body = parse_comment_buffer(&prep.template);
 
         // Unchanged template parses back to the original body.

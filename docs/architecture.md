@@ -288,10 +288,15 @@ to something else, it is an argument.
 Readers coerce, so a frontend that can only produce strings still satisfies a
 typed parameter: the CLI's `--arg key=value` (repeatable, last key wins)
 delivers `Text` and never guesses a type from the shape of a string, because a
-command line that reads `007` as a number is a trap. Reaching the adapter
-through the context means `--arg` serves `invoke_action` today;
-`prepare`/`execute` take an input rather than a context and gain one when the
-editor path needs it. See [`plan-action-args.md`](plan-action-args.md).
+command line that reads `007` as a number is a trap. The same set reaches every
+entry point: `invoke_action` reads it from `ActionContext::args`, while
+`prepare` and `execute` take an `args: &ActionArgs` parameter — the editor
+path has no use for the rest of the context, and a second context type would
+have been the field-per-case habit in disguise. The return direction mirrors
+it: `EditorPrep::args` and `ActionDispatch::OpenEditor { args }` let an
+adapter answer with named data (the Postgres editor says which `database` and
+`schema`, Jira says which `ticket_dir` it chose) instead of the framework
+growing a field per answer. See [`plan-action-args.md`](plan-action-args.md).
 
 The TUI's view YAML is the third writer. A binding's `args:` block is
 deserialised straight into `ActionArgs`, so each value keeps the type the YAML

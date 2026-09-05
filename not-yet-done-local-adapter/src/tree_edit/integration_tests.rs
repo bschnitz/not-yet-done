@@ -831,7 +831,7 @@ async fn adapter_delete_single_leaves_children() {
         ActionDispatch::DeleteSelf { confirm: None }
     ));
 
-    node.execute("delete-single", ActionInput::None)
+    node.execute("delete-single", ActionInput::None, &Default::default())
         .await
         .unwrap();
 
@@ -873,7 +873,7 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     assert!(msg.contains("2 subtasks"), "prompt names the count: {msg}");
     assert!(msg.contains("recursive"), "prompt flags the cascade: {msg}");
 
-    node.execute("delete", ActionInput::None).await.unwrap();
+    node.execute("delete", ActionInput::None, &Default::default()).await.unwrap();
 
     let tasks = all_tasks(&db).await;
     assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");

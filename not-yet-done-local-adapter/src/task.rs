@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use not_yet_done_content::HostEvent;
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
     ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec, Invalidation,
     Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
@@ -1103,6 +1103,7 @@ fn prepare_add(parent_id: Option<Uuid>) -> EditorPrep {
         version: String::new(),
         suffix: ".md".into(),
         file_path: None,
+        args: Default::default(),
     }
 }
 
@@ -1131,6 +1132,7 @@ async fn prepare_edit(
         version: task.updated_at.to_rfc3339(),
         suffix: ".md".into(),
         file_path: None,
+        args: Default::default(),
     })
 }
 
@@ -1306,6 +1308,7 @@ fn prepare_edit_tree(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep> 
         version: String::new(),
         suffix: ".md".into(),
         file_path: None,
+        args: Default::default(),
     })
 }
 
@@ -1375,6 +1378,7 @@ fn prepare_edit_notes(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep>
         version: String::new(),
         suffix: ".md".into(),
         file_path: None,
+        args: Default::default(),
     })
 }
 
@@ -1777,7 +1781,7 @@ impl Node for TaskRootNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
     }
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             // Create a top-level task; the buffer's `parent:` may override.
             // `add-sibling` aliases `add` here (sibling of root = top-level).
@@ -1787,7 +1791,7 @@ impl Node for TaskRootNode {
             ))),
         }
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
@@ -1909,7 +1913,7 @@ impl Node for TaskItemNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TaskItemNode::fetch(&self.snapshot, &self.cache, &self.handle, id)
     }
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             // Create a child task under this one (buffer's `parent:` wins).
             "add" => Ok(prepare_add(Some(self.id))),
@@ -1926,7 +1930,7 @@ impl Node for TaskItemNode {
             ))),
         }
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await

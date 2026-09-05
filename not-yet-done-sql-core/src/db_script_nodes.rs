@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
     FormFieldSpec, InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
     NodeType, Result, ScriptStore,
@@ -589,7 +589,7 @@ impl Node for DbScriptsGroupNode {
     /// through the [`ScriptStore`], so both frontends share one write
     /// path. The new entry lives at the container root (this is the
     /// group node).
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         let store = self.tree.store();
         match action_id {
             "add-script" => {
@@ -687,7 +687,7 @@ impl Node for DbScriptDirNode {
     /// "not empty (N entries)" error verbatim). Confirmation / name entry
     /// already happened frontend-side, so the TUI and the CLI share one
     /// code path.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         let store = self.tree.store();
         match action_id {
             "add-script" => {
@@ -838,10 +838,9 @@ impl Node for DbScriptNode {
                 // the host's session resolves the on-disk file through
                 // `ScriptStore::db_script_path`, which is a `PathBuf::join`
                 // and so accepts slashes.
-                params: HashMap::from([
-                    ("database".into(), self.key.clone()),
-                    ("script".into(), self.rel_path.clone()),
-                ]),
+                args: ActionArgs::new()
+                    .with("database", self.key.clone())
+                    .with("script", self.rel_path.clone()),
             }),
             "delete" => Ok(ActionDispatch::DeleteSelf { confirm: None }),
             // `rename` collects a name via `InputSpec::Form` and runs
@@ -858,7 +857,7 @@ impl Node for DbScriptNode {
     /// `delete` unlinks it and `rename` / `move` relocate it through the
     /// [`ScriptStore`]. Confirmation (delete) and name entry (rename)
     /// already happened frontend-side, so both front-ends share one path.
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         if action_id == "edit" {
             let ActionInput::Edited { text, .. } = input else {
                 return Err(ContentError::NotSupported(
@@ -914,13 +913,14 @@ impl Node for DbScriptNode {
     /// `do_editor` opens `$EDITOR` pre-filled and diffs against it. The
     /// TUI never calls this (its `e` opens the rich session via
     /// `invoke_action`); this exists purely for the generic CLI path.
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == "edit" {
             return Ok(EditorPrep {
                 template: self.read_body().await?,
                 version: String::new(),
                 suffix: Node::node_type(self).file_extension.clone(),
                 file_path: None,
+                args: Default::default(),
             });
         }
         Err(ContentError::NotSupported(format!(
@@ -1020,6 +1020,7 @@ mod tests {
             .execute(
                 "add-script",
                 ActionInput::Form(HashMap::from([("name".into(), "audit".into())])),
+                &Default::default(),
             )
             .await
             .expect("add-script");
@@ -1027,6 +1028,7 @@ mod tests {
             .execute(
                 "add-dir",
                 ActionInput::Form(HashMap::from([("name".into(), "util".into())])),
+                &Default::default(),
             )
             .await
             .expect("add-dir");
@@ -1051,8 +1053,8 @@ mod tests {
         let t = tree(dir.path());
         let mut group = DbScriptTree::group_node(&t, "notes");
         let form = || ActionInput::Form(HashMap::from([("name".into(), "audit".into())]));
-        group.execute("add-script", form()).await.expect("first");
-        assert!(group.execute("add-script", form()).await.is_err());
+        group.execute("add-script", form(), &Default::default()).await.expect("first");
+        assert!(group.execute("add-script", form(), &Default::default()).await.is_err());
     }
 
     #[tokio::test]
@@ -1158,16 +1160,10 @@ mod tests {
             .await
             .expect("edit")
         {
-            ActionDispatch::OpenEditor {
-                session_kind,
-                params,
-            } => {
+            ActionDispatch::OpenEditor { session_kind, args } => {
                 assert_eq!(session_kind, "script_editor");
-                assert_eq!(params.get("database").map(String::as_str), Some("notes"));
-                assert_eq!(
-                    params.get("script").map(String::as_str),
-                    Some("util/deep.sql")
-                );
+                assert_eq!(args.text("database").as_deref(), Some("notes"));
+                assert_eq!(args.text("script").as_deref(), Some("util/deep.sql"));
             }
             other => panic!("expected OpenEditor, got {other:?}"),
         }
@@ -1187,6 +1183,7 @@ mod tests {
             .execute(
                 "rename",
                 ActionInput::Form(HashMap::from([("name".into(), "report".into())])),
+                &Default::default(),
             )
             .await
             .expect("rename");
@@ -1210,6 +1207,7 @@ mod tests {
             .execute(
                 "move",
                 ActionInput::Form(HashMap::from([("target".into(), "util".into())])),
+                &Default::default(),
             )
             .await
             .expect("move");
@@ -1233,6 +1231,7 @@ mod tests {
                 .execute(
                     "move",
                     ActionInput::Form(HashMap::from([("target".into(), "util\\deep".into())])),
+                    &Default::default(),
                 )
                 .await
                 .is_err()
@@ -1250,6 +1249,7 @@ mod tests {
                     .execute(
                         "add-script",
                         ActionInput::Form(HashMap::from([("name".into(), bad.into())])),
+                        &Default::default(),
                     )
                     .await
                     .is_err(),
@@ -1270,7 +1270,7 @@ mod tests {
         let group = DbScriptTree::group_node(&t, "notes");
         let mut folder = group.get_child("util").await.expect("folder");
         // `ActionOutcome` has no `Debug`, so no `expect_err` here.
-        match folder.execute("delete-dir", ActionInput::None).await {
+        match folder.execute("delete-dir", ActionInput::None, &Default::default()).await {
             Ok(_) => panic!("a non-empty folder must not be deleted"),
             Err(e) => assert!(e.to_string().contains("not empty"), "{e}"),
         }

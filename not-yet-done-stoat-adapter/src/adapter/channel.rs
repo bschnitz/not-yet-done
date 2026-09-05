@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use not_yet_done_content::{
+use not_yet_done_content::{ActionArgs, 
     ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, EditorPrep,
     FormFieldSpec, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
     NodeSummary, NodeType, Result,
@@ -208,7 +208,7 @@ impl Node for StoatChannelNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             // Compose starts on an empty buffer followed by the CACHE
             // section, so `@uu_…` mention slugs are available to copy.
@@ -220,6 +220,7 @@ impl Node for StoatChannelNode {
                     version: String::new(),
                     suffix: ".md".into(),
                     file_path: None,
+                    args: Default::default(),
                 })
             }
             other => Err(ContentError::NotSupported(format!(
@@ -228,7 +229,7 @@ impl Node for StoatChannelNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("send_message", ActionInput::Edited { text, .. }) => {
                 // Drop the CACHE section, then translate `@uu_slug`

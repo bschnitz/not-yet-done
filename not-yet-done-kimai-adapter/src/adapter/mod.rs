@@ -274,7 +274,7 @@ impl Node for KimaiRoot {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         fetch_timesheet_node(&self.client, id).await
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(fields)) => self.execute_create(fields).await,
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -565,7 +565,7 @@ impl Node for KimaiTimesheetNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn prepare(&self, action_id: &str) -> Result<EditorPrep> {
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit" => Ok(EditorPrep {
                 template: template::render_edit_template(
@@ -576,6 +576,7 @@ impl Node for KimaiTimesheetNode {
                 version: template::version_token(&self.ts),
                 suffix: ".md".into(),
                 file_path: None,
+                args: Default::default(),
             }),
             other => Err(ContentError::NotSupported(format!(
                 "prepare: unknown action {other}"
@@ -583,7 +584,7 @@ impl Node for KimaiTimesheetNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit", ActionInput::Edited { text, version, .. }) => {
                 self.execute_edit(&text, &version).await

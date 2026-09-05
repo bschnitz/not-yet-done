@@ -196,10 +196,7 @@ pub fn dispatch_to_view_request(
         return Some(req);
     }
     match dispatch {
-        ActionDispatch::OpenEditor {
-            session_kind,
-            params,
-        } => match session_kind.as_str() {
+        ActionDispatch::OpenEditor { session_kind, args } => match session_kind.as_str() {
             // Generic query editor — edits and (re)runs a query against a
             // backend. Reuses the `OpenAdapterQueryEditor` request; the
             // adapter has already validated `node_id` addresses the right
@@ -212,18 +209,16 @@ pub fn dispatch_to_view_request(
             }),
             // Generic named-script editor (CP-8): edits a persisted script
             // the user re-executes separately. The adapter packs
-            // `(database, script)` into `params`; we re-derive `database`
+            // `(database, script)` into `args`; we re-derive `database`
             // from the `node_id` first segment as a fallback so the
-            // dispatch survives an adapter that omits the params map.
+            // dispatch survives an adapter that omits them.
             "script_editor" => {
-                let database = params
-                    .get("database")
-                    .cloned()
+                let database = args
+                    .text("database")
                     .or_else(|| node_id.split('/').next().map(str::to_string))
                     .unwrap_or_default();
-                let script = params
-                    .get("script")
-                    .cloned()
+                let script = args
+                    .text("script")
                     .or_else(|| node_id.rsplit('/').next().map(str::to_string))
                     .unwrap_or_default();
                 Some(ViewRequest::OpenAdapterDbScriptEditor {
@@ -331,7 +326,6 @@ pub fn dispatch_to_view_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn dispatch_noop_yields_no_request() {
@@ -431,14 +425,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_open_editor_postgres_db_script_uses_params() {
-        let mut params = HashMap::new();
-        params.insert("database".to_string(), "live".to_string());
-        params.insert("script".to_string(), "report".to_string());
+    fn dispatch_open_editor_postgres_db_script_uses_args() {
+        let args = ActionArgs::new()
+            .with("database", "live")
+            .with("script", "report");
         let req = dispatch_to_view_request(
             ActionDispatch::OpenEditor {
                 session_kind: "script_editor".into(),
-                params,
+                args,
             },
             2,
             4,
@@ -467,12 +461,12 @@ mod tests {
 
     #[test]
     fn dispatch_open_editor_postgres_db_script_falls_back_to_node_id() {
-        // Adapter omits the params map — dispatcher recovers
+        // Adapter omits the args — dispatcher recovers
         // (database, script) from the node_id segments.
         let req = dispatch_to_view_request(
             ActionDispatch::OpenEditor {
                 session_kind: "script_editor".into(),
-                params: HashMap::new(),
+                args: ActionArgs::new(),
             },
             0,
             1,
