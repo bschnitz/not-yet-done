@@ -703,6 +703,7 @@ fn print_level_usage(
                 hint = action_flag_hint(a),
                 w = w,
             );
+            print_action_params(a);
         }
         println!();
     }
@@ -724,6 +725,7 @@ fn print_level_usage(
                 hint = action_flag_hint(a),
                 w = w,
             );
+            print_action_params(a);
         }
         println!();
     }
@@ -735,6 +737,40 @@ fn print_level_usage(
         for c in child_locals {
             println!("  {base}:{c} help");
         }
+    }
+}
+
+/// The `--arg` parameters an action declares, one indented line each under
+/// its action. Printed only where there are any: an action that declares none
+/// takes no named arguments worth advertising, and a blank line per action
+/// would bury the ones that do.
+fn print_action_params(a: &NodeAction) {
+    for p in &a.params {
+        let required = if p.required { ", required" } else { "" };
+        let default = match &p.default {
+            Some(v) => v
+                .as_text()
+                .map(|t| format!(", default {t}"))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        println!(
+            "      --arg {key}=<{kind}>   {label} ({kind}{required}{default})",
+            key = p.key,
+            kind = p.kind.name(),
+            label = p.label,
+        );
+    }
+}
+
+/// The input shape in one word, for a message that has to name it.
+fn input_shape_name(input: &InputSpec) -> &'static str {
+    match input {
+        InputSpec::None => "no input",
+        InputSpec::Editor => "an editor",
+        InputSpec::Picker => "a picker",
+        InputSpec::FilePicker { .. } => "a file picker",
+        InputSpec::Form { .. } | InputSpec::ColumnForm => "a form",
     }
 }
 
@@ -1199,6 +1235,27 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         }
     })?;
 
+    // Named arguments are checked against the action's declaration before
+    // anything runs, so a typo costs a message rather than a silent no-op. An
+    // action that declares no parameters is not validated — see `resolve_args`.
+    let action_args = not_yet_done_content::resolve_args(&action.params, &inv.action_args())
+        .map_err(|problems| {
+            anyhow!(
+                "action '{action_id}': {}",
+                not_yet_done_content::describe_problems(&problems)
+            )
+        })?;
+    // Arguments reach an adapter through `ActionContext`, and only
+    // `invoke_action` is handed one. Saying so beats accepting `--arg` on an
+    // editor action and quietly dropping it.
+    if !action_args.is_empty() && !matches!(action.input, InputSpec::None) {
+        return Err(anyhow!(
+            "action '{action_id}' takes its input through {}, and named arguments reach only \
+             dispatch actions so far — see docs/plan-action-args.md",
+            input_shape_name(&action.input)
+        ));
+    }
+
     match action.input {
         InputSpec::Editor => do_editor(node.as_mut(), &action_id, inv).await,
         InputSpec::Form { fields } => do_form(node.as_mut(), &action_id, &fields, inv).await,
@@ -1217,7 +1274,7 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         }
         InputSpec::Picker => do_picker(node.as_mut(), &action_id, inv).await,
         InputSpec::FilePicker { multi } => do_files(node.as_mut(), &action_id, multi, inv).await,
-        InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv).await,
+        InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv, action_args).await,
     }
 }
 
@@ -1398,14 +1455,19 @@ async fn do_files(
 /// `InputSpec::None`: the shortcut/dispatch path. Build an [`ActionContext`]
 /// from the CLI flags, call [`Node::invoke_action`], and act on the returned
 /// [`ActionDispatch`].
-async fn do_dispatch(node: &mut dyn Node, action_id: &str, inv: &Invocation) -> Result<()> {
+async fn do_dispatch(
+    node: &mut dyn Node,
+    action_id: &str,
+    inv: &Invocation,
+    args: ActionArgs,
+) -> Result<()> {
     let ctx = ActionContext {
         marked: None,
         confirmed: inv.yes,
         query: inv.query.clone(),
         value: inv.value.clone(),
         text: inv.text.clone(),
-        args: inv.action_args(),
+        args,
     };
     let dispatch = node.invoke_action(action_id, &ctx).await?;
     match dispatch {
