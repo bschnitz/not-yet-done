@@ -4615,6 +4615,33 @@ formatting survive in the affected YAML (`git diff`).
 - [ ] Different tabs never collide (the same key in tab A and tab B → no
       prompt).
 
+## The keymap dump (`not-yet-done-tui --keymap`)
+
+User documentation:
+[`keybinding-editor.md`](keybinding-editor.md#dumping-the-keymap-to-the-terminal).
+The dump is the shortcut menu's **All tabs** scope on stdout, so the two must
+agree.
+
+- [ ] `not-yet-done-tui --keymap` prints and exits; the UI never starts, no
+      adapter connects, no banner or log line appears in a TUI running next to
+      it.
+- [ ] The `Global` section comes first and lists one `Switch to <tab>` row per
+      configured tab, then one section per tab and per drilldown level.
+- [ ] Pick a binding you know: its key, its action name and its config path
+      match what `o k` shows in the All-tabs scope for the same row.
+- [ ] Inside a section single keys come before chords, chords before
+      modifier keys; the columns line up even in scopes whose label carries a
+      `›`.
+- [ ] Actions with no key appear only in the trailing `Unbound` section, and
+      the header count excludes them.
+- [ ] `--keymap <pattern>` narrows on key, action, scope and config path
+      alike, case-insensitively; a pattern that matches nothing prints the
+      header with `0 bindings`.
+- [ ] `--help` prints the usage; an unknown option exits non-zero with the
+      usage; a bare argument without `--keymap` is rejected the same way.
+- [ ] A binding recorded in the menu (`Ctrl+N`) shows up in the next dump; a
+      saved-query or script shortcut (DB-stored) deliberately does not.
+
 ## The notification bar — display limit + the notification centre (`f10`)
 
 `notifications.max_messages` limits how many messages the **bottom** bar shows

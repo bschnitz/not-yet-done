@@ -44,6 +44,16 @@ Start the TUI with:
 not-yet-done-tui
 ```
 
+It takes no options in normal use — everything is configured in `tui.yaml` and
+the view files. The one exception prints the keymap instead of starting the UI:
+
+```bash
+not-yet-done-tui --keymap            # every configured binding
+not-yet-done-tui --keymap tracking   # only rows containing "tracking"
+```
+
+See [Dumping the keymap](docs/keybinding-editor.md#dumping-the-keymap-to-the-terminal).
+
 ### Tabs and Views
 
 Every tab is an adapter-backed _content tab_, configured under
