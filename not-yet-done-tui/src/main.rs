@@ -8,6 +8,7 @@ mod edit_session;
 mod events;
 mod key_groups;
 mod keymap;
+mod keymap_dump;
 mod mouse;
 mod query_filter;
 
@@ -38,8 +39,57 @@ use not_yet_done_core::{
 use tabs::Tab;
 use ui::theme::Theme;
 
+/// What the process was asked to do on the command line.
+///
+/// The TUI takes no options in normal use — everything is configured in
+/// `config.yaml` and the view files — so this stays a hand-rolled parse of
+/// the two flags that exist rather than a dependency on an argument parser.
+struct Cli {
+    /// Print the keymap and exit instead of starting the UI.
+    keymap: bool,
+    /// Optional substring the `--keymap` dump is narrowed to.
+    filter: Option<String>,
+}
+
+const USAGE: &str = "\
+not-yet-done-tui — task and time tracking TUI
+
+USAGE:
+    not-yet-done-tui                 start the UI
+    not-yet-done-tui --keymap [PAT]  print every configured key binding and exit
+    not-yet-done-tui --help
+
+The keymap dump is the shortcut menu's \"All tabs\" scope on stdout: one
+section per scope (Global, then each tab and drilldown level), each line
+`<key>  <action>  <where it is configured>`, followed by the actions that
+carry no key. PAT narrows the list to rows containing it (case-insensitive).
+";
+
+fn parse_args() -> Result<Cli> {
+    let mut cli = Cli {
+        keymap: false,
+        filter: None,
+    };
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                std::process::exit(0);
+            }
+            "--keymap" => cli.keymap = true,
+            other if other.starts_with('-') => {
+                anyhow::bail!("unknown option `{other}`\n\n{USAGE}");
+            }
+            other if cli.keymap && cli.filter.is_none() => cli.filter = Some(other.to_string()),
+            other => anyhow::bail!("unexpected argument `{other}`\n\n{USAGE}"),
+        }
+    }
+    Ok(cli)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = parse_args()?;
     let config = load_or_create_config().await?;
 
     // Install diagnostic logging before anything can log. Errors (including
@@ -128,6 +178,18 @@ async fn main() -> Result<()> {
         factory_builder,
         host_ctx,
     );
+
+    // `--keymap`: the map is projected from the static config alone, so it is
+    // answerable right here — before the wiring below opens adapters, stamps
+    // saved queries and starts the first fetch, and before the alternate
+    // screen goes up. Nothing is loaded, nothing connects, nothing is written.
+    if cli.keymap {
+        print!(
+            "{}",
+            keymap_dump::render(&app.all_shortcut_rows(), cli.filter.as_deref())
+        );
+        return Ok(());
+    }
 
     // Wire every content view: DB-persisted state (column config, saved
     // queries, default query, sort spec), the jump alphabet, the adapter

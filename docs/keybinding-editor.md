@@ -110,6 +110,40 @@ If any listed conflict is itself read-only, it is tagged `(read-only)` and
 cannot be removed; the prompt then only offers `n`/`Esc`, because the key
 cannot be freed.
 
+## Dumping the keymap to the terminal
+
+The menu answers "which key does what, and where" — but only inside a
+running TUI, a screenful at a time. The same list is available on stdout:
+
+```bash
+not-yet-done-tui --keymap
+not-yet-done-tui --keymap "ctrl+"   # only rows containing this
+```
+
+The dump is the menu's **All tabs** scope, laid out as one section per
+scope and, inside it, one line per binding:
+
+```
+  o k        Shortcut menu    global.shortcut_menu
+  t t        Switch to items  views.items.key
+```
+
+The third column is the config path the binding is written at, so the dump
+also says which file to edit — the same path the conflict messages use. The
+single keys come first, then the chords, then the modifier keys, which is
+the order one scans in when looking for a key that is still free. Actions
+that carry no key at all follow in a trailing `Unbound` section, and the
+optional argument narrows every column at once (key, action, scope, path).
+
+The flag prints and exits: no adapter connects, nothing is loaded, nothing
+is written, so it is safe to run while the TUI is up.
+
+**What it does not list:** the shortcuts you bound at runtime — saved
+queries and `:script`-menu scripts, whose keys live in the adapter database
+and attach to one drilldown level. Those exist only in the menu's context
+scope, which is a property of the pane you are standing in, not of the
+config. Look them up in the menu itself.
+
 ## Config surface
 
 Bindings are written in one of three forms:

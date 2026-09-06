@@ -6230,6 +6230,34 @@ impl App {
     /// projected from every content tab's leaf maps. The menu opens in the
     /// configured [`crate::config::ShortcutScope`].
     fn open_shortcut_menu(&mut self) {
+        // Context: the live keymap of the currently focused content view,
+        // plus its keyless actions, prefixed with the generic tab switches.
+        let context = self.context_shortcut_rows();
+        let all = self.all_shortcut_rows();
+
+        // Refreshing an open menu (e.g. right after adding, deleting or
+        // restoring a binding) keeps the current scope and carries the live
+        // fuzzy filter across the rebuild; a fresh open uses the configured
+        // scope and an empty query.
+        if self.shortcut_menu.is_open() {
+            self.shortcut_menu.refresh(context, all);
+        } else {
+            self.shortcut_menu
+                .open(context, all, self.config.shortcut_menu.default_scope);
+        }
+    }
+
+    /// Every configured shortcut across all content tabs and drilldown
+    /// levels — the shortcut menu's "All tabs" scope, and the source of the
+    /// `--keymap` dump.
+    ///
+    /// Projected from the *static* config (tab layout, view files, global
+    /// keybindings), not from any live keymap, so it needs no running UI and
+    /// no loaded adapter: a fresh [`App`] that was never wired answers it in
+    /// full. Rows the user has bound at runtime (saved-query and script
+    /// shortcuts, which live in `nyd.db` and attach to the focused level) are
+    /// deliberately absent here — they only exist in the context scope.
+    pub fn all_shortcut_rows(&self) -> Vec<crate::keymap::ShortcutRow> {
         use crate::keymap::{
             KeyScope, ShortcutRow, build_leaf_maps_for, leaf_scope_label, shortcut_rows_with,
         };
@@ -6237,12 +6265,6 @@ impl App {
         // Generic per-tab switch rows built from the active layout, so
         // every configured tab is listed by its real name.
         let switch_rows = self.tab_switch_rows();
-
-        // Context: the live keymap of the currently focused content view,
-        // plus its keyless actions, prefixed with the generic tab switches.
-        let context = self.context_shortcut_rows();
-
-        // All: every configured shortcut across all content tabs and levels.
         let kb = &self.config.keybindings;
         let mut all: Vec<ShortcutRow> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -6297,16 +6319,7 @@ impl App {
             }
         }
 
-        // Refreshing an open menu (e.g. right after adding, deleting or
-        // restoring a binding) keeps the current scope and carries the live
-        // fuzzy filter across the rebuild; a fresh open uses the configured
-        // scope and an empty query.
-        if self.shortcut_menu.is_open() {
-            self.shortcut_menu.refresh(context, all);
-        } else {
-            self.shortcut_menu
-                .open(context, all, self.config.shortcut_menu.default_scope);
-        }
+        all
     }
 
     /// The shortcuts that would fire right now: the generic per-tab switch
