@@ -24,8 +24,8 @@
 use std::fmt::Write as _;
 
 use crate::{
-    ActionOutcome, AdapterCapabilities, ColumnSchema, ContentAdapter, InputSpec, Metadata, Node,
-    NodeAction, NodeType,
+    ActionOutcome, AdapterCapabilities, ArgValue, ColumnSchema, ContentAdapter, InputSpec,
+    Metadata, Node, NodeAction, NodeType,
 };
 
 /// A structural stand-in for a node of a given [`NodeType`], carrying no
@@ -281,8 +281,22 @@ async fn render_body(
         // a name like `limit` means nothing without the action it belongs to.
         for p in &a.params {
             let required = if p.required { ", required" } else { "" };
-            let default = match p.default.as_ref().and_then(|v| v.as_text()) {
-                Some(t) => format!(", default `{t}`"),
+            // A list default is shown item by item, each in its own code
+            // span — `as_text` refuses to invent a separator, and here the
+            // display is the point.
+            let default = match p.default.as_ref() {
+                Some(ArgValue::List(items)) if !items.is_empty() => format!(
+                    ", default {}",
+                    items
+                        .iter()
+                        .map(|i| format!("`{i}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(v) => match v.as_text() {
+                    Some(t) => format!(", default `{t}`"),
+                    None => String::new(),
+                },
                 None => String::new(),
             };
             let _ = writeln!(
@@ -509,6 +523,38 @@ mod tests {
         assert!(!md.contains("## Adapter capabilities"));
         assert!(md.contains("`edit`"));
         assert!(md.contains("leaf level"));
+    }
+
+    /// A parameter's default is printed after its kind — a list one item by
+    /// item, since `as_text` refuses to join a list on the caller's behalf.
+    #[tokio::test]
+    async fn parameter_defaults_render_scalars_and_lists() {
+        use crate::ParamSpec;
+        let a = MockAdapterBuilder::new("mock")
+            .actions_for(
+                "mock:issue",
+                vec![
+                    NodeAction::new("track", "track", InputSpec::None)
+                        .param(
+                            ParamSpec::list("group_paths", "groups")
+                                .with_default(ArgValue::List(vec!["^/Work".into(), "^/X".into()])),
+                        )
+                        .param(ParamSpec::int("limit", "limit").with_default(50i64)),
+                ],
+            )
+            .node(
+                MockNodeData::new("root", "Root")
+                    .child_type(issue_type())
+                    .child(MockNodeData::new("ISS-1", "First").node_type(issue_type())),
+            )
+            .build();
+        let leaf = a.get_by_id("ISS-1").await.unwrap();
+        let md = render_level(&a, leaf.as_ref(), false).await;
+        assert!(
+            md.contains("`group_paths` — groups _(list, default `^/Work`, `^/X`)_"),
+            "{md}"
+        );
+        assert!(md.contains("`limit` — limit _(int, default `50`)_"), "{md}");
     }
 
     #[test]

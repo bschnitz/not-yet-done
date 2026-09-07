@@ -53,16 +53,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use not_yet_done_content::HostEvent;
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
-    ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec, Invalidation,
-    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore,
-    SortKey, Subtree, SubtreeNode, NodeHit,
-    TypedAdapterFactory, apply_sort,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    ColumnSchema, ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec,
+    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeHit, NodeSummary, NodeType,
+    ParamSpec, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode, TypedAdapterFactory,
+    apply_sort,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
 use not_yet_done_task_core::events::DomainEvent;
+use not_yet_done_task_core::service::TrackingPolicy;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
@@ -971,7 +972,7 @@ fn task_item_actions() -> Vec<NodeAction> {
         // stays the recursive `delete`. See [`execute_delete_single`].
         NodeAction::new("delete-single", "Delete", InputSpec::None),
         NodeAction::new("undelete", "Undelete", InputSpec::None),
-        NodeAction::new("toggle-tracking", "track", InputSpec::None),
+        toggle_tracking_action(),
         // Value-accepting action for the generic `option_menu`: assigns or
         // unassigns the tag whose stable id arrives in `ctx.value`. Declares
         // no widget (`InputSpec::None`) — the menu sources the value (from
@@ -1059,29 +1060,67 @@ fn reopen_service_error(text: &str, e: AppError) -> ActionOutcome {
     }
 }
 
-/// Start or stop tracking for `task_id`, mirroring the host's native
-/// policy: with parallel tracking disabled, starting first stops every
-/// other active tracking. Each transition emits a `Tracking*` event so the
-/// other tabs repaint.
-pub(crate) async fn apply_tracking(handle: &CoreHandle, task_id: Uuid, wants_tracked: bool) {
+/// The `toggle-tracking` action every task-bearing level declares (task
+/// tree, tracking entries, duration tree, condensed rows). One definition so
+/// its `group_paths` parameter is spelled identically everywhere an alias
+/// may supply it — see [`tracking_policy_for`] for what the values mean.
+pub(crate) fn toggle_tracking_action() -> NodeAction {
+    NodeAction::new("toggle-tracking", "track", InputSpec::None).param(ParamSpec::list(
+        "group_paths",
+        "path regexes partitioning tasks into tracking groups; a start stops only its own group",
+    ))
+}
+
+/// The policy a `toggle-tracking` invocation runs under.
+///
+/// Without a `group_paths` argument the adapter's configured policy applies
+/// (`allow_parallel`). With it, each pattern is a regex over the task's label
+/// path (`/Root/Child/Leaf`, root first); the first matching pattern decides
+/// the group, tasks matching none share one rest group, and starting a
+/// tracking stops only the running ones in the same group. Grouping is a
+/// refinement of exclusivity, so it cannot be combined with
+/// `allow_parallel: true` — that is reported as an error rather than picking
+/// a winner silently.
+pub(crate) fn tracking_policy_for(
+    handle: &CoreHandle,
+    args: &ActionArgs,
+) -> std::result::Result<TrackingPolicy, String> {
+    let Some(paths) = args.list("group_paths") else {
+        return Ok(handle.tracking_policy.clone());
+    };
+    if matches!(handle.tracking_policy, TrackingPolicy::Parallel) {
+        return Err("group_paths cannot be combined with allow_parallel: true".to_string());
+    }
+    TrackingPolicy::grouped(&paths)
+}
+
+/// Start or stop tracking for `task_id` under `policy`. Starting goes
+/// through [`TrackingService::start`], the one place the policy is applied
+/// (exclusive: stop everything else; grouped: stop the same group; parallel:
+/// stop nothing). Each transition emits a `Tracking*` event so the other tabs
+/// repaint — the stopped ones first, so a row never shows two active markers.
+///
+/// [`TrackingService::start`]: not_yet_done_task_core::service::TrackingService::start
+pub(crate) async fn apply_tracking(
+    handle: &CoreHandle,
+    task_id: Uuid,
+    wants_tracked: bool,
+    policy: &TrackingPolicy,
+) {
     let now = chrono::Utc::now();
     if wants_tracked {
-        if !handle.allow_parallel_tracking {
-            if let Ok(active) = handle.tracking_repo.find_all_active().await {
-                for t in active {
-                    if handle.tracking_repo.stop(t.id, now).await.is_ok() {
-                        handle.publish(DomainEvent::TrackingStopped {
-                            task_id: t.task_id,
-                            tracking_id: t.id,
-                        });
-                    }
-                }
+        // `TrackingAlreadyActive` means the task already tracks: nothing to
+        // do, and no event — the marker is already on.
+        if let Ok(started) = handle.tracking_service.start(task_id, policy).await {
+            for t in started.stopped {
+                handle.publish(DomainEvent::TrackingStopped {
+                    task_id: t.task_id,
+                    tracking_id: t.id,
+                });
             }
-        }
-        if let Ok(started) = handle.tracking_repo.insert(task_id, now, None).await {
             handle.publish(DomainEvent::TrackingStarted {
                 task_id,
-                tracking_id: started.id,
+                tracking_id: started.tracking.id,
             });
         }
     } else if let Ok(Some(t)) = handle.tracking_repo.find_active_for_task(task_id).await {
@@ -1174,7 +1213,7 @@ async fn execute_add(
             };
             notes::write_notes(&created, &all_tasks(snapshot), &notes_text);
             if wants_tracking {
-                apply_tracking(handle, created.id, true).await;
+                apply_tracking(handle, created.id, true, &handle.tracking_policy).await;
             }
             emit_task_changed(handle, created.id);
             Ok(ActionOutcome::Navigate {
@@ -1276,7 +1315,7 @@ async fn execute_edit(
 
             if let Some(want) = parsed.tracking {
                 if want != was_tracked {
-                    apply_tracking(handle, updated.id, want).await;
+                    apply_tracking(handle, updated.id, want, &handle.tracking_policy).await;
                 }
             }
             emit_task_changed(handle, updated.id);
@@ -1332,9 +1371,9 @@ async fn execute_edit_tree(
         &originals,
         id,
         &handle.task_service,
-        &handle.tracking_repo,
+        &handle.tracking_service,
         &snapshot.tracked,
-        handle.allow_parallel_tracking,
+        &handle.tracking_policy,
     )
     .await
     {
@@ -1492,15 +1531,24 @@ async fn invoke_undelete(handle: &CoreHandle) -> ActionDispatch {
 /// `invoke_action("toggle-tracking")` — flip time tracking for `task_id`.
 /// The current state is read live (an active tracking exists?) rather than
 /// from the snapshot, so a stale marker can't desync the toggle.
-/// [`apply_tracking`] enforces the host's exclusivity policy and emits the
-/// `Tracking*` events; the bridge then patches the affected task row's
-/// `⏱` marker in place (M9) rather than reloading the tree.
-async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
+/// [`apply_tracking`] applies the policy [`tracking_policy_for`] derives
+/// from `args` and emits the `Tracking*` events; the bridge then patches the
+/// affected task rows' `⏱` markers in place (M9) rather than reloading the
+/// tree.
+async fn invoke_toggle_tracking(
+    handle: &CoreHandle,
+    task_id: Uuid,
+    args: &ActionArgs,
+) -> ActionDispatch {
+    let policy = match tracking_policy_for(handle, args) {
+        Ok(p) => p,
+        Err(msg) => return ActionDispatch::Error(msg),
+    };
     let is_tracked = matches!(
         handle.tracking_repo.find_active_for_task(task_id).await,
         Ok(Some(_))
     );
-    apply_tracking(handle, task_id, !is_tracked).await;
+    apply_tracking(handle, task_id, !is_tracked, &policy).await;
     // No `Reload`: only the row's tracking marker changed, so the bridge
     // patches it in place instead of rebuilding the (deep) task tree.
     ActionDispatch::Noop
@@ -1791,7 +1839,12 @@ impl Node for TaskRootNode {
             ))),
         }
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
@@ -1930,7 +1983,12 @@ impl Node for TaskItemNode {
             ))),
         }
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
                 execute_add(&self.handle, &self.snapshot, &text, &original).await
@@ -1997,7 +2055,7 @@ impl Node for TaskItemNode {
             // applies). See [`execute_delete_single`].
             "delete-single" => ActionDispatch::DeleteSelf { confirm: None },
             "undelete" => invoke_undelete(&self.handle).await,
-            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id).await,
+            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.id, &ctx.args).await,
             "toggle-tag" => {
                 invoke_toggle_tag(&self.handle, &self.snapshot, self.id, ctx.value.as_deref()).await
             }

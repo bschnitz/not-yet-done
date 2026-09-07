@@ -22,7 +22,7 @@ use not_yet_done_task_core::repository::{
     TagRepositoryImplParameters, TaskRepositoryImpl, TaskRepositoryImplParameters,
     TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
-use not_yet_done_task_core::service::TaskService;
+use not_yet_done_task_core::service::{TaskService, TrackingPolicy, TrackingService};
 
 use super::diff::apply_changes;
 use super::serialize::{serialize, short_id};
@@ -33,7 +33,7 @@ use super::serialize::{serialize, short_id};
 
 async fn setup() -> (
     Arc<dyn TaskService>,
-    Arc<dyn TrackingRepository>,
+    Arc<dyn TrackingService>,
     Arc<dyn not_yet_done_task_core::service::TagService>,
     sea_orm::DatabaseConnection,
 ) {
@@ -73,7 +73,7 @@ async fn setup() -> (
         .build();
 
     let service: Arc<dyn TaskService> = module.resolve();
-    let tracking: Arc<dyn TrackingRepository> = module.resolve();
+    let tracking: Arc<dyn TrackingService> = module.resolve();
     let tag_service: Arc<dyn not_yet_done_task_core::service::TagService> = module.resolve();
     (service, tracking, tag_service, db)
 }
@@ -134,7 +134,7 @@ async fn round_trip_no_changes() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert_eq!(result.unwrap(), "No changes");
@@ -156,7 +156,7 @@ async fn rename_task() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("updated"));
@@ -181,7 +181,7 @@ async fn toggle_status() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("updated"));
@@ -206,7 +206,7 @@ async fn create_new_child() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("created"));
@@ -237,7 +237,7 @@ async fn create_nested_new_items() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -272,7 +272,7 @@ async fn soft_delete_missing_item() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("deleted"));
@@ -308,7 +308,7 @@ async fn reparent_task() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("updated"));
@@ -334,7 +334,7 @@ async fn change_priority() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     assert!(result.unwrap().contains("updated"));
@@ -367,7 +367,7 @@ async fn multiple_changes_at_once() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -427,7 +427,7 @@ async fn delete_subtree_by_removing_from_editor() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -509,7 +509,7 @@ async fn delete_items_exact_user_scenario() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -557,7 +557,7 @@ async fn delete_with_duplicate_names() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -601,7 +601,7 @@ async fn restore_deleted_task_via_marker() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -642,7 +642,7 @@ async fn delete_task_via_d_marker() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -717,7 +717,7 @@ async fn serialize_edit_delete_round_trip() {
         &service,
         &tracking,
         &HashSet::new(),
-        true,
+        &TrackingPolicy::Parallel,
     )
     .await;
     let msg = result.unwrap();
@@ -733,16 +733,18 @@ async fn serialize_edit_delete_round_trip() {
 /// / `execute` exactly as the TUI does.
 fn build_task_adapter(
     service: Arc<dyn TaskService>,
-    tracking: Arc<dyn TrackingRepository>,
-    tracking_service: Arc<dyn not_yet_done_task_core::service::TrackingService>,
+    tracking_service: Arc<dyn TrackingService>,
     tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
     project_service: Arc<dyn not_yet_done_task_core::service::ProjectService>,
+    db: &sea_orm::DatabaseConnection,
+    policy: TrackingPolicy,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
     use not_yet_done_content::InMemoryHostBus;
     // The self-contained factory would open its *own* database; the test
     // needs the adapter over the very `service`/`tracking` of its in-memory
     // DB, so build the handle and adapter directly.
     let bus = std::sync::Arc::new(InMemoryHostBus::default());
+    let tracking: Arc<dyn TrackingRepository> = tracking_repo_for(&db);
     let handle = crate::CoreHandle::new(
         service,
         tracking,
@@ -751,17 +753,14 @@ fn build_task_adapter(
         project_service,
         bus,
         "test".to_string(),
-        false,
+        policy,
     );
     Box::new(crate::task::TaskAdapter::new("test", handle))
 }
 
-/// Resolve a `TrackingService` over the test's in-memory `db` — the
-/// `CoreHandle` now carries one, but these task-adapter tests don't exercise
-/// split/move, so any service over the same DB satisfies the constructor.
-fn tracking_service_for(
-    db: &sea_orm::DatabaseConnection,
-) -> Arc<dyn not_yet_done_task_core::service::TrackingService> {
+/// Resolve a `TrackingRepository` over the test's in-memory `db` for the
+/// `CoreHandle`'s direct stop/lookup path.
+fn tracking_repo_for(db: &sea_orm::DatabaseConnection) -> Arc<dyn TrackingRepository> {
     let module = TaskDomainModule::builder()
         .with_component_parameters::<TaskRepositoryImpl>(TaskRepositoryImplParameters {
             db: Some(db.clone()),
@@ -815,9 +814,10 @@ async fn adapter_delete_single_leaves_children() {
     let adapter = build_task_adapter(
         service,
         tracking,
-        tracking_service_for(&db),
         _tag_service,
         project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
     );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
@@ -856,9 +856,10 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     let adapter = build_task_adapter(
         service,
         tracking,
-        tracking_service_for(&db),
         _tag_service,
         project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
     );
     let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
 
@@ -873,7 +874,9 @@ async fn adapter_delete_recursive_warns_and_cascades() {
     assert!(msg.contains("2 subtasks"), "prompt names the count: {msg}");
     assert!(msg.contains("recursive"), "prompt flags the cascade: {msg}");
 
-    node.execute("delete", ActionInput::None, &Default::default()).await.unwrap();
+    node.execute("delete", ActionInput::None, &Default::default())
+        .await
+        .unwrap();
 
     let tasks = all_tasks(&db).await;
     assert!(find_by_desc(&tasks, "Parent").deleted, "parent deleted");
@@ -882,4 +885,220 @@ async fn adapter_delete_recursive_warns_and_cascades() {
         find_by_desc(&tasks, "Grandchild").deleted,
         "grandchild cascaded"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `toggle-tracking` with `group_paths`
+// ---------------------------------------------------------------------------
+
+/// Ids of the tasks currently tracking, by description.
+async fn tracking_now(repo: &Arc<dyn TrackingRepository>, tasks: &[task::Model]) -> Vec<String> {
+    let active = repo.find_all_active().await.unwrap();
+    let mut names: Vec<String> = active
+        .iter()
+        .map(|t| {
+            tasks
+                .iter()
+                .find(|x| x.id == t.task_id)
+                .map(|x| x.description.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// `toggle-tracking` on `task` with the given `group_paths` argument.
+async fn toggle_grouped(
+    adapter: &dyn not_yet_done_content::ContentAdapter,
+    task: &task::Model,
+    group_paths: &[&str],
+) -> not_yet_done_content::ActionDispatch {
+    use not_yet_done_content::{ActionContext, ArgValue};
+    let node = adapter.get_by_id(&task.id.to_string()).await.unwrap();
+    let ctx = ActionContext {
+        args: not_yet_done_content::ActionArgs::new().with(
+            "group_paths",
+            ArgValue::List(group_paths.iter().map(|s| s.to_string()).collect()),
+        ),
+        ..Default::default()
+    };
+    node.invoke_action("toggle-tracking", &ctx).await.unwrap()
+}
+
+/// A start stops only the running trackings of its own group: `/Work/*` is
+/// one group, everything else the shared rest group.
+#[tokio::test]
+async fn grouped_toggle_stops_only_the_same_group() {
+    use not_yet_done_content::ActionDispatch;
+    let (service, tracking, tag_service, db) = setup().await;
+    let work = insert_task(&db, "Work", None, TaskStatus::Todo, 0).await;
+    let a = insert_task(&db, "A", Some(work.id), TaskStatus::Todo, 0).await;
+    let b = insert_task(&db, "B", Some(work.id), TaskStatus::Todo, 0).await;
+    let other = insert_task(&db, "Other", None, TaskStatus::Todo, 0).await;
+    let c = insert_task(&db, "C", Some(other.id), TaskStatus::Todo, 0).await;
+    let d = insert_task(&db, "D", Some(other.id), TaskStatus::Todo, 0).await;
+    let repo = tracking_repo_for(&db);
+    let tasks = all_tasks(&db).await;
+
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
+    );
+    let groups = ["^/Work"];
+
+    assert!(matches!(
+        toggle_grouped(adapter.as_ref(), &c, &groups).await,
+        ActionDispatch::Noop
+    ));
+    toggle_grouped(adapter.as_ref(), &a, &groups).await;
+    assert_eq!(
+        tracking_now(&repo, &tasks).await,
+        vec!["A", "C"],
+        "different groups track side by side"
+    );
+
+    toggle_grouped(adapter.as_ref(), &b, &groups).await;
+    assert_eq!(
+        tracking_now(&repo, &tasks).await,
+        vec!["B", "C"],
+        "B replaces A inside /Work, C outside is untouched"
+    );
+
+    toggle_grouped(adapter.as_ref(), &d, &groups).await;
+    assert_eq!(
+        tracking_now(&repo, &tasks).await,
+        vec!["B", "D"],
+        "the rest group is one group: D replaces C"
+    );
+
+    // Toggling a tracking task stops it, regardless of groups.
+    toggle_grouped(adapter.as_ref(), &b, &groups).await;
+    assert_eq!(tracking_now(&repo, &tasks).await, vec!["D"]);
+
+    // An invalid regex is refused before anything changes, naming the pattern.
+    match toggle_grouped(adapter.as_ref(), &a, &["("]).await {
+        ActionDispatch::Error(msg) => assert!(msg.contains("group_paths[0]"), "{msg}"),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(tracking_now(&repo, &tasks).await, vec!["D"]);
+}
+
+/// `group_paths` refines exclusivity; over a parallel policy it is refused
+/// instead of silently picking one of the two.
+#[tokio::test]
+async fn group_paths_over_parallel_policy_is_an_error() {
+    use not_yet_done_content::ActionDispatch;
+    let (service, tracking, tag_service, db) = setup().await;
+    let a = insert_task(&db, "A", None, TaskStatus::Todo, 0).await;
+    let repo = tracking_repo_for(&db);
+
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Parallel,
+    );
+    match toggle_grouped(adapter.as_ref(), &a, &["^/Work"]).await {
+        ActionDispatch::Error(msg) => assert!(msg.contains("allow_parallel"), "{msg}"),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(repo.find_all_active().await.unwrap().is_empty());
+}
+
+/// Without `group_paths` the adapter's configured policy applies: exclusive
+/// stops everything else.
+#[tokio::test]
+async fn plain_toggle_keeps_the_configured_exclusive_policy() {
+    use not_yet_done_content::ActionContext;
+    let (service, tracking, tag_service, db) = setup().await;
+    let a = insert_task(&db, "A", None, TaskStatus::Todo, 0).await;
+    let b = insert_task(&db, "B", None, TaskStatus::Todo, 0).await;
+    let repo = tracking_repo_for(&db);
+    let tasks = all_tasks(&db).await;
+
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
+    );
+    for t in [&a, &b] {
+        let node = adapter.get_by_id(&t.id.to_string()).await.unwrap();
+        node.invoke_action("toggle-tracking", &ActionContext::default())
+            .await
+            .unwrap();
+    }
+    assert_eq!(tracking_now(&repo, &tasks).await, vec!["B"]);
+}
+
+/// The outline editor's `-t` flags run under the same policy: two `-t` in
+/// different groups both start; under the exclusive policy that is refused
+/// up front.
+#[tokio::test]
+async fn outline_tracking_flags_follow_the_policy() {
+    let (service, tracking, _tag_service, db) = setup().await;
+    let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
+    let work = insert_task(&db, "Work", Some(root.id), TaskStatus::Todo, 0).await;
+    let a = insert_task(&db, "A", Some(work.id), TaskStatus::Todo, 0).await;
+    let other = insert_task(&db, "Other", Some(root.id), TaskStatus::Todo, 0).await;
+    let c = insert_task(&db, "C", Some(other.id), TaskStatus::Todo, 0).await;
+    let repo = tracking_repo_for(&db);
+    let tasks = all_tasks(&db).await;
+
+    let subtree = vec![
+        root.clone(),
+        work.clone(),
+        a.clone(),
+        other.clone(),
+        c.clone(),
+    ];
+    let content = serialize(&root, &subtree);
+    let flagged = content
+        .lines()
+        .map(|l| {
+            if l.contains(&short_id(a.id)) || l.contains(&short_id(c.id)) {
+                l.replacen("] ", "] -t ", 1)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let err = apply_changes(
+        &flagged,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        &TrackingPolicy::Exclusive,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("Only one task"), "{err}");
+    assert!(repo.find_all_active().await.unwrap().is_empty());
+
+    let grouped = TrackingPolicy::grouped(&["^/Root/Work"]).unwrap();
+    apply_changes(
+        &flagged,
+        &subtree,
+        root.id,
+        &service,
+        &tracking,
+        &HashSet::new(),
+        &grouped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(tracking_now(&repo, &tasks).await, vec!["A", "C"]);
 }

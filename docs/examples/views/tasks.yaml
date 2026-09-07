@@ -53,7 +53,8 @@
 #     last deletion) — generic node actions dispatched via `invoke_action`.
 #   * `s` toggle-tracking — start/stop time tracking for the selected task
 #     in one key. The `tracking` column shows a `⏱` glyph on running rows.
-#     Respects the host's exclusivity policy (`tracking.allow_parallel`).
+#     Starting applies the adapter's policy (`allow_parallel` below) unless
+#     the invocation carries `group_paths` (see `aliases:` below).
 #   * `a m` mark-move / `a p` paste-move — reparent: mark a task, move onto
 #     the target task (which becomes its new parent). Cycles are rejected.
 #   * `U` un-nest — move the selected task back to the top level. The
@@ -107,7 +108,9 @@ adapter:
   #   database:        SeaORM DSN of the DB this tab opens (default: per-host
   #                    tasks.db). Point a Tasks and a Trackings tab at the same
   #                    file to make them coordinate live.
-  #   allow_parallel:  false (default) = starting a tracking stops the others.
+  #   allow_parallel:  false (default) = starting a tracking stops the others;
+  #                    true = trackings run side by side. Cannot be combined
+  #                    with `toggle-tracking`'s `group_paths` (refused).
   #   tracking_marker: glyph shown in the tracking marker column for a running
   #                    task (and its collapsed ancestors). Default "⏱". This is
   #                    the *cell value*, not a column `label:` (the header). Set
@@ -121,6 +124,21 @@ adapter:
   #                    same dir never evict each other. Example:
   #   config_inline: '{ backup: { directory: /mnt/sync/nyd, max_count: 30 } }'
   config_inline: "{}"
+  # Action aliases (see generic-view-spec.md, "aliases:"): a new action name
+  # standing for an existing one with arguments filled in, bindable wherever
+  # the target is. `toggle-tracking` takes `group_paths`, a list of regexes
+  # over a task's label path (`/Root/Child/Leaf`, root first, joined by `/`):
+  # the first matching pattern decides a task's group, tasks matching none
+  # share one rest group, and starting a tracking stops only the running ones
+  # in the same group — e.g. one customer's task next to an internal one.
+  # Without `group_paths` the `allow_parallel` policy above applies.
+  #   aliases:
+  #     my-toggle-tracking:
+  #       action: toggle-tracking
+  #       args: { group_paths: ["^/Work", "^/Other/Group"] }
+  #       label: track (grouped)
+  # then bind `- { key: s, id: my-toggle-tracking, inherit: true }` instead of
+  # `toggle-tracking` at the levels below.
   # `auto_connect` defaults to `never` (nothing connects until you press the
   # reload key). This adapter opens a local SQLite file and never logs in, so
   # it opts back into loading at startup.

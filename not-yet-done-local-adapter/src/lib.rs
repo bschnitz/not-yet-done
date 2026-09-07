@@ -34,6 +34,7 @@ use not_yet_done_task_core::repository::TrackingRepository;
 use not_yet_done_task_core::service::ProjectService;
 use not_yet_done_task_core::service::TagService;
 use not_yet_done_task_core::service::TaskService;
+use not_yet_done_task_core::service::TrackingPolicy;
 use not_yet_done_task_core::service::TrackingService;
 use tokio::sync::broadcast;
 
@@ -100,14 +101,15 @@ pub struct CoreHandle {
     /// Bus channel key for this handle — the database DSN. Local adapters on
     /// the same database share it; adapters elsewhere use a different channel.
     channel: String,
-    /// Tracking policy mirrored from the adapter's `allow_parallel` config.
-    /// When `false` (the default) starting tracking on a task via the
-    /// editor's `tracking: true` field first stops every other active
-    /// tracking, so at most one task tracks at a time; when `true` parallel
-    /// trackings are allowed. The local adapters need it because the
-    /// `tracking:` toggle in the task edit-buffer (A1b) goes through the
-    /// adapter, not the host's native session.
-    pub allow_parallel_tracking: bool,
+    /// Tracking policy mirrored from the adapter's `allow_parallel` config:
+    /// [`TrackingPolicy::Exclusive`] (the default) makes a start stop every
+    /// other active tracking, [`TrackingPolicy::Parallel`] lets them
+    /// coexist. A `toggle-tracking` invocation may override it with a
+    /// [`TrackingPolicy::Grouped`] built from its `group_paths` argument
+    /// (see [`crate::task::tracking_policy_for`]). The local adapters need
+    /// it because the `tracking:` toggle in the task edit-buffer (A1b) goes
+    /// through the adapter, not the host's native session.
+    pub tracking_policy: TrackingPolicy,
     /// Directory the `backup` action writes timestamped copies of this
     /// handle's database into. Defaults to
     /// [`not_yet_done_task_core::backup::default_backup_dir`]; overridable via
@@ -137,7 +139,7 @@ impl CoreHandle {
         project_service: Arc<dyn ProjectService>,
         bus: Arc<dyn HostEventBus>,
         channel: String,
-        allow_parallel_tracking: bool,
+        tracking_policy: TrackingPolicy,
     ) -> Self {
         Self {
             task_service,
@@ -147,7 +149,7 @@ impl CoreHandle {
             project_service,
             bus,
             channel,
-            allow_parallel_tracking,
+            tracking_policy,
             backup_dir: not_yet_done_task_core::backup::default_backup_dir(),
             backup_max_count: 10,
             tracking_marker: Arc::from(DEFAULT_TRACKING_MARKER),
@@ -349,7 +351,7 @@ pub fn open_core_handle(
         domain.project_service,
         ctx.event_bus.clone(),
         dsn,
-        cfg.allow_parallel.unwrap_or(false),
+        TrackingPolicy::from_parallel_flag(cfg.allow_parallel.unwrap_or(false)),
     )
     .with_backup(backup_dir, backup_max_count);
     if let Some(marker) = cfg.tracking_marker {

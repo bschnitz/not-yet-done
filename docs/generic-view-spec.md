@@ -2422,6 +2422,12 @@ adapter:
       label: track (grouped) # optional; default = the target's label
 ```
 
+(`group_paths` is the tasks adapter's own parameter: regexes over a task's
+label path, `/Root/Child/Leaf`; the first match decides the task's group, no
+match is the shared rest group, and a start stops only the running trackings
+of its own group. Which parameters an action takes is the adapter's business —
+`nyd <instance> help --full` lists them.)
+
 To everything outside the adapter the alias **is** an action: it is listed
 next to its target on every level where the target is (the action bar, the
 shortcut overview, `nyd <instance> help --full`, the `--keymap` dump), it is

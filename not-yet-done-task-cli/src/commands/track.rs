@@ -21,16 +21,19 @@ pub mod cli {
         parallel: bool,
     ) -> u8 {
         let result = crate::run_async(|module| async move {
-            use not_yet_done_task_core::service::TrackingService;
+            use not_yet_done_task_core::service::{TrackingPolicy, TrackingService};
             use sea_orm::prelude::Uuid;
             use shaku::HasComponent;
             let task_id = Uuid::parse_str(&task_id)
                 .map_err(|_| not_yet_done_task_core::error::AppError::InvalidId(task_id))?;
             let service: &dyn TrackingService = module.resolve_ref();
-            service.start(task_id, parallel).await
+            service
+                .start(task_id, &TrackingPolicy::from_parallel_flag(parallel))
+                .await
         });
         match result {
-            Ok(tracking) => {
+            Ok(started) => {
+                let tracking = started.tracking;
                 println!(
                     "✓ Tracking started: [{}] started at {}",
                     tracking.id,
@@ -39,6 +42,9 @@ pub mod cli {
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M:%S")
                 );
+                if !started.stopped.is_empty() {
+                    println!("  stopped {} other tracking(s)", started.stopped.len());
+                }
                 0
             }
             Err(e) => {
