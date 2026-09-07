@@ -2340,9 +2340,9 @@ the `invalidate_session` action (drop the token, keep the credentials) or
 
 ### Lifecycle hooks
 
-A **hook** binds an adapter action to a point in the adapter's lifetime,
-configured per instance in its view file (`views/*.yaml`). The only hook so far
-is `connected`, fired right after the adapter is built — for the in-process
+A **hook** binds an adapter action or a script to a point in the adapter's
+lifetime, configured per instance in its view file (`views/*.yaml`). Every
+adapter fires `connected`, right after it is built — for the in-process
 tasks/trackings adapter that is **every program start** (TUI launch or any `nyd
 tasks …` / `nyd trackings …` command). This is how the daily `tasks.db` backup
 works — it is no longer hard-coded:
@@ -2368,6 +2368,69 @@ Hooks are best-effort: a bad action or unwritable state file is
 logged and never blocks startup. See
 [decision 0005](docs/decisions/0005-host-crate-and-lifecycle-hooks.md) for the
 design.
+
+#### Event hooks: `tracking_started` / `tracking_stopped`
+
+The tasks and trackings adapters also fire a hook **while they run**, for
+every tracking they start or stop — the explicit ones (`s`, `toggle-tracking`,
+`nyd tasks … do toggle-tracking`) and the implicit stops a tracking policy
+performs when a start ends the trackings of its group. This is the seam for
+automation that reacts to your time tracking (a status light, a second
+measurement, a notification) without polling the database:
+
+| Hook               | Fires                                                      |
+| ------------------ | ---------------------------------------------------------- |
+| `tracking_started` | after a tracking has been started                          |
+| `tracking_stopped` | after a tracking has been stopped, implicit stops included |
+
+Both carry the same payload: `task_id`, `task_path` (the task's label path,
+`/Work/Project/Task`), `tracking_id`, `started_at` and `ended_at` (RFC 3339,
+`ended_at` is `null` for a start). A binding on such a hook is usually a
+**script**, which is the second kind of binding:
+
+```yaml
+# views/tasks.yaml — and the same block in views/trackings.yaml
+hooks:
+  tracking_started:
+    - script: on_tracking.py # a file in the tab's view-script directory
+  tracking_stopped:
+    - script: on_tracking.py # the payload tells the script which hook fired
+```
+
+A binding names either `run:` (an adapter action) or `script:` (an executable
+file), never both. A bare script name is looked up in the instance's top-level
+view-script directory, `~/.local/share/not_yet_done/scripts/<adapter type>/`
+— the same place the script menu (`x`) keeps its scripts, so a hook script can
+be created and edited there. A name containing `/` is taken relative to the
+scripts root (`trackings/on_tracking.py` from the tasks instance shares one
+file), an absolute path as is. The script receives:
+
+- `argv[1]`: the path of a JSON file with `hook`, `instance` and the payload
+  keys above;
+- `NYD_SCRIPT_HOOK` (the hook name), `NYD_HOOK_INSTANCE` (the instance id)
+  and `NYD_HOOK_DEPTH` (see below) in its environment;
+- no stdin; stdout and stderr go to a log file next to the payload file in
+  `~/.local/state/not_yet_done/hooks/` (kept for an hour).
+
+Bindings run **one after the other and are awaited** (60 s each, then the
+script is killed), so the stop a policy performs is delivered before the
+start that caused it. The TUI runs them in the background as the events come
+in; a `nyd … do …` command runs them after its action, before it exits.
+Failures are logged (`hooks/runner.log` in the state directory for the TUI,
+stderr for the CLI) and never fail the action.
+
+Two things to know:
+
+- A hook fires **in the process that performed the mutation**, and only for
+  the instance that performed it: a tracking toggled on the trackings tab
+  fires the trackings instance's hooks. Configure the block in **both**
+  `tasks.yaml` and `trackings.yaml` (pointing at one script) to catch every
+  toggle. `nyd-t track start/stop` writes through the domain core directly
+  and fires **no** hooks.
+- A hook script that itself drives the CLI (`nyd tasks … do toggle-tracking`)
+  would fire the same hook again in the child process. The child inherits
+  `NYD_HOOK_DEPTH=1` and runs no event hooks at that depth, so the recursion
+  stops there; the `connected` hook is unaffected.
 
 ### Editor
 

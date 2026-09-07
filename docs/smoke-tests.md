@@ -7653,6 +7653,44 @@ on `s`, with a tree `Work/A`, `Work/B`, `Other/C`, `Other/D` and
       paths (`/Work/A — 5s`), one per line; the pill hides once the last one
       stops
 
+## Tracking hooks (`tracking_started` / `tracking_stopped`)
+
+The tasks and trackings adapters fire a hook for every tracking they start or
+stop, implicit policy stops included. A view file binds a script to it
+(`hooks: { tracking_started: [ { script: on_tracking.py } ] }`, see
+`docs/examples/views/tasks.yaml`); the script gets the payload as a JSON
+file in `argv[1]`. Set up `~/.local/share/not_yet_done/scripts/tasks/on_tracking.py`
+that appends `$NYD_SCRIPT_HOOK task_path` from its payload to a file, bind
+it in both `tasks.yaml` and `trackings.yaml`, and use the grouped-tracking
+tree above.
+
+- [ ] `s` on `A` → one `tracking_started /Work/A` line appears within a
+      second, the TUI stays responsive
+- [ ] `s` on `B` → `tracking_stopped /Work/A` **before**
+      `tracking_started /Work/B`
+- [ ] `s` on `B` again → `tracking_stopped /Work/B`
+- [ ] The same from the trackings tab writes the same lines (with the
+      trackings instance in the payload's `instance`)
+- [ ] `nyd tasks <id of C> do toggle-tracking` → the line appears before the
+      command returns; `nyd-t track stop` writes nothing
+- [ ] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
+      the JSON carries `hook`, `instance`, `task_id`, `task_path`,
+      `tracking_id`, `started_at`, `ended_at`
+- [ ] Make the script exit 1 → the TUI keeps working, the failure lands in
+      `~/.local/state/not_yet_done/hooks/runner.log` naming the log file; the
+      CLI prints it on stderr, exit code unchanged
+- [ ] Make the script `sleep 70` → after 60 s it is killed and reported as
+      timed out; later toggles fire again
+- [ ] Let the script run `nyd tasks <id of D> do toggle-tracking` → `D`
+      starts, but the child's toggle fires **no** second hook (the script
+      is not run again); `NYD_HOOK_DEPTH` is `1` inside the script
+- [ ] Bind `script: nope.py` → each toggle logs `script … not found`, the
+      toggle itself still succeeds
+- [ ] A binding with both `run:` and `script:` (or neither) is reported per
+      fire, the other bindings of the hook still run
+- [ ] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
+      next toggle fires the hook **once**, not twice
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

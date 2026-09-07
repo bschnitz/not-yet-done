@@ -267,66 +267,79 @@ fn run_adapter(args: &[String]) -> Result<()> {
         // however often the CLI is invoked. Best-effort — never blocks the verb.
         not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected").await;
 
-        // `help` is answered from the adapter's static description — no
-        // connection, no credentials, so it stays usable when the backend is
-        // down or not configured yet.
-        if inv.verb == "help" {
-            return cmd_help(adapter.as_ref(), &inv).await;
-        }
-
-        // `queries` reads the two stores, which live next to the instance's
-        // config — asking a locked or unreachable backend for credentials just
-        // to print local file names would be a connection nobody asked for.
-        if inv.verb == "queries" {
-            return cmd_queries(adapter.as_ref(), &inv).await;
-        }
-
-        // An action the adapter declares `local` is answered from the row's
-        // address — the type from the command's level, the id from the command
-        // line — so there is nothing to connect to and nothing to look up.
-        if cmd_do_local(adapter.as_ref(), &inv).await? {
-            return Ok(());
-        }
-
-        // Same for a collection action the adapter declares `local` — a bulk
-        // write over a whole node type, addressed by the type and carrying its
-        // row addresses in its own input.
-        if cmd_do_collection(adapter.as_ref(), &inv, true).await? {
-            return Ok(());
-        }
-
-        // Everything else talks to the backend. Watch the connection for the
-        // rest of the command: report progress on stderr, ask for credentials
-        // on the terminal, and give up loudly when neither is possible — see
-        // `adapter_connect`.
-        let mut sup = adapter_connect::Supervisor::start(Arc::clone(&adapter));
-        // Addressing the root is what makes an adapter start connecting (the
-        // TUI's `r` does the same thing). Cheap and side-effect free for the
-        // adapters that are already connected.
-        let a = Arc::clone(&adapter);
-        sup.guard(async move { a.root().await.map_err(|e| anyhow!("{e}")) })
-            .await
-            .with_context(|| format!("connecting to '{}'", inv.instance))?;
-        // Only then run the verb: an adapter that builds its connection in the
-        // background would otherwise serve an empty snapshot, and an empty
-        // list is indistinguishable from "there is nothing there".
-        sup.guard(adapter_connect::wait_until_connected(adapter.as_ref()))
-            .await
-            .with_context(|| format!("connecting to '{}'", inv.instance))?;
-
-        let verb = async {
-            match inv.verb.as_str() {
-                "ls" | "list" => cmd_ls(adapter.as_ref(), &inv).await,
-                "show" | "get" => cmd_show(adapter.as_ref(), &inv).await,
-                "cat" | "read" => cmd_cat(adapter.as_ref(), &inv).await,
-                "actions" => cmd_actions(adapter.as_ref(), &inv).await,
-                "values" => cmd_values(adapter.as_ref(), &inv).await,
-                "do" => cmd_do(adapter.as_ref(), &inv).await,
-                other => Err(anyhow!("unknown command '{other}'")),
-            }
-        };
-        sup.guard(verb).await
+        // Event hooks (e.g. `tracking_started`): the adapter publishes them on
+        // the bus while the verb runs; subscribe now, fire them once the verb
+        // is done — after the mutation, in order, before the process exits.
+        let mut hook_events = not_yet_done_content::subscribe_events(ctx.event_bus.as_ref());
+        let result = run_verb(&adapter, &inv).await;
+        not_yet_done_host::drain_event_hooks(adapter.as_ref(), &inv.instance, &mut hook_events)
+            .await;
+        result
     })
+}
+
+/// Everything after the adapter is built: the no-connection verbs, then the
+/// supervised connection and the verb proper.
+async fn run_verb(adapter: &Arc<dyn ContentAdapter>, inv: &Invocation) -> Result<()> {
+    // `help` is answered from the adapter's static description — no
+    // connection, no credentials, so it stays usable when the backend is
+    // down or not configured yet.
+    if inv.verb == "help" {
+        return cmd_help(adapter.as_ref(), inv).await;
+    }
+
+    // `queries` reads the two stores, which live next to the instance's
+    // config — asking a locked or unreachable backend for credentials just
+    // to print local file names would be a connection nobody asked for.
+    if inv.verb == "queries" {
+        return cmd_queries(adapter.as_ref(), inv).await;
+    }
+
+    // An action the adapter declares `local` is answered from the row's
+    // address — the type from the command's level, the id from the command
+    // line — so there is nothing to connect to and nothing to look up.
+    if cmd_do_local(adapter.as_ref(), inv).await? {
+        return Ok(());
+    }
+
+    // Same for a collection action the adapter declares `local` — a bulk
+    // write over a whole node type, addressed by the type and carrying its
+    // row addresses in its own input.
+    if cmd_do_collection(adapter.as_ref(), &inv, true).await? {
+        return Ok(());
+    }
+
+    // Everything else talks to the backend. Watch the connection for the
+    // rest of the command: report progress on stderr, ask for credentials
+    // on the terminal, and give up loudly when neither is possible — see
+    // `adapter_connect`.
+    let mut sup = adapter_connect::Supervisor::start(Arc::clone(adapter));
+    // Addressing the root is what makes an adapter start connecting (the
+    // TUI's `r` does the same thing). Cheap and side-effect free for the
+    // adapters that are already connected.
+    let a = Arc::clone(adapter);
+    sup.guard(async move { a.root().await.map_err(|e| anyhow!("{e}")) })
+        .await
+        .with_context(|| format!("connecting to '{}'", inv.instance))?;
+    // Only then run the verb: an adapter that builds its connection in the
+    // background would otherwise serve an empty snapshot, and an empty
+    // list is indistinguishable from "there is nothing there".
+    sup.guard(adapter_connect::wait_until_connected(adapter.as_ref()))
+        .await
+        .with_context(|| format!("connecting to '{}'", inv.instance))?;
+
+    let verb = async {
+        match inv.verb.as_str() {
+            "ls" | "list" => cmd_ls(adapter.as_ref(), inv).await,
+            "show" | "get" => cmd_show(adapter.as_ref(), inv).await,
+            "cat" | "read" => cmd_cat(adapter.as_ref(), inv).await,
+            "actions" => cmd_actions(adapter.as_ref(), inv).await,
+            "values" => cmd_values(adapter.as_ref(), inv).await,
+            "do" => cmd_do(adapter.as_ref(), inv).await,
+            other => Err(anyhow!("unknown command '{other}'")),
+        }
+    };
+    sup.guard(verb).await
 }
 
 /// The concise top-level help, printed for no-args / `help`. Lists only the

@@ -2795,6 +2795,7 @@ impl TrackingAdapter {
     /// saved-query root. The factory uses this after [`crate::open_core_handle`];
     /// tests use it over a handle built on their own in-memory database.
     pub(crate) fn new(instance_id: &str, handle: CoreHandle) -> Self {
+        let handle = handle.with_instance(instance_id);
         let (inv_tx, _) = broadcast::channel(64);
         let snapshot: Arc<RwLock<Option<Arc<TrackingSnapshot>>>> = Arc::new(RwLock::new(None));
         let last_live_secs = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -2951,9 +2952,15 @@ impl ContentAdapter for TrackingAdapter {
 
     /// Fires `connected` after construction (every program start for this
     /// in-process adapter). The tracking root also exposes the `backup` action,
-    /// so a `connected`→`backup` binding works here too.
+    /// so a `connected`→`backup` binding works here too. `tracking_started` /
+    /// `tracking_stopped` fire from every start and stop this instance
+    /// performs, the policy's implicit stops included.
     fn hooks(&self) -> Vec<&str> {
-        vec!["connected"]
+        vec![
+            "connected",
+            crate::HOOK_TRACKING_STARTED,
+            crate::HOOK_TRACKING_STOPPED,
+        ]
     }
 
     /// Anonymize the task name a tracking carries (`label` / `task` / each

@@ -162,6 +162,18 @@ adapter:
 #   with:  action inputs — { value: …, text: … } (none needed for backup).
 #   when:  { throttle: <dur> } — fire at most once per window; omit to fire
 #          every time.
+# A binding may name a `script:` instead of `run:` — an executable in this
+# tab's view-script directory (`~/.local/share/not_yet_done/scripts/tasks/`)
+# that gets the hook payload as a JSON file in argv[1]. That is the usual
+# shape for the event hooks the adapter fires while it runs:
+# `tracking_started` / `tracking_stopped` (payload: task_id, task_path,
+# tracking_id, started_at, ended_at). Scripts run one after the other, in
+# event order. Put the same block into trackings.yaml so a toggle from the
+# trackings tab is caught too (a hook fires for the instance that did it).
+#   tracking_started:
+#     - script: on_tracking.py
+#   tracking_stopped:
+#     - script: on_tracking.py
 hooks:
   connected:
     - run: backup
