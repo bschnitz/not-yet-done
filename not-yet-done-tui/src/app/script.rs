@@ -992,6 +992,35 @@ impl App {
         }
     }
 
+    /// A node script is an action too, just one the adapter never sees: report
+    /// it as `action_invoked` (action `script:<file name>`, phase `script`) so
+    /// an instance's `hooks:` treat it like `edit` or `open_in_browser`. Batch
+    /// and table scripts act on no single node and stay silent.
+    fn report_script_invocation(&self, ctx: &ScriptContext, path: &std::path::Path) {
+        let ScriptContext::ContentNode {
+            instance,
+            node_type,
+            node_id,
+            label,
+            ..
+        } = ctx
+        else {
+            return;
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        not_yet_done_content::publish_action_invoked(
+            self.host_ctx.event_bus.as_ref(),
+            instance,
+            &format!("script:{name}"),
+            not_yet_done_content::action_events::phase::SCRIPT,
+            node_id,
+            node_type,
+            Some(label),
+        );
+    }
+
     /// Execute a script for the given context. Forks on the script's
     /// `# mode:` header into background / capture / interactive paths;
     /// each path also chooses between detached (`interactive_command`
@@ -1003,6 +1032,7 @@ impl App {
             return EditorRequest::None;
         }
 
+        self.report_script_invocation(ctx, path);
         let script_content = std::fs::read_to_string(path).unwrap_or_default();
         let mode = parse_script_mode(&script_content);
         // Capture-output viewer file extension (drives Markdown rendering).

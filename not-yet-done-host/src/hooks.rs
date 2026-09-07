@@ -15,6 +15,9 @@
 //!       when: { throttle: 24h } # fire at most once per window
 //!   tracking_started:
 //!     - script: autotrack.py   # a view-script instead of an action
+//!   action_invoked:
+//!     - script: autotrack.py
+//!       when: { action: [edit, open_in_browser] } # only these action ids
 //! ```
 //!
 //! A binding names **either** an adapter action (`run:`) **or** a script
@@ -176,6 +179,43 @@ pub struct HookWhen {
     /// every time the hook fires (no throttle, no state stamp).
     #[serde(default)]
     pub throttle: Option<String>,
+    /// Only fire when the event payload's `action` is one of these — a single
+    /// id or a list. Meant for `action_invoked`, which reports every action;
+    /// a binding that cares about `edit` alone need not spawn its script for
+    /// each toggle. Absent → every payload passes.
+    #[serde(default)]
+    pub action: Option<ActionFilter>,
+}
+
+/// One action id or a list of them, as `when: { action: edit }` or
+/// `when: { action: [edit, open_in_browser] }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ActionFilter {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl ActionFilter {
+    fn matches(&self, action: &str) -> bool {
+        match self {
+            ActionFilter::One(one) => one == action,
+            ActionFilter::Many(many) => many.iter().any(|m| m == action),
+        }
+    }
+}
+
+/// Does the payload pass the binding's `when.action` filter? A binding
+/// without one passes everything; a filtered binding needs a string `action`
+/// in the payload that matches.
+fn action_matches(binding: &HookBinding, payload: &serde_json::Value) -> bool {
+    match &binding.when.action {
+        None => true,
+        Some(filter) => payload
+            .get("action")
+            .and_then(|a| a.as_str())
+            .is_some_and(|a| filter.matches(a)),
+    }
 }
 
 /// Parse a throttle duration through the crate's one interval spelling
@@ -331,6 +371,9 @@ async fn process_binding(
         Ok(k) => k,
         Err(e) => return HookOutcome::Failed(e),
     };
+    if !action_matches(binding, payload) {
+        return HookOutcome::Skipped("action not in the binding's when.action".into());
+    }
     if is_throttled(instance, hook, binding, now) {
         return HookOutcome::Throttled;
     }
@@ -965,6 +1008,29 @@ connected:
         assert_eq!(args.int("limit"), Some(20));
         assert_eq!(args.bool("dry_run"), Some(true));
         assert_eq!(args.list("folders"), Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn when_action_takes_one_id_or_a_list_and_filters_the_payload() {
+        let yaml = r#"
+action_invoked:
+  - script: autotrack.py
+    when: { action: edit }
+  - script: autotrack.py
+    when: { action: [edit, open_in_browser] }
+  - script: autotrack.py
+"#;
+        let cfg: HookConfig = serde_yaml::from_str(yaml).unwrap();
+        let b = &cfg["action_invoked"];
+        let edit = serde_json::json!({ "action": "edit" });
+        let open = serde_json::json!({ "action": "open_in_browser" });
+        let none = serde_json::json!({ "phase": "invoke" });
+        assert!(action_matches(&b[0], &edit));
+        assert!(!action_matches(&b[0], &open));
+        assert!(action_matches(&b[1], &edit));
+        assert!(action_matches(&b[1], &open));
+        assert!(!action_matches(&b[1], &none));
+        assert!(action_matches(&b[2], &none));
     }
 
     #[test]

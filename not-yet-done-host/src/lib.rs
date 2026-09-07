@@ -26,6 +26,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -33,15 +34,15 @@ use serde::Deserialize;
 
 use not_yet_done_content::{
     AdapterFactory, AliasSpec, AliasTable, ContentAdapter, HostContext, InMemoryHostBus,
-    aliasing_adapter,
+    action_event_adapter, aliasing_adapter,
 };
 
 pub use not_yet_done_content::AutoConnect;
 
 pub mod hooks;
 pub use hooks::{
-    HOOK_DEPTH_ENV, HookBinding, HookConfig, HookInputs, HookOutcome, HookReport, HookTarget,
-    HookWhen, drain_event_hooks, event_hooks_suppressed, fire_connected_hooks, fire_hook,
+    ActionFilter, HOOK_DEPTH_ENV, HookBinding, HookConfig, HookInputs, HookOutcome, HookReport,
+    HookTarget, HookWhen, drain_event_hooks, event_hooks_suppressed, fire_connected_hooks, fire_hook,
     fire_hook_event, fire_hook_with, spawn_event_hook_runner,
 };
 
@@ -544,19 +545,27 @@ pub fn resolve_adapter_with(
     let adapter = factory
         .create(found.instance_id(), &cfg, ctx)
         .map_err(|e| anyhow!("creating adapter '{instance_name}': {e}"))?;
-    decorate_instance(adapter, &found.adapter)
+    decorate_instance(adapter, &found.adapter, ctx)
 }
 
-/// Wrap a freshly created adapter in the decorators an instance's own block
-/// asks for — today its `aliases:`. The per-*type* decorators (scripts, custom
-/// columns, anonymization) live in [`factories`] because they apply to every
-/// instance alike; this one needs the instance, so every build site calls it
-/// right after `AdapterFactory::create`. An instance without aliases comes back
-/// untouched.
+/// Wrap a freshly created adapter in the per-*instance* decorators: the
+/// action-event reporter (every instance, so `hooks: action_invoked:` works
+/// everywhere) and the `aliases:` the instance's own block asks for. The
+/// per-*type* decorators (scripts, custom columns, anonymization) live in
+/// [`factories`] because they apply to every instance alike; these need the
+/// instance, so every build site calls this right after
+/// `AdapterFactory::create`. Order matters: aliasing wraps the reporter, so
+/// reported actions carry the resolved id, never the alias name.
 pub fn decorate_instance(
     adapter: Box<dyn ContentAdapter>,
     instance: &AdapterInstance,
+    ctx: &HostContext,
 ) -> Result<Box<dyn ContentAdapter>> {
+    let adapter = action_event_adapter(
+        adapter,
+        instance.effective_instance_id(),
+        Arc::clone(&ctx.event_bus),
+    );
     let table = AliasTable::new(instance.aliases.clone()).map_err(|e| {
         anyhow!(
             "adapter '{}': invalid aliases: {e}",
