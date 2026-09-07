@@ -24,14 +24,17 @@
 //! re-exported by the TUI's view-config module so there is a single source of
 //! truth for the `adapter:` block schema.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use not_yet_done_content::{AdapterFactory, ContentAdapter, HostContext, InMemoryHostBus};
+use not_yet_done_content::{
+    AdapterFactory, AliasSpec, AliasTable, ContentAdapter, HostContext, InMemoryHostBus,
+    aliasing_adapter,
+};
 
 pub use not_yet_done_content::AutoConnect;
 
@@ -254,6 +257,13 @@ pub struct AdapterInstance {
     /// so there is nothing to keep fresh.
     #[serde(default, deserialize_with = "deserialize_interval")]
     pub auto_reload: Option<Duration>,
+    /// Action aliases declared on this instance: a new action name that stands
+    /// for an existing adapter action with arguments filled in. An alias is a
+    /// real action to every frontend — it is listed and bindable wherever its
+    /// target is. See [`not_yet_done_content::AliasSpec`] for the block's
+    /// shape and [`decorate_instance`] for where it takes effect.
+    #[serde(default)]
+    pub aliases: BTreeMap<String, AliasSpec>,
 }
 
 /// Serde default for [`AdapterInstance::manual_connect`] — see the field's
@@ -530,9 +540,29 @@ pub fn resolve_adapter_with(
             found.adapter.adapter_type
         )
     })?;
-    factory
+    let adapter = factory
         .create(found.instance_id(), &cfg, ctx)
-        .map_err(|e| anyhow!("creating adapter '{instance_name}': {e}"))
+        .map_err(|e| anyhow!("creating adapter '{instance_name}': {e}"))?;
+    decorate_instance(adapter, &found.adapter)
+}
+
+/// Wrap a freshly created adapter in the decorators an instance's own block
+/// asks for — today its `aliases:`. The per-*type* decorators (scripts, custom
+/// columns, anonymization) live in [`factories`] because they apply to every
+/// instance alike; this one needs the instance, so every build site calls it
+/// right after `AdapterFactory::create`. An instance without aliases comes back
+/// untouched.
+pub fn decorate_instance(
+    adapter: Box<dyn ContentAdapter>,
+    instance: &AdapterInstance,
+) -> Result<Box<dyn ContentAdapter>> {
+    let table = AliasTable::new(instance.aliases.clone()).map_err(|e| {
+        anyhow!(
+            "adapter '{}': invalid aliases: {e}",
+            instance.effective_instance_id()
+        )
+    })?;
+    Ok(aliasing_adapter(adapter, table))
 }
 
 #[cfg(test)]
@@ -549,6 +579,7 @@ mod tests {
             auto_connect: None,
             manual_connect: false,
             auto_reload: None,
+            aliases: Default::default(),
         };
         assert_eq!(inst.effective_instance_id(), "tasks");
     }
@@ -563,6 +594,7 @@ mod tests {
             auto_connect: None,
             manual_connect: false,
             auto_reload: None,
+            aliases: Default::default(),
         };
         assert_eq!(inst.effective_instance_id(), "analytics");
     }
@@ -798,6 +830,7 @@ adapter:
             auto_connect: None,
             manual_connect: false,
             auto_reload: None,
+            aliases: Default::default(),
         };
         let got = read_config_string(&inst, Path::new("/tmp/view.yaml")).unwrap();
         assert_eq!(got, "inline-cfg");
@@ -813,6 +846,7 @@ adapter:
             auto_connect: None,
             manual_connect: false,
             auto_reload: None,
+            aliases: Default::default(),
         };
         assert!(read_config_string(&inst, Path::new("/tmp/view.yaml")).is_err());
     }

@@ -14981,6 +14981,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -15881,6 +15882,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -16450,6 +16452,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -16733,6 +16736,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -16909,6 +16913,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -18085,6 +18090,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -20149,6 +20155,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -22226,6 +22233,7 @@ mod tests {
                 auto_connect: None,
                 manual_connect: false,
                 auto_reload: None,
+                aliases: Default::default(),
             },
             views: vec![ViewDef {
                 highlights: Vec::new(),
@@ -25471,6 +25479,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
             auto_connect: None,
             manual_connect: false,
             auto_reload: None,
+            aliases: Default::default(),
         },
         views: vec![ViewDef {
             highlights: Vec::new(),

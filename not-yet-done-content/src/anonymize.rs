@@ -47,10 +47,9 @@
 //! durations are the point of the screenshot), so only genuine free text is
 //! replaced.
 
+use crate::decorate::{AdapterDecorator, NodeDecorator};
 use crate::*;
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Deterministic, dependency-free string hash. Stable across runs *and* across
@@ -446,16 +445,19 @@ impl AnonymizingAdapter {
     }
 }
 
+/// Only the data-bearing returns are overridden; everything else — addressing,
+/// auth, status, queries, the write paths — reaches the inner adapter through
+/// [`AdapterDecorator`]'s forwarders. Deliberately *not* scrubbed and hence not
+/// listed here: `execute_addressed` / `collection_prepare` / `execute_collection`
+/// (the input is what the caller typed, not backend content), `bucket_for_now`
+/// (a bucket *id* for targeting a reload), `execute_custom_query` (feeds the
+/// query editor, a write/inspect path), `locate_node_path` (node ids) and
+/// `query_body_suffix` (the query language name — masking it would have an
+/// anonymised Jira view reject its own `jql` fences).
 #[async_trait]
-impl ContentAdapter for AnonymizingAdapter {
-    fn adapter_type(&self) -> &str {
-        self.inner.adapter_type()
-    }
-    fn instance_id(&self) -> &str {
-        self.inner.instance_id()
-    }
-    fn instance_data_dir(&self) -> PathBuf {
-        self.inner.instance_data_dir()
+impl AdapterDecorator for AnonymizingAdapter {
+    fn inner(&self) -> &dyn ContentAdapter {
+        &*self.inner
     }
 
     async fn root(&self) -> Result<Box<dyn Node>> {
@@ -511,61 +513,6 @@ impl ContentAdapter for AnonymizingAdapter {
         }
     }
 
-    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
-        self.inner.actions_for_type(node_type)
-    }
-    /// Passed through unmasked: an address-only action carries no content to
-    /// scrub, and the id it addresses is the one the caller already holds.
-    async fn execute_addressed(
-        &self,
-        node_type: &NodeType,
-        id: &str,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
-        self.inner
-            .execute_addressed(node_type, id, action_id, input)
-            .await
-    }
-    fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
-        self.inner.collection_actions(node_type)
-    }
-    /// Passed through unmasked for the same reason as `execute_addressed`: a
-    /// collection action's input is what the caller typed, not content we read
-    /// out of the backend.
-    async fn collection_prepare(
-        &self,
-        node_type: &NodeType,
-        action_id: &str,
-    ) -> Result<EditorPrep> {
-        self.inner.collection_prepare(node_type, action_id).await
-    }
-    async fn execute_collection(
-        &self,
-        node_type: &NodeType,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
-        self.inner
-            .execute_collection(node_type, action_id, input)
-            .await
-    }
-    fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
-        self.inner.child_process_env(node)
-    }
-    async fn augment_editor_buffer(&self, node: &NodeRef, buffer: String) -> String {
-        self.inner.augment_editor_buffer(node, buffer).await
-    }
-    fn strip_editor_hints(&self, text: &str) -> String {
-        self.inner.strip_editor_hints(text)
-    }
-    fn capabilities(&self) -> AdapterCapabilities {
-        self.inner.capabilities()
-    }
-    fn has_active_tracking(&self) -> bool {
-        self.inner.has_active_tracking()
-    }
-
     async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
         let mut values = self.inner.list_values(source).await?;
         for opt in values.iter_mut() {
@@ -576,29 +523,12 @@ impl ContentAdapter for AnonymizingAdapter {
         Ok(values)
     }
 
-    fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
-        self.inner.subscribe_status()
-    }
-    fn subscribe_status_for(
-        &self,
-        query: Option<&str>,
-    ) -> tokio::sync::watch::Receiver<AdapterStatus> {
-        self.inner.subscribe_status_for(query)
-    }
-    fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
-        self.inner.subscribe_invalidations()
-    }
-
     async fn live_rows(&self) -> Vec<NodeSummary> {
         let mut rows = self.inner.live_rows().await;
         for row in rows.iter_mut() {
             self.anon.scrub_summary(row);
         }
         rows
-    }
-    async fn bucket_for_now(&self, group_by: &GroupSpec) -> Option<String> {
-        // Returns a bucket *id* used to target a reload, not display text.
-        self.inner.bucket_for_now(group_by).await
     }
     async fn live_group_rows(&self, group_by: &GroupSpec, query: Option<&str>) -> Vec<NodeSummary> {
         let mut rows = self.inner.live_group_rows(group_by, query).await;
@@ -608,72 +538,10 @@ impl ContentAdapter for AnonymizingAdapter {
         rows
     }
 
-    async fn revalidate(&self) {
-        self.inner.revalidate().await
-    }
-    async fn submit_credentials(&self, fields: HashMap<String, String>) -> Result<()> {
-        self.inner.submit_credentials(fields).await
-    }
-
-    async fn cancel_credentials(&self) -> Result<()> {
-        self.inner.cancel_credentials().await
-    }
-    async fn try_refresh_session(&self) -> Result<()> {
-        self.inner.try_refresh_session().await
-    }
-    async fn invalidate_session(&self) -> Result<()> {
-        self.inner.invalidate_session().await
-    }
-    async fn invalidate_credentials(&self) -> Result<()> {
-        self.inner.invalidate_credentials().await
-    }
-    async fn load_view_sort(&self, scope: &str) -> Result<Vec<SortKey>> {
-        self.inner.load_view_sort(scope).await
-    }
-    async fn save_view_sort(&self, scope: &str, sort: &[SortKey]) -> Result<()> {
-        self.inner.save_view_sort(scope, sort).await
-    }
-    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
-        self.inner.query_variables(query)
-    }
-    fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
-        self.inner.render_query(query, vars)
-    }
-    async fn execute_custom_query(
-        &self,
-        query: &str,
-        context: &CustomQueryContext,
-    ) -> Result<CustomQueryResult> {
-        // Custom-query results feed the query editor (a write/inspect path), not
-        // the row display — left unscrubbed deliberately (see module docs).
-        self.inner.execute_custom_query(query, context).await
-    }
-    fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
-        self.inner.saved_query_store()
-    }
-    /// Forwarded, unlike most display-facing strings: it names the *language*
-    /// the wrapped adapter's queries are written in — which is also where
-    /// `query_language()` derives from, so leaving it at the default would
-    /// have an anonymised Jira view reject its own `jql` fences.
-    fn query_body_suffix(&self) -> &str {
-        self.inner.query_body_suffix()
-    }
-    fn script_store(&self) -> Option<&dyn ScriptStore> {
-        self.inner.script_store()
-    }
-    /// Pure addressing (node ids) — nothing to scrub, just forward.
-    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
-        self.inner.locate_node_path(node_id).await
-    }
-    fn hooks(&self) -> Vec<&str> {
-        self.inner.hooks()
-    }
     fn anonymizer(&self) -> Arc<dyn Anonymizer> {
         self.anon.clone()
     }
     async fn describe_columns(&self, node_type: &str) -> Vec<ColumnSchema> {
-        // Delegate: this is the outer wrapper, so the default (empty) would
-        // shadow any columns the inner adapter (e.g. custom-columns) describes.
         // The schema carries only structural metadata (key/type), not user
         // values — those flow through the scrubbed metadata path — so it needs
         // no anonymization of its own; labels are scrubbed defensively.
@@ -740,16 +608,20 @@ impl AnonymizingNode {
     }
 }
 
+/// `content()`, `prepare()`, `form_prep()`, `picker_options()` and `execute()`
+/// are inherited forwarders on purpose: they feed the write/export path, and a
+/// scrubbed body the user then saves would overwrite the real data.
 #[async_trait]
-impl Node for AnonymizingNode {
-    fn id(&self) -> &str {
-        self.inner.id() // addressing — never anonymized
+impl NodeDecorator for AnonymizingNode {
+    fn inner(&self) -> &dyn Node {
+        &*self.inner
     }
+    fn inner_mut(&mut self) -> &mut dyn Node {
+        &mut *self.inner
+    }
+
     fn label(&self) -> &str {
         &self.label
-    }
-    fn node_type(&self) -> &NodeType {
-        self.inner.node_type()
     }
     fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -775,10 +647,6 @@ impl Node for AnonymizingNode {
         ))
     }
 
-    fn content(&self) -> Option<&dyn Content> {
-        // Editable/exportable body — left raw to avoid overwrite-on-save.
-        self.inner.content()
-    }
     /// Scrubbed, unlike most dispatches: [`ActionDispatch::Nodes`] carries
     /// display text (hit labels, the grouping key) straight out of the
     /// backend. `path` is addressing — node ids — and stays raw, otherwise
@@ -803,18 +671,6 @@ impl Node for AnonymizingNode {
             }
             other => other,
         })
-    }
-    async fn prepare(&self, action_id: &str, args: &crate::ActionArgs) -> Result<EditorPrep> {
-        self.inner.prepare(action_id, args).await
-    }
-    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
-        self.inner.picker_options(action_id).await
-    }
-    async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
-        self.inner.form_prep(action_id).await
-    }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &crate::ActionArgs) -> Result<ActionOutcome> {
-        self.inner.execute(action_id, input, args).await
     }
 }
 

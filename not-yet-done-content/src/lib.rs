@@ -8,7 +8,9 @@
 pub mod mock;
 
 pub mod action_args;
+pub mod aliasing;
 pub mod anonymize;
+pub mod decorate;
 pub mod auth;
 pub mod auto_connect;
 pub mod children;
@@ -33,6 +35,8 @@ pub use action_args::{
     ActionArgs, ArgKind, ArgProblem, ArgValue, ParamSpec, describe_problems, resolve_args,
 };
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
+pub use aliasing::{ActionAlias, AliasSpec, AliasTable, aliasing_adapter};
+pub use decorate::{AdapterDecorator, NodeDecorator};
 pub use auto_connect::AutoConnect;
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
 pub use describe::{
