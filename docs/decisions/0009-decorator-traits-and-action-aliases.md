@@ -102,8 +102,10 @@ table and wraps the adapter, or leaves it untouched when the table is empty.
   and the merged set is validated against the target's declared parameters.
   A real action of the alias's name wins, so an adapter update never breaks
   a view file.
-- The scripts and custom-columns decorators still carry their own forwarders
-  and their five dead forwards each; migrating them to `AdapterDecorator` is
-  the follow-up that closes the per-subtab status gap.
+- The scripts and custom-columns decorators are migrated in the same step.
+  Each had five dead forwards (`refresh`, `subscribe_status_for`, the
+  extended-query store, the custom query context, the query language); since
+  those two wrap every adapter, a per-subtab status had been degrading to the
+  global one behind them.
 - One hop only: an alias of an alias is a load error. Chains would make the
   listing order and the argument precedence a matter of declaration order.

@@ -512,7 +512,8 @@ impossible to forget, because it sits at the _one_ chokepoint
   and silently fell back to the trait default for every method added later
   (seven of them here, among them the credential prompts and the reminders);
   a test in `decorate.rs` now compares the trait's method list against the
-  forwarders, so a new `ContentAdapter` method cannot be forgotten. They push
+  forwarders, so a new `ContentAdapter` method cannot be forgotten. The
+  scripts and custom-columns decorators use the same traits. They push
   only the **displayable** return values through
   `Anonymizer::scrub_value(key, value)`: list rows, eager subtrees,
   `row_summary()`, live tick rows, `metadata()` + `label()`, picker labels,
