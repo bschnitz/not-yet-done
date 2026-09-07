@@ -6,8 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use not_yet_done_task_core::entity::task::Model as Task;
-use not_yet_done_task_core::repository::TrackingRepository;
-use not_yet_done_task_core::service::TaskService;
+use not_yet_done_task_core::service::{TaskService, TrackingPolicy, TrackingService};
 
 use super::parse::{self, ParsedItem};
 use super::serialize::short_id;
@@ -18,14 +17,18 @@ use super::serialize::short_id;
 
 /// Parse the editor content, diff against the originals, and apply all
 /// changes sequentially (so new items get UUIDs before their children).
+///
+/// `-t` flags start and stop trackings through `tracking_service` under
+/// `policy` — the same one place that applies it for `toggle-tracking`, so
+/// an outline edit can never track two tasks the policy would keep apart.
 pub async fn apply_changes(
     content: &str,
     original_tasks: &[Task],
     root_id: Uuid,
     task_service: &Arc<dyn TaskService>,
-    tracking_repo: &Arc<dyn TrackingRepository>,
+    tracking_service: &Arc<dyn TrackingService>,
     tracked_ids: &HashSet<Uuid>,
-    allow_parallel: bool,
+    policy: &TrackingPolicy,
 ) -> Result<String, String> {
     let items = parse::parse(content).map_err(|e| e.to_string())?;
 
@@ -33,9 +36,11 @@ pub async fn apply_changes(
         return Err("Empty tree — nothing to apply".into());
     }
 
-    // Validate: if !allow_parallel, at most one item may have -t flag.
+    // Validate: under the exclusive policy at most one item may carry `-t`.
+    // (A grouped policy is applied item by item below: each start stops
+    // only its own group, so two `-t` in different groups are fine.)
     let tracked_items: Vec<&ParsedItem> = items.iter().filter(|i| i.has_flag('t')).collect();
-    if !allow_parallel && tracked_items.len() > 1 {
+    if policy.is_exclusive() && tracked_items.len() > 1 {
         let names: Vec<&str> = tracked_items
             .iter()
             .map(|i| i.description.as_str())
@@ -134,31 +139,20 @@ pub async fn apply_changes(
                 let wants_tracked = item.has_flag('t');
 
                 if wants_tracked && !was_tracked {
-                    // If !allow_parallel, stop all other active trackings first.
-                    if !allow_parallel {
-                        let active = tracking_repo.find_all_active().await.unwrap_or_default();
-                        for t in active {
-                            if t.task_id != full_id {
-                                let _ = tracking_repo.stop(t.id, chrono::Utc::now()).await;
-                            }
-                        }
-                    }
-                    tracking_repo
-                        .insert(full_id, chrono::Utc::now(), None)
+                    // The service applies `policy`: it stops whatever the
+                    // policy says must not run alongside this start.
+                    tracking_service
+                        .start(full_id, policy)
                         .await
                         .map_err(|e| format!("Failed to start tracking: {e}"))?;
                     tracking_started += 1;
                 } else if !wants_tracked && was_tracked {
-                    let active = tracking_repo
-                        .find_active_for_task(full_id)
+                    // `stop(Some(id))` is a no-op when nothing is active for
+                    // the task — the flag may lag behind a stop made elsewhere.
+                    tracking_service
+                        .stop(Some(full_id))
                         .await
-                        .map_err(|e| format!("Failed to find active tracking: {e}"))?;
-                    if let Some(t) = active {
-                        tracking_repo
-                            .stop(t.id, chrono::Utc::now())
-                            .await
-                            .map_err(|e| format!("Failed to stop tracking: {e}"))?;
-                    }
+                        .map_err(|e| format!("Failed to stop tracking: {e}"))?;
                     tracking_stopped += 1;
                 }
             }

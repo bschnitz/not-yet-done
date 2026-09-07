@@ -31,10 +31,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use not_yet_done_content::{ActionArgs, 
-    ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema, ContentAdapter, ContentError,
-    FormFieldSpec, HostContext, InputSpec, Invalidation, ListParams, ListResult, Metadata,
-    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, TypedAdapterFactory,
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema, ContentAdapter,
+    ContentError, FormFieldSpec, HostContext, InputSpec, Invalidation, ListParams, ListResult,
+    Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, TypedAdapterFactory,
     apply_sort,
 };
 use not_yet_done_task_core::entity::project;
@@ -317,7 +317,12 @@ impl Node for ProjectRootNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         ProjectItemNode::fetch(&self.handle, id).await
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => execute_create(&self.handle, &values).await,
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -392,7 +397,12 @@ impl Node for ProjectItemNode {
         }
         Ok(prefill)
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit", ActionInput::Form(values)) => {
                 execute_edit(&self.handle, self.project_id()?, &values).await
@@ -629,7 +639,7 @@ mod tests {
             module.resolve(),
             Arc::new(InMemoryHostBus::default()),
             "test".to_string(),
-            false,
+            not_yet_done_task_core::service::TrackingPolicy::Exclusive,
         );
         (ProjectAdapter::new("test", handle), db)
     }
@@ -682,7 +692,11 @@ mod tests {
         let (adapter, _db) = setup().await;
         let mut root = adapter.root().await.unwrap();
         let err = root
-            .execute("create", form(&[("description", "no name")]), &Default::default())
+            .execute(
+                "create",
+                form(&[("description", "no name")]),
+                &Default::default(),
+            )
             .await
             .err()
             .expect("missing name must error");

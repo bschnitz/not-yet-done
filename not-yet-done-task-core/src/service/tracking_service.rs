@@ -10,6 +10,7 @@ use crate::entity::tracking;
 use crate::error::AppError;
 use crate::local_context::LocalContext;
 use crate::repository::{TaskRepository, TrackingRepository};
+use crate::service::tracking_policy::{TrackingPolicy, label_path};
 
 pub enum GravityDirection {
     Start,
@@ -19,6 +20,13 @@ pub enum GravityDirection {
 pub struct StoppedTracking {
     pub tracking: tracking::Model,
     pub task_description: String,
+}
+
+/// What a start did: the tracking it opened and the ones the policy closed.
+pub struct StartedTracking {
+    pub tracking: tracking::Model,
+    /// The trackings the [`TrackingPolicy`] stopped on the way, oldest first.
+    pub stopped: Vec<tracking::Model>,
 }
 
 pub struct TaskSummary {
@@ -105,9 +113,19 @@ pub struct MovedTracking {
 pub trait TrackingService: shaku::Interface {
     /// Start tracking a task.
     ///
-    /// If `parallel` is false (default), all other active trackings are stopped first.
+    /// The `policy` decides which of the other running trackings stop first
+    /// (see [`TrackingPolicy`]); this is the one place that rule is applied.
     /// Returns an error if the task already has an active tracking.
-    async fn start(&self, task_id: Uuid, parallel: bool) -> Result<tracking::Model, AppError>;
+    async fn start(
+        &self,
+        task_id: Uuid,
+        policy: &TrackingPolicy,
+    ) -> Result<StartedTracking, AppError>;
+
+    /// The label path of a task — its ancestors' descriptions and its own,
+    /// root first, joined by `/` with a leading `/`. What the grouped
+    /// [`TrackingPolicy`] matches its patterns against.
+    async fn label_path(&self, task_id: Uuid) -> Result<String, AppError>;
 
     /// Stop tracking for a specific task, or all active trackings if task_id is None.
     /// Returns all stopped tracking entries.
@@ -166,7 +184,11 @@ pub struct TrackingServiceImpl {
 
 #[async_trait]
 impl TrackingService for TrackingServiceImpl {
-    async fn start(&self, task_id: Uuid, parallel: bool) -> Result<tracking::Model, AppError> {
+    async fn start(
+        &self,
+        task_id: Uuid,
+        policy: &TrackingPolicy,
+    ) -> Result<StartedTracking, AppError> {
         // Guard: task must exist
         self.task_repository.find_by_id(task_id).await?;
 
@@ -181,17 +203,52 @@ impl TrackingService for TrackingServiceImpl {
         }
 
         let now = chrono::Utc::now();
+        let mut stopped = Vec::new();
 
-        if !parallel {
+        if !matches!(policy, TrackingPolicy::Parallel) {
+            // The starting task's path is only needed by a grouped policy;
+            // resolve it once, not per running tracking.
+            let starting = match policy {
+                TrackingPolicy::Grouped(_) => Some(self.label_path(task_id).await?),
+                _ => None,
+            };
             let active = self.tracking_repository.find_all_active().await?;
             for t in active {
-                if t.task_id != task_id {
-                    self.tracking_repository.stop(t.id, now).await?;
+                if t.task_id == task_id {
+                    continue;
+                }
+                let stops = match &starting {
+                    Some(starting) => {
+                        let running = self.label_path(t.task_id).await?;
+                        policy.stops(starting, &running)
+                    }
+                    None => true,
+                };
+                if stops {
+                    stopped.push(self.tracking_repository.stop(t.id, now).await?);
                 }
             }
         }
 
-        self.tracking_repository.insert(task_id, now, None).await
+        let tracking = self.tracking_repository.insert(task_id, now, None).await?;
+        Ok(StartedTracking { tracking, stopped })
+    }
+
+    async fn label_path(&self, task_id: Uuid) -> Result<String, AppError> {
+        // Walk the parent chain upwards, then read it root first. The depth
+        // cap turns a corrupt parent cycle into a truncated path instead of
+        // a hang.
+        let mut descriptions = Vec::new();
+        let mut cursor = Some(task_id);
+        while let Some(id) = cursor {
+            if descriptions.len() >= 64 {
+                break;
+            }
+            let task = self.task_repository.find_by_id(id).await?;
+            descriptions.push(task.description);
+            cursor = task.parent_id;
+        }
+        Ok(label_path(descriptions.iter().rev().map(String::as_str)))
     }
 
     async fn stop(&self, task_id: Option<Uuid>) -> Result<Vec<StoppedTracking>, AppError> {

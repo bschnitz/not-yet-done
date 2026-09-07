@@ -80,12 +80,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, ColumnSchema,
-    ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket, GroupSpec, HostContext,
-    HostEvent, InputSpec, Invalidation, MarkedNode, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result, SavedQueryStore, SortDirection, SortKey, Subtree, SubtreeNode,
-    TypedAdapterFactory, apply_sort, grouping,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    ColumnSchema, ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket,
+    GroupSpec, HostContext, HostEvent, InputSpec, Invalidation, MarkedNode, Metadata,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection,
+    SortKey, Subtree, SubtreeNode, TypedAdapterFactory, apply_sort, grouping,
 };
 use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
@@ -1413,7 +1413,7 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("delete", "Delete", InputSpec::None),
         NodeAction::new("restore", "Restore", InputSpec::None),
-        NodeAction::new("toggle-tracking", "track", InputSpec::None),
+        crate::task::toggle_tracking_action(),
         NodeAction::new("split", "Split", split_input_spec()),
         NodeAction::new("move", "Move", move_input_spec()),
         // Repack (mark/paste): `mark-move` records the row as the move source
@@ -1788,7 +1788,7 @@ async fn invoke_paste_move(
 /// [`crate::task::apply_tracking`] policy as the other views. (Reload /
 /// fuzzy-filter are generic frontend actions in `views/trackings.yaml`.)
 fn tracking_tree_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("toggle-tracking", "track", InputSpec::None)]
+    vec![crate::task::toggle_tracking_action()]
 }
 
 /// Actions a condensed row (`tracking:condensed-row`) exposes. A cell
@@ -1798,7 +1798,7 @@ fn tracking_tree_actions() -> Vec<NodeAction> {
 /// other views. (Reload / fuzzy-filter are generic frontend actions in
 /// `views/trackings.yaml`.)
 fn tracking_condensed_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("toggle-tracking", "track", InputSpec::None)]
+    vec![crate::task::toggle_tracking_action()]
 }
 
 /// Announce a non-transition tracking change (delete/restore) so the bridge
@@ -1988,23 +1988,36 @@ enum RestoreAll {
 }
 
 /// Flip time tracking for `task_id` and return the **new** tracked state
-/// (`true` = now tracking). Reads the current state live (never from the
-/// possibly-stale snapshot) and reuses the task adapter's
-/// [`apply_tracking`](crate::task::apply_tracking) so the host's
-/// exclusivity policy and `Tracking*` events stay identical across both
-/// tabs. The emitted event drives the bridge's in-place row patches (M9).
-async fn toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> bool {
+/// (`true` = now tracking), or the reason the invocation's arguments were
+/// refused. Reads the current state live (never from the possibly-stale
+/// snapshot) and reuses the task adapter's
+/// [`apply_tracking`](crate::task::apply_tracking) under the policy
+/// [`tracking_policy_for`](crate::task::tracking_policy_for) derives from
+/// `args`, so the policy and the `Tracking*` events stay identical across
+/// both tabs. The emitted events drive the bridge's in-place row patches (M9).
+async fn toggle_tracking(
+    handle: &CoreHandle,
+    task_id: Uuid,
+    args: &ActionArgs,
+) -> std::result::Result<bool, String> {
+    let policy = crate::task::tracking_policy_for(handle, args)?;
     let is_tracked = matches!(
         handle.tracking_repo.find_active_for_task(task_id).await,
         Ok(Some(_))
     );
     let now_tracked = !is_tracked;
-    crate::task::apply_tracking(handle, task_id, now_tracked).await;
-    now_tracked
+    crate::task::apply_tracking(handle, task_id, now_tracked, &policy).await;
+    Ok(now_tracked)
 }
 
-async fn invoke_toggle_tracking(handle: &CoreHandle, task_id: Uuid) -> ActionDispatch {
-    toggle_tracking(handle, task_id).await;
+async fn invoke_toggle_tracking(
+    handle: &CoreHandle,
+    task_id: Uuid,
+    args: &ActionArgs,
+) -> ActionDispatch {
+    if let Err(msg) = toggle_tracking(handle, task_id, args).await {
+        return ActionDispatch::Error(msg);
+    }
     // Reload the pane: starting a tracking mints a fresh interval (a row
     // that wasn't visible to patch) and may auto-stop another, while a stop
     // freezes a duration and re-folds ancestor aggregates — none of which a
@@ -2275,7 +2288,12 @@ impl Node for TrackingEntryNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             // Reached via the generic `DeleteSelf` confirm flow, which calls
             // `execute("delete")` after the user confirms.
@@ -2304,7 +2322,9 @@ impl Node for TrackingEntryNode {
                 Ok(id) => invoke_restore(&self.handle, id, ctx.confirmed).await,
                 Err(_) => ActionDispatch::Error("Invalid tracking id".to_string()),
             },
-            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            "toggle-tracking" => {
+                invoke_toggle_tracking(&self.handle, self.task_id, &ctx.args).await
+            }
             // `mark-move` is handled entirely by the frontend's generic move
             // clipboard (it reads this row's label/type and records it); the
             // adapter only needs to not reject the action.
@@ -2398,9 +2418,11 @@ impl Node for TrackingCondensedNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
-            "toggle-tracking" => invoke_toggle_tracking(&self.handle, self.task_id).await,
+            "toggle-tracking" => {
+                invoke_toggle_tracking(&self.handle, self.task_id, &ctx.args).await
+            }
             _ => ActionDispatch::Noop,
         })
     }
@@ -2549,7 +2571,7 @@ impl Node for TrackingTreeNode {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         TrackingTreeNode::fetch(&self.snapshot, &self.handle, id)
     }
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // Toggle, then let the snapshot reload + `NowAnchored` the bridge
             // emits drive the refresh: the frontend reloads only the bucket
@@ -2559,10 +2581,11 @@ impl Node for TrackingTreeNode {
             // avoids. The flat/condensed entry node keeps `Reload`
             // (`invoke_toggle_tracking`); they have no per-bucket fold to
             // localise, so a full pane reload is already cheap there.
-            "toggle-tracking" => {
-                toggle_tracking(&self.handle, self.task_id).await;
-                ActionDispatch::Noop
-            }
+            "toggle-tracking" => match toggle_tracking(&self.handle, self.task_id, &ctx.args).await
+            {
+                Ok(_) => ActionDispatch::Noop,
+                Err(msg) => ActionDispatch::Error(msg),
+            },
             _ => ActionDispatch::Noop,
         })
     }
@@ -5042,7 +5065,7 @@ mod restore_scope_tests {
                 project_service,
                 bus,
                 "test".to_string(),
-                false,
+                not_yet_done_task_core::service::TrackingPolicy::Exclusive,
             ),
             db,
         )

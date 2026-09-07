@@ -10,7 +10,6 @@ use super::keybindings::KeyBindingConfig;
 use super::script::ScriptConfig;
 use super::tabs::TabsConfig;
 use super::theme_config::ThemeConfig;
-use super::tracking::TrackingConfig;
 
 // ---------------------------------------------------------------------------
 // TuiConfig — top-level, owns all sub-configs
@@ -42,8 +41,6 @@ pub struct TuiConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub editors: EditorsConfig,
-    #[serde(default)]
-    pub tracking: TrackingConfig,
     #[serde(default)]
     pub script: ScriptConfig,
     #[serde(default)]
@@ -121,7 +118,6 @@ impl Default for TuiConfig {
             keybindings: Default::default(),
             theme: Default::default(),
             editors: Default::default(),
-            tracking: Default::default(),
             script: Default::default(),
             notifications: Default::default(),
             navigation: Default::default(),

@@ -2412,10 +2412,12 @@ colours come from [`theme.vim`](#theme-colors).
 
 ### Tracking
 
-```yaml
-tracking:
-  allow_parallel: false # allow multiple simultaneous trackings
-```
+Whether starting a tracking stops the running ones is decided by the tasks
+adapter, not by `tui.yaml`: `allow_parallel` in the adapter's config blob
+(`config_inline: '{ allow_parallel: true }'`, default `false` = exclusive), and
+per invocation `toggle-tracking --group-paths` narrows exclusivity to groups of
+tasks — see [`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml)
+and [action aliases](docs/generic-view-spec.md#naming-an-action-with-its-arguments-filled-in--aliases).
 
 ### Theme
 

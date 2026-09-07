@@ -6,7 +6,6 @@ pub mod keybindings;
 pub mod script;
 pub mod tabs;
 pub mod theme_config;
-pub mod tracking;
 pub mod tui_config;
 pub mod view_config;
 pub mod yaml_edit;

@@ -3826,8 +3826,8 @@ the native tasks tab (for comparison), this is not the C1 cutover.
 - [ ] `e` → change `status`/`priority` → applied. An invalid `status` →
       reopens with an inline error.
 - [ ] `e` → `tracking: true` → tracking starts (visible in the native
-      trackings tab); with `allow_parallel=false` other active trackings are
-      stopped. `tracking: false` → stops it again.
+      trackings tab); with the adapter's `allow_parallel: false` other active
+      trackings are stopped. `tracking: false` → stops it again.
 - [ ] `d` (delete) on a task with subtasks → confirm → the whole subtree is
       gone, with the message "Deleted subtree (N tasks)". Notes are
       soft-deleted.
@@ -3863,8 +3863,8 @@ subtasks and grandchildren.
       disappear.
 - [ ] Several changes in one buffer (re-hang, add, delete, status) → `:wq` →
       all applied in a single pass; the message names the tally.
-- [ ] With `tracking.allow_parallel=false`, mark two lines with the `-t` flag
-      → `:wq` → reopens with the error "Only one task can be tracked at a time
+- [ ] With the adapter's `allow_parallel: false`, mark two lines with the `-t`
+      flag → `:wq` → reopens with the error "Only one task can be tracked at a time
       …", the edits are preserved.
 - [ ] Save the buffer unchanged → nothing changes (the diff is a no-op).
 - [ ] `ctrl+n` is reachable in the flat `list` view (`v`) too, and at every
@@ -3880,10 +3880,10 @@ subtasks and grandchildren.
 - [ ] `t` (toggle-tracking) on an untracked task → `⏱` appears immediately
       (reload); the tracking shows up in the native trackings tab.
 - [ ] `t` again on the same task → `⏱` disappears, the tracking is stopped.
-- [ ] With `tracking.allow_parallel=false`: `t` on task B while A is running →
-      A's `⏱` disappears and B's appears (exclusive, the native policy).
-- [ ] With `tracking.allow_parallel=true`: `t` on B leaves A's `⏱` in place
-      (both run).
+- [ ] With the adapter's `allow_parallel: false`: `t` on task B while A is
+      running → A's `⏱` disappears and B's appears (exclusive, the default).
+- [ ] With `config_inline: '{ allow_parallel: true }'`: `t` on B leaves A's
+      `⏱` in place (both run).
 - [ ] Tracking started via the `e` buffer (`tracking: true`) → `⏱` appears
       without an extra `t`; `t` toggles consistently afterwards.
 - [ ] `t` and the `tracking:` buffer toggle stay in sync (no stale marker):
@@ -4055,8 +4055,8 @@ native trackings tab (until C1).
       headers), not just in the ungrouped or tree view.
 - [ ] **`d` on an already deleted (dimmed) row** → **no** confirm dialog, just
       the notification "Already deleted" (no re-delete).
-- [ ] `t` on a row → starts or stops tracking on the row's **task**; with
-      `allow_parallel_tracking` disabled another running tracking is stopped
+- [ ] `t` on a row → starts or stops tracking on the row's **task**; with the
+      adapter's `allow_parallel: false` another running tracking is stopped
       first (the same policy as the tasks tab).
 - [ ] `R` on a visible **non-deleted** row → the notification "Restore failed:
       … not deleted" (only deleted rows can be restored — and a query is what
@@ -7618,6 +7618,39 @@ TUI, CLI and hooks all see it as a real action.
 - [ ] `NYD_ANON=1` on any tab → every method still works behind the mask
       (`r` reload, credential prompt, reminders on the calendar tab) — the
       anon decorator lost its seven dead forwards
+
+## Grouped tracking (`toggle-tracking` with `group_paths`)
+
+`group_paths` is a list parameter of `toggle-tracking` (tasks, tracking
+entries, duration tree, condensed rows): regexes over the task's label path
+(`/Root/Child/Leaf`). First match = the task's group, no match = one shared
+rest group; a start stops only the running trackings of its own group. Set it
+up as an alias (`my-toggle-tracking`, see the example in `tasks.yaml`) bound
+on `s`, with a tree `Work/A`, `Work/B`, `Other/C`, `Other/D` and
+`group_paths: ["^/Work"]`.
+
+- [ ] `s` on `C`, then `s` on `A` → both show `⏱` (different groups)
+- [ ] `s` on `B` → `A` loses its `⏱`, `B` gains it, `C` keeps it
+- [ ] `s` on `D` → `C` stops, `D` runs (the rest group is one group)
+- [ ] `s` on a running task → it stops, nothing else changes
+- [ ] The same four steps from the trackings tab (`s` on an entry, on a
+      duration-tree row and on a condensed cell) behave identically, and the
+      tasks tab's markers follow live
+- [ ] `nyd tasks <id> help --full` lists `group_paths` on `toggle-tracking`
+      and shows the alias's paths as its default
+- [ ] Plain `toggle-tracking` (no alias) still stops everything else
+- [ ] `config_inline: '{ allow_parallel: true }'` + the alias → `s` shows
+      "group_paths cannot be combined with allow_parallel: true", nothing
+      starts
+- [ ] `group_paths: ["("]` → the notification names `group_paths[0]` and the
+      regex error; nothing starts
+- [ ] `ctrl+n` outline: `-t` on `A` and `C` under the default policy →
+      "Only one task can be tracked at a time"; the same buffer is accepted
+      when the adapter policy is grouped — not reachable from the outline
+      today (the outline always runs under the adapter's configured policy),
+      so this only verifies the refusal
+- [ ] Waybar shows one running tracking only (the first) while two run —
+      known limitation, not a bug of this feature
 
 ## Refinements / deferred tasks
 
