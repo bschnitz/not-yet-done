@@ -248,6 +248,20 @@ pub trait CalendarBackend: Send + Sync {
         ))
     }
 
+    /// Put the backend's window on screen if it is off, take it off if it is on;
+    /// answered with whether it is on now.
+    ///
+    /// A backend that drives a browser — `office365-web` — keeps it hidden and
+    /// only brings it up when the run has something to say. Whoever attends the
+    /// session may still want to look (a sign-in that got stuck) or stop looking;
+    /// this is that switch, exposed as an ordinary action so any frontend can
+    /// bind it. The default refuses: a REST backend has no window.
+    async fn toggle_window(&self) -> Result<bool, CalendarError> {
+        Err(CalendarError::Other(
+            "this calendar connection has no window".into(),
+        ))
+    }
+
     /// Subscribe to the backend's "data became ready" signal, if it has one.
     ///
     /// A backend whose data arrives *asynchronously and out of band* — e.g. the
@@ -343,5 +357,24 @@ mod tests {
         let p = LoadProgress::indeterminate();
         assert_eq!(p.fraction, None, "no percentage is known yet");
         assert!(!p.done, "still loading");
+    }
+
+    /// A backend that overrides nothing has no window, and says so.
+    struct Windowless;
+
+    #[async_trait]
+    impl CalendarBackend for Windowless {
+        fn connection_id(&self) -> &str {
+            "windowless"
+        }
+        async fn list_events(&self, _range: &TimeRange) -> Result<Vec<CalEvent>, CalendarError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_backend_without_a_window_refuses_to_toggle_one() {
+        let err = Windowless.toggle_window().await.expect_err("no window");
+        assert!(matches!(err, CalendarError::Other(ref why) if why.contains("no window")));
     }
 }

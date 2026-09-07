@@ -170,6 +170,39 @@ fn create_event_action(calendars: &[GlobalCalendar]) -> NodeAction {
     NodeAction::new("create", "New event", create_event_spec(calendars))
 }
 
+/// The root's `Show/hide browser` action: flip the window of every connection
+/// that has one (see [`CalendarBackend::toggle_window`]).
+fn toggle_window_action() -> NodeAction {
+    NodeAction::new("toggle_window", "Show/hide browser", InputSpec::None)
+}
+
+/// `execute("toggle_window")` — flip every backend's window. Connections
+/// without one are skipped; the message says where each window stands now.
+/// Only when no connection has a window is that an error.
+async fn execute_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<ActionOutcome> {
+    let mut said = Vec::new();
+    let mut refused = Vec::new();
+    for backend in backends {
+        match backend.toggle_window().await {
+            Ok(shown) => said.push(format!(
+                "{}: browser {}",
+                backend.connection_label(),
+                if shown { "shown" } else { "hidden" }
+            )),
+            Err(why) => refused.push(format!("{}: {why}", backend.connection_label())),
+        }
+    }
+    if said.is_empty() {
+        return Err(other_err(format!(
+            "no connection has a window to show ({})",
+            refused.join("; ")
+        )));
+    }
+    Ok(ActionOutcome::Done {
+        message: Some(said.join("; ")),
+    })
+}
+
 // -- Form-value helpers (the calendar counterpart of local-adapter's form.rs) --
 
 /// Read a Form field, treating absent or whitespace-only values as `None`.
@@ -1039,7 +1072,10 @@ impl ContentAdapter for CalendarAdapter {
             // hint bar only needs to know the action exists). The authoritative
             // form spec — with the picker populated — is built at open time from
             // the root that `get_by_id` returns, which has ensured the list.
-            "calendar:root" => vec![create_event_action(&self.calendars.read().unwrap())],
+            "calendar:root" => vec![
+                create_event_action(&self.calendars.read().unwrap()),
+                toggle_window_action(),
+            ],
             _ => Vec::new(),
         }
     }
@@ -1362,7 +1398,12 @@ impl Node for CalendarRoot {
         static EMPTY: Metadata = Metadata { fields: vec![] };
         &EMPTY
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => {
                 execute_create(
@@ -1375,6 +1416,7 @@ impl Node for CalendarRoot {
                 )
                 .await
             }
+            ("toggle_window", ActionInput::None) => execute_toggle_window(&self.backends).await,
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the calendar root"
             ))),
@@ -2362,6 +2404,76 @@ mod tests {
                 url: None,
             })
         }
+    }
+
+    /// A backend with a window that remembers whether it is up.
+    struct WindowedBackend {
+        conn_id: String,
+        shown: Arc<Mutex<bool>>,
+    }
+
+    #[async_trait]
+    impl CalendarBackend for WindowedBackend {
+        fn connection_id(&self) -> &str {
+            &self.conn_id
+        }
+        async fn list_events(
+            &self,
+            _range: &TimeRange,
+        ) -> std::result::Result<Vec<CalEvent>, not_yet_done_calendar_core::CalendarError> {
+            Ok(Vec::new())
+        }
+        async fn toggle_window(
+            &self,
+        ) -> std::result::Result<bool, not_yet_done_calendar_core::CalendarError> {
+            let mut shown = self.shown.lock().unwrap();
+            *shown = !*shown;
+            Ok(*shown)
+        }
+    }
+
+    #[tokio::test]
+    async fn toggle_window_flips_every_window_and_skips_connections_without_one() {
+        let shown = Arc::new(Mutex::new(false));
+        let backends: Vec<Box<dyn CalendarBackend>> = vec![
+            Box::new(WindowedBackend {
+                conn_id: "web".into(),
+                shown: Arc::clone(&shown),
+            }),
+            // The stub inherits the trait's refusal: no window.
+            Box::new(StubBackend {
+                conn_id: "rest".into(),
+                calendars: Vec::new(),
+                created: Arc::default(),
+            }),
+        ];
+
+        let outcome = execute_toggle_window(&backends)
+            .await
+            .expect("one window flipped");
+        assert!(*shown.lock().unwrap());
+        assert!(
+            matches!(outcome, ActionOutcome::Done { message: Some(ref m) } if m == "web: browser shown")
+        );
+
+        let outcome = execute_toggle_window(&backends).await.expect("and back");
+        assert!(!*shown.lock().unwrap());
+        assert!(
+            matches!(outcome, ActionOutcome::Done { message: Some(ref m) } if m == "web: browser hidden")
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_window_with_no_window_anywhere_is_an_error() {
+        let backends: Vec<Box<dyn CalendarBackend>> = vec![Box::new(StubBackend {
+            conn_id: "rest".into(),
+            calendars: Vec::new(),
+            created: Arc::default(),
+        })];
+        let Err(err) = execute_toggle_window(&backends).await else {
+            panic!("nothing to show, yet no error");
+        };
+        assert!(err.to_string().contains("no connection has a window"));
     }
 
     /// Run `execute_create` with no backends and no calendars — enough to
