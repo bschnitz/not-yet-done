@@ -2382,7 +2382,9 @@ actions, whose arguments go to the adapter's `prepare` and `execute`. On any
 other type — `create` among them — it is a config error reported like every
 other view-file problem, not a key that silently does nothing. Lifecycle hooks
 take the same block as `with: { args: {…} }` (no placeholders there: a hook
-has no row), and the CLI has `--arg key=value` for every input shape.
+has no row; a `script:` binding gets the hook payload as a JSON file instead —
+see the README's [lifecycle hooks](../README.md#lifecycle-hooks)), and the CLI
+has `--arg key=value` for every input shape.
 
 For an editor binding the arguments are checked **before the editor opens**,
 so a wrong value is one notification and no `$EDITOR` to quit, and the same

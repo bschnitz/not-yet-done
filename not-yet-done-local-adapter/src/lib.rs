@@ -118,6 +118,10 @@ pub struct CoreHandle {
     /// How many of *this database's* backups to keep (older ones are pruned).
     /// Defaults to 10; overridable via the adapter config's `backup.max_count`.
     backup_max_count: usize,
+    /// The adapter instance this handle serves — the `source` of the hook
+    /// events it publishes (see [`HOOK_TRACKING_STARTED`]). Empty for a
+    /// handle built outside an adapter (tests), which then fires no hooks.
+    instance_id: Arc<str>,
     /// Glyph shown in the `tracking`/`tracking_rollup` marker columns for an
     /// actively-tracked task (and its collapsed ancestors) across the Tasks and
     /// Trackings adapters. Defaults to `⏱`; overridable via the adapter
@@ -129,6 +133,14 @@ pub struct CoreHandle {
 /// Default glyph for the active-tracking marker column when the adapter config
 /// does not set `tracking_marker`.
 pub const DEFAULT_TRACKING_MARKER: &str = "⏱";
+
+/// Hook fired after a tracking started, with the tracked task's path in the
+/// payload (see [`crate::task::tracking_hook_payload`]).
+pub const HOOK_TRACKING_STARTED: &str = "tracking_started";
+/// Hook fired after a tracking stopped — by a toggle, or implicitly because a
+/// start under the tracking policy stopped it. Same payload as
+/// [`HOOK_TRACKING_STARTED`], with `ended_at` set.
+pub const HOOK_TRACKING_STOPPED: &str = "tracking_stopped";
 
 impl CoreHandle {
     pub fn new(
@@ -153,7 +165,38 @@ impl CoreHandle {
             backup_dir: not_yet_done_task_core::backup::default_backup_dir(),
             backup_max_count: 10,
             tracking_marker: Arc::from(DEFAULT_TRACKING_MARKER),
+            instance_id: Arc::from(""),
         }
+    }
+
+    /// Name the adapter instance this handle serves. Builder-style like the
+    /// other overrides; the adapters call it in their constructors so the
+    /// hook events they publish carry their instance id as `source`.
+    pub fn with_instance(mut self, instance_id: &str) -> Self {
+        self.instance_id = Arc::from(instance_id);
+        self
+    }
+
+    /// The adapter instance this handle serves (empty outside an adapter).
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Fire an adapter hook: publish `hook` as a [`BusEvent`] whose `source`
+    /// is this handle's instance and whose payload is `payload`. The host's
+    /// hook runner picks it up in whichever process performed the mutation
+    /// (TUI or CLI) and runs the bindings the instance's view file declares
+    /// for it. A handle without an instance fires nothing.
+    ///
+    /// [`BusEvent`]: not_yet_done_content::BusEvent
+    pub fn fire_hook(&self, hook: &str, payload: serde_json::Value) {
+        if self.instance_id.is_empty() {
+            return;
+        }
+        not_yet_done_content::publish_event(
+            &*self.bus,
+            not_yet_done_content::BusEvent::new(hook, self.instance_id.as_ref(), payload),
+        );
     }
 
     /// Override the active-tracking marker glyph. Builder-style so the many

@@ -40,8 +40,9 @@ pub use not_yet_done_content::AutoConnect;
 
 pub mod hooks;
 pub use hooks::{
-    HookBinding, HookConfig, HookInputs, HookOutcome, HookReport, HookTarget, HookWhen,
-    fire_connected_hooks, fire_hook, fire_hook_with,
+    HOOK_DEPTH_ENV, HookBinding, HookConfig, HookInputs, HookOutcome, HookReport, HookTarget,
+    HookWhen, drain_event_hooks, event_hooks_suppressed, fire_connected_hooks, fire_hook,
+    fire_hook_event, fire_hook_with, spawn_event_hook_runner,
 };
 
 // ---------------------------------------------------------------------------

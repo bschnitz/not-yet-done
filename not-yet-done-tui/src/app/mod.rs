@@ -13198,7 +13198,20 @@ fn load_content_views(
                                             .map_err(|e| e.to_string())
                                     });
                                 match built {
-                                    Ok(a) => Some(Arc::from(a)),
+                                    Ok(a) => {
+                                        let a: Arc<dyn not_yet_done_content::ContentAdapter> =
+                                            Arc::from(a);
+                                        // Event hooks (`hooks:` beyond `connected`):
+                                        // one background runner per built adapter,
+                                        // holding it weakly so a reload's fresh
+                                        // adapter takes over cleanly.
+                                        not_yet_done_host::spawn_event_hook_runner(
+                                            Arc::downgrade(&a),
+                                            config.adapter.effective_instance_id(),
+                                            host_ctx.event_bus.as_ref(),
+                                        );
+                                        Some(a)
+                                    }
                                     Err(e) => {
                                         init_error = Some(e);
                                         None
