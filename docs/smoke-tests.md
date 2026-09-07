@@ -7649,8 +7649,8 @@ on `s`, with a tree `Work/A`, `Work/B`, `Other/C`, `Other/D` and
       when the adapter policy is grouped — not reachable from the outline
       today (the outline always runs under the adapter's configured policy),
       so this only verifies the refusal
-- [ ] Waybar shows one running tracking only (the first) while two run —
-      known limitation, not a bug of this feature
+- [ ] Waybar reads `⏱ 2` while two run; hovering lists both with their
+      elapsed times, one per line; the pill hides once the last one stops
 
 ## Refinements / deferred tasks
 

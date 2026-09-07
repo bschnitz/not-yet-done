@@ -13,7 +13,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Rich TUI** — keyboard-driven interface with fuzzy filter, text search, hop-style jump navigation, saved filters, favorites, and configurable columns
 - **Mouse support** — optional (`mouse` cargo feature): click tabs, panes, rows and popup entries, double-click to open, sort by clicking a column header, drag-select inside a single popup or pane instead of across whole terminal rows, copy on release, wheel scrolling
 - **CLI** — full command-line interface for scripting and automation
-- **Waybar module** — CFFI module showing the active tracking in your status bar
+- **Waybar module** — CFFI module counting the running trackings in your status bar, naming them on hover
 - **Per-task notes** — Markdown notes per task, auto-organized in a directory tree matching the task hierarchy
 - **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes — or automatically after a reload via a hook binding
 - **Filter DSL** — YAML-based query language with natural-language date expressions
@@ -1983,7 +1983,11 @@ that must not. Rename them freely — but an id lives in **both** files, as
 
 ## Waybar Integration
 
-The Waybar CFFI module shows the currently active tracking in your status bar.
+The Waybar CFFI module shows how many trackings are running in your status bar
+and names them, with their elapsed times, in the tooltip on hover. It counts
+rather than names because grouped tracking (`toggle-tracking` with
+`group_paths`) lets several trackings run at once, and a bar has no room for
+two descriptions.
 
 It is a thin frontend over the same in-process `trackings` content adapter the
 TUI and `nyd` use — it does **not** open the database itself. This means it
@@ -2001,16 +2005,17 @@ Add to your Waybar config:
 "cffi/nyd": {
     "module_path": "~/.config/waybar/cffi/libnyd_waybar.so",
     "icon": "⏱",
-    "max_chars": 20,
     "interval_ms": 5000
 }
 ```
 
-| Option        | Default | Description                       |
-| ------------- | ------- | --------------------------------- |
-| `icon`        | `⏱`     | Icon before task name             |
-| `max_chars`   | `20`    | Max description length before `…` |
-| `interval_ms` | `5000`  | Update interval in ms             |
+| Option        | Default | Description                   |
+| ------------- | ------- | ----------------------------- |
+| `icon`        | `⏱`     | Icon before the running count |
+| `interval_ms` | `5000`  | Update interval in ms         |
+
+The bar reads `⏱ 2` while two trackings run and is hidden while none does.
+The tooltip lists one line per running tracking: `description — elapsed`.
 
 ### Styling
 
@@ -2023,9 +2028,9 @@ CSS widget name: `#nyd-tracking`. Class `active` is added when tracking is runni
 }
 ```
 
-Duration is displayed as: `30s`, `22min`, `1.5h`, `10h`.
+Elapsed time in the tooltip is displayed as: `30s`, `22min`, `1.5h`, `10h`.
 
-<!-- screenshot: waybar with nyd-tracking pill showing "⏱ Build API endpoi… 1.5h" -->
+<!-- screenshot: waybar with nyd-tracking pill showing "⏱ 1"; predates the count display -->
 
 ![Waybar Module](docs/screenshots/waybar.png)
 

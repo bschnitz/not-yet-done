@@ -25,12 +25,9 @@ const TRACKINGS_INSTANCE: &str = "trackings";
 
 #[derive(Deserialize)]
 struct Config {
-    /// Icon shown before the task description.
+    /// Icon shown before the running-tracking count.
     #[serde(default = "default_icon")]
     icon: String,
-    /// Maximum characters for the task description before truncation.
-    #[serde(default = "default_max_chars")]
-    max_chars: usize,
     /// Update interval in milliseconds.
     #[serde(default = "default_interval_ms")]
     interval_ms: u32,
@@ -38,9 +35,6 @@ struct Config {
 
 fn default_icon() -> String {
     "⏱".to_string()
-}
-fn default_max_chars() -> usize {
-    20
 }
 fn default_interval_ms() -> u32 {
     5000
@@ -74,13 +68,34 @@ fn format_duration_short(d: Duration) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{truncated}\u{2026}") // U+2026 HORIZONTAL ELLIPSIS
-    }
+/// One running tracking as the bar shows it: the task's description and the
+/// time elapsed since it started.
+struct RunningTracking {
+    description: String,
+    elapsed: Duration,
+}
+
+/// The bar text for `running`: the icon and how many trackings run. With
+/// grouped tracking several can run at once, and the bar has no room to name
+/// them all — the names go to the tooltip (see [`tooltip_text`]).
+fn label_text(icon: &str, running: &[RunningTracking]) -> String {
+    format!("{icon} {}", running.len())
+}
+
+/// The hover text: one line per running tracking, `description — elapsed`,
+/// in the order the adapter lists them.
+fn tooltip_text(running: &[RunningTracking]) -> String {
+    running
+        .iter()
+        .map(|t| {
+            format!(
+                "{} \u{2014} {}",
+                t.description,
+                format_duration_short(t.elapsed)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -119,18 +134,20 @@ fn resolve_trackings_adapter(rt: &tokio::runtime::Runtime) -> Option<Box<dyn Con
     .ok()
 }
 
-/// Query the active tracking via the adapter and return (description, elapsed).
+/// Query every running tracking via the adapter.
 ///
 /// `root()` reloads the snapshot from the DB on every call, so a tracking
 /// started or stopped after module init is picked up on the next tick. The
-/// flat entry list marks the running tracking with a non-empty `marker` field
+/// flat entry list marks a running tracking with a non-empty `marker` field
 /// (the glyph is adapter-configurable via `tracking_marker`, so we match on
 /// "non-empty" rather than a specific character) and carries the elapsed time
-/// (computed at `now`) in `duration` (integer seconds).
-fn get_active_tracking(
+/// (computed at `now`) in `duration` (integer seconds). Under a grouped or
+/// parallel policy more than one can run, so all of them are returned; an
+/// unreadable adapter yields an empty list.
+fn get_running_trackings(
     rt: &tokio::runtime::Runtime,
     adapter: &dyn ContentAdapter,
-) -> Option<(String, Duration)> {
+) -> Vec<RunningTracking> {
     rt.block_on(async {
         let root = adapter.root().await.ok()?;
         let result = not_yet_done_content::children::list(
@@ -156,17 +173,24 @@ fn get_active_tracking(
                 .map(|f| f.value.clone())
         };
 
-        let active = result
+        let running = result
             .items
             .iter()
-            .find(|row| field(row, "marker").is_some_and(|m| !m.is_empty()))?;
-
-        let desc = field(active, "task").unwrap_or_else(|| active.label.clone());
-        let secs: i64 = field(active, "duration")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        Some((desc, Duration::seconds(secs)))
+            .filter(|row| field(row, "marker").is_some_and(|m| !m.is_empty()))
+            .map(|row| {
+                let description = field(row, "task").unwrap_or_else(|| row.label.clone());
+                let secs: i64 = field(row, "duration")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                RunningTracking {
+                    description,
+                    elapsed: Duration::seconds(secs),
+                }
+            })
+            .collect();
+        Some(running)
     })
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -179,14 +203,12 @@ fn update_label(
     rt: &tokio::runtime::Runtime,
     adapter: &Option<Box<dyn ContentAdapter>>,
     icon: &str,
-    max_chars: usize,
 ) {
     if let Some(adapter) = adapter {
-        if let Some((desc, elapsed)) = get_active_tracking(rt, adapter.as_ref()) {
-            let dur = format_duration_short(elapsed);
-            let short_desc = truncate(&desc, max_chars);
-            label.set_text(&format!("{icon} {short_desc} {dur}"));
-            label.set_tooltip_text(Some(&format!("{desc} \u{2014} {dur}")));
+        let running = get_running_trackings(rt, adapter.as_ref());
+        if !running.is_empty() {
+            label.set_text(&label_text(icon, &running));
+            label.set_tooltip_text(Some(&tooltip_text(&running)));
             inner.style_context().add_class("active");
             inner.show_all();
         } else {
@@ -228,10 +250,9 @@ impl Module for NydModule {
         let adapter = resolve_trackings_adapter(&rt);
 
         let icon = config.icon;
-        let max_chars = config.max_chars;
 
         // Initial update immediately.
-        update_label(&label, &inner, &rt, &adapter, &icon, max_chars);
+        update_label(&label, &inner, &rt, &adapter, &icon);
 
         // Periodic update via glib timeout.
         let label_ref = RefCell::new(label);
@@ -245,7 +266,6 @@ impl Module for NydModule {
                     &rt,
                     &adapter,
                     &icon,
-                    max_chars,
                 );
                 glib::ControlFlow::Continue
             },
@@ -286,11 +306,24 @@ mod tests {
         assert_eq!(format_duration_short(Duration::seconds(36000)), "10h");
     }
 
+    fn running(description: &str, secs: i64) -> RunningTracking {
+        RunningTracking {
+            description: description.to_string(),
+            elapsed: Duration::seconds(secs),
+        }
+    }
+
     #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("Hello", 10), "Hello");
-        assert_eq!(truncate("Hello World Long", 10), "Hello Wor\u{2026}");
-        assert_eq!(truncate("AB", 2), "AB");
-        assert_eq!(truncate("ABC", 2), "A\u{2026}");
+    fn label_counts_the_running_trackings() {
+        assert_eq!(label_text("⏱", &[running("A", 5)]), "⏱ 1");
+        assert_eq!(label_text("⏱", &[running("A", 5), running("B", 90)]), "⏱ 2");
+    }
+
+    #[test]
+    fn tooltip_names_each_running_tracking_with_its_elapsed_time() {
+        assert_eq!(
+            tooltip_text(&[running("Write report", 5400), running("Call", 30)]),
+            "Write report \u{2014} 1.5h\nCall \u{2014} 30s"
+        );
     }
 }
