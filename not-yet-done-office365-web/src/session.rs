@@ -236,6 +236,10 @@ impl SessionHandle {
     /// whether it is up now. For whoever attends the session and wants to see, or stop
     /// seeing, what the browser is doing — a sign-on that got stuck, say.
     ///
+    /// Answered at once, a fetch in progress or not: it does not queue behind the
+    /// session's commands, since a sign-on that got stuck is exactly when one wants to
+    /// look.
+    ///
     /// Only toggles: a session whose browser has not been started yet (nothing fetched so
     /// far) has no window to show and says so, rather than starting one for the purpose.
     pub async fn toggle_window(&self) -> Result<bool, MsOfficeError> {
@@ -263,10 +267,19 @@ pub(crate) struct SessionInner {
     /// because each prompt owns a one-shot reply path; `Mutex<Option<…>>` gives
     /// the take-once semantics. The matching sender lives in the actor's forwarder.
     prompt_rx: std::sync::Mutex<Option<mpsc::Receiver<SessionPrompt>>>,
+    /// The window of the browser now running, for a toggle to reach directly. Not a
+    /// command: the actor answers commands one at a time, and a toggle queued behind a
+    /// fetch would show the window minutes later, once a sign-on in progress is over —
+    /// the very moment one wants to see it (seen 2026-09-07). Filled by the actor when it
+    /// starts the browser, emptied when the browser is gone.
+    window: WindowSlot,
     // Aborts the actor task (and thus drops the browser) when the last handle
     // to this session is dropped.
     _actor: AbortOnDrop,
 }
+
+/// Where the actor leaves the running browser's window for the handle to reach.
+type WindowSlot = Arc<std::sync::Mutex<Option<Arc<Link>>>>;
 
 impl SessionInner {
     /// Start a new session actor for `config`. No browser yet: it is started on the
@@ -275,11 +288,19 @@ impl SessionInner {
         let (tx, rx) = mpsc::channel(32);
         let (loaded_tx, _) = broadcast::channel::<LoadStatus>(16);
         let (prompt_tx, prompt_rx) = mpsc::channel::<SessionPrompt>(8);
-        let actor = tokio::spawn(actor_loop(config, rx, loaded_tx.clone(), prompt_tx));
+        let window = WindowSlot::default();
+        let actor = tokio::spawn(actor_loop(
+            config,
+            rx,
+            loaded_tx.clone(),
+            prompt_tx,
+            Arc::clone(&window),
+        ));
         Arc::new(Self {
             tx,
             loaded_tx,
             prompt_rx: std::sync::Mutex::new(Some(prompt_rx)),
+            window,
             _actor: AbortOnDrop(actor),
         })
     }
@@ -297,14 +318,13 @@ impl SessionInner {
             .map_err(|_| MsOfficeError::Other("session actor dropped the response".into()))?
     }
 
+    /// Straight to the window, past the actor's queue — see [`Self::window`].
     pub(crate) async fn toggle_window(&self) -> Result<bool, MsOfficeError> {
-        let (resp, rx) = oneshot::channel();
-        self.tx
-            .send(Command::ToggleWindow { resp })
-            .await
-            .map_err(|_| MsOfficeError::Other("session actor is gone".into()))?;
-        rx.await
-            .map_err(|_| MsOfficeError::Other("session actor dropped the response".into()))?
+        let link = self.window.lock().unwrap().clone();
+        match link {
+            Some(link) => link.toggle().await,
+            None => Err(MsOfficeError::Browser(NO_BROWSER_YET.into())),
+        }
     }
 }
 
@@ -313,10 +333,6 @@ enum Command {
     GetCalendarView {
         range: MsTimeRange,
         resp: oneshot::Sender<Result<Vec<MsCalEvent>, MsOfficeError>>,
-    },
-    /// Flip the window; answered with whether it is up now.
-    ToggleWindow {
-        resp: oneshot::Sender<Result<bool, MsOfficeError>>,
     },
 }
 
@@ -330,6 +346,7 @@ async fn actor_loop(
     mut rx: mpsc::Receiver<Command>,
     loaded_tx: broadcast::Sender<LoadStatus>,
     prompt_tx: mpsc::Sender<SessionPrompt>,
+    window: WindowSlot,
 ) {
     let mut browser: Option<Browser> = None;
     // Kept alive for the actor's lifetime: relays what the run says and asks. Spawned the
@@ -341,7 +358,9 @@ async fn actor_loop(
         match cmd {
             Command::GetCalendarView { range, resp } => {
                 let result =
-                    match ensure_browser(&mut browser, &mut _fwd, &config, &prompt_tx).await {
+                    match ensure_browser(&mut browser, &mut _fwd, &window, &config, &prompt_tx)
+                        .await
+                    {
                         Ok(b) => {
                             let mut data = config.facts.clone();
                             data.extend(calendar::data_for(&range));
@@ -367,19 +386,13 @@ async fn actor_loop(
                             if matches!(outcome, Err(MsOfficeError::Browser(_))) {
                                 browser = None;
                                 _fwd = None;
+                                *window.lock().unwrap() = None;
                                 announcing.browser_gone();
                             }
                             outcome.and_then(calendar::events_of)
                         }
                         Err(e) => Err(e),
                     };
-                let _ = resp.send(result);
-            }
-            Command::ToggleWindow { resp } => {
-                let result = match browser.as_ref() {
-                    Some(b) => b.link().toggle().await,
-                    None => Err(MsOfficeError::Browser(NO_BROWSER_YET.into())),
-                };
                 let _ = resp.send(result);
             }
         }
@@ -436,16 +449,19 @@ impl Announcing {
 }
 
 /// Lazily start the browser, reusing it across commands. On first start, also
-/// start the forwarder that relays the run's `told`/`asking` news as [`SessionPrompt`]s.
+/// start the forwarder that relays the run's `told`/`asking` news as [`SessionPrompt`]s,
+/// and leave the window in `window` for the handle to reach.
 async fn ensure_browser<'a>(
     slot: &'a mut Option<Browser>,
     fwd: &mut Option<AbortOnDrop>,
+    window: &WindowSlot,
     config: &SessionConfig,
     prompt_tx: &mpsc::Sender<SessionPrompt>,
 ) -> Result<&'a mut Browser, MsOfficeError> {
     if slot.is_none() {
         let browser = Browser::start(config).await?;
         let link = browser.link();
+        *window.lock().unwrap() = Some(Arc::clone(&link));
         let news = link.news();
         *fwd = Some(AbortOnDrop(tokio::spawn(forward(
             link,
@@ -628,6 +644,56 @@ mod tests {
         assert!(matches!(err, MsOfficeError::Browser(why) if why == NO_BROWSER_YET));
     }
 
+    #[tokio::test]
+    async fn a_toggle_reaches_the_window_the_actor_left_in_the_slot() {
+        let shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let window = fake::window({
+            let shown = Arc::clone(&shown);
+            move |request| match ask_of(request) {
+                Some("show") => {
+                    if let Some(on) = request["host"]["on"].as_bool() {
+                        shown.store(on, Ordering::SeqCst);
+                    }
+                    Some(vec![fake::answered(
+                        request,
+                        json!({ "answer": "window", "shown": shown.load(Ordering::SeqCst) }),
+                    )])
+                }
+                _ => None,
+            }
+        });
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let config = SessionConfig {
+            account_key: "slot-probe".into(),
+            profile_dir: dir.path().join("profile"),
+            headless: true,
+            auto_headed: false,
+            facts: BTreeMap::new(),
+            answers: Answers::new(),
+            browser: BrowserConfig {
+                bin: dir.path().join("no-such-browser"),
+                ..BrowserConfig::default()
+            },
+        };
+        let session = SessionHandle {
+            inner: SessionInner::spawn(config),
+        };
+        // What the actor does once it has started the browser.
+        let link = Link::connect(&window.socket).await.expect("connect");
+        *session.inner.window.lock().unwrap() = Some(link);
+
+        assert!(session.toggle_window().await.expect("toggled up"));
+        assert!(!session.toggle_window().await.expect("toggled down"));
+        let flips: Vec<bool> = window
+            .heard
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["host"]["on"].as_bool())
+            .collect();
+        assert_eq!(flips, vec![true, false]);
+    }
+
     #[test]
     fn answers_debug_names_no_value() {
         let mut answers = Answers::new();
@@ -641,6 +707,7 @@ mod tests {
 
     use crate::browser::fake::{self, ask_of, news};
     use serde_json::{Value, json};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     /// Wait until the window has heard `n` lines, and return them.
