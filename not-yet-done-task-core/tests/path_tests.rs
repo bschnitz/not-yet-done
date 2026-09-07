@@ -799,3 +799,149 @@ async fn include_ancestors_with_already_matching_parent() {
     // A, B, Root — A already in results, Root added as ancestor.
     assert_eq!(results.len(), 3);
 }
+
+// ---------------------------------------------------------------------------
+// Tree predicates: description vs. absolute path
+// ---------------------------------------------------------------------------
+
+/// Resolve one `in_tree` / `has_ancestor` predicate and return the short IDs
+/// its `path LIKE` branches anchor on — empty when it resolved to no task.
+async fn tree_predicate_sids(
+    name: &str,
+    value: &str,
+    db: &sea_orm::DatabaseConnection,
+) -> Vec<String> {
+    use not_yet_done_task_core::filter::tree_ops::resolve_tree_operators;
+    use not_yet_done_task_core::filter::{FilterExpr, FilterLeaf, Literal, Operator, Rhs};
+
+    let expr = FilterExpr::Custom {
+        name: name.into(),
+        arg: Literal::String(value.into()),
+    };
+    let resolved = resolve_tree_operators(&expr, db).await.unwrap();
+    let leaves: Vec<&FilterLeaf> = match &resolved {
+        FilterExpr::Leaf(leaf) => vec![leaf],
+        FilterExpr::Or(children) => children
+            .iter()
+            .map(|c| match c {
+                FilterExpr::Leaf(leaf) => leaf,
+                other => panic!("unexpected branch {other:?}"),
+            })
+            .collect(),
+        other => panic!("unexpected shape {other:?}"),
+    };
+    let mut sids: Vec<String> = leaves
+        .into_iter()
+        .filter(|leaf| leaf.op == Operator::Like)
+        .map(|leaf| match &leaf.rhs {
+            Rhs::Lit(Literal::String(pattern)) => pattern
+                .trim_start_matches("%/")
+                .trim_end_matches('%')
+                .trim_end_matches("/_")
+                .to_string(),
+            other => panic!("unexpected rhs {other:?}"),
+        })
+        .collect();
+    sids.sort();
+    sids
+}
+
+#[tokio::test]
+async fn in_tree_by_description_takes_every_task_of_that_name() {
+    let (repo, db) = setup().await;
+    let work = repo.insert("Work".into(), None, None, None).await.unwrap();
+    let auto = repo
+        .insert("Autotrack".into(), None, None, None)
+        .await
+        .unwrap();
+    let nested = repo
+        .insert("Work".into(), Some(auto.id), None, None)
+        .await
+        .unwrap();
+
+    let mut expected = vec![sid(work.id), sid(nested.id)];
+    expected.sort();
+    assert_eq!(tree_predicate_sids("in_tree", "Work", &db).await, expected);
+}
+
+#[tokio::test]
+async fn in_tree_by_path_tells_same_named_tasks_apart() {
+    let (repo, db) = setup().await;
+    let work = repo.insert("Work".into(), None, None, None).await.unwrap();
+    let auto = repo
+        .insert("Autotrack".into(), None, None, None)
+        .await
+        .unwrap();
+    let nested = repo
+        .insert("Work".into(), Some(auto.id), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tree_predicate_sids("in_tree", "/Work", &db).await,
+        vec![sid(work.id)]
+    );
+    assert_eq!(
+        tree_predicate_sids("in_tree", "/Autotrack/Work", &db).await,
+        vec![sid(nested.id)]
+    );
+    assert_eq!(
+        tree_predicate_sids("has_ancestor", "/Autotrack/Work/", &db).await,
+        vec![sid(nested.id)],
+        "trailing slash and has_ancestor walk the same path"
+    );
+}
+
+#[tokio::test]
+async fn in_tree_by_path_matches_nothing_when_a_segment_is_missing() {
+    let (repo, db) = setup().await;
+    let auto = repo
+        .insert("Autotrack".into(), None, None, None)
+        .await
+        .unwrap();
+    repo.insert("Work".into(), Some(auto.id), None, None)
+        .await
+        .unwrap();
+
+    // The root is "Autotrack", not "Work" — a description match would find
+    // the nested task, the path must not.
+    assert!(
+        tree_predicate_sids("in_tree", "/Work", &db)
+            .await
+            .is_empty()
+    );
+    assert!(
+        tree_predicate_sids("in_tree", "/Autotrack/Work/Tickets", &db)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn in_tree_by_path_allows_like_segments_and_keeps_every_branch() {
+    let (repo, db) = setup().await;
+    let work = repo.insert("Work".into(), None, None, None).await.unwrap();
+    let a = repo
+        .insert("Client A".into(), Some(work.id), None, None)
+        .await
+        .unwrap();
+    let b = repo
+        .insert("Client B".into(), Some(work.id), None, None)
+        .await
+        .unwrap();
+    let a_tickets = repo
+        .insert("Tickets".into(), Some(a.id), None, None)
+        .await
+        .unwrap();
+    let b_tickets = repo
+        .insert("Tickets".into(), Some(b.id), None, None)
+        .await
+        .unwrap();
+
+    let mut expected = vec![sid(a_tickets.id), sid(b_tickets.id)];
+    expected.sort();
+    assert_eq!(
+        tree_predicate_sids("in_tree", "/Work/Client %/Tickets", &db).await,
+        expected
+    );
+}

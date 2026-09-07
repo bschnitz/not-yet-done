@@ -7719,6 +7719,23 @@ and the same script without `when:` in `tasks.yaml`.
       `action_invoked` (depth guard)
 - [ ] Batch/table scripts (`scope: filtered_set` / `table`) write nothing
 
+## Tree predicates — path values (`[in_tree, /Root]`)
+
+Needs two tasks of the same description in different places, e.g. a root
+`Globex` and a second `Globex` under another root `Archive`, each with a
+tracking today.
+
+- [ ] Trackings tab, query `[in_tree, Globex]` → trackings of **both**
+      subtrees show up (a plain name matches every task of that name).
+- [ ] Same query with `[in_tree, /Globex]` → only the root one's
+      trackings; `[in_tree, /Archive/Globex]` → only the nested one's.
+- [ ] `[in_tree, /Nope/Globex]` (missing segment) → the tab is empty, no
+      error; a plain `[in_tree, Nope]` behaves the same.
+- [ ] `[in_tree, '/Globex/Client %/Tickets']` → every branch whose
+      middle segment LIKE-matches contributes rows.
+- [ ] CLI parity: `nyd adapter trackings ls -q '<query>'` with the same
+      four bodies gives the same rows as the tab.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
