@@ -36,8 +36,6 @@
 //! path scheme, which they do by construction.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -149,16 +147,13 @@ impl ScriptsAdapter {
     }
 }
 
+/// Everything not listed here forwards to the wrapped adapter through
+/// [`AdapterDecorator`]'s defaults, so a method added to `ContentAdapter`
+/// later cannot silently fall through to the trait default behind this layer.
 #[async_trait]
-impl ContentAdapter for ScriptsAdapter {
-    fn adapter_type(&self) -> &str {
-        self.inner.adapter_type()
-    }
-    fn instance_id(&self) -> &str {
-        self.inner.instance_id()
-    }
-    fn instance_data_dir(&self) -> PathBuf {
-        self.inner.instance_data_dir()
+impl AdapterDecorator for ScriptsAdapter {
+    fn inner(&self) -> &dyn ContentAdapter {
+        &*self.inner
     }
 
     async fn root(&self) -> Result<Box<dyn Node>> {
@@ -178,22 +173,6 @@ impl ContentAdapter for ScriptsAdapter {
         Ok(self.wrap(inner, segments))
     }
 
-    fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<Child<'a>> {
-        self.inner.childs(node)
-    }
-
-    async fn eager_subtree(
-        &self,
-        node: &dyn Node,
-        params: &ListParams,
-        depth: u32,
-    ) -> Option<Result<Subtree>> {
-        self.inner.eager_subtree(node, params, depth).await
-    }
-
-    async fn download_asset(&self, url: &str) -> Result<Vec<u8>> {
-        self.inner.download_asset(url).await
-    }
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         // Script leaf files carry their own CRUD surface; every other (wrapped)
         // node type gets the injected `scripts` listing/create actions layered
@@ -210,140 +189,6 @@ impl ContentAdapter for ScriptsAdapter {
             }
         }
         actions
-    }
-    /// This layer owns no address-only actions — the script actions all read
-    /// the node they run on — so it only has to keep the path open to the
-    /// layers below.
-    async fn execute_addressed(
-        &self,
-        node_type: &NodeType,
-        id: &str,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
-        self.inner
-            .execute_addressed(node_type, id, action_id, input)
-            .await
-    }
-    /// Likewise for the collection surface: this layer's actions are all scoped
-    /// to a script file, so the three collection methods only pass through.
-    fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
-        self.inner.collection_actions(node_type)
-    }
-    async fn collection_prepare(
-        &self,
-        node_type: &NodeType,
-        action_id: &str,
-    ) -> Result<EditorPrep> {
-        self.inner.collection_prepare(node_type, action_id).await
-    }
-    async fn execute_collection(
-        &self,
-        node_type: &NodeType,
-        action_id: &str,
-        input: ActionInput,
-    ) -> Result<ActionOutcome> {
-        self.inner
-            .execute_collection(node_type, action_id, input)
-            .await
-    }
-    fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
-        self.inner.child_process_env(node)
-    }
-    async fn augment_editor_buffer(&self, node: &NodeRef, buffer: String) -> String {
-        self.inner.augment_editor_buffer(node, buffer).await
-    }
-    fn strip_editor_hints(&self, text: &str) -> String {
-        self.inner.strip_editor_hints(text)
-    }
-    fn capabilities(&self) -> AdapterCapabilities {
-        self.inner.capabilities()
-    }
-    fn has_active_tracking(&self) -> bool {
-        self.inner.has_active_tracking()
-    }
-    async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
-        self.inner.list_values(source).await
-    }
-    fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
-        self.inner.subscribe_status()
-    }
-    fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
-        self.inner.subscribe_invalidations()
-    }
-    fn subscribe_reminders(&self) -> tokio::sync::broadcast::Receiver<Reminder> {
-        self.inner.subscribe_reminders()
-    }
-    fn take_prompt_requests(&self) -> Option<tokio::sync::mpsc::Receiver<PromptRequest>> {
-        self.inner.take_prompt_requests()
-    }
-    async fn live_rows(&self) -> Vec<NodeSummary> {
-        self.inner.live_rows().await
-    }
-    async fn bucket_for_now(&self, group_by: &GroupSpec) -> Option<String> {
-        self.inner.bucket_for_now(group_by).await
-    }
-    async fn live_group_rows(&self, group_by: &GroupSpec, query: Option<&str>) -> Vec<NodeSummary> {
-        self.inner.live_group_rows(group_by, query).await
-    }
-    async fn revalidate(&self) {
-        self.inner.revalidate().await
-    }
-    async fn submit_credentials(&self, fields: HashMap<String, String>) -> Result<()> {
-        self.inner.submit_credentials(fields).await
-    }
-
-    async fn cancel_credentials(&self) -> Result<()> {
-        self.inner.cancel_credentials().await
-    }
-    async fn try_refresh_session(&self) -> Result<()> {
-        self.inner.try_refresh_session().await
-    }
-    async fn invalidate_session(&self) -> Result<()> {
-        self.inner.invalidate_session().await
-    }
-    async fn invalidate_credentials(&self) -> Result<()> {
-        self.inner.invalidate_credentials().await
-    }
-    async fn load_view_sort(&self, scope: &str) -> Result<Vec<SortKey>> {
-        self.inner.load_view_sort(scope).await
-    }
-    async fn save_view_sort(&self, scope: &str, sort: &[SortKey]) -> Result<()> {
-        self.inner.save_view_sort(scope, sort).await
-    }
-    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
-        self.inner.query_variables(query)
-    }
-    fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
-        self.inner.render_query(query, vars)
-    }
-    async fn execute_custom_query(
-        &self,
-        query: &str,
-        context: &CustomQueryContext,
-    ) -> Result<CustomQueryResult> {
-        self.inner.execute_custom_query(query, context).await
-    }
-    fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
-        self.inner.saved_query_store()
-    }
-    fn query_body_suffix(&self) -> &str {
-        self.inner.query_body_suffix()
-    }
-    fn script_store(&self) -> Option<&dyn ScriptStore> {
-        self.inner.script_store()
-    }
-    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
-        self.inner.locate_node_path(node_id).await
-    }
-    fn hooks(&self) -> Vec<&str> {
-        self.inner.hooks()
-    }
-    fn anonymizer(&self) -> Arc<dyn Anonymizer> {
-        self.inner.anonymizer()
-    }
-    async fn describe_columns(&self, node_type: &str) -> Vec<ColumnSchema> {
-        self.inner.describe_columns(node_type).await
     }
 }
 
@@ -408,26 +253,12 @@ impl ScriptsNode {
 }
 
 #[async_trait]
-impl Node for ScriptsNode {
-    fn id(&self) -> &str {
-        self.inner.id()
+impl NodeDecorator for ScriptsNode {
+    fn inner(&self) -> &dyn Node {
+        &*self.inner
     }
-    fn label(&self) -> &str {
-        self.inner.label()
-    }
-    fn node_type(&self) -> &NodeType {
-        self.inner.node_type()
-    }
-    fn metadata(&self) -> &Metadata {
-        self.inner.metadata()
-    }
-
-    async fn hydrate(&mut self) {
-        self.inner.hydrate().await;
-    }
-
-    fn row_summary(&self) -> NodeSummary {
-        self.inner.row_summary()
+    fn inner_mut(&mut self) -> &mut dyn Node {
+        &mut *self.inner
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
@@ -441,25 +272,6 @@ impl Node for ScriptsNode {
         segments.push(inner.node_type().type_id.clone());
         let scope = ScriptScope::new(self.scope.adapter.clone(), segments);
         Ok(Box::new(ScriptsNode::new(inner, self.repo.clone(), scope)))
-    }
-
-    fn content(&self) -> Option<&dyn Content> {
-        self.inner.content()
-    }
-    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
-        self.inner.invoke_action(name, ctx).await
-    }
-
-    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
-        self.inner.prepare(action_id, args).await
-    }
-
-    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
-        self.inner.picker_options(action_id).await
-    }
-
-    async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
-        self.inner.form_prep(action_id).await
     }
 
     async fn execute(&mut self, action_id: &str, input: ActionInput, args: &ActionArgs) -> Result<ActionOutcome> {
@@ -641,7 +453,7 @@ mod tests {
     use super::*;
     use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
 
-    fn adapter(repo: ScriptRepo) -> ScriptsAdapter {
+    fn adapter(repo: ScriptRepo) -> Box<dyn ContentAdapter> {
         let inner = MockAdapterBuilder::new("jira")
             .instance_id("j1")
             .node(
@@ -650,7 +462,7 @@ mod tests {
                     .child(MockNodeData::new("ISS-1", "Bug").node_type(issue_type())),
             )
             .build();
-        ScriptsAdapter::new(Box::new(inner), repo)
+        Box::new(ScriptsAdapter::new(Box::new(inner), repo))
     }
 
     fn repo() -> (tempfile::TempDir, ScriptRepo) {

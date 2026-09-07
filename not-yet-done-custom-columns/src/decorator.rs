@@ -41,7 +41,6 @@
 //! (numbers/dates survive) — a user's local note can't leak past the mask.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -507,17 +506,15 @@ impl CustomColumnsAdapter {
     }
 }
 
+/// Everything not listed here forwards to the wrapped adapter through
+/// [`AdapterDecorator`]'s defaults, so a method added to `ContentAdapter`
+/// later cannot silently fall through to the trait default behind this layer.
 #[async_trait]
-impl ContentAdapter for CustomColumnsAdapter {
-    fn adapter_type(&self) -> &str {
-        self.inner.adapter_type()
+impl AdapterDecorator for CustomColumnsAdapter {
+    fn inner(&self) -> &dyn ContentAdapter {
+        &*self.inner
     }
-    fn instance_id(&self) -> &str {
-        self.inner.instance_id()
-    }
-    fn instance_data_dir(&self) -> PathBuf {
-        self.inner.instance_data_dir()
-    }
+
 
     async fn root(&self) -> Result<Box<dyn Node>> {
         Ok(self.wrap(self.inner.root().await?).await)
@@ -581,10 +578,6 @@ impl ContentAdapter for CustomColumnsAdapter {
             }
             other => other,
         }
-    }
-
-    async fn download_asset(&self, url: &str) -> Result<Vec<u8>> {
-        self.inner.download_asset(url).await
     }
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         // The custom-column cell actions are cross-cutting: every wrapped node
@@ -664,102 +657,6 @@ impl ContentAdapter for CustomColumnsAdapter {
         self.inner
             .execute_collection(node_type, action_id, input)
             .await
-    }
-
-    fn child_process_env(&self, node: &NodeRef) -> HashMap<String, String> {
-        self.inner.child_process_env(node)
-    }
-    async fn augment_editor_buffer(&self, node: &NodeRef, buffer: String) -> String {
-        self.inner.augment_editor_buffer(node, buffer).await
-    }
-    fn strip_editor_hints(&self, text: &str) -> String {
-        self.inner.strip_editor_hints(text)
-    }
-    fn capabilities(&self) -> AdapterCapabilities {
-        self.inner.capabilities()
-    }
-    fn has_active_tracking(&self) -> bool {
-        self.inner.has_active_tracking()
-    }
-    async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
-        self.inner.list_values(source).await
-    }
-    fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
-        self.inner.subscribe_status()
-    }
-    fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
-        self.inner.subscribe_invalidations()
-    }
-    fn subscribe_reminders(&self) -> tokio::sync::broadcast::Receiver<Reminder> {
-        self.inner.subscribe_reminders()
-    }
-    fn take_prompt_requests(&self) -> Option<tokio::sync::mpsc::Receiver<PromptRequest>> {
-        self.inner.take_prompt_requests()
-    }
-    async fn live_rows(&self) -> Vec<NodeSummary> {
-        self.inner.live_rows().await
-    }
-    async fn bucket_for_now(&self, group_by: &GroupSpec) -> Option<String> {
-        self.inner.bucket_for_now(group_by).await
-    }
-    async fn live_group_rows(&self, group_by: &GroupSpec, query: Option<&str>) -> Vec<NodeSummary> {
-        self.inner.live_group_rows(group_by, query).await
-    }
-    async fn revalidate(&self) {
-        self.inner.revalidate().await
-    }
-    async fn submit_credentials(&self, fields: HashMap<String, String>) -> Result<()> {
-        self.inner.submit_credentials(fields).await
-    }
-
-    async fn cancel_credentials(&self) -> Result<()> {
-        self.inner.cancel_credentials().await
-    }
-    async fn try_refresh_session(&self) -> Result<()> {
-        self.inner.try_refresh_session().await
-    }
-    async fn invalidate_session(&self) -> Result<()> {
-        self.inner.invalidate_session().await
-    }
-    async fn invalidate_credentials(&self) -> Result<()> {
-        self.inner.invalidate_credentials().await
-    }
-    async fn load_view_sort(&self, scope: &str) -> Result<Vec<SortKey>> {
-        self.inner.load_view_sort(scope).await
-    }
-    async fn save_view_sort(&self, scope: &str, sort: &[SortKey]) -> Result<()> {
-        self.inner.save_view_sort(scope, sort).await
-    }
-    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
-        self.inner.query_variables(query)
-    }
-    fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
-        self.inner.render_query(query, vars)
-    }
-    async fn execute_custom_query(
-        &self,
-        query: &str,
-        context: &CustomQueryContext,
-    ) -> Result<CustomQueryResult> {
-        self.inner.execute_custom_query(query, context).await
-    }
-    fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
-        self.inner.saved_query_store()
-    }
-    fn query_body_suffix(&self) -> &str {
-        self.inner.query_body_suffix()
-    }
-    fn script_store(&self) -> Option<&dyn ScriptStore> {
-        self.inner.script_store()
-    }
-    async fn locate_node_path(&self, node_id: &str) -> Result<Option<Vec<String>>> {
-        self.inner.locate_node_path(node_id).await
-    }
-    fn hooks(&self) -> Vec<&str> {
-        self.inner.hooks()
-    }
-    fn anonymizer(&self) -> Arc<dyn Anonymizer> {
-        self.inner.anonymizer()
     }
 
     /// The custom columns stored for this instance's `node_type`, merged over
@@ -853,16 +750,14 @@ impl CustomColumnsNode {
 }
 
 #[async_trait]
-impl Node for CustomColumnsNode {
-    fn id(&self) -> &str {
-        self.inner.id()
+impl NodeDecorator for CustomColumnsNode {
+    fn inner(&self) -> &dyn Node {
+        &*self.inner
     }
-    fn label(&self) -> &str {
-        self.inner.label()
+    fn inner_mut(&mut self) -> &mut dyn Node {
+        &mut *self.inner
     }
-    fn node_type(&self) -> &NodeType {
-        self.inner.node_type()
-    }
+
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
@@ -892,21 +787,6 @@ impl Node for CustomColumnsNode {
             self.scope.clone(),
         )
         .await)
-    }
-
-    fn content(&self) -> Option<&dyn Content> {
-        self.inner.content()
-    }
-    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
-        self.inner.invoke_action(name, ctx).await
-    }
-
-    async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
-        self.inner.prepare(action_id, args).await
-    }
-
-    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
-        self.inner.picker_options(action_id).await
     }
 
     async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
@@ -1074,7 +954,7 @@ mod tests {
     async fn column_form_bootstraps_a_new_column_on_first_write() {
         let store = mem_store("cc_bootstrap").await;
         let scope = "taiga/t1";
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Fresh store: no columns described beyond what the inner adapter offers.
         assert!(store.columns(scope, "mock:issue").await.unwrap().is_empty());
@@ -1112,7 +992,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn retype_action_reports_what_blocks_it_then_migrates_the_column() {
         let store = mem_store("cc_retype_action").await;
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Two rows, both typed `text` — the default the forms offer.
         for (row, rank) in [("ISS-1", "30"), ("root", "later")] {
@@ -1175,7 +1055,7 @@ mod tests {
     async fn column_form_clears_on_empty_and_skips_unchanged() {
         let store = mem_store("cc_clear").await;
         let scope = "taiga/t1";
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Seed a value.
         {
@@ -1243,7 +1123,7 @@ mod tests {
                     ),
             )
             .build();
-        let adapter = CustomColumnsAdapter::new(Box::new(inner), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
 
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         node.execute(
@@ -1256,7 +1136,7 @@ mod tests {
 
         let root = adapter.root().await.unwrap();
         let columns =
-            not_yet_done_content::children::columns_for(&adapter, root.as_ref(), &issue_type())
+            not_yet_done_content::children::columns_for(adapter.as_ref(), root.as_ref(), &issue_type())
                 .await;
 
         let est = columns
@@ -1298,7 +1178,7 @@ mod tests {
                     ),
             )
             .build();
-        let adapter = CustomColumnsAdapter::new(Box::new(inner), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
 
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         node.execute(
@@ -1311,7 +1191,7 @@ mod tests {
 
         let root = adapter.root().await.unwrap();
         let columns =
-            not_yet_done_content::children::columns_for(&adapter, root.as_ref(), &issue_type())
+            not_yet_done_content::children::columns_for(adapter.as_ref(), root.as_ref(), &issue_type())
                 .await;
 
         // One column, not two: the keys collide, so the union merges them.
@@ -1323,7 +1203,7 @@ mod tests {
 
     /// Three issues with ranks out of order, and a store that knows the rank
     /// column. Build them once for the two sorting tests below.
-    async fn ranked_adapter(store: Arc<LocalColumnStore>) -> CustomColumnsAdapter {
+    async fn ranked_adapter(store: Arc<LocalColumnStore>) -> Box<dyn ContentAdapter> {
         let inner = MockAdapterBuilder::new("taiga")
             .instance_id("t1")
             .node(
@@ -1349,7 +1229,7 @@ mod tests {
                     ),
             )
             .build();
-        let adapter = CustomColumnsAdapter::new(Box::new(inner), store);
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store));
         for (id, rank) in [("ISS-1", "30"), ("ISS-2", "10"), ("ISS-3", "20")] {
             let mut node = adapter.get_by_id(id).await.unwrap();
             node.execute(
@@ -1387,7 +1267,7 @@ mod tests {
         let root = adapter.root().await.unwrap();
 
         let result =
-            not_yet_done_content::children::list(&adapter, root.as_ref(), list_params(None))
+            not_yet_done_content::children::list(adapter.as_ref(), root.as_ref(), list_params(None))
                 .await
                 .unwrap();
 
@@ -1412,7 +1292,7 @@ mod tests {
             limit: 2,
         };
         let result =
-            not_yet_done_content::children::list(&adapter, root.as_ref(), list_params(Some(page)))
+            not_yet_done_content::children::list(adapter.as_ref(), root.as_ref(), list_params(Some(page)))
                 .await
                 .unwrap();
 
@@ -1436,7 +1316,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_addressed_writes_without_resolving_the_node() {
         let store = mem_store("cc_addressed").await;
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
         assert!(adapter.get_by_id("ISS-404").await.is_err(), "unknown row");
 
         let outcome = adapter
@@ -1469,7 +1349,7 @@ mod tests {
     /// opted in and says so rather than guessing.
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_addressed_passes_a_foreign_action_to_the_inner_adapter() {
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), mem_store("cc_foreign").await);
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), mem_store("cc_foreign").await));
         let refused = adapter
             .execute_addressed(&issue_type(), "ISS-1", "delete", ActionInput::None)
             .await
@@ -1516,7 +1396,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn set_cells_writes_a_whole_document_without_any_node() {
         let store = mem_store("cc_bulk").await;
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         let outcome = adapter
             .execute_collection(
@@ -1562,7 +1442,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bad_line_leaves_the_whole_batch_unwritten() {
         let store = mem_store("cc_bulk_atomic").await;
-        let adapter = CustomColumnsAdapter::new(taiga_adapter(), store.clone());
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         let failed = adapter
             .execute_collection(
