@@ -68,11 +68,20 @@ fn format_duration_short(d: Duration) -> String {
     }
 }
 
-/// One running tracking as the bar shows it: the task's description and the
-/// time elapsed since it started.
+/// One running tracking as the bar shows it: the tracked task's full path and
+/// the time elapsed since it started.
 struct RunningTracking {
-    description: String,
+    /// `/Work/Project/Task` — the ancestor chain plus the task itself, in the
+    /// same `/`-joined form the grouped tracking policy matches its
+    /// `group_paths` against.
+    path: String,
     elapsed: Duration,
+}
+
+/// The full task path from the adapter's `taskpath` column (the ancestors,
+/// `/a/b`, empty for a top-level task) and the task's own description.
+fn full_task_path(ancestors: &str, task: &str) -> String {
+    format!("{ancestors}/{task}")
 }
 
 /// The bar text for `running`: the icon and how many trackings run. With
@@ -82,18 +91,12 @@ fn label_text(icon: &str, running: &[RunningTracking]) -> String {
     format!("{icon} {}", running.len())
 }
 
-/// The hover text: one line per running tracking, `description — elapsed`,
-/// in the order the adapter lists them.
+/// The hover text: one line per running tracking, `path — elapsed`, in the
+/// order the adapter lists them.
 fn tooltip_text(running: &[RunningTracking]) -> String {
     running
         .iter()
-        .map(|t| {
-            format!(
-                "{} \u{2014} {}",
-                t.description,
-                format_duration_short(t.elapsed)
-            )
-        })
+        .map(|t| format!("{} \u{2014} {}", t.path, format_duration_short(t.elapsed)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -140,8 +143,9 @@ fn resolve_trackings_adapter(rt: &tokio::runtime::Runtime) -> Option<Box<dyn Con
 /// started or stopped after module init is picked up on the next tick. The
 /// flat entry list marks a running tracking with a non-empty `marker` field
 /// (the glyph is adapter-configurable via `tracking_marker`, so we match on
-/// "non-empty" rather than a specific character) and carries the elapsed time
-/// (computed at `now`) in `duration` (integer seconds). Under a grouped or
+/// "non-empty" rather than a specific character), names the task in `task`
+/// and its ancestors in `taskpath`, and carries the elapsed time (computed at
+/// `now`) in `duration` (integer seconds). Under a grouped or
 /// parallel policy more than one can run, so all of them are returned; an
 /// unreadable adapter yields an empty list.
 fn get_running_trackings(
@@ -178,12 +182,13 @@ fn get_running_trackings(
             .iter()
             .filter(|row| field(row, "marker").is_some_and(|m| !m.is_empty()))
             .map(|row| {
-                let description = field(row, "task").unwrap_or_else(|| row.label.clone());
+                let task = field(row, "task").unwrap_or_else(|| row.label.clone());
+                let ancestors = field(row, "taskpath").unwrap_or_default();
                 let secs: i64 = field(row, "duration")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
                 RunningTracking {
-                    description,
+                    path: full_task_path(&ancestors, &task),
                     elapsed: Duration::seconds(secs),
                 }
             })
@@ -306,11 +311,20 @@ mod tests {
         assert_eq!(format_duration_short(Duration::seconds(36000)), "10h");
     }
 
-    fn running(description: &str, secs: i64) -> RunningTracking {
+    fn running(path: &str, secs: i64) -> RunningTracking {
         RunningTracking {
-            description: description.to_string(),
+            path: path.to_string(),
             elapsed: Duration::seconds(secs),
         }
+    }
+
+    #[test]
+    fn full_task_path_appends_the_task_to_its_ancestors() {
+        assert_eq!(
+            full_task_path("/Work/Project", "Task"),
+            "/Work/Project/Task"
+        );
+        assert_eq!(full_task_path("", "Task"), "/Task");
     }
 
     #[test]
@@ -322,8 +336,8 @@ mod tests {
     #[test]
     fn tooltip_names_each_running_tracking_with_its_elapsed_time() {
         assert_eq!(
-            tooltip_text(&[running("Write report", 5400), running("Call", 30)]),
-            "Write report \u{2014} 1.5h\nCall \u{2014} 30s"
+            tooltip_text(&[running("/Work/Write report", 5400), running("/Call", 30)]),
+            "/Work/Write report \u{2014} 1.5h\n/Call \u{2014} 30s"
         );
     }
 }
