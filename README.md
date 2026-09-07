@@ -1984,10 +1984,10 @@ that must not. Rename them freely — but an id lives in **both** files, as
 ## Waybar Integration
 
 The Waybar CFFI module shows how many trackings are running in your status bar
-and names them, with their elapsed times, in the tooltip on hover. It counts
-rather than names because grouped tracking (`toggle-tracking` with
-`group_paths`) lets several trackings run at once, and a bar has no room for
-two descriptions.
+and lists them, each with its full task path and elapsed time, in the tooltip
+on hover. It counts rather than names because grouped tracking
+(`toggle-tracking` with `group_paths`) lets several trackings run at once, and
+a bar has no room for two descriptions.
 
 It is a thin frontend over the same in-process `trackings` content adapter the
 TUI and `nyd` use — it does **not** open the database itself. This means it
@@ -2015,7 +2015,8 @@ Add to your Waybar config:
 | `interval_ms` | `5000`  | Update interval in ms         |
 
 The bar reads `⏱ 2` while two trackings run and is hidden while none does.
-The tooltip lists one line per running tracking: `description — elapsed`.
+The tooltip lists one line per running tracking: `/path/to/task — elapsed`,
+the task path in the same form `group_paths` matches against.
 
 ### Styling
 
