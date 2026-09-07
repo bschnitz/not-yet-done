@@ -202,8 +202,25 @@ fn get_running_trackings(
 // Module
 // ---------------------------------------------------------------------------
 
+/// The tooltip is a label of our own, handed to GTK from `query-tooltip`:
+/// the stock tooltip wraps long lines, and a task path is one line that must
+/// stay one line.
+fn install_tooltip(inner: &GtkBox) -> Label {
+    let tip = Label::new(None);
+    tip.set_line_wrap(false);
+    tip.set_xalign(0.0);
+    inner.set_has_tooltip(true);
+    let custom = tip.clone();
+    inner.connect_query_tooltip(move |_, _, _, _, tooltip| {
+        tooltip.set_custom(Some(&custom));
+        true
+    });
+    tip
+}
+
 fn update_label(
     label: &Label,
+    tip: &Label,
     inner: &GtkBox,
     rt: &tokio::runtime::Runtime,
     adapter: &Option<Box<dyn ContentAdapter>>,
@@ -213,7 +230,7 @@ fn update_label(
         let running = get_running_trackings(rt, adapter.as_ref());
         if !running.is_empty() {
             label.set_text(&label_text(icon, &running));
-            label.set_tooltip_text(Some(&tooltip_text(&running)));
+            tip.set_text(&tooltip_text(&running));
             inner.style_context().add_class("active");
             inner.show_all();
         } else {
@@ -239,6 +256,7 @@ impl Module for NydModule {
 
         let label = Label::new(None);
         inner.add(&label);
+        let tip = install_tooltip(&inner);
         root.add(&inner);
         root.show_all();
 
@@ -257,16 +275,18 @@ impl Module for NydModule {
         let icon = config.icon;
 
         // Initial update immediately.
-        update_label(&label, &inner, &rt, &adapter, &icon);
+        update_label(&label, &tip, &inner, &rt, &adapter, &icon);
 
         // Periodic update via glib timeout.
         let label_ref = RefCell::new(label);
+        let tip_ref = RefCell::new(tip);
         let inner_ref = RefCell::new(inner);
         glib::timeout_add_local(
             std::time::Duration::from_millis(config.interval_ms as u64),
             move || {
                 update_label(
                     &label_ref.borrow(),
+                    &tip_ref.borrow(),
                     &inner_ref.borrow(),
                     &rt,
                     &adapter,
