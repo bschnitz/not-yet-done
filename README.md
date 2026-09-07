@@ -835,14 +835,20 @@ Tree predicates use a 2-element shorthand `[name, value]` and query the task hie
 | `in_tree`      | `[in_tree, Globex]`      | Globex **and** all tasks below it          |
 | `has_ancestor` | `[has_ancestor, Globex]` | All tasks below Globex (not Globex itself) |
 
-The value can be an exact description or a LIKE pattern:
+The value can be an exact description, a LIKE pattern, or an absolute path:
 
 ```yaml
-# All tasks in the Globex subtree
+# All tasks in the Globex subtree — every task called "Globex", wherever it sits
 [in_tree, Globex]
 
 # Tasks below any node matching "Ticket"
 [has_ancestor, '%Ticket%']
+
+# The Globex that is a root task, and nothing else of that name
+[in_tree, /Globex]
+
+# Path segments take LIKE patterns too; every matching branch is kept
+[in_tree, '/Globex/Client %/Tickets']
 
 # Combine with other filters
 query:
@@ -851,6 +857,8 @@ query:
     - [in_tree, Globex]
     - [status, =, todo]
 ```
+
+A plain name matches every task with that description, so a name that exists twice in the forest — `/Globex` next to `/Archive/Globex` — pulls in both subtrees. A value starting with `/` is walked from the roots one segment per level, so `[in_tree, /Globex]` is only the root one. A path with a missing segment matches nothing.
 
 Tree predicates work in both task and tracking filters. In tracking filters, they match against the tracked task's tree position. A misspelt name is rejected when the filter is read, rather than becoming a branch that matches nothing.
 

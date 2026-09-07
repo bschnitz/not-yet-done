@@ -72,17 +72,10 @@ async fn resolve_tree_predicate(
         ));
     };
 
-    // Find matching tasks by description — exact or LIKE if contains %.
-    let matching_tasks: Vec<task::Model> = if search_str.contains('%') {
-        task::Entity::find()
-            .filter(task::Column::Description.like(search_str))
-            .all(db)
-            .await?
+    let matching_tasks = if search_str.starts_with('/') {
+        tasks_at_path(search_str, db).await?
     } else {
-        task::Entity::find()
-            .filter(task::Column::Description.eq(search_str))
-            .all(db)
-            .await?
+        tasks_named(search_str, None, db).await?
     };
 
     if matching_tasks.is_empty() {
@@ -118,6 +111,56 @@ async fn resolve_tree_predicate(
     } else {
         Ok(FilterExpr::Or(conditions))
     }
+}
+
+/// Tasks whose description matches `pattern` (exact, or LIKE when it
+/// contains `%`), optionally restricted to the children of one parent —
+/// `Some(None)` means "roots only", `None` means "anywhere in the forest".
+async fn tasks_named(
+    pattern: &str,
+    parent: Option<Option<uuid::Uuid>>,
+    db: &DatabaseConnection,
+) -> Result<Vec<task::Model>, AppError> {
+    let mut query = task::Entity::find();
+    query = if pattern.contains('%') {
+        query.filter(task::Column::Description.like(pattern))
+    } else {
+        query.filter(task::Column::Description.eq(pattern))
+    };
+    query = match parent {
+        None => query,
+        Some(None) => query.filter(task::Column::ParentId.is_null()),
+        Some(Some(id)) => query.filter(task::Column::ParentId.eq(id)),
+    };
+    Ok(query.all(db).await?)
+}
+
+/// Tasks sitting at an absolute `/A/B/C` path, walked one segment per level
+/// from the roots. Every segment matches like a plain description (exact, or
+/// LIKE with `%`), so a name that exists twice in the forest — `/Work` and
+/// `/Archive/Work`, say — is told apart by where it sits. A segment that
+/// matches more than one child keeps every branch; a segment that matches
+/// nothing ends the walk with no tasks.
+async fn tasks_at_path(path: &str, db: &DatabaseConnection) -> Result<Vec<task::Model>, AppError> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return Err(AppError::FilterError(
+            "has_ancestor / in_tree: a path needs at least one segment".into(),
+        ));
+    }
+    let mut level: Vec<Option<uuid::Uuid>> = vec![None];
+    let mut current: Vec<task::Model> = Vec::new();
+    for segment in segments {
+        current.clear();
+        for parent in &level {
+            current.extend(tasks_named(segment, Some(*parent), db).await?);
+        }
+        if current.is_empty() {
+            break;
+        }
+        level = current.iter().map(|t| Some(t.id)).collect();
+    }
+    Ok(current)
 }
 
 #[cfg(test)]
