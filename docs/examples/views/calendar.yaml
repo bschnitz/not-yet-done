@@ -245,7 +245,7 @@ views:
       # event it *would* create, without touching a backend. The shortcut and
       # form are fully live; only the final PUT/POST is pending.
       - name: create
-        key: a
+        key: 'a a'
         type: custom
         id: create
         on_container: true
@@ -272,6 +272,16 @@ views:
           # `inline` = radio list, every option visible (Show as / Calendar
           # render as inline radios); `dropdown` (default) = collapsed.
           select_style: inline
+      # Show or hide the browser window behind a browser-driven connection
+      # (`office365-web`): `execute("toggle_window")` flips every connection
+      # that has one, so a stuck sign-in can be watched — and hidden again.
+      # `on_container: true` dispatches it against the adapter root, like
+      # `create` above.
+      - name: toggle browser
+        key: 'a h'
+        type: custom
+        id: toggle_window
+        on_container: true
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f

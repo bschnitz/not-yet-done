@@ -232,6 +232,16 @@ impl SessionHandle {
         self.inner.loaded_tx.subscribe()
     }
 
+    /// Put the browser's window up if it is down, take it down if it is up. Returns
+    /// whether it is up now. For whoever attends the session and wants to see, or stop
+    /// seeing, what the browser is doing — a sign-on that got stuck, say.
+    ///
+    /// Only toggles: a session whose browser has not been started yet (nothing fetched so
+    /// far) has no window to show and says so, rather than starting one for the purpose.
+    pub async fn toggle_window(&self) -> Result<bool, MsOfficeError> {
+        self.inner.toggle_window().await
+    }
+
     /// Take the session's mid-run prompt stream (see [`SessionPrompt`]).
     /// **Single-consumer**: each prompt carries a one-shot reply path, so there
     /// is exactly one receiver. Callable once — later calls (and a session that
@@ -287,6 +297,15 @@ impl SessionInner {
             .map_err(|_| MsOfficeError::Other("session actor dropped the response".into()))?
     }
 
+    pub(crate) async fn toggle_window(&self) -> Result<bool, MsOfficeError> {
+        let (resp, rx) = oneshot::channel();
+        self.tx
+            .send(Command::ToggleWindow { resp })
+            .await
+            .map_err(|_| MsOfficeError::Other("session actor is gone".into()))?;
+        rx.await
+            .map_err(|_| MsOfficeError::Other("session actor dropped the response".into()))?
+    }
 }
 
 /// Commands the actor processes, one at a time.
@@ -295,7 +314,14 @@ enum Command {
         range: MsTimeRange,
         resp: oneshot::Sender<Result<Vec<MsCalEvent>, MsOfficeError>>,
     },
+    /// Flip the window; answered with whether it is up now.
+    ToggleWindow {
+        resp: oneshot::Sender<Result<bool, MsOfficeError>>,
+    },
 }
+
+/// What a toggle is told while there is no browser to have a window.
+const NO_BROWSER_YET: &str = "no browser yet: nothing has been fetched through this session";
 
 /// Owns the browser and answers commands sequentially. The browser is started
 /// lazily on the first command.
@@ -347,6 +373,13 @@ async fn actor_loop(
                         }
                         Err(e) => Err(e),
                     };
+                let _ = resp.send(result);
+            }
+            Command::ToggleWindow { resp } => {
+                let result = match browser.as_ref() {
+                    Some(b) => b.link().toggle().await,
+                    None => Err(MsOfficeError::Browser(NO_BROWSER_YET.into())),
+                };
                 let _ = resp.send(result);
             }
         }
@@ -569,6 +602,30 @@ mod tests {
         announcing.browser_gone();
         assert!(announcing.step(1, 3).is_some());
         assert!(announcing.over().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_toggle_before_the_first_fetch_finds_no_window_and_starts_no_browser() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let config = SessionConfig {
+            account_key: "toggle-probe".into(),
+            profile_dir: dir.path().join("profile"),
+            headless: true,
+            auto_headed: false,
+            facts: BTreeMap::new(),
+            answers: Answers::new(),
+            browser: BrowserConfig {
+                // Nothing to start: were a toggle to start the browser, this would fail
+                // with a very different sentence.
+                bin: dir.path().join("no-such-browser"),
+                ..BrowserConfig::default()
+            },
+        };
+        let session = SessionHandle {
+            inner: SessionInner::spawn(config),
+        };
+        let err = session.toggle_window().await.expect_err("no window");
+        assert!(matches!(err, MsOfficeError::Browser(why) if why == NO_BROWSER_YET));
     }
 
     #[test]

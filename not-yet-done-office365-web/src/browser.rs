@@ -187,6 +187,25 @@ impl Link {
             .map(|_| ())
     }
 
+    /// Whether the window is on screen. Asked of the window rather than remembered here:
+    /// the window is the one that knows, and a browser this side adopted was put up or
+    /// taken down by somebody else.
+    pub(crate) async fn shown(&self) -> Result<bool, MsOfficeError> {
+        let answer = self.ask(json!({ "ask": "show" })).await?;
+        answer["shown"].as_bool().ok_or_else(|| {
+            MsOfficeError::Browser(format!(
+                "the window did not say whether it is shown: {answer}"
+            ))
+        })
+    }
+
+    /// Take the window down if it is up, put it up if it is down. Returns what it is now.
+    pub(crate) async fn toggle(&self) -> Result<bool, MsOfficeError> {
+        let on = !self.shown().await?;
+        self.show(on).await?;
+        Ok(on)
+    }
+
     async fn send(&self, mut line: Value) -> Result<Value, MsOfficeError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         line["id"] = json!(id);
@@ -981,6 +1000,59 @@ mod tests {
 
         let err = link.show(true).await.expect_err("failed");
         assert!(matches!(err, MsOfficeError::Browser(why) if why == "no window to show"));
+    }
+
+    #[tokio::test]
+    async fn a_toggle_asks_the_window_where_it_stands_and_flips_it() {
+        // The window's own state; a toggle must not remember one of its own.
+        let shown = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let window = fake::window({
+            let shown = Arc::clone(&shown);
+            move |request| match ask_of(request) {
+                Some("show") => {
+                    if let Some(on) = request["host"]["on"].as_bool() {
+                        shown.store(on, Ordering::SeqCst);
+                    }
+                    Some(vec![answered(
+                        request,
+                        json!({ "answer": "window", "shown": shown.load(Ordering::SeqCst) }),
+                    )])
+                }
+                _ => None,
+            }
+        });
+        let link = Link::connect(&window.socket).await.expect("connect");
+
+        assert!(link.shown().await.expect("answered"));
+        assert!(!link.toggle().await.expect("toggled down"));
+        assert!(!link.shown().await.expect("answered"));
+        assert!(link.toggle().await.expect("toggled up"));
+        assert!(link.shown().await.expect("answered"));
+
+        // Asking is `show` without `on`; flipping is `show` with the new state.
+        let asks: Vec<Option<bool>> = window
+            .heard
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| ask_of(r) == Some("show"))
+            .map(|r| r["host"]["on"].as_bool())
+            .collect();
+        assert_eq!(
+            asks,
+            vec![None, None, Some(false), None, None, Some(true), None]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_that_does_not_say_whether_it_is_shown_is_a_browser_error() {
+        let window = fake::window(|request| match ask_of(request) {
+            Some("show") => Some(vec![answered(request, json!({ "answer": "said" }))]),
+            _ => None,
+        });
+        let link = Link::connect(&window.socket).await.expect("connect");
+        let err = link.shown().await.expect_err("no state");
+        assert!(matches!(err, MsOfficeError::Browser(_)));
     }
 
     #[tokio::test]

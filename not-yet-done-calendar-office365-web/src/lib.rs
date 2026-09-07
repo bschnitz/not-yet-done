@@ -318,6 +318,18 @@ impl CalendarBackend for Office365WebBackend {
             .collect())
     }
 
+    /// Flips the browser's window. Only the session already at hand: a toggle
+    /// must not start a browser (and its sign-in) for the sake of a window.
+    async fn toggle_window(&self) -> Result<bool, CalendarError> {
+        let session = self.session.lock().unwrap().clone();
+        match session {
+            Some(session) => session.toggle_window().await.map_err(map_err),
+            None => Err(CalendarError::Other(
+                "no browser yet: nothing has been fetched through this connection".into(),
+            )),
+        }
+    }
+
     fn subscribe_ready(&self) -> Option<broadcast::Receiver<LoadProgress>> {
         Some(self.ready_tx.subscribe())
     }
