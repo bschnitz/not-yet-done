@@ -13186,14 +13186,21 @@ fn load_content_views(
                                 None
                             }
                             Some(cfg) => {
-                                match factory.create(
-                                    config.adapter.effective_instance_id(),
-                                    &cfg,
-                                    host_ctx,
-                                ) {
+                                let built = factory
+                                    .create(
+                                        config.adapter.effective_instance_id(),
+                                        &cfg,
+                                        host_ctx,
+                                    )
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|a| {
+                                        not_yet_done_host::decorate_instance(a, &config.adapter)
+                                            .map_err(|e| e.to_string())
+                                    });
+                                match built {
                                     Ok(a) => Some(Arc::from(a)),
                                     Err(e) => {
-                                        init_error = Some(e.to_string());
+                                        init_error = Some(e);
                                         None
                                     }
                                 }

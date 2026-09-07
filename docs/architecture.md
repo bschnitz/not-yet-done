@@ -505,8 +505,15 @@ impossible to forget, because it sits at the _one_ chokepoint
   tokens with neutral pool words and lets structure — empty, numeric, ISO
   date, duration — through). Domain adapters override it only for _realism_,
   never to become safe in the first place.
-- `AnonymizingAdapter`/`AnonymizingNode` delegate everything to the inner
-  adapter and push only the **displayable** return values through
+- `AnonymizingAdapter`/`AnonymizingNode` are **decorators** — they implement
+  `AdapterDecorator`/`NodeDecorator` from `content::decorate`, whose blanket
+  impls forward every trait method to `inner()` unless the decorator overrides
+  it. Before those traits existed each decorator hand-copied the forwarders
+  and silently fell back to the trait default for every method added later
+  (seven of them here, among them the credential prompts and the reminders);
+  a test in `decorate.rs` now compares the trait's method list against the
+  forwarders, so a new `ContentAdapter` method cannot be forgotten. They push
+  only the **displayable** return values through
   `Anonymizer::scrub_value(key, value)`: list rows, eager subtrees,
   `row_summary()`, live tick rows, `metadata()` + `label()`, picker labels,
   tree search hits. Tree and row **labels** go through
@@ -833,6 +840,18 @@ after the DB split. The details are in
 the TUI, `nyd` and Waybar inherit the anonymization without a line of code of
 their own; in normal operation (flag off) there is no overhead. See
 [ADR 0006](decisions/0006-anonymization-content-layer.md).
+
+The factories wrap per **type**; what an instance's own block asks for is
+applied one step later. `host::decorate_instance(adapter, &instance)` runs
+right after `AdapterFactory::create` at every build site (the host's
+`resolve_adapter_with` for CLI and Waybar, the TUI's tab construction) and
+today wraps the adapter in an `AliasingAdapter` when the instance declares
+`aliases:` — action names that stand for an existing action with arguments
+filled in, listed and invocable like real actions (see
+[ADR 0009](decisions/0009-decorator-traits-and-action-aliases.md)). Both
+chokepoints are the reason a frontend never has to know that a decorator
+exists: it calls the one factory and the one instance function, and gets the
+whole chain.
 
 ### Lifecycle hooks
 

@@ -7583,6 +7583,42 @@ save. The return direction is `EditorPrep::args` and
 - [ ] `args:` on a `type: create` binding → refused at load, the message
       points at the plan
 
+## Action aliases on the adapter block (`aliases:`)
+
+An instance's adapter block can declare `aliases:` — a new action name that
+stands for an existing action with arguments filled in. The alias is applied
+by `host::decorate_instance` right after the factory builds the adapter, so
+TUI, CLI and hooks all see it as a real action.
+
+- [ ] Tasks view, `aliases: { my-toggle: { action: toggle-tracking } }` and
+      `- { key: s, id: my-toggle }` → `s` toggles a tracking exactly as
+      `toggle-tracking` did; the action bar and `o s` list `my-toggle`
+- [ ] `label: track it` on the alias → the bar and overview show that label
+- [ ] `nyd tasks help --full` lists the alias next to its target, its
+      `args:` as the parameters' defaults
+- [ ] Jira view, `aliases: { edit_here: { action: edit_markdown, args: { buffer: here.md } } }`
+      bound on `e h` → the editor opens `here.md`; a binding with its own
+      `args: { buffer: mine.md }` wins over the alias
+- [ ] Alias with `args: { nope: 1 }` on a target that declares parameters →
+      the invocation is refused, the message names the alias and `nope`
+- [ ] Alias with `args:` on a target that declares no parameters → refused
+      the same way
+- [ ] Alias bound on a level that lacks the target → a notification naming
+      the alias and the target; nothing runs
+- [ ] `aliases: { toggle-tracking: {…} }` (name equals an existing action) →
+      the real action is listed once and runs unchanged
+- [ ] Loader errors, each refuses the view file with the instance in the
+      message: empty name, empty `action:`, name equal to `action:`, an
+      alias pointing at another alias
+- [ ] `nyd adapter <inst> do --id <alias-without-args>` → runs the target;
+      the same with an alias that carries args → refused with "invoke it on
+      the node"
+- [ ] A view file without `aliases:` → no change at all (the adapter is not
+      wrapped)
+- [ ] `NYD_ANON=1` on any tab → every method still works behind the mask
+      (`r` reload, credential prompt, reminders on the calendar tab) — the
+      anon decorator lost its seven dead forwards
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

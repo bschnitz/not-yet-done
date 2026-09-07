@@ -47,6 +47,12 @@ adapter:
   # Refresh on a timer once the tab has loaded: number + s/m/h/d.
   # Absent = never. Refreshes only — it never connects by itself.
   auto_reload: 10m
+  # Action aliases: a new action name standing for an existing one with
+  # arguments filled in. Bindable wherever the target is (see `aliases:`).
+  aliases:
+    export_pdf:
+      action: export
+      args: { format: pdf }
 
 views:
   # Every entry is a subtab or a navigable level.
@@ -2396,6 +2402,58 @@ actions:
       workspace: "{workspace}/tickets"
       buffer: ticket.edit.md
 ```
+
+#### Naming an action with its arguments filled in — `aliases:`
+
+Arguments in a binding travel with the binding: two levels that want the same
+`export` with the same `format: pdf` write the block twice, and a hook that
+wants it writes it a third time. The adapter block can instead declare an
+**alias** — a new action name that stands for an existing action plus a set of
+arguments — once per instance:
+
+```yaml
+adapter:
+  type: tasks
+  config_inline: '{ tracking_marker: "⏱️" }'
+  aliases:
+    my-toggle-tracking:
+      action: toggle-tracking # the target — an action the adapter has
+      args: { group_paths: ["^/Work", "^/Other/Group"] }
+      label: track (grouped) # optional; default = the target's label
+```
+
+To everything outside the adapter the alias **is** an action: it is listed
+next to its target on every level where the target is (the action bar, the
+shortcut overview, `nyd <instance> help --full`, the `--keymap` dump), it is
+bound like one (`- { key: s, id: my-toggle-tracking }`), a hook can name it,
+and the CLI runs it by name. It is not global — an alias of a per-node action
+exists exactly where that action exists, and invoking it on a level without
+the target is refused with a message naming both.
+
+The alias's `args:` are **defaults**, not a lock: they show up as the
+parameters' defaults in the listing, a binding's own `args:` win key by key,
+and the merged set is checked against the target's declared parameters the
+same way a plain binding's would be — an unknown key or a wrong kind refuses
+the invocation, and the message names the alias. An alias whose target
+declares no parameters cannot carry any (there is nothing to check them
+against). Placeholders are expanded by the frontend before the alias sees
+them, so `{cell:key}` works in a binding's `args:` exactly as without an
+alias; the alias's own defaults are literal.
+
+The rules the loader enforces:
+
+- the name and the `action:` are non-empty, the name is not the target, no
+  two aliases share a name, and an alias cannot point at another alias — one
+  hop, no chains;
+- a real action of the same name as an alias wins, and the alias is not
+  listed there — an adapter update that grows an action never breaks a
+  view file, it merely makes the alias redundant on that level;
+- the addressed and collection paths (`execute_addressed`, bulk `set-cells`,
+  the CLI's `do --id`) rewrite an alias **without** arguments to its target
+  and refuse one **with** arguments, because they have no context to deliver
+  them in — invoke such an alias on the node instead.
+
+An unknown key inside an alias is reported like every other view-file typo.
 
 #### Taking a key from a built-in — `force: true`
 
