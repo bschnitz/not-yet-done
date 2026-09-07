@@ -176,10 +176,12 @@ fn toggle_window_action() -> NodeAction {
     NodeAction::new("toggle_window", "Show/hide browser", InputSpec::None)
 }
 
-/// `execute("toggle_window")` — flip every backend's window. Connections
+/// `invoke_action("toggle_window")` — flip every backend's window. Connections
 /// without one are skipped; the message says where each window stands now.
-/// Only when no connection has a window is that an error.
-async fn execute_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<ActionOutcome> {
+/// Only when no connection has a window is that an error. Takes no input, so
+/// it is dispatched through [`Node::invoke_action`] (the path every frontend
+/// takes for an `InputSpec::None` action), never through `execute`.
+async fn invoke_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<ActionDispatch> {
     let mut said = Vec::new();
     let mut refused = Vec::new();
     for backend in backends {
@@ -198,8 +200,8 @@ async fn execute_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<
             refused.join("; ")
         )));
     }
-    Ok(ActionOutcome::Done {
-        message: Some(said.join("; ")),
+    Ok(ActionDispatch::Notify {
+        message: said.join("; "),
     })
 }
 
@@ -1416,8 +1418,16 @@ impl Node for CalendarRoot {
                 )
                 .await
             }
-            ("toggle_window", ActionInput::None) => execute_toggle_window(&self.backends).await,
             (other, _) => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on the calendar root"
+            ))),
+        }
+    }
+
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "toggle_window" => invoke_toggle_window(&self.backends).await,
+            other => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the calendar root"
             ))),
         }
@@ -2448,18 +2458,18 @@ mod tests {
             }),
         ];
 
-        let outcome = execute_toggle_window(&backends)
+        let dispatch = invoke_toggle_window(&backends)
             .await
             .expect("one window flipped");
         assert!(*shown.lock().unwrap());
         assert!(
-            matches!(outcome, ActionOutcome::Done { message: Some(ref m) } if m == "web: browser shown")
+            matches!(dispatch, ActionDispatch::Notify { ref message } if message == "web: browser shown")
         );
 
-        let outcome = execute_toggle_window(&backends).await.expect("and back");
+        let dispatch = invoke_toggle_window(&backends).await.expect("and back");
         assert!(!*shown.lock().unwrap());
         assert!(
-            matches!(outcome, ActionOutcome::Done { message: Some(ref m) } if m == "web: browser hidden")
+            matches!(dispatch, ActionDispatch::Notify { ref message } if message == "web: browser hidden")
         );
     }
 
@@ -2470,9 +2480,9 @@ mod tests {
             calendars: Vec::new(),
             created: Arc::default(),
         })];
-        let Err(err) = execute_toggle_window(&backends).await else {
-            panic!("nothing to show, yet no error");
-        };
+        let err = invoke_toggle_window(&backends)
+            .await
+            .expect_err("nothing to show");
         assert!(err.to_string().contains("no connection has a window"));
     }
 
