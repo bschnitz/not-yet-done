@@ -8,6 +8,7 @@
 pub mod mock;
 
 pub mod action_args;
+pub mod action_events;
 pub mod aliasing;
 pub mod anonymize;
 pub mod decorate;
@@ -35,6 +36,7 @@ pub use action_args::{
     ActionArgs, ArgKind, ArgProblem, ArgValue, ParamSpec, describe_problems, resolve_args,
 };
 pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
+pub use action_events::{HOOK_ACTION_INVOKED, action_event_adapter, publish_action_invoked};
 pub use aliasing::{ActionAlias, AliasSpec, AliasTable, aliasing_adapter};
 pub use decorate::{AdapterDecorator, NodeDecorator};
 pub use auto_connect::AutoConnect;

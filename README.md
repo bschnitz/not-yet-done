@@ -2432,6 +2432,43 @@ Two things to know:
   `NYD_HOOK_DEPTH=1` and runs no event hooks at that depth, so the recursion
   stops there; the `connected` hook is unaffected.
 
+#### Event hook: `action_invoked`
+
+**Every** instance fires `action_invoked` for every action a user runs on one
+of its nodes, whatever the adapter: the host wraps each adapter it builds in
+a reporter, so this hook needs no adapter support and is available on the
+Jira tab as much as on the tasks tab. It exists for automation that wants to
+know **what you are working on** rather than what changed — opening a
+ticket's editor, jumping to it in the browser, previewing it — where the
+adapters themselves see only an action id.
+
+| Payload key | Value                                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------ |
+| `action`    | the action id the view YAML declares (an alias is resolved first); a node script as `script:<file name>`     |
+| `phase`     | `invoke` (a plain action), `prepare` (its editor is about to open), `execute` (its edit was saved), `script` |
+| `node_id`   | the node the action ran on                                                                                   |
+| `node_type` | its type id, e.g. `jira:issue`                                                                               |
+| `label`     | its display label (absent for a `nyd … do …` execution, which loads no node)                                 |
+
+An action that only asks for confirmation, or that reports an error, is not
+reported; the confirmed re-run is. Because this hook fires for **every**
+action — each tracking toggle included — a binding on it usually names the
+actions it cares about, so the script is not spawned for the rest:
+
+```yaml
+# views/jira.yaml
+hooks:
+  action_invoked:
+    - script: tasks/on_ticket.py # one script, shared with the tasks instance
+      when:
+        action: [edit_markdown, open_in_browser, "script:html_preview.py"]
+```
+
+`when.action` takes one id or a list; a binding without it fires for every
+action. Scripts the script menu (`x`) runs on a node are reported by the TUI
+with the `script:` prefix, so a preview script counts like an editor action.
+Batch and table scripts act on no single node and are not reported.
+
 ### Editor
 
 Editors are configured as **named profiles** under `editors:`. The mandatory

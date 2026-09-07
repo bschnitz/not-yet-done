@@ -7691,6 +7691,34 @@ tree above.
 - [ ] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
       next toggle fires the hook **once**, not twice
 
+## Action hook (`action_invoked`)
+
+Every instance fires `action_invoked` for every action run on one of its
+nodes; the host adds it, no adapter support needed. Bind a script that
+appends `action phase node_id label` from its payload to a file, in
+`jira.yaml` (or any tab with an editor action) as
+`hooks: { action_invoked: [ { script: tasks/on_ticket.py, when: { action: [edit_markdown, "script:html_preview.py"] } } ] }`,
+and the same script without `when:` in `tasks.yaml`.
+
+- [ ] Jira: `e e` on a ticket → `edit_markdown prepare <key> <summary>` at
+      once (before the editor opens); saving adds `edit_markdown execute …`;
+      quitting without a save adds nothing more
+- [ ] Jira: `o p` → `script:html_preview.py script <key> <summary>`; `o b`
+      (not in the list) writes nothing
+- [ ] Tasks: `s` (toggle) writes `toggle-tracking invoke …`, `e e` writes
+      `edit prepare …`, `x` + a script writes `script:<name> script …`
+- [ ] Tasks: an action that asks `(y/n)` writes nothing on the question and
+      one line on `y`
+- [ ] Tasks: an alias (`my-toggle-tracking`) is reported under the **real**
+      id (`toggle-tracking`)
+- [ ] `nyd tasks <id> do toggle-tracking` → one line with `execute`, no
+      label, before the command returns
+- [ ] `when: { action: edit }` (a single id) parses; `when: { action: nope }`
+      never fires and reports nothing
+- [ ] A hook script that runs `nyd tasks … do …` itself triggers no second
+      `action_invoked` (depth guard)
+- [ ] Batch/table scripts (`scope: filtered_set` / `table`) write nothing
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

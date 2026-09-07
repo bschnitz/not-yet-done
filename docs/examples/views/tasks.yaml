@@ -174,6 +174,12 @@ adapter:
 #     - script: on_tracking.py
 #   tracking_stopped:
 #     - script: on_tracking.py
+# `action_invoked` fires on every instance for every action run on a node
+# (payload: action, phase, node_id, node_type, label); `when.action` names
+# the ids a binding cares about so the script is not spawned for the rest:
+#   action_invoked:
+#     - script: on_ticket.py
+#       when: { action: edit }
 hooks:
   connected:
     - run: backup

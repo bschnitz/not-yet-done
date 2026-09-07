@@ -13194,7 +13194,11 @@ fn load_content_views(
                                     )
                                     .map_err(|e| e.to_string())
                                     .and_then(|a| {
-                                        not_yet_done_host::decorate_instance(a, &config.adapter)
+                                        not_yet_done_host::decorate_instance(
+                                            a,
+                                            &config.adapter,
+                                            host_ctx,
+                                        )
                                             .map_err(|e| e.to_string())
                                     });
                                 match built {
