@@ -3938,7 +3938,7 @@ views: []
             .expect("calendar.yaml declares the show-auth-number action");
         assert_eq!(notify.action_type, "notify");
         assert!(notify.key.is_none());
-        assert!(notify.message.as_deref().unwrap().contains("{number}"));
+        assert!(notify.message.as_deref().unwrap().contains("{message}"));
         assert_eq!(
             notify
                 .on_event
