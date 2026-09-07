@@ -112,12 +112,12 @@ pub struct SessionConfig {
     pub browser: BrowserConfig,
 }
 
-/// Progress of the browser session's out-of-band load, pushed as a run goes
-/// through the flow's steps.
+/// Progress of the browser session's first load, pushed as that run goes through the
+/// flow's steps.
 ///
-/// `fraction` is a best-effort completion estimate in `[0, 1]` — steps done over steps
-/// in the flow — or `None` while the run is going but nothing is done yet (the sign-on,
-/// which a person may be pacing). `done` marks the terminal push: the run is over.
+/// `fraction` is a best-effort completion estimate in `(0, 1]` — steps done over steps
+/// in the flow. `done` marks the terminal push: the run is over. Only the browser's first
+/// run is announced (see [`SessionHandle::subscribe_loaded`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoadStatus {
     pub fraction: Option<f32>,
@@ -217,12 +217,17 @@ impl SessionHandle {
 
     /// Subscribe to the browser session's load-progress stream.
     ///
-    /// Fires as a run goes through the flow: a fraction-less nudge when it starts (the
-    /// sign-on, which a person may be pacing), then a [`LoadStatus`] per step done, then
-    /// a terminal `done` push once the run is over. A consumer that showed empty data
-    /// during login can listen here and re-fetch the instant the calendar is available,
-    /// and surface a progress banner while it runs — instead of waiting for a periodic
-    /// poll.
+    /// Fires as the browser's **first** run goes through the flow: a [`LoadStatus`] per
+    /// step done, then a terminal `done` push once the run is over. A consumer that showed
+    /// empty data during login can listen here and re-fetch the instant the calendar is
+    /// available, and surface a progress banner while it runs — instead of waiting for a
+    /// periodic poll.
+    ///
+    /// Later runs are silent. They are fetches the consumer asked for itself, and a
+    /// consumer that re-fetches on `done` would otherwise be answered with another `done`
+    /// and fetch forever — seen 2026-09-07, a run every five seconds. A browser started
+    /// afresh (the old one gone) announces its first run again, since that is the run that
+    /// may have to sign on.
     pub fn subscribe_loaded(&self) -> broadcast::Receiver<LoadStatus> {
         self.inner.loaded_tx.subscribe()
     }
@@ -281,6 +286,7 @@ impl SessionInner {
         rx.await
             .map_err(|_| MsOfficeError::Other("session actor dropped the response".into()))?
     }
+
 }
 
 /// Commands the actor processes, one at a time.
@@ -303,6 +309,7 @@ async fn actor_loop(
     // Kept alive for the actor's lifetime: relays what the run says and asks. Spawned the
     // first time the browser is started (see `ensure_browser`).
     let mut _fwd: Option<AbortOnDrop> = None;
+    let mut announcing = Announcing::default();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -319,27 +326,22 @@ async fn actor_loop(
                                     &data,
                                     config.browser.run_timeout,
                                     |done, steps| {
-                                        let fraction = match (done, steps) {
-                                            (0, _) | (_, 0) => None,
-                                            (d, s) => Some(d as f32 / s as f32),
-                                        };
-                                        let _ = loaded.send(LoadStatus {
-                                            fraction,
-                                            done: false,
-                                        });
+                                        if let Some(status) = announcing.step(done, steps) {
+                                            let _ = loaded.send(status);
+                                        }
                                     },
                                 )
                                 .await;
                             // Over either way: the banner a consumer raised comes down.
-                            let _ = loaded_tx.send(LoadStatus {
-                                fraction: Some(1.0),
-                                done: true,
-                            });
+                            if let Some(status) = announcing.over() {
+                                let _ = loaded_tx.send(status);
+                            }
                             // A browser that is gone is started afresh next time rather than
                             // asked again.
                             if matches!(outcome, Err(MsOfficeError::Browser(_))) {
                                 browser = None;
                                 _fwd = None;
+                                announcing.browser_gone();
                             }
                             outcome.and_then(calendar::events_of)
                         }
@@ -348,6 +350,55 @@ async fn actor_loop(
                 let _ = resp.send(result);
             }
         }
+    }
+}
+
+/// Which runs the load stream announces, and what it says of them.
+///
+/// Only a browser's first run (see [`SessionHandle::subscribe_loaded`]): that is the run
+/// that may have to sign on, and the one a consumer showing nothing yet is waiting for.
+/// Every later run is a fetch the consumer asked for itself, and a consumer that re-fetches
+/// on `done` must not be told `done` by the fetch it triggered — that was a run every five
+/// seconds (2026-09-07). Apart from the actor so that it can be tested without a browser.
+#[derive(Debug, Default)]
+struct Announcing {
+    /// Whether the browser now running has had its first run.
+    first_run_over: bool,
+}
+
+impl Announcing {
+    /// What to push for `done` of `steps` steps gone through — or nothing.
+    ///
+    /// Nothing for a run that is not announced, and nothing before a step is done: the
+    /// consumer announced the load when it asked for the session, and a fraction-less
+    /// push is what makes it fetch again.
+    fn step(&self, done: usize, steps: usize) -> Option<LoadStatus> {
+        if self.first_run_over {
+            return None;
+        }
+        match (done, steps) {
+            (0, _) | (_, 0) => None,
+            (d, s) => Some(LoadStatus {
+                fraction: Some(d as f32 / s as f32),
+                done: false,
+            }),
+        }
+    }
+
+    /// The run is over: the terminal push, if this run was announced. No run after it is.
+    fn over(&mut self) -> Option<LoadStatus> {
+        let announced = !self.first_run_over;
+        self.first_run_over = true;
+        announced.then_some(LoadStatus {
+            fraction: Some(1.0),
+            done: true,
+        })
+    }
+
+    /// The browser is gone. The next one's first run is announced again, since it may
+    /// have to sign on.
+    fn browser_gone(&mut self) {
+        self.first_run_over = false;
     }
 }
 
@@ -479,6 +530,45 @@ mod tests {
         );
         assert_eq!(hole_of("{{data.week}}"), (false, Some("week")));
         assert_eq!(hole_of("otp"), (true, None));
+    }
+
+    #[test]
+    fn only_the_browsers_first_run_is_announced() {
+        let mut announcing = Announcing::default();
+        assert_eq!(
+            announcing.step(1, 3),
+            Some(LoadStatus {
+                fraction: Some(1.0 / 3.0),
+                done: false
+            })
+        );
+        assert_eq!(
+            announcing.over(),
+            Some(LoadStatus {
+                fraction: Some(1.0),
+                done: true
+            })
+        );
+        // The second run is a fetch the consumer asked for: nothing to announce, and above
+        // all no `done` for it to fetch again on.
+        assert_eq!(announcing.step(1, 3), None);
+        assert_eq!(announcing.over(), None);
+    }
+
+    #[test]
+    fn nothing_is_said_before_a_step_is_done() {
+        let announcing = Announcing::default();
+        assert_eq!(announcing.step(0, 3), None);
+        assert_eq!(announcing.step(1, 0), None);
+    }
+
+    #[test]
+    fn a_browser_started_afresh_is_announced_again() {
+        let mut announcing = Announcing::default();
+        announcing.over();
+        announcing.browser_gone();
+        assert!(announcing.step(1, 3).is_some());
+        assert!(announcing.over().is_some());
     }
 
     #[test]

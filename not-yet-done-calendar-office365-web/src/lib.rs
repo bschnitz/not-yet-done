@@ -86,8 +86,10 @@ pub struct Office365WebBackend {
     ///
     /// A [`LoadProgress::indeterminate`] fires when a session is first created
     /// (the sign-in begins, no fraction yet), then one [`LoadProgress::at`] per
-    /// step of the flow the run gets through, then a terminal
-    /// [`LoadProgress::complete`] once the run is over.
+    /// step of the flow the browser's first run gets through, then a terminal
+    /// [`LoadProgress::complete`] once that run is over. Later runs are silent —
+    /// the adapter re-fetches on `complete`, and a run that announced its own end
+    /// would be re-fetched forever.
     ready_tx: broadcast::Sender<LoadProgress>,
     /// Host cross-adapter event bus (from [`HostContext`]). The login flow
     /// publishes MFA [`BusEvent`](not_yet_done_content::BusEvent)s here (e.g.
