@@ -3,20 +3,22 @@ name = "not-yet-done-office365-web"
 version = "0.1.0"
 edition = "2024"
 
-# A wrapper around an authenticated Office 365 *web* session, driven through a
-# headless browser (Playwright) that runs as an out-of-process sidecar. It
-# exposes typed, app-agnostic APIs for the Office 365 web surfaces (calendar
-# now; mail/contacts/files later) and knows nothing about this workspace's
-# adapters or DTOs — so any consumer can use it.
+# A wrapper around an authenticated Office 365 *web* session, driven through a real
+# browser — `drunken-browser`, started per account as a hidden child process and driven
+# over its control socket. It exposes typed, app-agnostic APIs for the Office 365 web
+# surfaces (calendar now; mail/contacts/files later) and knows nothing about this
+# workspace's adapters or DTOs — so any consumer can use it.
 #
-# Sessions are shared by account key through a process-global registry: two
-# consumers (e.g. a calendar backend and a future mail backend) asking for the
-# same key get the SAME browser session — one interactive MFA login serves them
-# all. A different key (or none) yields a separate session.
+# Sessions are shared by account key through a process-global registry: two consumers
+# (e.g. a calendar backend and a future mail backend) asking for the same key get the SAME
+# browser session — one interactive MFA login serves them all. A different key (or none)
+# yields a separate session.
 #
-# The browser lives entirely behind the sidecar (see `sidecar/`); the Rust side
-# only speaks a small newline-delimited JSON protocol over the child's
-# stdin/stdout, keeping the browser-automation stack out of the workspace.
+# The browser-automation itself is a *flow* on the browser's own shelf (`nyd-calendar` by
+# default): the sign-on with its second factor, the capture of the calendar's own request
+# and its replay for the range asked. This crate opens the flow, runs it with the range as
+# its data, relays what the run says and asks to whoever is attending, and reads what it
+# yielded — so the Rust side holds no browser automation at all.
 
 [dependencies]
 chrono     = { workspace = true, features = ["serde"] }
@@ -26,7 +28,10 @@ thiserror  = { workspace = true }
 tokio      = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-# Used for the sidecar process-lifecycle guarantees: start it in its own
-# process group, signal the whole group (node + browser) on teardown, watch a
-# parent-death pipe, and reap a stale browser profile lock.
+# For the browser's lifecycle guarantee: it runs in its own process group, and teardown
+# signals the whole group (the browser and every process it spawned) if asking it to quit
+# was not enough.
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

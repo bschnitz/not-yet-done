@@ -18,13 +18,16 @@ use not_yet_done_calendar_core::{
     CalEvent, CalendarBackend, CalendarBackendFactory, CalendarError, LoadProgress, ShowAs,
     TimeRange,
 };
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 
 use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
-use not_yet_done_content::{BusEvent, HostEventBus, PromptRequest, publish_event, subscribe_events};
+use not_yet_done_content::{
+    BusEvent, HostEventBus, PromptRequest, publish_event, subscribe_events,
+};
 use not_yet_done_office365_web::{
-    LoginCredentials, MsCalEvent, MsOfficeError, MsOfficeWeb, MsShowAs, MsTimeRange, PromptKind,
+    Answers, MsCalEvent, MsOfficeError, MsOfficeWeb, MsShowAs, MsTimeRange, PromptKind,
     SessionConfig, SessionHandle,
 };
 
@@ -35,14 +38,15 @@ use config::Office365WebConfig;
 /// reads it back.
 const MFA_CODE_FIELD: &str = "code";
 
-/// Payload key carrying the display-only number-match digits. A configured
-/// `notify` action reads it as `{number}`.
-const NUMBER_FIELD: &str = "number";
+/// Payload key carrying what the sign-in said to the user — the whole sentence,
+/// e.g. "Tap 42 on your phone to sign in". A configured `notify` action reads
+/// it as `{message}`.
+const MESSAGE_FIELD: &str = "message";
 
-/// Bus topic: the login reached a **number-match** challenge. Payload carries
-/// `{ "number": "<digits>" }` for a `notify` action to display; the browser
-/// advances on its own once the user approves in their authenticator app, so
-/// this is fire-and-forget (no reply expected).
+/// Bus topic: the login has something to say — a **number-match** challenge.
+/// Payload carries `{ "message": "<sentence>" }` for a `notify` action to
+/// display; the browser advances on its own once the user approves in their
+/// authenticator app, so this is fire-and-forget (no reply expected).
 const TOPIC_NUMBER_MATCH: &str = "office365-web:mfa:number-match";
 
 /// Bus topic: the login needs a **one-time code** typed in. A request (carries
@@ -68,11 +72,11 @@ pub struct Office365WebBackend {
     connection_id: String,
     label: String,
     session_config: SessionConfig,
-    /// Resolvers for the sign-in credentials, resolved lazily on first use and
-    /// injected into the session config. Kept off `SessionConfig` so the wrapper
-    /// crate never depends on the credential system.
-    username_resolver: Option<Box<dyn CredentialResolver>>,
-    password_resolver: Option<Box<dyn CredentialResolver>>,
+    /// Resolvers for the secrets the flow may ask for, by the flow's own name
+    /// for each; resolved lazily on first use and injected into the session
+    /// config as its answers. Kept off `SessionConfig` so the wrapper crate
+    /// never depends on the credential system.
+    secret_resolvers: BTreeMap<String, Box<dyn CredentialResolver>>,
     /// Retained session handle, populated lazily on the first `list_events`.
     session: Mutex<Option<SessionHandle>>,
     /// Re-broadcasts the session's load activity as the backend's
@@ -81,9 +85,9 @@ pub struct Office365WebBackend {
     /// task is wired to the session the first time one is created.
     ///
     /// A [`LoadProgress::indeterminate`] fires when a session is first created
-    /// (the interactive sign-in begins, no fraction yet), then one
-    /// [`LoadProgress::at`] per captured month as `getCalendarView` pages the
-    /// window in, then a terminal [`LoadProgress::complete`] once all data is in.
+    /// (the sign-in begins, no fraction yet), then one [`LoadProgress::at`] per
+    /// step of the flow the run gets through, then a terminal
+    /// [`LoadProgress::complete`] once the run is over.
     ready_tx: broadcast::Sender<LoadProgress>,
     /// Host cross-adapter event bus (from [`HostContext`]). The login flow
     /// publishes MFA [`BusEvent`](not_yet_done_content::BusEvent)s here (e.g.
@@ -111,7 +115,7 @@ impl Office365WebBackend {
             return Ok(handle);
         }
         let mut config = self.session_config.clone();
-        config.credentials = Some(self.resolve_credentials().await?);
+        config.answers = self.resolve_answers().await?;
         // A session is about to be built — the interactive sign-in / first load
         // begins now. Announce loading with no fraction yet (a percentage is
         // meaningless during a user-paced sign-in) so the adapter raises an
@@ -170,8 +174,8 @@ impl Office365WebBackend {
 
         // Wire the prompt translator: turn the session's neutral
         // `SessionPrompt`s into MFA `BusEvent`s and route any answer back to the
-        // sidecar. A number-match challenge is fire-and-forget (publish the
-        // number, acknowledge immediately — the browser advances once the user
+        // run. A number-match challenge is fire-and-forget (publish what the
+        // run said, acknowledge immediately — the browser advances once the user
         // approves on their phone); a one-time code is a request/response — mint
         // a `correlation_id`, publish `otc-required`, and wait on the bus for a
         // reply carrying that id. If nobody is listening on the bus, cancel the
@@ -185,16 +189,16 @@ impl Office365WebBackend {
                 while let Some(sp) = prompts.recv().await {
                     match sp.kind() {
                         PromptKind::Acknowledge => {
-                            // Display-only number match: publish the number and
-                            // acknowledge (the sidecar treats the reply as a mere
-                            // overlay dismissal; the browser advances on its own).
-                            let number = sp.detail().unwrap_or_default().to_string();
+                            // Display-only: publish what the run said and
+                            // acknowledge (nothing travels back; the browser
+                            // advances on its own).
+                            let message = sp.detail().unwrap_or_default().to_string();
                             publish_event(
                                 bus.as_ref(),
                                 BusEvent::new(
                                     TOPIC_NUMBER_MATCH,
                                     source.clone(),
-                                    serde_json::json!({ NUMBER_FIELD: number }),
+                                    serde_json::json!({ MESSAGE_FIELD: message }),
                                 ),
                             );
                             let _ = sp.acknowledge().await;
@@ -237,19 +241,14 @@ impl Office365WebBackend {
         Ok(handle)
     }
 
-    /// Resolve the configured credentials. The username falls back to
-    /// `login_hint` when no `username:` provider is set, so a config that only
-    /// sets `login_hint` + `password` still fills the account picker/email.
-    async fn resolve_credentials(&self) -> Result<LoginCredentials, CalendarError> {
-        let username = match &self.username_resolver {
-            Some(r) => Some(resolve(r.as_ref(), "username").await?),
-            None => self.session_config.login_hint.clone(),
-        };
-        let password = match &self.password_resolver {
-            Some(r) => Some(resolve(r.as_ref(), "password").await?),
-            None => None,
-        };
-        Ok(LoginCredentials { username, password })
+    /// Resolve every configured secret into the answers the session gives the
+    /// run when it asks for one.
+    async fn resolve_answers(&self) -> Result<Answers, CalendarError> {
+        let mut answers = Answers::new();
+        for (name, resolver) in &self.secret_resolvers {
+            answers.insert(name.clone(), resolve(resolver.as_ref(), name).await?);
+        }
+        Ok(answers)
     }
 }
 
@@ -371,16 +370,15 @@ impl CalendarBackendFactory for Office365WebBackendFactory {
         } else {
             (None, None)
         };
-        let resolvers = cfg
-            .build_credential_resolvers(prompts.as_ref())
-            .map_err(|e| CalendarError::Config(format!("office365-web credentials: {e}")))?;
+        let secret_resolvers = cfg
+            .build_secret_resolvers(prompts.as_ref())
+            .map_err(|e| CalendarError::Config(format!("office365-web secrets: {e}")))?;
         let (ready_tx, _) = broadcast::channel(16);
         Ok(Box::new(Office365WebBackend {
             connection_id: connection_id.to_string(),
             label,
             session_config: cfg.into_session_config(),
-            username_resolver: resolvers.username,
-            password_resolver: resolvers.password,
+            secret_resolvers,
             session: Mutex::new(None),
             ready_tx,
             event_bus: ctx.event_bus.clone(),
@@ -418,11 +416,9 @@ fn map_show_as(s: MsShowAs) -> ShowAs {
 
 fn map_err(e: MsOfficeError) -> CalendarError {
     match e {
-        MsOfficeError::LoginRequired => {
-            CalendarError::Auth("interactive login required for office365-web session".into())
-        }
-        MsOfficeError::Timeout => CalendarError::Network("office365-web sidecar timed out".into()),
-        MsOfficeError::Sidecar(m) => CalendarError::Network(format!("office365-web sidecar: {m}")),
+        MsOfficeError::Timeout => CalendarError::Network("office365-web browser timed out".into()),
+        MsOfficeError::Browser(m) => CalendarError::Network(format!("office365-web browser: {m}")),
+        MsOfficeError::Run(m) => CalendarError::Other(format!("office365-web run: {m}")),
         MsOfficeError::Protocol(m) => CalendarError::Other(format!("office365-web protocol: {m}")),
         MsOfficeError::Other(m) => CalendarError::Other(m),
     }

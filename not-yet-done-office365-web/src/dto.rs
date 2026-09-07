@@ -2,8 +2,8 @@
 //! APIs. These are the crate's public vocabulary; a consumer (e.g. a calendar
 //! backend) maps them onto its own domain DTOs.
 //!
-//! The `Deserialize` impls match the JSON the sidecar emits (camelCase), so a
-//! sidecar response body can be parsed straight into these types.
+//! The `Deserialize` impls match the JSON the calendar flow yields (camelCase),
+//! so what a run hands back can be parsed straight into these types.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -56,7 +56,7 @@ pub struct MsCalEvent {
     pub location: Option<String>,
     #[serde(default)]
     pub organizer: Option<String>,
-    /// Plain-text body preview, if the sidecar captured one.
+    /// Plain-text body preview, if the flow captured one.
     #[serde(default)]
     pub body_preview: Option<String>,
     /// Web link to open the event in the source app, if any.

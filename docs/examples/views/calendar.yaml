@@ -204,21 +204,22 @@ views:
       keybinding: p
 
     # Bus event → action bindings (rule engine). When the office365-web backend
-    # hits a Microsoft Authenticator *number-match* challenge during an
-    # interactive sign-in, it publishes `office365-web:mfa:number-match` with the
-    # digits to tap. Bind it to the `show auth number` action below so the
-    # number appears in the notification bar; the same action auto-clears when
-    # the login completes (`office365-web:mfa:resolved`). No key is pressed —
-    # this is a purely event-driven reaction. Only relevant for the
-    # office365-web calendar backend; harmless for msgraph connections (they
-    # never publish it).
+    # reaches a Microsoft Authenticator *number-match* challenge during a
+    # sign-on, the browser run says what to do ("Tap 42 on your phone to sign
+    # in") and the backend publishes that sentence as
+    # `office365-web:mfa:number-match`. Bind it to the `show auth number` action
+    # below so the sentence appears in the notification bar; the same action
+    # auto-clears when the run is over (`office365-web:mfa:resolved`). No key
+    # is pressed — this is a purely event-driven reaction. Only relevant for
+    # the office365-web calendar backend; harmless for msgraph connections
+    # (they never publish it).
     event_actions:
       - on: "office365-web:mfa:number-match"
         run: show auth number
 
     actions:
       # Event-only notify (no `key:`): fired by the `event_actions` binding
-      # above. `{number}` is filled from the event payload. `on_event` retracts
+      # above. `{message}` is filled from the event payload. `on_event` retracts
       # the message once the sign-in resolves, scoped to the same connection so
       # one account's completion never clears another's prompt.
       - name: show auth number
@@ -228,7 +229,7 @@ views:
         # `notifications.alert_enabled: false` in tui.yaml) to use the ordinary
         # bottom notification bar instead.
         prominent: true
-        message: "Microsoft Authenticator: tap number {number} to approve sign-in"
+        message: "Microsoft Authenticator: {message}"
         on_event:
           "office365-web:mfa:resolved": close
       # Local filter-while-typing over the loaded rows.

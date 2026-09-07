@@ -1,40 +1,27 @@
 //! Backend config block for a `backend: office365-web` connection.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use not_yet_done_content::CredentialProvider;
 use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
-use not_yet_done_office365_web::{SessionConfig, SidecarConfig};
-
-/// Prompt text shown to the user when the sign-in raises an MFA challenge, when
-/// no `mfa.prompt` override is configured. Kept generic on purpose: for the
-/// common number-match flow the actual number arrives as the request's
-/// *detail* line, rendered above this text.
-pub(crate) const DEFAULT_MFA_PROMPT: &str = "Multi-factor authentication is required to sign in. Approve the request in \
-     your authenticator app, then press Enter.";
-
-/// The username + password resolvers built from a connection's credential
-/// providers. Either may be absent (fully manual login); the username falls
-/// back to `login_hint` when no `username:` provider is configured.
-pub(crate) struct CredentialResolvers {
-    pub(crate) username: Option<Box<dyn CredentialResolver>>,
-    pub(crate) password: Option<Box<dyn CredentialResolver>>,
-}
+use not_yet_done_office365_web::{Answers, BrowserConfig, SessionConfig};
 
 /// The `config:` sub-tree of an `office365-web` connection entry, e.g.
 ///
 /// ```yaml
 /// account_key: work           # sessions with the same key share one browser
 /// name: "Work"                # "Account" column label (optional)
-/// login_hint: user@example.com
+/// account: user@example.com   # what the flow signs on as ({{data.account}})
 /// profile_dir: ~/.local/state/not_yet_done/office365-web/work
-/// headless: true             # resting invisible; auto-shows a window for MFA
-/// auto_headed: true           # (default) drop back to headless after sign-in
-/// password:                   # optional: drives the sign-in unattended
-///   type: command
-///   script: pass show work/example/password
+/// headless: true              # resting hidden; shows the window for a second factor
+/// auto_headed: true           # (default) and hides it again once the run is over
+/// secrets:                    # what the flow may ask for, and where it comes from
+///   calendar-password:
+///     type: command
+///     script: pass show work/example/password
 /// ```
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -44,66 +31,39 @@ pub(crate) struct Office365WebConfig {
     /// Display label for the "Account" column. Defaults to the connection id.
     #[serde(default)]
     pub(crate) name: Option<String>,
-    /// UPN to prefill on the interactive login (optional). Also the default
-    /// username for the account picker / email field when no `username:`
-    /// credential provider is set.
+    /// The account the flow signs on as — its `{{data.account}}`. Optional only
+    /// because the browser's own values file may say it; with two connections
+    /// each names its own.
     #[serde(default)]
-    pub(crate) login_hint: Option<String>,
+    pub(crate) account: Option<String>,
     /// Persistent browser profile directory (login/SSO survives here). `~/` is
     /// expanded against `$HOME`.
     pub(crate) profile_dir: String,
-    /// Resting display mode. `true` (default) keeps the browser invisible for
+    /// Resting display mode. `true` (default) keeps the browser hidden for
     /// every silent poll; `false` always shows the window (fully manual setups).
     #[serde(default = "default_true")]
     pub(crate) headless: bool,
-    /// When resting headless, briefly surface a visible window the moment the
-    /// sign-in needs the user (typically MFA), then drop back to headless once
-    /// it completes. Defaults to `true`. Set `false` to never pop a window: a
-    /// lapsed headless session then reports a login error instead (only sensible
-    /// for accounts whose session rarely expires).
+    /// When resting hidden, put the window up the moment the sign-in has
+    /// something to say to you (typically the second factor), then take it
+    /// down once the run is over. Defaults to `true`. Set `false` to never pop
+    /// a window: what the run says then reaches you through the event bus
+    /// alone (see the `office365-web:mfa:number-match` binding).
     #[serde(default = "default_true")]
     pub(crate) auto_headed: bool,
-    /// Entry URL (optional; the sidecar defaults to the Outlook web calendar).
+    /// The flow a calendar read runs: a name on the browser's shelf or a path
+    /// to a flow directory. Default `nyd-calendar`.
     #[serde(default)]
-    pub(crate) start_url: Option<String>,
-    /// Override the sidecar entry script path (else `NYD_OFFICE365_SIDECAR`).
+    pub(crate) flow: Option<String>,
+    /// The `drunken-browser` binary (default: found on `PATH`).
     #[serde(default)]
-    pub(crate) sidecar_script: Option<String>,
-    /// Override the Node binary (default `node`).
+    pub(crate) browser: Option<String>,
+    /// The secrets the flow may ask for — by the name the flow declares under
+    /// `requires: secrets:` — and how to obtain each. A run asks only for a
+    /// secret the browser's own values file says to ask for; the value is
+    /// resolved here and handed to the run as the answer. Any credential
+    /// provider works; `command` wrapping `pass`/`op` is the intended default.
     #[serde(default)]
-    pub(crate) node_bin: Option<String>,
-    /// How to obtain the account username/UPN (optional). Any credential
-    /// provider works; a `literal` or `command` (e.g. `pass`) is typical. When
-    /// absent, `login_hint` is used.
-    #[serde(default)]
-    pub(crate) username: Option<CredentialProvider>,
-    /// How to obtain the account password (optional). Any credential provider
-    /// works; `command` wrapping `pass`/`op` is the intended default. When
-    /// absent, the sign-in stays manual (a headed window opens for the user).
-    #[serde(default)]
-    pub(crate) password: Option<CredentialProvider>,
-    /// How the multi-factor-authentication challenge is surfaced to the user
-    /// (optional). Absent = the defaults: [`DEFAULT_MFA_PROMPT`] text and the
-    /// wrapper's built-in retry count.
-    #[serde(default)]
-    pub(crate) mfa: Option<MfaConfig>,
-}
-
-/// Per-connection MFA prompt configuration. Both fields are independently
-/// optional so a config can override just the wording, just the retry count, or
-/// both.
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MfaConfig {
-    /// Prompt text shown when the sign-in needs the user during MFA. Defaults
-    /// to [`DEFAULT_MFA_PROMPT`].
-    #[serde(default)]
-    pub(crate) prompt: Option<String>,
-    /// How many times the sidecar re-raises the challenge if the user is too
-    /// slow and the underlying attempt lapses before an answer arrives.
-    /// Defaults to the wrapper's [`SidecarConfig`] default.
-    #[serde(default)]
-    pub(crate) max_retries: Option<u32>,
+    pub(crate) secrets: BTreeMap<String, CredentialProvider>,
 }
 
 fn default_true() -> bool {
@@ -111,70 +71,58 @@ fn default_true() -> bool {
 }
 
 impl Office365WebConfig {
-    /// Build the credential resolvers from this config's providers. Called
-    /// before [`into_session_config`], while the providers are still available.
+    /// Build one credential resolver per configured secret. Called before
+    /// [`into_session_config`](Self::into_session_config), while the providers
+    /// are still available.
     ///
     /// `prompts` is what a `script` provider asks the user through, so a
     /// locked password store raises a form in the frontend rather than
     /// `gpg`'s own `pinentry` window.
-    pub(crate) fn build_credential_resolvers(
+    pub(crate) fn build_secret_resolvers(
         &self,
         prompts: Option<&CredentialPrompts>,
-    ) -> Result<CredentialResolvers, String> {
-        let build = |p: &Option<CredentialProvider>| -> Result<_, String> {
-            p.as_ref()
-                .map(|p| p.build_resolver_with(prompts))
-                .transpose()
-        };
-        Ok(CredentialResolvers {
-            username: build(&self.username)?,
-            password: build(&self.password)?,
-        })
+    ) -> Result<BTreeMap<String, Box<dyn CredentialResolver>>, String> {
+        self.secrets
+            .iter()
+            .map(|(name, provider)| {
+                provider
+                    .build_resolver_with(prompts)
+                    .map(|resolver| (name.clone(), resolver))
+            })
+            .collect()
     }
 
     /// Whether any configured provider may raise a dialog while it
     /// resolves — the cue for the backend to offer a prompt stream at all.
     pub(crate) fn can_prompt(&self) -> bool {
-        [&self.username, &self.password]
-            .into_iter()
-            .flatten()
-            .any(CredentialProvider::can_prompt)
-    }
-
-    /// The prompt text to show when this connection raises an MFA challenge,
-    /// falling back to [`DEFAULT_MFA_PROMPT`]. Borrows `self`, so it is read
-    /// before [`into_session_config`] consumes the config.
-    pub(crate) fn mfa_prompt(&self) -> String {
-        self.mfa
-            .as_ref()
-            .and_then(|m| m.prompt.clone())
-            .unwrap_or_else(|| DEFAULT_MFA_PROMPT.to_string())
+        self.secrets.values().any(CredentialProvider::can_prompt)
     }
 
     /// Build the wrapper's [`SessionConfig`] from this connection config.
-    /// Credentials are resolved separately (see [`build_credential_resolvers`])
-    /// and injected on the async path, so this leaves `credentials` unset.
+    /// Secrets are resolved separately (see
+    /// [`build_secret_resolvers`](Self::build_secret_resolvers)) and injected
+    /// on the async path, so this leaves `answers` empty.
     pub(crate) fn into_session_config(self) -> SessionConfig {
-        let mut sidecar = SidecarConfig::default();
-        if let Some(script) = self.sidecar_script {
-            sidecar.script = PathBuf::from(script);
+        let mut browser = BrowserConfig::default();
+        if let Some(flow) = self.flow {
+            browser.flow = flow;
         }
-        if let Some(node) = self.node_bin {
-            sidecar.node_bin = PathBuf::from(node);
+        if let Some(bin) = self.browser {
+            browser.bin = expand_tilde(&bin);
         }
-        // Only override the wrapper's built-in retry count when the config asks.
-        if let Some(retries) = self.mfa.as_ref().and_then(|m| m.max_retries) {
-            sidecar.mfa_max_retries = retries;
-        }
+        let facts = self
+            .account
+            .into_iter()
+            .map(|account| ("account".to_string(), account))
+            .collect();
         SessionConfig {
             account_key: self.account_key,
-            login_hint: self.login_hint,
             profile_dir: expand_tilde(&self.profile_dir),
             headless: self.headless,
             auto_headed: self.auto_headed,
-            start_url: self.start_url,
-            credentials: None,
-            sidecar,
+            facts,
+            answers: Answers::new(),
+            browser,
         }
     }
 }
@@ -203,6 +151,13 @@ mod tests {
         let sc = cfg.into_session_config();
         assert_eq!(sc.account_key, "work");
         assert_eq!(sc.profile_dir, PathBuf::from("/tmp/p"));
+        assert_eq!(sc.browser.flow, "nyd-calendar");
+        assert_eq!(sc.browser.bin, PathBuf::from("drunken-browser"));
+        assert!(sc.facts.is_empty(), "no account → no fact");
+        assert!(
+            sc.answers.is_empty(),
+            "answers are resolved on the async path"
+        );
     }
 
     #[test]
@@ -212,72 +167,56 @@ mod tests {
     }
 
     #[test]
-    fn parses_credential_providers_and_builds_resolvers() {
+    fn the_sidecar_fields_are_gone() {
+        for old in [
+            "login_hint: x",
+            "sidecar_script: x",
+            "node_bin: x",
+            "start_url: x",
+        ] {
+            let yaml = format!("account_key: work\nprofile_dir: /tmp/p\n{old}\n");
+            assert!(
+                serde_yaml::from_str::<Office365WebConfig>(&yaml).is_err(),
+                "{old} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn account_flow_and_browser_reach_the_session_config() {
         let yaml = r#"
 account_key: work
 profile_dir: /tmp/p
-login_hint: user@example.com
-password:
-  type: command
-  script: pass show example/password
+account: user@example.com
+flow: /home/me/flows/calendar
+browser: ~/.cargo/bin/drunken-browser
+"#;
+        let cfg: Office365WebConfig = serde_yaml::from_str(yaml).expect("parses");
+        let sc = cfg.into_session_config();
+        assert_eq!(sc.facts["account"], "user@example.com");
+        assert_eq!(sc.browser.flow, "/home/me/flows/calendar");
+        assert!(sc.browser.bin.ends_with(".cargo/bin/drunken-browser"));
+    }
+
+    #[test]
+    fn parses_secret_providers_and_builds_resolvers() {
+        let yaml = r#"
+account_key: work
+profile_dir: /tmp/p
+secrets:
+  calendar-password:
+    type: command
+    script: pass show example/password
 "#;
         let cfg: Office365WebConfig = serde_yaml::from_str(yaml).expect("parses");
         assert!(matches!(
-            cfg.password,
+            cfg.secrets.get("calendar-password"),
             Some(CredentialProvider::Command { .. })
         ));
-        assert!(cfg.username.is_none(), "username provider is optional");
-        let resolvers = cfg.build_credential_resolvers(None).expect("builds");
-        assert!(resolvers.password.is_some());
-        assert!(
-            resolvers.username.is_none(),
-            "no username provider → falls back to login_hint at resolve time"
-        );
-    }
-
-    #[test]
-    fn credentials_default_to_none_in_session_config() {
-        let yaml = "account_key: work\nprofile_dir: /tmp/p\n";
-        let cfg: Office365WebConfig = serde_yaml::from_str(yaml).expect("parses");
-        let sc = cfg.into_session_config();
-        assert!(
-            sc.credentials.is_none(),
-            "credentials are injected on the async path, not here"
-        );
-    }
-
-    #[test]
-    fn mfa_defaults_when_absent() {
-        let yaml = "account_key: work\nprofile_dir: /tmp/p\n";
-        let cfg: Office365WebConfig = serde_yaml::from_str(yaml).expect("parses");
-        assert_eq!(cfg.mfa_prompt(), DEFAULT_MFA_PROMPT);
-        let sc = cfg.into_session_config();
-        assert_eq!(
-            sc.sidecar.mfa_max_retries,
-            SidecarConfig::default().mfa_max_retries,
-            "no mfa block → wrapper default retry count"
-        );
-    }
-
-    #[test]
-    fn mfa_overrides_prompt_and_retries() {
-        let yaml = r#"
-account_key: work
-profile_dir: /tmp/p
-mfa:
-  prompt: "Approve on your phone"
-  max_retries: 5
-"#;
-        let cfg: Office365WebConfig = serde_yaml::from_str(yaml).expect("parses");
-        assert_eq!(cfg.mfa_prompt(), "Approve on your phone");
-        let sc = cfg.into_session_config();
-        assert_eq!(sc.sidecar.mfa_max_retries, 5);
-    }
-
-    #[test]
-    fn mfa_rejects_unknown_fields() {
-        let yaml = "account_key: work\nprofile_dir: /tmp/p\nmfa:\n  bogus: 1\n";
-        assert!(serde_yaml::from_str::<Office365WebConfig>(yaml).is_err());
+        let resolvers = cfg.build_secret_resolvers(None).expect("builds");
+        assert_eq!(resolvers.len(), 1);
+        assert!(resolvers.contains_key("calendar-password"));
+        assert!(!cfg.can_prompt(), "a command provider asks nothing");
     }
 
     #[test]

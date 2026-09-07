@@ -36,33 +36,45 @@
 # Outlook on the web) the `config:` sub-tree is instead:
 #
 #   account_key   — session registry key (required). Connections sharing a key
-#                   share ONE browser session, so a single interactive login
-#                   serves them all (e.g. a calendar and a future mail backend).
+#                   share ONE browser, so a single interactive sign-on serves
+#                   them all (e.g. a calendar and a future mail backend).
 #   name          — display label for the "Account" column (optional).
-#   login_hint    — UPN to prefill on the interactive login (optional).
-#   profile_dir   — persistent browser profile directory (required); the login
-#                   and its SSO cookies survive here across restarts. `~/` is
+#   account       — the account the flow signs on as (optional; becomes the
+#                   flow's `{{data.account}}`). Leave it out only when the
+#                   browser's own values file names the account — with two
+#                   connections each must name its own.
+#   profile_dir   — persistent browser data directory (required); the sign-on
+#                   and its cookies survive here across restarts. `~/` is
 #                   expanded against $HOME.
-#   headless      — run the browser headless once logged in (optional; true).
-#   start_url     — entry URL (optional; defaults to the Outlook web calendar).
-#   username      — credential provider for the account UPN (optional). Used to
-#                   pick the account tile / fill the email field. Defaults to
-#                   `login_hint` when omitted.
-#   password      — credential provider for the account password (optional).
-#                   When set, the sign-in is driven unattended up to the second
-#                   factor (MFA); when omitted, the login stays fully manual.
-#   sidecar_script, node_bin — override the Playwright sidecar entry script and
-#                   Node binary (optional; the script also reads the
-#                   NYD_OFFICE365_SIDECAR env var).
+#   headless      — rest hidden (optional; true). `false` always shows the
+#                   browser window, for a fully manual setup.
+#   auto_headed   — while resting hidden, show the window the moment the run
+#                   has something to say to you (the second factor) and hide
+#                   it again once the run is over (optional; true). `false`
+#                   never pops a window: what the run says then reaches you
+#                   through the event bus alone (see calendar.yaml).
+#   secrets       — one credential provider per secret the flow may ask for,
+#                   keyed by the name the flow declares (optional). Any
+#                   provider works; `command` wrapping `pass`/`op` is the
+#                   intended default.
+#   flow          — the flow a calendar read runs: a name on the browser's
+#                   shelf or a path to a flow directory (optional;
+#                   `nyd-calendar`).
+#   browser       — the `drunken-browser` binary (optional; found on PATH).
 #
-# This backend drives a headless Chromium via an out-of-process Playwright
-# sidecar (Node); the first fetch on an unauthenticated profile opens a visible
-# window. With `password` configured the sidecar auto-fills the account, the
-# password, and "stay signed in", leaving only MFA for you to complete once;
-# afterwards it runs unattended. Credentials are resolved in the Rust process
-# and handed to the sidecar over its JSON protocol — never via the environment,
-# so the browser child can't leak them. Enable it with the `office365-web` cargo
-# feature (on by default).
+# This backend starts one hidden `drunken-browser` per account_key and drives
+# it over its socket: every calendar read runs the `nyd-calendar` flow from the
+# browser's shelf, which signs on if it has to, fetches the calendar view and
+# yields the events. Secrets never touch the browser's command line or
+# environment: the flow *asks* for a secret it needs, the answer is resolved
+# here and handed to the run over the socket. For that to happen the browser's
+# own values file (`~/.config/browsertest/values.yaml`) must say `ask` for the
+# secret — a command written there wins over this config, for every account.
+# When the sign-on reaches the second factor the run says so ("Tap 42 on your
+# phone to sign in"); the sentence is published on the event bus as
+# `office365-web:mfa:number-match` and, with `auto_headed`, the window comes up
+# for it. Enable the backend with the `office365-web` cargo feature (on by
+# default).
 
 connections:
   - id: work
@@ -91,27 +103,27 @@ connections:
           --query accessToken -o tsv
 
   # A tenant reachable only through the browser (Graph blocked). No token — the
-  # session authenticates itself in a real browser and persists in profile_dir.
-  # With `password` set, the sidecar signs in unattended up to MFA; drop it to
-  # log in fully by hand.
+  # browser signs on itself and keeps the session in profile_dir. The flow asks
+  # for the password by the name it declares (`calendar-password`); the
+  # provider below answers. Drop `secrets` to type the password by hand in the
+  # browser window.
   - id: web
     backend: office365-web
     config:
       account_key: web
       name: Web calendar
-      login_hint: user@example.com
+      account: user@example.com
       profile_dir: ~/.local/state/not_yet_done/office365-web/web
       headless: true
-      # Username defaults to `login_hint`; set it explicitly only if the tile /
-      # email differs from the hint.
-      # username:
-      #   type: literal
-      #   value: user@example.com
-      password:
-        # `command` runs a shell command and uses its trimmed stdout — here a
-        # password manager. Any credential provider works (env, file, keyring).
-        type: command
-        script: pass show example/office365/password
+      auto_headed: true
+      secrets:
+        calendar-password:
+          # `command` runs a shell command and uses its trimmed stdout — here a
+          # password manager. Any credential provider works (env, file, keyring).
+          type: command
+          script: pass show example/office365/password
+      # flow: nyd-calendar
+      # browser: ~/.cargo/bin/drunken-browser
 
   # A CalDAV server (backend: caldav) — mail.de, Nextcloud, Baïkal, Fastmail,
   # iCloud, Radicale, … Auth is HTTP Basic. `url` is the entry point: a
