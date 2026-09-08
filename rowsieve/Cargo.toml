@@ -1,6 +1,6 @@
 [package]
 name = "rowsieve"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A small YAML filter language over rows: an AST, a parser, and an in-memory evaluator over any type that can answer \"what is the value of field X\". Host-agnostic."
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ regex      = { workspace = true }
 # Only for the `natural-dates` feature: resolving "tomorrow" on the right-hand
 # side of a comparison. The language itself has no opinion on how a date is
 # written, so hosts that pass timestamps do not pay for the parser stack.
-natural-date = { path = "../natural-date", version = "0.1.2", optional = true }
+natural-date = { path = "../natural-date", version = "0.2.0", optional = true }
 
 [features]
 default = []

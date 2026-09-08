@@ -14,13 +14,20 @@ takes `now` as a parameter, so resolution is deterministic and testable.
 
 ```text
 <boundary> of [the] [<rel>] <unit>
+<rel> <unit>
 
 boundary := start | beginning | end
-rel      := this | next | last | previous     (optional; default: this)
+rel      := this | current | next | last | previous   (optional in the first form; default: this)
 unit     := day | week | month | quarter | year
 ```
 
 A `start` resolves to `00:00:00` of the boundary day, an `end` to `23:59:59`.
+
+The second form names a period without a boundary — `last month`, `this week`,
+`next year` — and resolves to its **start**. That is the natural reading of
+"since last month" in a filter, and it keeps such phrases away from
+relative-date parsers: `chrono-english` reads the `mon` in `last month` as a
+weekday and answers with last Monday.
 
 ## Usage
 

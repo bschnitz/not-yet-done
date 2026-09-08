@@ -38,6 +38,17 @@ On top of the phrasings inherited from
 - **Business days** — `next business day`, `in 2 working days`.
 - **`now` / `asap`**.
 
+Two readings differ from a plain `chrono-english` pass, on purpose:
+
+- **Day words are calendar days.** `today`, `yesterday` and `tomorrow` resolve
+  to midnight of that day, not to the reference time of day — so that
+  `> today` in a filter means "since this morning", not "later than this very
+  moment". `now` is the instant; `resolve_date` drops the time either way.
+- **A bare period is its start.** `last month`, `this week`, `next year` go to
+  `date-periods` and resolve to the first instant of that period. Left to
+  `chrono-english`, `last month` reads as `last mon…` and answers with a
+  Monday.
+
 ## API
 
 - `resolve_datetime(s, now) -> Option<DateTime<Utc>>` — an absolute instant.

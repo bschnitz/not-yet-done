@@ -90,6 +90,18 @@ where
     if s == "now" || s == "asap" {
         return Some(now);
     }
+    // A day named on its own is a calendar day, so it starts at midnight.
+    // chrono-english would keep the reference time of day, which turns
+    // `> today` in a filter into "later than this very moment".
+    if let Some(days) = match s {
+        "today" => Some(0),
+        "tomorrow" => Some(1),
+        "yesterday" => Some(-1),
+        _ => None,
+    } {
+        let date = now.date_naive() + Duration::days(days);
+        return build(date, NaiveTime::from_hms_opt(0, 0, 0)?, now);
+    }
     if let Some(d) = in_prefix(s, now) {
         return Some(d);
     }
