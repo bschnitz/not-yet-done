@@ -880,7 +880,10 @@ String values are automatically resolved as natural-language dates:
 
 | Expression     | Resolves to                |
 | -------------- | -------------------------- |
+| `today`        | Today at midnight          |
 | `yesterday`    | Yesterday at midnight      |
+| `last month`   | First day of last month    |
+| `this week`    | Monday of this week        |
 | `last monday`  | Most recent Monday         |
 | `2 weeks ago`  | 14 days before now         |
 | `1 month ago`  | One month before now       |

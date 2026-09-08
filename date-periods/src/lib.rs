@@ -8,14 +8,19 @@
 //!
 //! ```text
 //! <boundary> of [the] [<rel>] <unit>
+//! <rel> <unit>
 //!
 //! boundary := start | beginning | end
-//! rel      := this | next | last | previous     (optional; default: this)
+//! rel      := this | current | next | last | previous     (optional in the first form; default: this)
 //! unit     := day | week | month | quarter | year
 //! ```
 //!
 //! Examples: `end of next week`, `start of month`, `beginning of last quarter`,
-//! `end of the year`.
+//! `end of the year`. The second form names a period without a boundary —
+//! `last month`, `this week`, `next year` — and resolves to its **start**: the
+//! natural reading of "since last month" in a filter, and one that a
+//! relative-date parser must not get first, because `chrono-english` reads the
+//! `mon` in `last month` as a weekday and answers with last Monday.
 //!
 //! # Usage
 //!
@@ -94,7 +99,19 @@ pub fn parse(phrase: &str) -> Option<PeriodSpec> {
     let boundary = match tokens.next()? {
         "start" | "beginning" => Boundary::Start,
         "end" => Boundary::End,
-        _ => return None,
+        // `<rel> <unit>` — a period named without a boundary is its start.
+        rel_token => {
+            let rel = rel_of(rel_token)?;
+            let unit = unit_of(tokens.next()?)?;
+            if tokens.next().is_some() {
+                return None;
+            }
+            return Some(PeriodSpec {
+                boundary: Boundary::Start,
+                rel,
+                unit,
+            });
+        }
     };
 
     // Require the connective `of`.
@@ -109,21 +126,12 @@ pub fn parse(phrase: &str) -> Option<PeriodSpec> {
     }
 
     // Optional relative qualifier; if absent, `next` already holds the unit.
-    let (rel, unit_token) = match next {
-        "this" | "current" => (Rel::This, tokens.next()?),
-        "next" => (Rel::Next, tokens.next()?),
-        "last" | "previous" => (Rel::Last, tokens.next()?),
-        other => (Rel::This, other),
+    let (rel, unit_token) = match rel_of(next) {
+        Some(rel) => (rel, tokens.next()?),
+        None => (Rel::This, next),
     };
 
-    let unit = match unit_token {
-        "day" => Unit::Day,
-        "week" => Unit::Week,
-        "month" => Unit::Month,
-        "quarter" => Unit::Quarter,
-        "year" => Unit::Year,
-        _ => return None,
-    };
+    let unit = unit_of(unit_token)?;
 
     // Reject trailing junk so "end of week foo" doesn't silently succeed.
     if tokens.next().is_some() {
@@ -207,6 +215,26 @@ pub fn resolve<Tz: TimeZone>(
         .from_local_datetime(&naive)
         .earliest()
         .or_else(|| now.timezone().from_local_datetime(&naive).latest())
+}
+
+fn rel_of(token: &str) -> Option<Rel> {
+    match token {
+        "this" | "current" => Some(Rel::This),
+        "next" => Some(Rel::Next),
+        "last" | "previous" => Some(Rel::Last),
+        _ => None,
+    }
+}
+
+fn unit_of(token: &str) -> Option<Unit> {
+    match token {
+        "day" => Some(Unit::Day),
+        "week" => Some(Unit::Week),
+        "month" => Some(Unit::Month),
+        "quarter" => Some(Unit::Quarter),
+        "year" => Some(Unit::Year),
+        _ => None,
+    }
 }
 
 // --- date arithmetic helpers ------------------------------------------------
@@ -316,6 +344,51 @@ mod tests {
         assert!(parse("sometime soon").is_none());
         assert!(parse("end of week foo").is_none());
         assert!(parse("middle of week").is_none());
+    }
+
+    #[test]
+    fn a_bare_period_is_its_start() {
+        assert_eq!(
+            spec("last month"),
+            PeriodSpec {
+                boundary: Boundary::Start,
+                rel: Rel::Last,
+                unit: Unit::Month
+            }
+        );
+        assert_eq!(spec("This Week").rel, Rel::This);
+        assert_eq!(spec("previous quarter").rel, Rel::Last);
+        assert_eq!(spec("next year").unit, Unit::Year);
+        // A unit needs its qualifier in this form: a bare `month` is not a
+        // phrase, and `last monday` belongs to a weekday parser.
+        assert!(parse("month").is_none());
+        assert!(parse("last monday").is_none());
+        assert!(parse("last month foo").is_none());
+    }
+
+    #[test]
+    fn bare_periods_resolve_to_the_period_start() {
+        // today() is Thursday 2026-07-09.
+        assert_eq!(
+            spec("last month").boundary_date(today(), WeekStart::Monday),
+            d("2026-06-01")
+        );
+        assert_eq!(
+            spec("this month").boundary_date(today(), WeekStart::Monday),
+            d("2026-07-01")
+        );
+        assert_eq!(
+            spec("last week").boundary_date(today(), WeekStart::Monday),
+            d("2026-06-29")
+        );
+        assert_eq!(
+            spec("next year").boundary_date(today(), WeekStart::Monday),
+            d("2027-01-01")
+        );
+        assert_eq!(
+            spec("last month").boundary_time(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+        );
     }
 
     #[test]

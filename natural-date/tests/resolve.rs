@@ -202,3 +202,32 @@ fn respects_reference_timezone() {
     assert_eq!(got.year(), 2026);
     assert_eq!(got, Utc.with_ymd_and_hms(2026, 7, 18, 10, 0, 0).unwrap());
 }
+
+// --- calendar-day words and bare periods -----------------------------------
+
+#[test]
+fn day_words_are_calendar_days_at_midnight() {
+    // now is Saturday 2026-07-18 10:00 — the time of day must not survive.
+    assert_eq!(dt("today"), "2026-07-18 00:00:00");
+    assert_eq!(dt("yesterday"), "2026-07-17 00:00:00");
+    assert_eq!(dt("tomorrow"), "2026-07-19 00:00:00");
+    assert_eq!(dt("Today"), "2026-07-18 00:00:00");
+    // The instant itself stays the instant.
+    assert_eq!(dt("now"), "2026-07-18 10:00:00");
+    // A part of day still sets its own time on that day.
+    assert_eq!(dt("tomorrow morning"), "2026-07-19 09:00:00");
+    assert_eq!(dt("yesterday evening"), "2026-07-17 18:00:00");
+}
+
+#[test]
+fn bare_periods_resolve_to_their_start() {
+    assert_eq!(dt("last month"), "2026-06-01 00:00:00");
+    assert_eq!(dt("this month"), "2026-07-01 00:00:00");
+    assert_eq!(dt("next month"), "2026-08-01 00:00:00");
+    assert_eq!(dt("last week"), "2026-07-06 00:00:00");
+    assert_eq!(dt("this week"), "2026-07-13 00:00:00");
+    assert_eq!(dt("last year"), "2025-01-01 00:00:00");
+    assert_eq!(dt("previous quarter"), "2026-04-01 00:00:00");
+    // Weekdays are untouched by the period rule.
+    assert_eq!(dt("last monday"), "2026-07-13 00:00:00");
+}
