@@ -348,12 +348,57 @@ fn resolve_entry(
     if let Some(c) = combos.iter().find(|c| c.token == lowered) {
         return Ok((c.project_id, c.activity_id));
     }
-    let mut available: Vec<&str> = combos.iter().map(|c| c.token.as_str()).collect();
-    available.sort_unstable();
+    let tokens: Vec<&str> = combos.iter().map(|c| c.token.as_str()).collect();
     Err(format!(
-        "unknown entry `{value}` (available: {})",
-        available.join(", ")
+        "unknown entry `{value}`; {}",
+        nearest_tokens_hint(&lowered, &tokens)
     ))
+}
+
+/// How many tokens an unknown-entry error names before pointing at the
+/// full list.
+const NEAREST_TOKENS: usize = 5;
+
+/// Suggest the tokens closest to `value` instead of dumping every combo.
+///
+/// Tokens are `customer_project_activity` slugs, so two of them are close
+/// when they share slug segments: a value written against a customer that
+/// has since been renamed still shares its project and activity with the
+/// right token. Segments are compared after splitting on both `_` and `-`;
+/// the tokens sharing the most segments come first, ties alphabetical. When
+/// nothing shares a segment the first few tokens stand in, so the reader
+/// still sees what a token looks like. The hint always says how many there
+/// are and where the full list is.
+fn nearest_tokens_hint(value: &str, tokens: &[&str]) -> String {
+    let segments = |s: &str| -> Vec<String> {
+        s.split(['_', '-'])
+            .filter(|seg| !seg.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let wanted = segments(value);
+    let mut ranked: Vec<(usize, &str)> = tokens
+        .iter()
+        .map(|t| {
+            let have = segments(t);
+            let shared = wanted.iter().filter(|w| have.contains(w)).count();
+            (shared, *t)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    let similar = ranked.iter().any(|(shared, _)| *shared > 0);
+    let shown: Vec<&str> = ranked
+        .iter()
+        .filter(|(shared, _)| !similar || *shared > 0)
+        .take(NEAREST_TOKENS)
+        .map(|(_, t)| *t)
+        .collect();
+    let label = if similar { "closest" } else { "for example" };
+    format!(
+        "{label}: {} ({} tokens in total, list them with `entry_combos values`)",
+        shown.join(", "),
+        tokens.len()
+    )
 }
 
 /// Render the edit buffer for one timesheet.
@@ -953,7 +998,41 @@ mod tests {
         );
         let err = resolve_entry("nope", &projects, &activities, None).unwrap_err();
         assert!(err.contains("unknown entry `nope`"));
-        assert!(err.contains("acme-corp_website-relaunch_development"));
+        // Nothing resembles `nope`, so a few tokens stand in as examples.
+        assert!(err.contains("for example: acme-corp_website-relaunch_development"));
+        assert!(err.contains("list them with `entry_combos values`"));
+    }
+
+    #[test]
+    fn unknown_entry_names_the_nearest_tokens_first() {
+        let tokens = [
+            "acme-corp_website-relaunch_development",
+            "acme-corp_website-relaunch_consulting",
+            "globex_erp_development",
+            "globex_erp_consulting",
+            "initech_intranet_support",
+        ];
+        // A token written against a renamed customer still shares project
+        // and activity with the right one: that one leads, its sibling
+        // activity follows, unrelated tokens are left out.
+        let hint = nearest_tokens_hint("acme_website-relaunch_development", &tokens);
+        assert!(
+            hint.starts_with(
+                "closest: acme-corp_website-relaunch_development, acme-corp_website-relaunch_consulting, globex_erp_development"
+            ),
+            "{hint}"
+        );
+        assert!(!hint.contains("initech"), "{hint}");
+        assert!(hint.contains("(5 tokens in total"), "{hint}");
+        // Never more than the cap, even when many share a segment.
+        let many: Vec<String> = (0..9).map(|i| format!("c{i}_p_development")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let hint = nearest_tokens_hint("x_y_development", &refs);
+        assert_eq!(
+            hint.matches("_p_development").count(),
+            NEAREST_TOKENS,
+            "{hint}"
+        );
     }
 
     #[test]

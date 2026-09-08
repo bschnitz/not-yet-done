@@ -7744,7 +7744,7 @@ Put a `views/broken.yaml` with `tab:` + `adapter:` and a bad head, e.g.
 - [ ] `nyd adapter` lists the good instances and ends with
       `view file skipped, it did not parse: <path>: hooks: invalid type …`.
 - [ ] `nyd adapter broken help` fails with `no adapter instance 'broken'
-  configured (known: …)` followed by the same skipped line, so a stale
+configured (known: …)` followed by the same skipped line, so a stale
       binary that predates a new view key points at the file, not at the
       config.
 
@@ -7762,6 +7762,16 @@ Trackings tab, `q e` on the active query (or `nyd adapter trackings ls -q`).
 - [ ] `this week` → since Monday 00:00; `last year` → since January 1 of
       last year. Both used to stay unresolved text.
 - [ ] `last monday` and `tomorrow morning` are unchanged.
+
+## Kimai — an unknown entry names the nearest tokens
+
+- [ ] `nyd adapter kimai create --field entry=acme_website_development --field begin=<tomorrow 08:00> --field duration=900`
+      with a token whose customer segment is wrong → the error says
+      `unknown entry`, then `closest:` with at most five tokens that share
+      slug segments (project/activity), the total count and the hint to
+      `entry_combos values`. Nothing is created.
+- [ ] A token sharing no segment at all (`entry=nope`) → `for example:` with
+      the first few tokens instead of the whole list.
 
 ## Refinements / deferred tasks
 
