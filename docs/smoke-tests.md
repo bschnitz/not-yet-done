@@ -7736,6 +7736,18 @@ tracking today.
 - [ ] CLI parity: `nyd adapter trackings ls -q '<query>'` with the same
       four bodies gives the same rows as the tab.
 
+## CLI — a view file that does not parse is named, not dropped
+
+Put a `views/broken.yaml` with `tab:` + `adapter:` and a bad head, e.g.
+`hooks: 5`, next to the real views.
+
+- [ ] `nyd adapter` lists the good instances and ends with
+      `view file skipped, it did not parse: <path>: hooks: invalid type …`.
+- [ ] `nyd adapter broken help` fails with `no adapter instance 'broken'
+    configured (known: …)` followed by the same skipped line, so a stale
+      binary that predates a new view key points at the file, not at the
+      config.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
