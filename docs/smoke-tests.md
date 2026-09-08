@@ -7773,6 +7773,21 @@ Trackings tab, `q e` on the active query (or `nyd adapter trackings ls -q`).
 - [ ] A token sharing no segment at all (`entry=nope`) → `for example:` with
       the first few tokens instead of the whole list.
 
+## Notes — a renamed ancestor keeps its directory
+
+Tasks tab. Pick a task with notes (`n` opens the file) whose parent has
+notes too, e.g. `/Alpha/Beta`.
+
+- [ ] Rename the parent to `Alphonse` with the CLI (`nyd-t task edit
+    --description`), which does not move directories, then `n` on
+      `Beta` → the same notes file opens; the parent directory on disk is
+      still `<sid>_alpha`, found by its short-id prefix.
+- [ ] Rename the parent in the TUI editor instead → the adapter moves the
+      directory to `<sid>_alphonse`; `n` on `Beta` opens the same file.
+- [ ] Leave both `<sid>_alpha` and `<sid>_alphonse` on disk → the one
+      matching the current name wins; a `<sid>_alpha_deleted_at_…`
+      directory is never picked.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
