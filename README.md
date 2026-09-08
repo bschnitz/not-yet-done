@@ -23,11 +23,20 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 ## Installation
 
 ```bash
-# Build and install all binaries
+./install.sh
+```
+
+The script installs both binaries and, if `~/.config/waybar/cffi/` exists,
+builds and installs the Waybar module into it. Do the two together: the module
+carries its own copy of the host — config parser included — so a module left
+behind while the view files move on skips every file its older schema cannot
+read and hides itself, which on the bar looks exactly like an idle timer. The
+steps by hand:
+
+```bash
 cargo install --path not-yet-done-cli
 cargo install --path not-yet-done-tui
 
-# Build the Waybar module
 cargo build --release -p not-yet-done-waybar
 cp target/release/libnyd_waybar.so ~/.config/waybar/cffi/
 ```
@@ -2004,8 +2013,7 @@ It is a thin frontend over the same in-process `trackings` content adapter the
 TUI and `nyd` use — it does **not** open the database itself. This means it
 reads whatever database that view is configured for (the split-out `tasks.db`),
 stays correct when the storage backend changes, and requires a configured
-`~/.config/not_yet_done/views/trackings.yaml`. If no `trackings` view is
-configured, the module simply shows nothing.
+`~/.config/not_yet_done/views/trackings.yaml`.
 
 ### Setup
 
@@ -2029,14 +2037,28 @@ The bar reads `⏱ 2` while two trackings run and is hidden while none does.
 The tooltip lists one line per running tracking: `/path/to/task — elapsed`,
 the task path in the same form `group_paths` matches against.
 
+When there is no `trackings` adapter to ask — no such view configured, or a
+view file this module's schema cannot read — the bar reads `⏱ !` and the
+tooltip carries the host's reason, the skipped view files named. The module
+never hides on failure: a hidden module and an idle timer look the same, and
+the difference is the whole point of the display. Each tick retries the
+resolve, so fixing the config (or reinstalling the module) brings the count
+back without restarting the bar.
+
 ### Styling
 
-CSS widget name: `#nyd-tracking`. Class `active` is added when tracking is running.
+CSS widget name: `#nyd-tracking`. Class `active` is added while tracking is
+running, `error` while the module has no adapter to ask.
 
 ```css
 #nyd-tracking {
   color: #161320;
   background: #f5a97f;
+}
+
+#nyd-tracking.error {
+  color: #ffffff;
+  background: #f53c3c;
 }
 ```
 

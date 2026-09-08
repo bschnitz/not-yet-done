@@ -91,6 +91,14 @@ fn label_text(icon: &str, running: &[RunningTracking]) -> String {
     format!("{icon} {}", running.len())
 }
 
+/// The bar text when there is no adapter to ask. A module that hides on
+/// failure looks exactly like a module with nothing to show, so a broken
+/// setup passes for an idle one — the mark says the count is missing, the
+/// tooltip says why (see [`Ui::show`]).
+fn error_text(icon: &str) -> String {
+    format!("{icon} !")
+}
+
 /// The hover text: one line per running tracking, `path — elapsed`, in the
 /// order the adapter lists them.
 fn tooltip_text(running: &[RunningTracking]) -> String {
@@ -126,15 +134,18 @@ fn tracking_entry_type() -> NodeType {
     }
 }
 
-/// Resolve the `trackings` adapter via the host. Returns `None` (and the module
-/// shows nothing) if no such view is configured or the adapter fails to build.
-fn resolve_trackings_adapter(rt: &tokio::runtime::Runtime) -> Option<Box<dyn ContentAdapter>> {
+/// Resolve the `trackings` adapter via the host. The error is kept as text
+/// rather than logged away: it is what the tooltip shows, and the host names
+/// the view files its discovery had to skip in it — the usual reason a module
+/// built against an older schema finds no `trackings` instance.
+fn resolve_trackings_adapter(
+    rt: &tokio::runtime::Runtime,
+) -> Result<Box<dyn ContentAdapter>, String> {
     rt.block_on(async {
         let ctx = not_yet_done_host::host_context();
         not_yet_done_host::resolve_adapter(TRACKINGS_INSTANCE, &ctx)
     })
-    .map_err(|e| eprintln!("nyd-waybar: could not resolve trackings adapter: {e}"))
-    .ok()
+    .map_err(|e| e.to_string())
 }
 
 /// Query every running tracking via the adapter.
@@ -202,45 +213,105 @@ fn get_running_trackings(
 // Module
 // ---------------------------------------------------------------------------
 
-/// The tooltip is a label of our own, handed to GTK from `query-tooltip`:
-/// the stock tooltip wraps long lines, and a task path is one line that must
-/// stay one line.
-fn install_tooltip(inner: &GtkBox) -> Label {
-    let tip = Label::new(None);
-    tip.set_line_wrap(false);
-    tip.set_xalign(0.0);
-    inner.set_has_tooltip(true);
-    let custom = tip.clone();
-    inner.connect_query_tooltip(move |_, _, _, _, tooltip| {
-        tooltip.set_custom(Some(&custom));
-        true
-    });
-    tip
+/// The three widgets the module drives: the bar label, the tooltip label and
+/// the box that carries both — and with it the style classes `active` and
+/// `error`.
+struct Ui {
+    inner: GtkBox,
+    label: Label,
+    tip: Label,
 }
 
-fn update_label(
-    label: &Label,
-    tip: &Label,
-    inner: &GtkBox,
+impl Ui {
+    /// Build the widgets under waybar's root and hand them to GTK.
+    ///
+    /// The tooltip is a label of our own, handed over from `query-tooltip`:
+    /// the stock tooltip wraps long lines, and a task path is one line that
+    /// must stay one line.
+    fn install(info: &InitInfo) -> Self {
+        let root = info.get_root_widget();
+        let inner = GtkBox::new(Orientation::Horizontal, 4);
+        inner.set_widget_name("nyd-tracking");
+
+        let label = Label::new(None);
+        inner.add(&label);
+
+        let tip = Label::new(None);
+        tip.set_line_wrap(false);
+        tip.set_xalign(0.0);
+        inner.set_has_tooltip(true);
+        let custom = tip.clone();
+        inner.connect_query_tooltip(move |_, _, _, _, tooltip| {
+            tooltip.set_custom(Some(&custom));
+            true
+        });
+
+        root.add(&inner);
+        root.show_all();
+
+        Ui { inner, label, tip }
+    }
+
+    /// Show `text` with `tooltip`, styled by `class` — the one class of
+    /// [`STYLE_CLASSES`] that applies, the others removed.
+    fn show(&self, text: &str, tooltip: &str, class: &str) {
+        self.label.set_text(text);
+        self.tip.set_text(tooltip);
+        self.set_class(Some(class));
+        self.inner.show_all();
+    }
+
+    /// Take the module off the bar: nothing runs, and nothing is wrong.
+    fn hide(&self) {
+        self.label.set_text("");
+        self.set_class(None);
+        self.inner.hide();
+    }
+
+    fn set_class(&self, class: Option<&str>) {
+        let ctx = self.inner.style_context();
+        for candidate in STYLE_CLASSES {
+            match Some(*candidate) == class {
+                true => ctx.add_class(candidate),
+                false => ctx.remove_class(candidate),
+            }
+        }
+    }
+}
+
+/// The classes the module puts on its box, at most one at a time: `active`
+/// while trackings run, `error` while it has no adapter to ask.
+const STYLE_CLASSES: &[&str] = &["active", "error"];
+
+/// One tick. A failed resolve is retried here, so a bar that started before
+/// its config was readable — or before the module was rebuilt to match it —
+/// heals on the next tick instead of staying blank until the next restart.
+fn update(
+    ui: &Ui,
     rt: &tokio::runtime::Runtime,
-    adapter: &Option<Box<dyn ContentAdapter>>,
+    adapter: &RefCell<Result<Box<dyn ContentAdapter>, String>>,
     icon: &str,
 ) {
-    if let Some(adapter) = adapter {
-        let running = get_running_trackings(rt, adapter.as_ref());
-        if !running.is_empty() {
-            label.set_text(&label_text(icon, &running));
-            tip.set_text(&tooltip_text(&running));
-            inner.style_context().add_class("active");
-            inner.show_all();
-        } else {
-            label.set_text("");
-            inner.style_context().remove_class("active");
-            inner.hide();
+    // The borrow ends with this statement, so the retry below is free to
+    // borrow mutably — held into the `if`, it would collide with itself.
+    let unresolved = adapter.borrow().is_err();
+    if unresolved && let Ok(resolved) = resolve_trackings_adapter(rt) {
+        *adapter.borrow_mut() = Ok(resolved);
+    }
+
+    match adapter.borrow().as_ref() {
+        Err(reason) => ui.show(&error_text(icon), reason, "error"),
+        Ok(adapter) => {
+            let running = get_running_trackings(rt, adapter.as_ref());
+            match running.is_empty() {
+                true => ui.hide(),
+                false => ui.show(
+                    &label_text(icon, &running),
+                    &tooltip_text(&running),
+                    "active",
+                ),
+            }
         }
-    } else {
-        label.set_text("");
-        inner.hide();
     }
 }
 
@@ -250,15 +321,8 @@ impl Module for NydModule {
     type Config = Config;
 
     fn init(info: &InitInfo, config: Config) -> Self {
-        let root = info.get_root_widget();
-        let inner = GtkBox::new(Orientation::Horizontal, 4);
-        inner.set_widget_name("nyd-tracking");
-
-        let label = Label::new(None);
-        inner.add(&label);
-        let tip = install_tooltip(&inner);
-        root.add(&inner);
-        root.show_all();
+        let ui = Ui::install(info);
+        let icon = config.icon;
 
         // One runtime and one adapter for the module's lifetime — the adapter
         // is created within the runtime (like `nyd`) and reused across ticks
@@ -266,32 +330,24 @@ impl Module for NydModule {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => Rc::new(rt),
             Err(e) => {
-                eprintln!("nyd-waybar: could not start tokio runtime: {e}");
+                let reason = format!("could not start tokio runtime: {e}");
+                eprintln!("nyd-waybar: {reason}");
+                ui.show(&error_text(&icon), &reason, "error");
                 return NydModule;
             }
         };
-        let adapter = resolve_trackings_adapter(&rt);
 
-        let icon = config.icon;
+        let adapter = RefCell::new(resolve_trackings_adapter(&rt));
+        if let Err(reason) = adapter.borrow().as_ref() {
+            eprintln!("nyd-waybar: could not resolve trackings adapter: {reason}");
+        }
 
-        // Initial update immediately.
-        update_label(&label, &tip, &inner, &rt, &adapter, &icon);
-
-        // Periodic update via glib timeout.
-        let label_ref = RefCell::new(label);
-        let tip_ref = RefCell::new(tip);
-        let inner_ref = RefCell::new(inner);
+        // Initial update immediately, then one per interval.
+        update(&ui, &rt, &adapter, &icon);
         glib::timeout_add_local(
             std::time::Duration::from_millis(config.interval_ms as u64),
             move || {
-                update_label(
-                    &label_ref.borrow(),
-                    &tip_ref.borrow(),
-                    &inner_ref.borrow(),
-                    &rt,
-                    &adapter,
-                    &icon,
-                );
+                update(&ui, &rt, &adapter, &icon);
                 glib::ControlFlow::Continue
             },
         );
@@ -351,6 +407,11 @@ mod tests {
     fn label_counts_the_running_trackings() {
         assert_eq!(label_text("⏱", &[running("A", 5)]), "⏱ 1");
         assert_eq!(label_text("⏱", &[running("A", 5), running("B", 90)]), "⏱ 2");
+    }
+
+    #[test]
+    fn a_module_without_an_adapter_marks_the_count_as_missing() {
+        assert_eq!(error_text("⏱"), "⏱ !");
     }
 
     #[test]
