@@ -395,13 +395,16 @@ fn print_adapter_help() {
 
 /// List the configured adapter instances — the target of bare `adapter`.
 fn list_instances() -> Result<()> {
-    let instances = not_yet_done_host::discover_instances();
+    let (instances, skipped) = not_yet_done_host::discover_instances_reporting();
     if instances.is_empty() {
         println!(
             "no adapter instances configured (add a views/*.yaml with `tab:` + `adapter:` keys)"
         );
     } else {
         print_instance_lines("");
+    }
+    for view in &skipped {
+        eprintln!("view file skipped, it did not parse: {view}");
     }
     Ok(())
 }

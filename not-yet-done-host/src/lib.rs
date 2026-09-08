@@ -24,6 +24,7 @@
 //! re-exported by the TUI's view-config module so there is a single source of
 //! truth for the `adapter:` block schema.
 
+use std::fmt;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -430,6 +431,28 @@ impl DiscoveredInstance {
 /// the list of the ones that *did* parse. Results are sorted by file path so
 /// the order is stable.
 pub fn discover_instances() -> Vec<DiscoveredInstance> {
+    discover_instances_reporting().0
+}
+
+/// A view file that looked like an instance (`tab:` + `adapter:`) but whose
+/// head did not parse, and why. Surfaced wherever a lookup fails, because a
+/// silently dropped file reads as "instance not configured" — which sends the
+/// reader to the wrong place (a stale binary that predates a new `hooks:` key
+/// is the classic case).
+#[derive(Debug, Clone)]
+pub struct SkippedView {
+    pub view_path: PathBuf,
+    pub reason: String,
+}
+
+impl fmt::Display for SkippedView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.view_path.display(), self.reason)
+    }
+}
+
+/// [`discover_instances`], plus the instance-shaped view files it had to skip.
+pub fn discover_instances_reporting() -> (Vec<DiscoveredInstance>, Vec<SkippedView>) {
     let dir = views_dir();
     let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .into_iter()
@@ -444,6 +467,7 @@ pub fn discover_instances() -> Vec<DiscoveredInstance> {
     yaml_files.sort();
 
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     for path in yaml_files {
         let Ok(yaml) = std::fs::read_to_string(&path) else {
             continue;
@@ -455,8 +479,15 @@ pub fn discover_instances() -> Vec<DiscoveredInstance> {
         if raw.get("tab").is_none() || raw.get("adapter").is_none() {
             continue;
         }
-        let Ok(head) = serde_yaml::from_str::<ViewFileHead>(&yaml) else {
-            continue;
+        let head = match serde_yaml::from_str::<ViewFileHead>(&yaml) {
+            Ok(head) => head,
+            Err(err) => {
+                skipped.push(SkippedView {
+                    view_path: path,
+                    reason: err.to_string(),
+                });
+                continue;
+            }
         };
         out.push(DiscoveredInstance {
             adapter: head.adapter,
@@ -464,7 +495,7 @@ pub fn discover_instances() -> Vec<DiscoveredInstance> {
             view_path: path,
         });
     }
-    out
+    (out, skipped)
 }
 
 /// The `hooks:` config for one instance, parsed from its view file. `None` if
@@ -519,20 +550,24 @@ pub fn resolve_adapter_with(
     ctx: &HostContext,
     factories: &HashMap<String, Box<dyn AdapterFactory>>,
 ) -> Result<Box<dyn ContentAdapter>> {
-    let instances = discover_instances();
+    let (instances, skipped) = discover_instances_reporting();
     let found = instances
         .iter()
         .find(|d| d.instance_id() == instance_name)
         .ok_or_else(|| {
             let known: Vec<&str> = instances.iter().map(|d| d.instance_id()).collect();
-            anyhow!(
+            let mut msg = format!(
                 "no adapter instance '{instance_name}' configured (known: {})",
                 if known.is_empty() {
                     "<none>".to_string()
                 } else {
                     known.join(", ")
                 }
-            )
+            );
+            for view in &skipped {
+                msg.push_str(&format!("\nview file skipped, it did not parse: {view}"));
+            }
+            anyhow!(msg)
         })?;
 
     let cfg = read_config_string(&found.adapter, &found.view_path)?;
