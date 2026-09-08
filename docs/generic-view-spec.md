@@ -2991,7 +2991,11 @@ engine collects:
   pane.
 - **`filter_min_date` / `filter_max_date`** — the lower/upper date bound of the
   active saved query (relative specifications such as `last month` are resolved
-  at run time, RFC 3339; `null` if there is no bound).
+  at run time, RFC 3339; `null` if there is no bound). Both are **instants, not
+  days**: a bare date resolves to its midnight, so `[started_at, '<=', '2026-09-08']`
+  arrives as the start of the 8th and admits nothing of that day. A script
+  that plans in whole days must treat an upper bound sitting on a local
+  midnight as the end of the previous day.
 
 For backwards compatibility the payload key is named `tracking_ids` — the engine
 path itself is generic, so that the historical trackings scripts
