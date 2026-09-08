@@ -172,8 +172,8 @@ impl Node for JiraCommentNode {
 
     async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit_full", ActionInput::Edited { text, version, .. }) => {
-                let body = parse_comment_buffer(&text);
+            ("edit_full", ActionInput::Edited { text, original, version }) => {
+                let body = parse_comment_buffer(&text, &original);
                 if body == self.comment.body.trim() {
                     return Ok(ActionOutcome::NoChanges);
                 }
@@ -204,8 +204,15 @@ impl Node for JiraCommentNode {
 }
 
 /// Strip the comment editor's `# `-prefixed header and `# ───` separator,
-/// returning the trimmed body text.
-fn parse_comment_buffer(text: &str) -> String {
+/// returning the trimmed body text. Everything below the separator is the
+/// body and is taken verbatim.
+///
+/// Without a separator — a body handed over as a file, or a buffer whose
+/// separator the user deleted — only the *leading* run of lines is looked
+/// at, and only lines the template itself carried are dropped. `#` at the
+/// start of a line opens a numbered list in Jira wiki markup, so dropping
+/// every such line anywhere in the buffer would silently swallow the list.
+fn parse_comment_buffer(text: &str, template: &str) -> String {
     let mut in_body = false;
     let mut body_lines = Vec::new();
 
@@ -218,17 +225,28 @@ fn parse_comment_buffer(text: &str) -> String {
             in_body = true;
             continue;
         }
-        if line.starts_with("# ") || line == "#" {
-            continue;
-        }
     }
 
     if !in_body {
-        body_lines.clear();
+        // Header of the template: everything up to and including the
+        // separator. The lines below it are the comment's own body and must
+        // never serve as a strip pattern.
+        let header: Vec<&str> = template
+            .lines()
+            .take_while(|l| !l.starts_with("# ───"))
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut in_header = !header.is_empty();
         for line in text.lines() {
-            if !line.starts_with("# ") && line != "#" {
-                body_lines.push(line);
+            if in_header {
+                let trimmed = line.trim_end();
+                if trimmed.is_empty() || header.contains(&trimmed) {
+                    continue;
+                }
+                in_header = false;
             }
+            body_lines.push(line);
         }
     }
 
@@ -359,7 +377,7 @@ mod tests {
              \n\
              This needs a fix ASAP."
         );
-        let body = parse_comment_buffer(&text);
+        let body = parse_comment_buffer(&text, &text);
         assert_eq!(body, "This needs a fix ASAP.");
     }
 
@@ -371,7 +389,7 @@ mod tests {
              \n\
              Updated comment body with more details."
         );
-        let body = parse_comment_buffer(&text);
+        let body = parse_comment_buffer(&text, &text);
         assert_eq!(body, "Updated comment body with more details.");
     }
 
@@ -379,9 +397,38 @@ mod tests {
     async fn comment_editor_roundtrip() {
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
         let prep = node.prepare("edit_full", &Default::default()).await.unwrap();
-        let body = parse_comment_buffer(&prep.template);
+        let body = parse_comment_buffer(&prep.template, &prep.template);
 
         // Unchanged template parses back to the original body.
         assert_eq!(body, node.comment.body.trim());
+    }
+
+    #[test]
+    fn numbered_list_below_the_separator_survives() {
+        let text = format!(
+            "# Comment on PROJ-42\n\
+             {COMMENT_SEPARATOR}\n\
+             \n\
+             Done:\n\
+             # first\n\
+             # second"
+        );
+        let body = parse_comment_buffer(&text, &text);
+        assert_eq!(body, "Done:\n# first\n# second");
+    }
+
+    #[test]
+    fn body_without_separator_keeps_its_numbered_list() {
+        // A body handed over as a file carries neither header nor separator.
+        let template = format!("# Comment on PROJ-42\n{COMMENT_SEPARATOR}\n\nold body");
+        let text = "# first\n# second";
+        assert_eq!(parse_comment_buffer(text, &template), text);
+    }
+
+    #[test]
+    fn header_without_separator_is_still_dropped() {
+        let template = format!("# Comment on PROJ-42\n{COMMENT_SEPARATOR}\n\nold body");
+        let text = "# Comment on PROJ-42\n\n# first\n# second";
+        assert_eq!(parse_comment_buffer(text, &template), "# first\n# second");
     }
 }
