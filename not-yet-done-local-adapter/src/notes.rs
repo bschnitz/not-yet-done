@@ -8,7 +8,7 @@
 //!       ...
 
 use not_yet_done_task_core::entity::task::Model as Task;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Base directory for task notes.
@@ -50,22 +50,60 @@ fn task_stem(id: Uuid, description: &str) -> String {
 /// Compute the notes directory for a task's children, based on parent chain.
 /// Returns the directory where this task's notes file and children folder live.
 pub fn task_notes_parent_dir(task: &Task, all_tasks: &[Task]) -> PathBuf {
+    parent_dir_under(&notes_dir(), task, all_tasks)
+}
+
+/// The parent chain of `task` walked down from `base`, one directory per
+/// ancestor.
+///
+/// An ancestor's directory is looked up on disk by its short-id prefix, the
+/// same way a task's own file is found: the name after the id is only what
+/// the ancestor was called when the directory was created. Building the
+/// chain from the current descriptions instead would lose every note below
+/// an ancestor that was renamed by any path that did not rename the
+/// directory with it. Only when no directory carries the id is the stem
+/// derived from the current description, which is what a fresh write
+/// creates.
+fn parent_dir_under(base: &Path, task: &Task, all_tasks: &[Task]) -> PathBuf {
     let mut chain = Vec::new();
     let mut current = task.parent_id;
     while let Some(pid) = current {
         if let Some(parent) = all_tasks.iter().find(|t| t.id == pid) {
-            chain.push(task_stem(parent.id, &parent.description));
+            chain.push((parent.id, parent.description.as_str()));
             current = parent.parent_id;
         } else {
             break;
         }
     }
     chain.reverse();
-    let mut dir = notes_dir();
-    for segment in chain {
+    let mut dir = base.to_path_buf();
+    for (id, description) in chain {
+        let segment =
+            existing_dir_for(&dir, id, description).unwrap_or_else(|| task_stem(id, description));
         dir = dir.join(segment);
     }
     dir
+}
+
+/// The subdirectory of `dir` that belongs to task `id`, whatever the task
+/// was called when it was created. The directory named after the current
+/// description wins; otherwise any live directory with the id prefix. A
+/// directory parked by [`mark_notes_deleted`] is never picked.
+fn existing_dir_for(dir: &Path, id: Uuid, description: &str) -> Option<String> {
+    let current = task_stem(id, description);
+    if dir.join(&current).is_dir() {
+        return Some(current);
+    }
+    let prefix = format!("{}_", &id.to_string()[..8]);
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&prefix) && !name.contains("_deleted_at_"))
+        .collect();
+    names.sort();
+    names.into_iter().next()
 }
 
 /// Full path to the notes .md file for a task.
@@ -254,5 +292,91 @@ mod tests {
     fn task_stem_basic() {
         let id = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
         assert_eq!(task_stem(id, "Build API"), "12345678_build-api");
+    }
+
+    fn task(id: &str, description: &str, parent: Option<Uuid>) -> Task {
+        let now = chrono::Utc::now();
+        Task {
+            id: Uuid::parse_str(id).unwrap(),
+            description: description.to_string(),
+            status: not_yet_done_task_core::entity::task::TaskStatus::Todo,
+            deleted: false,
+            deleted_at: None,
+            priority: 0,
+            parent_id: parent,
+            created_at: now,
+            updated_at: now,
+            last_tracked_at: None,
+            path: None,
+        }
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nyd-notes-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_renamed_ancestor_keeps_its_directory() {
+        // The customer was created as "Acme", its directory carries that
+        // name; the task was later renamed. The ticket's notes must still
+        // resolve into the old directory, not into a fresh "acme-corp" one.
+        let base = scratch_dir("renamed");
+        let root = task("aaaaaaaa-0000-0000-0000-000000000000", "Work", None);
+        let customer = task(
+            "bbbbbbbb-0000-0000-0000-000000000000",
+            "Acme Corp",
+            Some(root.id),
+        );
+        let ticket = task(
+            "cccccccc-0000-0000-0000-000000000000",
+            "Ticket 1",
+            Some(customer.id),
+        );
+        let old = base.join("aaaaaaaa_work").join("bbbbbbbb_acme");
+        std::fs::create_dir_all(&old).unwrap();
+
+        let all = vec![root.clone(), customer.clone(), ticket.clone()];
+        assert_eq!(parent_dir_under(&base, &ticket, &all), old);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn the_current_name_wins_and_deleted_directories_are_skipped() {
+        let base = scratch_dir("current");
+        let root = task("aaaaaaaa-0000-0000-0000-000000000000", "Work", None);
+        let ticket = task(
+            "cccccccc-0000-0000-0000-000000000000",
+            "Ticket 1",
+            Some(root.id),
+        );
+        let all = vec![root.clone(), ticket.clone()];
+
+        // Nothing on disk yet: the stem follows the current description.
+        assert_eq!(
+            parent_dir_under(&base, &ticket, &all),
+            base.join("aaaaaaaa_work")
+        );
+
+        // A parked directory of the same task is not a candidate.
+        std::fs::create_dir_all(base.join("aaaaaaaa_old_deleted_at_2026-01-01T00-00-00")).unwrap();
+        assert_eq!(
+            parent_dir_under(&base, &ticket, &all),
+            base.join("aaaaaaaa_work")
+        );
+
+        // Both an old and the current directory exist: the current one wins.
+        std::fs::create_dir_all(base.join("aaaaaaaa_old")).unwrap();
+        std::fs::create_dir_all(base.join("aaaaaaaa_work")).unwrap();
+        assert_eq!(
+            parent_dir_under(&base, &ticket, &all),
+            base.join("aaaaaaaa_work")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
