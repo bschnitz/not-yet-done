@@ -42,7 +42,7 @@ mod wiki_md;
 mod workspace;
 
 use edit_with_comments::OwnIdentity;
-use template::{edit_full_fields, strip_template_comments};
+use template::{edit_full_fields, strip_comment_template_header};
 
 /// Issue node with lazily-hydrated full detail. `from_key` constructs
 /// without a network round-trip; `detail()` fetches on first access. This
@@ -706,8 +706,8 @@ impl Node for JiraIssueNode {
             ("transition", ActionInput::Picked(transition_chain)) => {
                 self.execute_transition_chain(&transition_chain).await
             }
-            ("create_comment", ActionInput::Edited { text, .. }) => {
-                let body = strip_template_comments(&text);
+            ("create_comment", ActionInput::Edited { text, original, .. }) => {
+                let body = strip_comment_template_header(&text, &original);
                 if body.trim().is_empty() {
                     return Ok(ActionOutcome::NoChanges);
                 }

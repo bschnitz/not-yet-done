@@ -115,15 +115,35 @@ pub(super) fn strip_cache_section(text: &str) -> &str {
     }
 }
 
-/// Strip `# `-prefixed comment lines from a template buffer (e.g. the
-/// header of the `create_comment` template).
-pub(super) fn strip_template_comments(text: &str) -> String {
-    text.lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+/// Strip the header that seeded the `create_comment` buffer, and nothing
+/// else. Only the leading run of lines is inspected, and only lines the
+/// template itself carried are dropped; the first line that is neither
+/// blank nor part of the template ends the header, and everything from
+/// there on is the user's text, verbatim.
+///
+/// A blanket "drop every line starting with `#`" cannot be used here: in
+/// Jira wiki markup `# ` opens a numbered list, so it would silently
+/// swallow every numbered list the comment contains. A body fed from a
+/// file (`--file`) carries no header at all — then nothing is dropped.
+pub(super) fn strip_comment_template_header(text: &str, template: &str) -> String {
+    let header: Vec<&str> = template
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_header = !header.is_empty();
+    for line in text.lines() {
+        if in_header {
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() || header.contains(&trimmed) {
+                continue;
+            }
+            in_header = false;
+        }
+        kept.push(line);
+    }
+    kept.join("\n").trim().to_string()
 }
 
 /// Render the trailing CACHE section. Empty string when both tables are
@@ -609,5 +629,58 @@ impl JiraIssueNode {
         out.push('\n');
         out.push_str(stripped);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_comment_template_header;
+
+    const TPL: &str = "# New comment for ABC-1\n\n";
+
+    #[test]
+    fn header_is_dropped() {
+        assert_eq!(
+            strip_comment_template_header("# New comment for ABC-1\n\nhello", TPL),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn numbered_list_survives() {
+        let text = "# New comment for ABC-1\n\nDone:\n# first\n# second\n## nested";
+        assert_eq!(
+            strip_comment_template_header(text, TPL),
+            "Done:\n# first\n# second\n## nested"
+        );
+    }
+
+    #[test]
+    fn body_from_file_is_untouched() {
+        // The `--file` path never carries the header.
+        let text = "# first\n# second";
+        assert_eq!(strip_comment_template_header(text, TPL), text);
+    }
+
+    #[test]
+    fn header_removed_but_leading_list_kept() {
+        let text = "# New comment for ABC-1\n# first\n# second";
+        assert_eq!(
+            strip_comment_template_header(text, TPL),
+            "# first\n# second"
+        );
+    }
+
+    #[test]
+    fn empty_buffer_stays_empty() {
+        assert_eq!(strip_comment_template_header(TPL, TPL), "");
+    }
+
+    #[test]
+    fn empty_template_drops_nothing() {
+        assert_eq!(
+            strip_comment_template_header("# one\n# two", ""),
+            "# one\n# two"
+        );
     }
 }
