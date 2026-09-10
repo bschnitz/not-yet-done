@@ -12524,8 +12524,22 @@ impl Component for ContentView {
             let is_failure = self.adapter_init_error.is_some()
                 || matches!(*self.auth_status(), AdapterStatus::Failed { .. })
                 || self.active_pane().fetch_error.is_some();
+            // A login waiting on the person is not a failure and not just
+            // another slow step: it is the one banner that is addressed to
+            // the user, and it stays until they act somewhere else.
+            let needs_the_user = matches!(
+                *self.auth_status(),
+                AdapterStatus::Connecting {
+                    attention: true,
+                    ..
+                }
+            );
             let style = if is_failure {
                 Style::default().fg(t.error())
+            } else if needs_the_user {
+                Style::default()
+                    .fg(t.warning())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t.accent())
             };

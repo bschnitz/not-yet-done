@@ -56,6 +56,7 @@ struct ConnectState {
     timeout_secs: u64,
     started_at_unix_ms: u64,
     step: Option<String>,
+    attention: bool,
 }
 
 impl ConnectState {
@@ -66,6 +67,7 @@ impl ConnectState {
             timeout_secs: 0,
             started_at_unix_ms: now_unix_ms(),
             step: None,
+            attention: false,
         }
     }
 
@@ -76,6 +78,7 @@ impl ConnectState {
             timeout_secs: self.timeout_secs,
             started_at_unix_ms: self.started_at_unix_ms,
             step: self.step.clone(),
+            attention: self.attention,
         }
     }
 }
@@ -164,6 +167,7 @@ impl StatusReporter {
     pub fn connect_step(&self, step: impl Into<String>) {
         let mut state = self.lock_connect();
         state.step = Some(step.into());
+        state.attention = false;
         state.started_at_unix_ms = now_unix_ms();
         let _ = self.inner.tx.send(state.to_status());
     }
@@ -174,6 +178,7 @@ impl StatusReporter {
     pub fn connect_phase(&self, step: impl Into<String>, max_retries: u32, timeout_secs: u64) {
         let mut state = self.lock_connect();
         state.step = Some(step.into());
+        state.attention = false;
         state.retry = 1;
         state.max_retries = max_retries;
         state.timeout_secs = timeout_secs;
@@ -187,8 +192,32 @@ impl StatusReporter {
     /// not exist.
     pub fn connect_attempt(&self, retry: u32, max_retries: u32, timeout_secs: u64) {
         let mut state = self.lock_connect();
+        state.attention = false;
         state.retry = retry;
         state.max_retries = max_retries;
+        state.timeout_secs = timeout_secs;
+        state.started_at_unix_ms = now_unix_ms();
+        let _ = self.inner.tx.send(state.to_status());
+    }
+
+    /// The login is waiting on the person, somewhere this program cannot
+    /// reach — a push notification to approve, a hardware key to touch.
+    /// `step` says what to do ("Approve the sign-in in your Authenticator");
+    /// the flag on the status says nothing will move until they do it, so a
+    /// frontend can be loud about a line it would otherwise let scroll past.
+    ///
+    /// Still a step, not a form: there is nothing to submit here, and the
+    /// login carries on by itself once the person has acted. `timeout_secs`
+    /// is the *longer* patience such a wait runs under — a deadline against
+    /// a person is a different number from a deadline against a machine, and
+    /// showing the machine's would be a countdown to a failure that is not
+    /// coming. Whatever is reported next takes the flag back.
+    pub fn connect_attention(&self, step: impl Into<String>, timeout_secs: u64) {
+        let mut state = self.lock_connect();
+        state.step = Some(step.into());
+        state.attention = true;
+        state.retry = 1;
+        state.max_retries = 1;
         state.timeout_secs = timeout_secs;
         state.started_at_unix_ms = now_unix_ms();
         let _ = self.inner.tx.send(state.to_status());
@@ -367,6 +396,53 @@ mod tests {
             }
             other => panic!("expected Connecting, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn waiting_on_the_person_is_a_step_that_says_so() {
+        let r = StatusReporter::new();
+        let rx = r.subscribe();
+        r.begin_connect();
+        r.connect_step("signing in");
+        r.connect_attention("Approve the sign-in in your Authenticator", 300);
+        match &*rx.borrow() {
+            AdapterStatus::Connecting {
+                step,
+                attention,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(
+                    step.as_deref(),
+                    Some("Approve the sign-in in your Authenticator")
+                );
+                assert!(*attention, "nothing moves until the person acts");
+                assert_eq!(
+                    *timeout_secs, 300,
+                    "the countdown shown must be the one a person is given"
+                );
+            }
+            other => panic!("expected Connecting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_next_step_takes_the_attention_back() {
+        let r = StatusReporter::new();
+        let rx = r.subscribe();
+        r.begin_connect();
+        r.connect_attention("Approve the sign-in in your Authenticator", 300);
+        r.connect_step("fetching the cookie");
+        assert!(
+            matches!(
+                &*rx.borrow(),
+                AdapterStatus::Connecting {
+                    attention: false,
+                    ..
+                }
+            ),
+            "a login that moved on must not keep asking for a tap"
+        );
     }
 
     #[test]
