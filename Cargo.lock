@@ -4247,6 +4247,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
+name = "not-yet-done-auth-drunken"
+version = "0.1.0"
+dependencies = [
+ "not-yet-done-content",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "not-yet-done-calendar-adapter"
 version = "0.1.0"
 dependencies = [

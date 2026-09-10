@@ -501,6 +501,15 @@ declared under `auth.plugins`. See
 [ADR 0010](decisions/0010-out-of-process-auth-plugins.md) for why it lives in
 the orchestrator rather than in a resolver, and the README for the protocol.
 
+The plugin that motivated it ships with nyd as `not-yet-done-auth-drunken`
+(binary `nyd-auth-drunken`): it drives a
+[drunken-browser](https://github.com/bschnitz/drunken-browser) flow over that
+browser's control socket and reports the flow's own steps as nyd's. It depends
+on `not-yet-done-content` for the line protocol and on none of the browser's
+crates — the coupling is the socket, on purpose, so the two programs can be
+built and broken apart. It is also the only crate in this workspace that talks
+to a browser at all: every adapter goes on speaking HTTP.
+
 ### Anonymization (`NYD_ANON`)
 
 For screenshots and screencasts taken against production instances, a

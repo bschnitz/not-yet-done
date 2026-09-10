@@ -16,6 +16,11 @@ waybar_dir="${XDG_CONFIG_HOME:-$HOME/.config}/waybar/cffi"
 echo "── binaries ──"
 cargo install --path not-yet-done-cli
 cargo install --path not-yet-done-tui
+# The browser auth plugin, which a user configures by writing its *name* into
+# `auth.plugins[].command` — so it has to be on the PATH, not merely built.
+# Installed whether or not anybody has configured one: a plugin that is
+# missing surfaces as a login failing at the moment somebody needs to log in.
+cargo install --path not-yet-done-auth-drunken
 
 echo "── waybar module ──"
 cargo build --release -p not-yet-done-waybar

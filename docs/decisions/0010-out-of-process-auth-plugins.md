@@ -7,7 +7,7 @@
   `AdapterStatus`, `status_reporter.rs`; the TUI and CLI status renderers;
   the `auth_session` table of the jira, confluence, stoat and taiga adapters;
   the `cookie` mechanisms of `not-yet-done-jira-adapter` and
-  `not-yet-done-confluence-adapter`
+  `not-yet-done-confluence-adapter`; `not-yet-done-auth-drunken` (new)
 
 ## Context
 
@@ -270,19 +270,45 @@ share one script.
 - **Jira and Confluence get an interactive SSO login with no adapter code.**
   Their `cookie` mechanism is unchanged; the script its doc has always
   promised becomes writable.
-- **The first plugin is `nyd-auth-drunken`, a binary in this repo.** The
-  protocol is nyd's, and drunken-browser stays an external program reached
-  over its own documented socket wire; nothing of it is linked in here. The
-  translation is close to a table, because that wire already carries the same
-  four kinds of message:
+- **The first plugin is `nyd-auth-drunken`, a binary in this repo**
+  (`not-yet-done-auth-drunken`). The protocol is nyd's, and drunken-browser
+  stays an external program reached over its own documented socket wire;
+  nothing of it is linked in here, and the JSON of that wire is written by
+  hand. Two programs that share a socket can be built, released and broken
+  separately; two that share a crate cannot. The translation is close to a
+  table, because that wire already carries the same four kinds of message:
 
-  | This protocol | drunken-browser `News` |
-  | ------------- | ---------------------- |
-  | `step`        | `Run { happened }`     |
-  | `attention`   | `Told { said }`        |
-  | `form`        | `Asking { hole }`      |
-  | `input`       | `Ask::FlowAnswer`      |
-  | `result`      | `Over { yielded }`     |
+  | This protocol | drunken-browser `News`      |
+  | ------------- | --------------------------- |
+  | `step`        | `Run { happened }`, `began` |
+  | `attention`   | `Told { said }`             |
+  | `form`        | `Asking { hole }`           |
+  | `input`       | `Ask::FlowAnswer`           |
+  | `result`      | `Over { yielded }`          |
+
+  Only a step the run _began_ becomes a `step`: every action inside one would
+  be a status changing faster than anybody can read it, and the step is what
+  the flow's author named. A `tell:` has no end of its own, so the next thing
+  the run does is what withdraws the attention.
+
+- **The nyd half of the protocol is a dependency of the plugin, the browser
+  half is not.** `ToPlugin` and the line a plugin writes are public and
+  round-trip, so a plugin written in Rust reads what nyd wrote instead of
+  transcribing its shape into a second set of types. Writing one protocol
+  down twice inside one workspace is how two spellings of it start to differ
+  — which is the argument _against_ linking drunken-browser turned around,
+  and lands the other way because that code is on the far side of a release
+  boundary and this is not.
+
+- **This plugin declines the session nyd offers it.** A browser's session is
+  its profile, which is on disk and outlives the process; handing the blob
+  back would mean putting a live cookie through the run's facts, which are
+  shown as the run goes. The offer stands for plugins that can use it.
+
+- **A browser a plugin starts is a browser a plugin quits.** It runs headless
+  on a private socket and puts a window up only while the run needs a person,
+  because a login that runs unattended cannot borrow the browser the user is
+  reading the news in.
 
 - **`not-yet-done-office365-web` is not touched.** It drives a browser for
   the _data_, not for a secret, and this protocol is about a secret. It may

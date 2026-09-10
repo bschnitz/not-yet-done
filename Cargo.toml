@@ -13,6 +13,7 @@ members = [
   "not-yet-done-table",
   "not-yet-done-waybar",
   "not-yet-done-content",
+  "not-yet-done-auth-drunken",
   "not-yet-done-filter",
   "rowsieve",
   "not-yet-done-extended-query",

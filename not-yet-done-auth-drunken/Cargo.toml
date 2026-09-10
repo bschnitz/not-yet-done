@@ -1,0 +1,22 @@
+[package]
+name = "not-yet-done-auth-drunken"
+version = "0.1.0"
+edition = "2024"
+
+# The binary is `nyd-auth-drunken` and not the crate's name: it is what a
+# user writes into `command:` in their auth config, and nothing about that
+# line should have to know how this workspace names its crates.
+[[bin]]
+name = "nyd-auth-drunken"
+path = "src/main.rs"
+
+[dependencies]
+# nyd's own side of the plugin protocol, so the line shapes are written
+# down once. drunken-browser's half is deliberately *not* a dependency —
+# see the module doc in `src/main.rs`.
+not-yet-done-content = { path = "../not-yet-done-content" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
