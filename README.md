@@ -2135,10 +2135,11 @@ with the ids that adapter does support — instead of failing at the first login
 | `file`          | a file's contents                                          | `path`, `trim` (default `true`)                    |
 | `command`       | a shell command's stdout                                   | `script`, `timeout_secs` (30), `retries` (3)       |
 | `script-result` | the auth block's `script` (see below)                      | — (the field name is the key)                      |
+| `plugin`        | one of the auth block's `plugins` (see below)              | `use` (the plugin's name)                          |
 | `script`        | a credential script run for this one slot (see below)      | `script`, `field` (optional), `timeout_secs` (120) |
 | `keyring`       | the OS keyring (secret-service / Keychain / Cred. Manager) | `service`, `account`                               |
 
-`prompt` and `script-result` need a frontend: the TUI shows the credential
+`prompt`, `script-result` and `plugin` need a frontend: the TUI shows the credential
 popup, the CLI asks on the terminal, and a command with no terminal (a pipe, a
 cron job) fails with "no terminal to ask on" rather than hanging. `script` only
 _may_ need one — it asks nothing while the store it reads is unlocked.
@@ -2351,6 +2352,80 @@ Nothing forces the whole connection into the block. A hop with an unencrypted
 key stays `{ kind: public_key }` with no passphrase, and a database password
 that lives in the OS keyring stays `{ type: keyring }` — only the slots that
 would otherwise ask the user need to delegate.
+
+#### Auth plugins (`plugins:` + `type: plugin`)
+
+A credential script is a fresh process per round, which is exactly wrong for a
+login that lives in a browser: a half-finished SSO bounce **is** the process
+state, and restarting it lands back on the login page. Such a login also takes
+minutes, and spends part of them waiting on the person — approving a push
+notification, touching a key — which a protocol that may say nothing between
+question and answer cannot express.
+
+An **auth plugin** is that same conversation held by one long-lived process.
+It is declared by name, so one adapter can use a browser for its session
+cookie and something else for another slot:
+
+```yaml
+auth:
+  mechanism: cookie
+  session_cache: { kind: ttl, ttl_secs: 28800 }
+  plugins:
+    - name: sso
+      command: nyd-auth-drunken --flow jira-sso
+      timeout_secs: 60 # optional; per step, not per login
+      attention_timeout_secs: 300 # optional; while it waits on you
+  bindings:
+    - field: cookie
+      provider: { type: plugin, use: sso }
+```
+
+Fields naming the same plugin are served by one invocation, as `script-result`
+fields share one script. A `use:` naming a plugin that is not declared, a name
+declared twice, and a declared plugin no binding uses are all rejected when the
+config is read.
+
+##### The line protocol
+
+One JSON object per line, both ways, for the whole login. **stdout is the
+protocol, stderr is the log** — a plugin that prints a diagnostic to stdout
+breaks the conversation, which is why it has somewhere else to print it.
+
+nyd writes:
+
+| Line                                                           | Meaning                                                                                                                                |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `{"start":{"protocol":1,"request":["cookie"],"session":null}}` | Once, first. `session` is the blob that just expired, offered so a plugin can refresh instead of logging in again.                     |
+| `{"input":{"otp":"424242"}}`                                   | The answers to the form last asked, accumulating across forms as a credential script's `input` does.                                   |
+| `{"cancel":{}}`                                                | Give up and shut down. The plugin then has a few seconds to clean up — long enough to close a browser it opened — before it is killed. |
+
+The plugin writes:
+
+| Line                                                           | Meaning                                                                               |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `{"step":"signing in"}`                                        | Any number, any time. Becomes the connect status and restarts its clock.              |
+| `{"attention":"Approve the sign-in in your Authenticator"}`    | A step that will not move until you act somewhere else. Frontends make this one loud. |
+| `{"attention":null}`                                           | That wait is over; the status returns to the step it was on.                          |
+| `{"form":{…}}`                                                 | The credential script's form, rendered the same way and answered with `input`.        |
+| `{"result":{"cookie":"…"},"expires_at_unix_ms":1757500000000}` | Ends it. Every name in `request` must be present; the expiry is optional.             |
+| `{"error":"the account is locked"}`                            | Give up, with this message shown to the user.                                         |
+
+`timeout_secs` is a deadline **per step**, refreshed by every line: progress is
+the heartbeat, so a plugin that keeps reporting may take as long as it takes,
+and one that goes quiet fails. While an `attention` stands, the longer
+`attention_timeout_secs` applies — a person at a second factor takes as long as
+they take. No ETA is asked of a plugin: for a wait on a human it could only be
+invented. At most 5 forms, as for a credential script.
+
+Only `result` carries secret values. `step`, `attention` and `form` reach the
+status line, the log and possibly a desktop notification, so a plugin must put
+no secret in them.
+
+`expires_at_unix_ms` is honoured as an upper bound on `session_cache`, never as
+an extension of it: a session known to be dead is not worth an attempt,
+whatever the policy would have allowed. And unlike a prompt's, a plugin's
+values are not cached between logins — what it fetches _is_ the session, and
+replaying an expired cookie would only mint the same expired session again.
 
 #### Session cache
 

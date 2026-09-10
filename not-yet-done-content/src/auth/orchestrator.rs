@@ -33,6 +33,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, oneshot, watch};
 
+use super::auth_plugin::{PluginSaid, PluginSession};
 use super::credential_script::{self, MAX_SCRIPT_ROUNDS, ScriptRound};
 use super::session_store::{SessionEntry, SessionStore};
 use super::{
@@ -85,11 +86,20 @@ pub struct AuthOrchestrator {
     /// Mechanism fields the credential script supplies, in config order.
     /// They travel to the script as one `request` list.
     script_fields: Vec<String>,
+    /// Mechanism fields an auth plugin supplies, grouped by the plugin
+    /// they name. One group is one invocation, in config order — the same
+    /// bargain `script_fields` makes, once per named plugin.
+    plugin_fields: Vec<(String, Vec<String>)>,
     /// Cache of values supplied via the interactive path (prompts and
     /// finished forms alike), keyed by mechanism field. Cleared by
     /// `re_authenticate` / `invalidate_credentials` along with the
     /// resolver caches.
     interactive_cache: RwLock<HashMap<String, String>>,
+    /// The earliest expiry the auth plugins put on the values they handed
+    /// over during the login that is running. Reset when that login starts
+    /// asking them, so a session never inherits the deadline of the one
+    /// before it.
+    plugin_expiry: RwLock<Option<SystemTime>>,
     /// Pending prompt awaiter — set when the orchestrator publishes
     /// `NeedsCreds` and waits for `submit_credentials`.
     pending_prompt: Mutex<Option<oneshot::Sender<HashMap<String, String>>>>,
@@ -140,10 +150,17 @@ impl AuthOrchestrator {
         let mut resolvers: HashMap<String, Box<dyn CredentialResolver>> = HashMap::new();
         let mut prompt_fields = Vec::new();
         let mut script_fields = Vec::new();
+        let mut plugin_fields: Vec<(String, Vec<String>)> = Vec::new();
         for binding in &spec.bindings {
             match &binding.provider {
                 CredentialProvider::Prompt { .. } => prompt_fields.push(binding.clone()),
                 CredentialProvider::ScriptResult => script_fields.push(binding.field.clone()),
+                CredentialProvider::Plugin { name } => {
+                    match plugin_fields.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, fields)) => fields.push(binding.field.clone()),
+                        None => plugin_fields.push((name.clone(), vec![binding.field.clone()])),
+                    }
+                }
                 other => {
                     let mut r = other.build_resolver().map_err(AuthError::Misconfigured)?;
                     // A resolver that retries or waits internally is the one
@@ -161,12 +178,24 @@ impl AuthOrchestrator {
                 "bindings use `script-result` but the auth block names no `script`".into(),
             ));
         }
+        // Same restatement for the plugin half of the pair: `use:` names an
+        // entry of `plugins:`, and a name with no entry behind it would
+        // otherwise only fail once someone tried to log in.
+        for (name, _) in &plugin_fields {
+            if !spec.plugins.iter().any(|p| &p.name == name) {
+                return Err(AuthError::Misconfigured(format!(
+                    "a binding uses the auth plugin `{name}`, which the auth block never declares"
+                )));
+            }
+        }
         Ok(Self {
             spec,
             resolvers,
             prompt_fields,
             script_fields,
+            plugin_fields,
             interactive_cache: RwLock::new(HashMap::new()),
+            plugin_expiry: RwLock::new(None),
             pending_prompt: Mutex::new(None),
             auth_mutex: Mutex::new(()),
             session_store,
@@ -201,6 +230,7 @@ impl AuthOrchestrator {
         Fut: std::future::Future<Output = Result<String, String>>,
     {
         let _guard = self.auth_mutex.lock().await;
+        let mut stale = None;
         if let Some(entry) = self.session_store.load().await {
             if self.is_session_valid(&entry) {
                 self.status.ready();
@@ -210,8 +240,12 @@ impl AuthOrchestrator {
                 });
             }
             self.session_store.delete().await;
+            // Expired by our own policy is not the same as refused: the
+            // login that mints it may still be able to refresh it, and an
+            // auth plugin is told so. See `run_auth_plugin`.
+            stale = Some(entry.blob);
         }
-        self.run_login(login).await
+        self.run_login(login, stale.as_deref()).await
     }
 
     /// Re-authenticate from scratch: drop the stored session and ALL
@@ -230,7 +264,10 @@ impl AuthOrchestrator {
             r.invalidate().await;
         }
         self.interactive_cache.write().await.clear();
-        self.run_login(login).await
+        // No stale session here on purpose: this path exists because the
+        // server refused the one we had, and offering it back to be
+        // refreshed is how a rejection loop starts.
+        self.run_login(login, None).await
     }
 
     /// Reply path for `AdapterStatus::NeedsCreds`. Routes `fields` back
@@ -280,6 +317,9 @@ impl AuthOrchestrator {
             .save(SessionEntry {
                 blob,
                 created_at: self.clock.now(),
+                // A refreshed session is the adapter's own; whatever a
+                // plugin said about the one it replaced does not apply.
+                expires_at: None,
             })
             .await;
     }
@@ -303,6 +343,13 @@ impl AuthOrchestrator {
     // --- internals ------------------------------------------------------
 
     fn is_session_valid(&self, entry: &SessionEntry) -> bool {
+        // A stated expiry outranks every policy: `until-rejected` means
+        // "we cannot tell from here", and this is a case where we can.
+        if let Some(expires_at) = entry.expires_at {
+            if self.clock.now() >= expires_at {
+                return false;
+            }
+        }
         match self.spec.session_cache {
             SessionCachePolicy::None => false,
             SessionCachePolicy::Ttl { ttl_secs } | SessionCachePolicy::TtlOrClose { ttl_secs } => {
@@ -317,13 +364,17 @@ impl AuthOrchestrator {
         }
     }
 
-    async fn run_login<F, Fut>(&self, login: F) -> Result<ResolvedSession, AuthError>
+    async fn run_login<F, Fut>(
+        &self,
+        login: F,
+        stale: Option<&str>,
+    ) -> Result<ResolvedSession, AuthError>
     where
         F: FnOnce(HashMap<String, String>) -> Fut,
         Fut: std::future::Future<Output = Result<String, String>>,
     {
         self.status.begin_connect();
-        let credentials = self.resolve_credentials().await?;
+        let credentials = self.resolve_credentials(stale).await?;
         // Whatever turning the credentials into a session takes — for most
         // mechanisms nothing, for a token exchange a round trip.
         self.status.connect_step("signing in");
@@ -333,6 +384,7 @@ impl AuthOrchestrator {
                 .save(SessionEntry {
                     blob: blob.clone(),
                     created_at: self.clock.now(),
+                    expires_at: *self.plugin_expiry.read().await,
                 })
                 .await;
         }
@@ -343,7 +395,10 @@ impl AuthOrchestrator {
         })
     }
 
-    async fn resolve_credentials(&self) -> Result<HashMap<String, String>, AuthError> {
+    async fn resolve_credentials(
+        &self,
+        stale: Option<&str>,
+    ) -> Result<HashMap<String, String>, AuthError> {
         let mut values = HashMap::new();
 
         for binding in &self.spec.bindings {
@@ -388,6 +443,21 @@ impl AuthOrchestrator {
                 }
                 drop(cache);
                 for (k, v) in collected {
+                    values.insert(k, v);
+                }
+            }
+        }
+
+        // Plugins run on every login, and their values are not cached.
+        // What a plugin fetches *is* the session — replaying an expired
+        // cookie would only mint the same expired session again, and the
+        // plugin is the one thing here that can tell the difference. A
+        // prompt is the opposite case: asking a person twice for the same
+        // password is rude, so those stay cached above.
+        if !self.plugin_fields.is_empty() {
+            *self.plugin_expiry.write().await = None;
+            for (name, fields) in &self.plugin_fields {
+                for (k, v) in self.run_auth_plugin(name, fields, stale).await? {
                     values.insert(k, v);
                 }
             }
@@ -522,12 +592,163 @@ impl AuthOrchestrator {
             ),
         )))
     }
+    /// Run one auth plugin until it hands over the fields bound to it.
+    ///
+    /// One process for the whole login, not one per round: a half-finished
+    /// browser session *is* process state, and a plugin restarted between
+    /// rounds would start over at the login page every time. What it says
+    /// on the way goes straight onto the connect status — the steps as
+    /// steps, and "the person has to act somewhere else" as an attention
+    /// the frontend can be loud about.
+    ///
+    /// `stale` is the session that just expired, offered so a plugin can
+    /// refresh rather than log in again.
+    async fn run_auth_plugin(
+        &self,
+        name: &str,
+        fields: &[String],
+        stale: Option<&str>,
+    ) -> Result<HashMap<String, String>, AuthError> {
+        // Restated from `from_spec_with_status`, which already refused an
+        // unknown name — so this is the impossible case, not the user's.
+        let plugin = self
+            .spec
+            .plugins
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| AuthError::Misconfigured(format!("no auth plugin named `{name}`")))?;
+        let request: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let patience = Duration::from_secs(plugin.timeout_secs);
+        let attention_patience = Duration::from_secs(plugin.attention_timeout_secs);
+
+        let mut step = format!("starting the `{name}` auth plugin");
+        self.status
+            .connect_phase(step.clone(), 1, plugin.timeout_secs);
+        let mut session = PluginSession::start(name, &plugin.command, &request, stale).await?;
+
+        // Every answer so far, as the credential script's rounds carry
+        // them: a plugin that re-asks a form gets back what was already
+        // typed, and only the runtime is in a position to keep that.
+        let mut input: BTreeMap<String, String> = BTreeMap::new();
+        let mut forms = 0usize;
+        // Whose patience is running: ours, or the person's.
+        let mut waiting_on_the_user = false;
+
+        loop {
+            let waited = if waiting_on_the_user {
+                attention_patience
+            } else {
+                patience
+            };
+            let said = match session.next(waited).await {
+                Ok(said) => said,
+                Err(e) => {
+                    session.cancel().await;
+                    return Err(AuthError::Credential(e));
+                }
+            };
+            match said {
+                PluginSaid::Step(named) => {
+                    step = named;
+                    waiting_on_the_user = false;
+                    self.status
+                        .connect_phase(step.clone(), 1, plugin.timeout_secs);
+                }
+                PluginSaid::Attention(message) => {
+                    waiting_on_the_user = true;
+                    self.status
+                        .connect_attention(message, plugin.attention_timeout_secs);
+                }
+                PluginSaid::AttentionOver => {
+                    waiting_on_the_user = false;
+                    // Back to the step it was on: the plugin has not yet
+                    // said what comes next, and inventing a name for it
+                    // would be worse than repeating the last true one.
+                    self.status
+                        .connect_phase(step.clone(), 1, plugin.timeout_secs);
+                }
+                PluginSaid::Form(form) => {
+                    forms += 1;
+                    if forms > MAX_SCRIPT_ROUNDS {
+                        session.cancel().await;
+                        return Err(AuthError::Credential(CredentialError::ProviderError(
+                            format!(
+                                "auth plugin `{name}` still asked for input after \
+                                 {MAX_SCRIPT_ROUNDS} forms"
+                            ),
+                        )));
+                    }
+                    let fields: Vec<AuthField> = form
+                        .fields
+                        .iter()
+                        .map(|f| AuthField {
+                            name: f.name.clone(),
+                            label: f.effective_label(),
+                            masked: f.masked,
+                            optional: f.optional,
+                            prefill: f.prefill.clone(),
+                        })
+                        .collect();
+                    let answers = match self.ask(fields, form.header, form.error).await {
+                        Ok(answers) => answers,
+                        // Esc on the form ends the login; the plugin is
+                        // told rather than left holding a browser open.
+                        Err(e) => {
+                            session.cancel().await;
+                            return Err(e);
+                        }
+                    };
+                    for f in &form.fields {
+                        if let Some(v) = answers.get(&f.name) {
+                            input.insert(f.name.clone(), v.clone());
+                        }
+                    }
+                    if let Err(e) = session.answer(&input).await {
+                        session.cancel().await;
+                        return Err(AuthError::Credential(e));
+                    }
+                    waiting_on_the_user = false;
+                    self.status
+                        .connect_phase(step.clone(), 1, plugin.timeout_secs);
+                }
+                PluginSaid::Values {
+                    values,
+                    expires_at_unix_ms,
+                } => {
+                    session.finish().await;
+                    if let Some(ms) = expires_at_unix_ms {
+                        let expires_at = SystemTime::UNIX_EPOCH + Duration::from_millis(ms);
+                        let mut known = self.plugin_expiry.write().await;
+                        // Several plugins, several expiries: the session is
+                        // only good until the first of them runs out.
+                        *known = Some(match *known {
+                            Some(earlier) => earlier.min(expires_at),
+                            None => expires_at,
+                        });
+                    }
+                    // Completeness against `request` is checked while the
+                    // line is parsed, so every key is present here.
+                    return Ok(request
+                        .iter()
+                        .map(|f| ((*f).to_string(), values[*f].clone()))
+                        .collect());
+                }
+                PluginSaid::Failed(message) => {
+                    session.finish().await;
+                    return Err(AuthError::Credential(CredentialError::ProviderError(
+                        format!("auth plugin `{name}`: {message}"),
+                    )));
+                }
+            }
+        }
+    }
 }
 
 // --- Tests ---------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use super::super::PluginSpec;
     use super::super::session_store::InMemorySessionStore;
     use super::*;
     use std::sync::Mutex as StdMutex;
@@ -1505,5 +1726,355 @@ esac
             .await
             .expect_err("must fail");
         assert!(matches!(err, AuthError::Credential(_)));
+    }
+
+    // --- auth plugins ---------------------------------------------------
+
+    fn plugin_spec(command: &str, policy: SessionCachePolicy) -> AuthSpec {
+        AuthSpec {
+            mechanism: "cookie".into(),
+            session_cache: policy,
+            script: None,
+            script_timeout_secs: 10,
+            plugins: vec![PluginSpec {
+                name: "sso".into(),
+                command: command.to_string(),
+                timeout_secs: 10,
+                attention_timeout_secs: 10,
+            }],
+            bindings: vec![CredentialBinding {
+                field: "cookie".into(),
+                provider: CredentialProvider::Plugin { name: "sso".into() },
+                label: None,
+                masked: None,
+            }],
+        }
+    }
+
+    /// Wait until the connect status satisfies `want`, so a test can pin a
+    /// step the plugin is *holding* rather than race the status channel —
+    /// a watch channel only keeps the newest value, and two lines printed
+    /// back to back would collapse into one.
+    async fn wait_for_connect(
+        rx: &mut watch::Receiver<AdapterStatus>,
+        want: impl Fn(&str, bool) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let status = rx.borrow_and_update();
+                if let AdapterStatus::Connecting {
+                    step: Some(step),
+                    attention,
+                    ..
+                } = &*status
+                {
+                    if want(step, *attention) {
+                        return;
+                    }
+                }
+            }
+            tokio::time::timeout_at(deadline, rx.changed())
+                .await
+                .expect("the status never arrived")
+                .expect("the status channel closed");
+        }
+    }
+
+    /// A plugin that holds each step until the test opens the gate, so the
+    /// status for that step is observable rather than overwritten.
+    fn gate(path: &std::path::Path, name: &str) -> String {
+        format!(
+            "while [ ! -f {} ]; do sleep 0.01; done",
+            path.join(name).display()
+        )
+    }
+
+    fn open_gate(path: &std::path::Path, name: &str) {
+        std::fs::write(path.join(name), "").expect("open the gate");
+    }
+
+    /// The everyday case: one process says what it is doing and hands the
+    /// cookie over. The steps it names reach the status channel — which is
+    /// the whole reason a plugin is not a `command` provider.
+    #[tokio::test]
+    async fn a_plugin_reports_its_steps_and_hands_over_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = write_script(
+            dir.path(),
+            "sso.sh",
+            &format!(
+                r#"#!/bin/sh
+read -r start
+echo '{{"step":"opening the login page"}}'
+{}
+echo '{{"step":"reading the session cookie"}}'
+echo '{{"result":{{"cookie":"c-42"}}}}'
+"#,
+                gate(dir.path(), "go")
+            ),
+        );
+        let orch = Arc::new(build(
+            plugin_spec(&plugin, SessionCachePolicy::None),
+            TestClock::new(SystemTime::UNIX_EPOCH),
+        ));
+        let mut rx = orch.subscribe_status();
+
+        let orch_in = orch.clone();
+        let login = tokio::spawn(async move {
+            orch_in
+                .ensure_session(|creds| async move {
+                    assert_eq!(creds["cookie"], "c-42");
+                    Ok::<_, String>("blob".into())
+                })
+                .await
+        });
+
+        wait_for_connect(&mut rx, |step, _| step == "opening the login page").await;
+        open_gate(dir.path(), "go");
+        assert_eq!(login.await.unwrap().unwrap().blob, "blob");
+    }
+
+    /// Waiting on a person is its own state: the step says what to do and
+    /// the status says nothing will move until they do it. Taking it back
+    /// keeps the step, because the plugin has not yet named the next one.
+    #[tokio::test]
+    async fn waiting_on_the_user_is_announced_and_taken_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = write_script(
+            dir.path(),
+            "push.sh",
+            &format!(
+                r#"#!/bin/sh
+read -r start
+echo '{{"step":"signing in"}}'
+echo '{{"attention":"Approve the sign-in in your Authenticator"}}'
+{}
+echo '{{"attention":null}}'
+{}
+echo '{{"result":{{"cookie":"c-42"}}}}'
+"#,
+                gate(dir.path(), "tapped"),
+                gate(dir.path(), "done")
+            ),
+        );
+        let orch = Arc::new(build(
+            plugin_spec(&plugin, SessionCachePolicy::None),
+            TestClock::new(SystemTime::UNIX_EPOCH),
+        ));
+        let mut rx = orch.subscribe_status();
+
+        let orch_in = orch.clone();
+        let login = tokio::spawn(async move {
+            orch_in
+                .ensure_session(|_| async move { Ok::<_, String>("blob".into()) })
+                .await
+        });
+
+        wait_for_connect(&mut rx, |step, attention| {
+            step == "Approve the sign-in in your Authenticator" && attention
+        })
+        .await;
+        open_gate(dir.path(), "tapped");
+
+        wait_for_connect(&mut rx, |step, attention| {
+            step == "signing in" && !attention
+        })
+        .await;
+        open_gate(dir.path(), "done");
+        assert_eq!(login.await.unwrap().unwrap().blob, "blob");
+    }
+
+    /// A form mid-login is answered by the same process — the point of a
+    /// long-lived plugin, since a browser cannot survive a restart.
+    #[tokio::test]
+    async fn a_form_is_answered_without_restarting_the_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = write_script(
+            dir.path(),
+            "otp.sh",
+            r#"#!/bin/sh
+read -r start
+echo '{"form":{"header":"Two-factor","fields":[{"name":"otp","label":"Code","masked":false}]}}'
+read -r answer
+case "$answer" in
+  *'"otp":"424242"'*) echo '{"result":{"cookie":"c-42"}}' ;;
+  *) echo '{"error":"wrong code"}' ;;
+esac
+"#,
+        );
+        let orch = Arc::new(build(
+            plugin_spec(&plugin, SessionCachePolicy::None),
+            TestClock::new(SystemTime::UNIX_EPOCH),
+        ));
+        let mut rx = orch.subscribe_status();
+
+        let orch_in = orch.clone();
+        let login = tokio::spawn(async move {
+            orch_in
+                .ensure_session(|creds| async move {
+                    assert_eq!(creds["cookie"], "c-42");
+                    Ok::<_, String>("blob".into())
+                })
+                .await
+        });
+
+        loop {
+            rx.changed().await.unwrap();
+            if let AdapterStatus::NeedsCreds { fields, header, .. } = &*rx.borrow() {
+                assert_eq!(fields[0].name, "otp");
+                assert_eq!(header.as_deref(), Some("Two-factor"));
+                break;
+            }
+        }
+        let mut reply = HashMap::new();
+        reply.insert("otp".to_string(), "424242".to_string());
+        orch.submit_credentials(reply).await.unwrap();
+        assert_eq!(login.await.unwrap().unwrap().blob, "blob");
+    }
+
+    /// A plugin that gives up ends the login with its own message, so the
+    /// user reads why rather than "credential resolution failed".
+    #[tokio::test]
+    async fn a_plugin_that_gives_up_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = write_script(
+            dir.path(),
+            "locked.sh",
+            r#"#!/bin/sh
+read -r start
+echo '{"error":"the account is locked"}'
+"#,
+        );
+        let orch = build(
+            plugin_spec(&plugin, SessionCachePolicy::None),
+            TestClock::new(SystemTime::UNIX_EPOCH),
+        );
+        let err = orch
+            .ensure_session(|_| async move { Ok::<_, String>("blob".into()) })
+            .await
+            .expect_err("the plugin refused");
+        assert!(
+            err.to_string().contains("the account is locked"),
+            "got: {err}"
+        );
+    }
+
+    /// An expiry the plugin states outranks the cache policy: `explicit`
+    /// would have kept the session forever, and the cookie stops working
+    /// at a time only the plugin could know.
+    #[tokio::test]
+    async fn an_expiry_the_plugin_states_ends_the_session_early() {
+        let dir = tempfile::tempdir().unwrap();
+        // Expires an hour after the epoch, which is where the clock starts.
+        let plugin = write_script(
+            dir.path(),
+            "dated.sh",
+            r#"#!/bin/sh
+read -r start
+echo '{"result":{"cookie":"c-42"},"expires_at_unix_ms":3600000}'
+"#,
+        );
+        let clock = TestClock::new(SystemTime::UNIX_EPOCH);
+        let orch = build(
+            plugin_spec(&plugin, SessionCachePolicy::Explicit),
+            clock.clone(),
+        );
+        let logins = Arc::new(AtomicUsize::new(0));
+
+        let counted = logins.clone();
+        orch.ensure_session(|_| async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, String>("blob".into())
+        })
+        .await
+        .unwrap();
+
+        clock.advance(Duration::from_secs(59 * 60));
+        let counted = logins.clone();
+        let cached = orch
+            .ensure_session(|_| async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, String>("blob".into())
+            })
+            .await
+            .unwrap();
+        assert!(cached.from_cache, "still inside the stated expiry");
+
+        clock.advance(Duration::from_secs(2 * 60));
+        let counted = logins.clone();
+        let fresh = orch
+            .ensure_session(|_| async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, String>("blob".into())
+            })
+            .await
+            .unwrap();
+        assert!(!fresh.from_cache, "past it, whatever the policy allows");
+        assert_eq!(logins.load(Ordering::SeqCst), 2);
+    }
+
+    /// The session that just expired is offered back, so a plugin can
+    /// refresh instead of logging in again — and a rejected one is not.
+    #[tokio::test]
+    async fn the_expired_session_is_offered_back_for_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = write_script(
+            dir.path(),
+            "refresh.sh",
+            r#"#!/bin/sh
+read -r start
+case "$start" in
+  *'"session":"blob-1"'*) echo '{"result":{"cookie":"refreshed"}}' ;;
+  *'"session":null'*) echo '{"result":{"cookie":"fresh"}}' ;;
+  *) echo '{"error":"unexpected start line"}' ;;
+esac
+"#,
+        );
+        let clock = TestClock::new(SystemTime::UNIX_EPOCH);
+        let orch = build(
+            plugin_spec(&plugin, SessionCachePolicy::Ttl { ttl_secs: 60 }),
+            clock.clone(),
+        );
+
+        orch.ensure_session(|creds| async move {
+            assert_eq!(creds["cookie"], "fresh");
+            Ok::<_, String>("blob-1".into())
+        })
+        .await
+        .unwrap();
+
+        clock.advance(Duration::from_secs(61));
+        orch.ensure_session(|creds| async move {
+            assert_eq!(
+                creds["cookie"], "refreshed",
+                "the plugin was told which session had expired"
+            );
+            Ok::<_, String>("blob-2".into())
+        })
+        .await
+        .unwrap();
+
+        // Rejected is not expired: there is nothing to refresh.
+        orch.re_authenticate(|creds| async move {
+            assert_eq!(creds["cookie"], "fresh");
+            Ok::<_, String>("blob-3".into())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// A binding may only name a plugin the auth block declares — the
+    /// same pairing `script-result` without `script` is refused for.
+    #[tokio::test]
+    async fn a_binding_naming_an_undeclared_plugin_is_a_construction_error() {
+        let mut spec = plugin_spec("true", SessionCachePolicy::None);
+        spec.plugins.clear();
+        let built = AuthOrchestrator::from_spec(spec, Box::new(InMemorySessionStore::new()));
+        match built {
+            Err(AuthError::Misconfigured(m)) => assert!(m.contains("never declares"), "got: {m}"),
+            Err(other) => panic!("wrong error: {other}"),
+            Ok(_) => panic!("a binding with no plugin behind it must not construct"),
+        }
     }
 }
