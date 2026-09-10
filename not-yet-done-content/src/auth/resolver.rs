@@ -134,7 +134,7 @@ impl CredentialProvider {
                 Duration::from_secs(*timeout_secs),
                 prompts.cloned(),
             ))),
-            // Both need a frontend in the loop (see
+            // These three need a frontend in the loop (see
             // `CredentialProvider::needs_frontend`), which only the
             // orchestrator can reach.
             CredentialProvider::Prompt { .. } => Err(
@@ -144,6 +144,13 @@ impl CredentialProvider {
             ),
             CredentialProvider::ScriptResult => Err(
                 "script-result provider must be wired up by the auth orchestrator, \
+                 not from build_resolver"
+                    .into(),
+            ),
+            // And a plugin for a third reason besides its form: the steps
+            // it reports go onto the orchestrator's status channel.
+            CredentialProvider::Plugin { .. } => Err(
+                "plugin provider must be wired up by the auth orchestrator, \
                  not from build_resolver"
                     .into(),
             ),

@@ -52,8 +52,8 @@ pub use scaffold::{
 
 pub use auth::{
     AuthError, AuthFieldSpec, AuthOrchestrator, AuthSpec, CredentialBinding, CredentialProvider,
-    InMemorySessionStore, MechanismSpec, ResolvedSession, SessionCachePolicy, SessionEntry,
-    SessionStore,
+    InMemorySessionStore, MechanismSpec, PluginSpec, ResolvedSession, SessionCachePolicy,
+    SessionEntry, SessionStore,
 };
 pub use editor_marks::NOT_YOURS_MARKER;
 pub use http_send::{Repeat, RetryConfig};

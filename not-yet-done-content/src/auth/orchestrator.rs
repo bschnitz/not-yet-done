@@ -562,6 +562,7 @@ mod tests {
             session_cache: policy,
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![CredentialBinding {
                 field: "token".into(),
                 provider,
@@ -577,6 +578,7 @@ mod tests {
             session_cache: policy,
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![
                 CredentialBinding {
                     field: "username".into(),
@@ -619,6 +621,7 @@ mod tests {
             session_cache: SessionCachePolicy::None,
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![
                 binding(CredentialProvider::Literal { value: "a".into() }),
                 binding(CredentialProvider::Literal { value: "b".into() }),
@@ -947,6 +950,7 @@ esac
             session_cache: policy,
             script: Some(script.to_string()),
             script_timeout_secs: 10,
+            plugins: Vec::new(),
             bindings: vec![binding("username"), binding("token")],
         }
     }
@@ -1231,6 +1235,7 @@ esac
             session_cache: SessionCachePolicy::None,
             script: Some(script),
             script_timeout_secs: 10,
+            plugins: Vec::new(),
             bindings: vec![
                 CredentialBinding {
                     field: "username".into(),
@@ -1340,6 +1345,7 @@ esac
             session_cache: SessionCachePolicy::None,
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![CredentialBinding {
                 field: "token".into(),
                 provider: CredentialProvider::ScriptResult,

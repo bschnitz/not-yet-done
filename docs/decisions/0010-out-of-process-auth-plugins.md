@@ -121,7 +121,7 @@ auth:
   mechanism: cookie
   session_cache: { type: ttl, ttl_secs: 28800 }
   plugins:
-    sso:
+    - name: sso
       command: nyd-auth-drunken --flow jira-sso
       timeout_secs: 60 # per step, not per login
       attention_timeout_secs: 300 # while it waits on the user
@@ -130,16 +130,27 @@ auth:
       provider: { type: plugin, use: sso }
 ```
 
-`use:` names an entry of `plugins:`; a binding naming an entry that does not
-exist is a config error at read time, like every other auth validation
-(`AuthSpec::validate_against`). The command runs through `sh -c`, so `~` and
-arguments work, as with `script:`.
+`use:` names an entry of `plugins:`. A binding naming an entry that does not
+exist, a duplicate name, and a declared plugin no binding uses are all config
+errors at read time, like every other auth validation
+(`AuthSpec::validate_against`) — the last one for the reason `script` without
+`script-result` is already rejected: half of a pair is a silent no-op. The
+command runs through `sh -c`, so `~` and arguments work, as with `script:`.
+
+`plugins:` is a list of named entries rather than a YAML map because
+`bindings:` already keys by a name inside the item, and because the schema a
+config wizard is generated from has no map shape — only scalars, nested types
+and lists.
 
 ### Protocol
 
 One JSON object per line, both ways. **stdout is the protocol, stderr is the
 log**, and they are never mixed — a plugin that prints a diagnostic to stdout
 breaks the conversation, which is why it has somewhere else to print it.
+Unlike a credential script's, that stderr is inherited rather than captured
+and quoted back on failure: a long-lived process writing into a pipe nobody
+drains until it exits would eventually block on a full one. A plugin that
+wants something shown to the user says `error`.
 
 nyd writes:
 
@@ -209,11 +220,18 @@ anyway: drunken-browser's `tell:` refuses to say a secret.
 
 The protocol types and the line reader go into
 `not-yet-done-content/src/auth/auth_plugin.rs`, so a plugin author has one
-file to read. A `PluginResolver` in `auth/resolver.rs` owns the child process,
-takes the `StatusReporter` through `report_to` and the frontend through
-`CredentialPrompts`, and caches its result like every other resolver. Fields
-sharing an entry share one resolver, as `ScriptResult` bindings share one
-script.
+file to read.
+
+Running one is the **orchestrator's** job, not a `CredentialResolver`'s,
+beside `run_credential_script`. A resolver is the wrong place for three
+reasons and each is decisive on its own: it hands back one value and a login
+yields several, the dialog a `form` needs is reached through
+`AuthOrchestrator::ask`, and the `StatusReporter` the steps are reported on is
+the orchestrator's own. `CredentialProvider::Plugin` therefore answers `true`
+to `needs_frontend()` and its `build_resolver` refuses, as `prompt` and
+`script-result` already do. Fields naming the same entry are collected into
+one `request` and served by one process, exactly as `script-result` bindings
+share one script.
 
 ## Consequences
 

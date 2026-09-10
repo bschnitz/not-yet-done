@@ -12,8 +12,13 @@
 //!
 //! - **Provider** ([`CredentialProvider`]): where the *runtime* fetches
 //!   the credential value from — literal config, prompt, env var, file,
-//!   shell command, or OS keyring. Per-field, since one mechanism may
-//!   need several fields (username + password) from different sources.
+//!   shell command, an auth plugin, or the OS keyring. Per-field, since
+//!   one mechanism may need several fields (username + password) from
+//!   different sources.
+//!
+//! A provider is never a layer everything passes through: an adapter whose
+//! login fits in Rust publishes a mechanism for it (`password-login`
+//! derives its own session) and meets none of this.
 //!
 //! On top of that sits [`SessionCachePolicy`] which controls the lifetime
 //! of any session token the adapter *derives* from the credentials (e.g.
@@ -26,11 +31,13 @@ use std::path::PathBuf;
 use fieldsmith::Buildable;
 use serde::Deserialize;
 
+mod auth_plugin;
 mod credential_script;
 mod orchestrator;
 mod resolver;
 mod session_store;
 
+pub use auth_plugin::{PROTOCOL as PLUGIN_PROTOCOL, PluginSaid, PluginSession};
 pub use credential_script::{ScriptForm, ScriptFormField, ScriptRequest, ScriptRound};
 pub use orchestrator::{AuthError, AuthOrchestrator, Clock, ResolvedSession, SystemClock};
 pub use resolver::{
@@ -124,6 +131,16 @@ pub(crate) fn title_case(name: &str) -> String {
     out
 }
 
+/// Comma-separated names, for error messages that tell the user what they
+/// could have written instead.
+fn id_list_of(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Comma-separated ids, for error messages that tell the user what they
 /// could have written instead.
 fn id_list(mechanisms: &[MechanismSpec]) -> String {
@@ -206,6 +223,26 @@ pub enum CredentialProvider {
         #[serde(default = "default_script_timeout")]
         timeout_secs: u64,
     },
+    /// Take this field's value from an [`auth plugin`](crate::auth::PluginSession)
+    /// named in the auth block's `plugins:` — a helper process that stays
+    /// alive for the whole login, reports what it is doing while it runs,
+    /// and may say that it is waiting on the user doing something
+    /// elsewhere (see ADR 0010).
+    ///
+    /// For the login a Rust library cannot perform: an interactive SSO
+    /// bounce that only a real browser gets through. The round protocol
+    /// behind [`ScriptResult`](Self::ScriptResult) cannot serve it, since
+    /// it starts a fresh process per round and a half-finished browser
+    /// session does not survive one.
+    ///
+    /// `use` names the entry rather than repeating the command, so
+    /// several fields of one login share a single invocation — the same
+    /// economy `script-result` exists for, and the reason one browser
+    /// opens instead of three.
+    Plugin {
+        #[serde(rename = "use")]
+        name: String,
+    },
     /// OS keyring entry. On Linux this maps to the secret-service /
     /// libsecret backend (kwallet, gnome-keyring, …); on macOS to the
     /// Keychain; on Windows to Credential Manager.
@@ -229,6 +266,9 @@ impl CredentialProvider {
             Self::ScriptResult | Self::Script { .. } => {
                 format!("asking the credential script for {field}")
             }
+            // Only until the plugin says otherwise: it names its own steps
+            // from here on, which is the whole point of it.
+            Self::Plugin { name } => format!("starting the `{name}` auth plugin for {field}"),
             Self::Keyring { .. } => format!("reading {field} from the keyring"),
         }
     }
@@ -251,15 +291,21 @@ impl CredentialProvider {
 
     /// Whether resolving this provider needs the orchestrator rather than
     /// a standalone [`CredentialResolver`]: `prompt` because only the
-    /// frontend can answer it, `script-result` because the script is
-    /// shared by several bindings and may ask the frontend on the way.
-    /// Both go through the
+    /// frontend can answer it, `script-result` and `plugin` because the
+    /// helper is shared by several bindings and may ask the frontend on
+    /// the way. All three go through the
     /// [`AdapterStatus::NeedsCreds`](crate::AdapterStatus::NeedsCreds)
     /// contract; everything else builds its resolver up front.
+    ///
+    /// A plugin needs the orchestrator for a second reason: it reports its
+    /// steps while it runs, and the orchestrator is what holds the
+    /// [`StatusReporter`](crate::StatusReporter) they are reported on.
     pub fn needs_frontend(&self) -> bool {
         matches!(
             self,
-            CredentialProvider::Prompt { .. } | CredentialProvider::ScriptResult
+            CredentialProvider::Prompt { .. }
+                | CredentialProvider::ScriptResult
+                | CredentialProvider::Plugin { .. }
         )
     }
 
@@ -285,6 +331,41 @@ fn default_command_retries() -> u32 {
 }
 fn default_script_timeout() -> u64 {
     120
+}
+fn default_plugin_timeout() -> u64 {
+    60
+}
+fn default_plugin_attention_timeout() -> u64 {
+    300
+}
+
+/// One auth plugin the auth block may draw on.
+///
+/// A list of named entries rather than a YAML map because `bindings:`
+/// already keys by a name inside the item, and because the schema a
+/// config wizard is generated from has no map shape — only scalars,
+/// nested types and lists.
+#[derive(Deserialize, Buildable, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginSpec {
+    /// What a binding points at with `provider: { type: plugin, use: … }`.
+    pub name: String,
+    /// The command line, run through `sh -c`, so `~` and arguments work.
+    pub command: String,
+    /// Deadline for one **step**, refreshed by every step the plugin
+    /// reports: progress is the heartbeat, and a separate liveness ping
+    /// would be a second truth about the same thing. A whole-login
+    /// deadline would have to be as long as the slowest login and would
+    /// then forgive a plugin that hung on its first step.
+    #[serde(default = "default_plugin_timeout")]
+    #[builder(default = 60)]
+    pub timeout_secs: u64,
+    /// Deadline while the plugin says it is waiting on the user. Longer,
+    /// because a person at a second factor takes as long as they take and
+    /// a login must not fail underneath them.
+    #[serde(default = "default_plugin_attention_timeout")]
+    #[builder(default = 300)]
+    pub attention_timeout_secs: u64,
 }
 
 /// One field of the active mechanism, paired with its provider. The
@@ -381,6 +462,15 @@ pub struct AuthSpec {
     #[serde(default = "default_script_timeout")]
     #[builder(default = 120)]
     pub script_timeout_secs: u64,
+    /// The auth plugins bindings may name with `use:`.
+    ///
+    /// A table rather than one `plugin:` key beside `script:`, because one
+    /// adapter may want a browser for its session cookie and something
+    /// else entirely for another slot. Fields naming the same entry are
+    /// served by one invocation; fields naming different entries get
+    /// different plugins.
+    #[serde(default)]
+    pub plugins: Vec<PluginSpec>,
     pub bindings: Vec<CredentialBinding>,
 }
 
@@ -460,6 +550,59 @@ impl AuthSpec {
                 );
             }
             _ => {}
+        }
+
+        self.validate_plugins()?;
+        Ok(())
+    }
+
+    /// The same pairing check for `plugins:` and the `plugin` provider,
+    /// plus the two invariants a named table brings with it: a name is
+    /// what a binding points at, so an empty or a repeated one leaves a
+    /// binding pointing at nothing or at either of two things.
+    fn validate_plugins(&self) -> Result<(), String> {
+        let mut seen: Vec<&str> = Vec::with_capacity(self.plugins.len());
+        for plugin in &self.plugins {
+            if plugin.name.trim().is_empty() {
+                return Err("a plugin on the auth block has no `name`".to_string());
+            }
+            if seen.contains(&plugin.name.as_str()) {
+                return Err(format!("duplicate plugin `{}`", plugin.name));
+            }
+            seen.push(&plugin.name);
+            if plugin.command.trim().is_empty() {
+                return Err(format!("plugin `{}` has no `command`", plugin.name));
+            }
+        }
+
+        let mut used: Vec<&str> = Vec::new();
+        for binding in &self.bindings {
+            let CredentialProvider::Plugin { name } = &binding.provider else {
+                continue;
+            };
+            if !seen.contains(&name.as_str()) {
+                return Err(format!(
+                    "field `{}` uses the plugin `{name}`, which the auth block does not \
+                     declare{}",
+                    binding.field,
+                    if seen.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; it declares {}", id_list_of(&seen))
+                    }
+                ));
+            }
+            if !used.contains(&name.as_str()) {
+                used.push(name);
+            }
+        }
+
+        // A declared plugin nobody uses is a silent no-op, the same typo
+        // `script` without `script-result` is.
+        if let Some(idle) = seen.iter().find(|name| !used.contains(*name)) {
+            return Err(format!(
+                "plugin `{idle}` is declared on the auth block, but no binding uses it"
+            ));
         }
         Ok(())
     }
@@ -988,5 +1131,117 @@ script: >-
         // listening — so it is not in the "needs a frontend" set.
         assert!(provider.can_prompt());
         assert!(!provider.needs_frontend());
+    }
+
+    // --- auth plugins (ADR 0010) ------------------------------------------
+
+    /// The shape the `cookie` mechanism's own doc has always promised: an
+    /// SSO login fetched by a helper, with the adapter never talking to a
+    /// browser itself.
+    #[test]
+    fn a_cookie_can_be_fetched_by_a_named_plugin() {
+        let spec = parse(
+            r#"
+mechanism: cookie
+plugins:
+  - name: sso
+    command: nyd-auth-drunken --flow jira-sso
+    timeout_secs: 90
+bindings:
+  - field: cookie
+    provider: { type: plugin, use: sso }
+"#,
+        );
+        spec.validate_against(MECHANISMS).expect("a sound config");
+        assert_eq!(spec.plugins[0].name, "sso");
+        assert_eq!(spec.plugins[0].timeout_secs, 90);
+        // Only the per-step deadline was written; a person at a second
+        // factor still gets the longer one.
+        assert_eq!(spec.plugins[0].attention_timeout_secs, 300);
+        let provider = &spec.bindings[0].provider;
+        assert!(
+            provider.needs_frontend(),
+            "the orchestrator holds both the dialog and the status channel"
+        );
+        assert!(
+            provider.build_resolver().is_err(),
+            "a plugin is not a standalone resolver"
+        );
+    }
+
+    #[test]
+    fn a_binding_cannot_name_a_plugin_the_auth_block_never_declared() {
+        let spec = parse(
+            r#"
+mechanism: cookie
+plugins:
+  - name: sso
+    command: nyd-auth-drunken --flow jira-sso
+bindings:
+  - field: cookie
+    provider: { type: plugin, use: sso-typo }
+"#,
+        );
+        let err = spec.validate_against(MECHANISMS).expect_err("a typo");
+        assert!(err.contains("`sso-typo`"), "{err}");
+        assert!(err.contains("it declares `sso`"), "{err}");
+    }
+
+    /// The mirror of the `script` / `script-result` pairing check: half of
+    /// the pair is a silent no-op either way round.
+    #[test]
+    fn a_declared_plugin_nobody_uses_is_a_typo_and_not_a_spare() {
+        let spec = parse(
+            r#"
+mechanism: cookie
+plugins:
+  - name: sso
+    command: nyd-auth-drunken --flow jira-sso
+bindings:
+  - field: cookie
+    provider: { type: literal, value: "session=abc" }
+"#,
+        );
+        let err = spec.validate_against(MECHANISMS).expect_err("an idle plugin");
+        assert!(err.contains("no binding uses it"), "{err}");
+    }
+
+    /// Two fields, one plugin: the economy the whole named table exists
+    /// for — three entries would open three browsers for one login.
+    #[test]
+    fn two_fields_may_share_one_plugin() {
+        let spec = parse(
+            r#"
+mechanism: basic-auth
+plugins:
+  - name: sso
+    command: nyd-auth-drunken --flow sso
+bindings:
+  - field: username
+    provider: { type: plugin, use: sso }
+  - field: token
+    provider: { type: plugin, use: sso }
+"#,
+        );
+        spec.validate_against(MECHANISMS).expect("a sound config");
+    }
+
+    #[test]
+    fn two_plugins_cannot_answer_to_the_same_name() {
+        let spec = parse(
+            r#"
+mechanism: cookie
+plugins:
+  - name: sso
+    command: one
+  - name: sso
+    command: another
+bindings:
+  - field: cookie
+    provider: { type: plugin, use: sso }
+"#,
+        );
+        let err = spec.validate_against(MECHANISMS).expect_err("an ambiguity");
+        assert!(err.contains("duplicate plugin `sso`"), "{err}");
     }
 }
