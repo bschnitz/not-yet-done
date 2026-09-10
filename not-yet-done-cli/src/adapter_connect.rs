@@ -41,6 +41,12 @@ use tokio::sync::oneshot;
 /// command instead of parking the terminal forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The same patience, but for a login that is waiting on the *person* — an
+/// approval to tap, a code to type. A deadline against a person is a bug in
+/// the deadline: they are not slow, they are elsewhere. Still finite, because
+/// a terminal that never returns is its own kind of broken.
+const ATTENTION_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Watches the adapter's status for the duration of one CLI command.
 ///
 /// Owns the credential prompt: whenever the adapter asks for credentials the
@@ -185,6 +191,15 @@ async fn watch_status(adapter: Arc<dyn ContentAdapter>, prompter: Arc<dyn Prompt
             other => {
                 last_prompted = None;
                 if let Some(line) = other.banner_text() {
+                    // A login waiting on the person is the one line that must
+                    // not read like just another slow step: nothing will move
+                    // until they do something, somewhere else.
+                    let line = match other {
+                        AdapterStatus::Connecting {
+                            attention: true, ..
+                        } => format!("action needed — {line}"),
+                        _ => line,
+                    };
                     // Only on change — a Busy countdown ticking once a second
                     // must not scroll the terminal.
                     if last_line.as_deref() != Some(line.as_str()) {
@@ -209,7 +224,6 @@ async fn watch_status(adapter: Arc<dyn ContentAdapter>, prompter: Arc<dyn Prompt
 /// with a request in flight, which the call itself will wait out.
 pub async fn wait_until_connected(adapter: &dyn ContentAdapter) -> Result<()> {
     let mut rx = adapter.subscribe_status();
-    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
     loop {
         let status = rx.borrow_and_update().clone();
         match &status {
@@ -219,14 +233,25 @@ pub async fn wait_until_connected(adapter: &dyn ContentAdapter) -> Result<()> {
             AdapterStatus::Failed { reason } => bail!("connection failed: {reason}"),
             AdapterStatus::Connecting { .. } | AdapterStatus::NeedsCreds { .. } => {}
         }
-        match tokio::time::timeout_at(deadline, rx.changed()).await {
+        // The deadline is against *silence*, not against the login: a login
+        // that keeps naming its steps is working, however long it takes, and
+        // an SSO bounce through a browser takes longer than any total budget
+        // we could name without lying. What it may not do is go quiet.
+        let patience = match &status {
+            AdapterStatus::Connecting {
+                attention: true, ..
+            }
+            | AdapterStatus::NeedsCreds { .. } => ATTENTION_TIMEOUT,
+            _ => CONNECT_TIMEOUT,
+        };
+        match tokio::time::timeout(patience, rx.changed()).await {
             Ok(Ok(())) => {}
             // Sender dropped: nobody will ever report `Ready`, so stop waiting
             // and let the command run against whatever the adapter has.
             Ok(Err(_)) => return Ok(()),
             Err(_) => bail!(
-                "timed out after {}s waiting for the connection (last status: {})",
-                CONNECT_TIMEOUT.as_secs(),
+                "nothing happened for {}s while waiting for the connection (last status: {})",
+                patience.as_secs(),
                 status.banner_text().unwrap_or_else(|| "unknown".into())
             ),
         }

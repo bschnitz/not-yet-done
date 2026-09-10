@@ -1782,6 +1782,16 @@ pub enum AdapterStatus {
         timeout_secs: u64,
         started_at_unix_ms: u64,
         step: Option<String>,
+        /// The login is waiting on the *person*, somewhere this program
+        /// cannot reach: a push notification to approve, a hardware key to
+        /// touch. The step already says what to do; this only says that
+        /// nothing will move until they do it, so a frontend can be loud
+        /// about it — raise a desktop notification, keep the line visible —
+        /// where it would otherwise let a slow step scroll past.
+        ///
+        /// It is not a form: there is nothing to submit, and the login
+        /// continues on its own once the person has acted.
+        attention: bool,
     },
     /// Adapter needs interactive credentials. The frontend renders a form
     /// for `fields` and submits the collected values via
@@ -1839,6 +1849,7 @@ impl AdapterStatus {
             timeout_secs,
             started_at_unix_ms: now_unix_ms(),
             step: None,
+            attention: false,
         }
     }
 
@@ -1859,6 +1870,11 @@ impl AdapterStatus {
                 timeout_secs,
                 started_at_unix_ms,
                 step,
+                // Deliberately unread: waiting on a person is still a step,
+                // and the step names it. What the flag changes is how loud a
+                // frontend is about that line, which a one-line rendering
+                // has no way to be.
+                attention: _,
             } => {
                 // Every part is optional in the status: an adapter with a
                 // single, open-ended, unnamed attempt reports `1/1`, `0` and
@@ -3906,6 +3922,7 @@ mod adapter_status_tests {
             timeout_secs: 30,
             started_at_unix_ms: now_unix_ms(),
             step: Some("running the cookie script".into()),
+            attention: false,
         }
         .banner_text()
         .unwrap();
@@ -3923,6 +3940,7 @@ mod adapter_status_tests {
             timeout_secs: 0,
             started_at_unix_ms: now_unix_ms(),
             step: None,
+            attention: false,
         }
         .banner_text()
         .unwrap();
@@ -3938,6 +3956,7 @@ mod adapter_status_tests {
             timeout_secs: 120,
             started_at_unix_ms: started,
             step: Some("running the cookie script".into()),
+            attention: false,
         }
         .banner_text()
         .unwrap();
