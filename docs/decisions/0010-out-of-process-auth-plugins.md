@@ -1,11 +1,12 @@
 # 0010 — Out-of-process auth plugins
 
-- **Status:** accepted, not implemented
+- **Status:** accepted, implemented
 - **Date:** 2026-09-10
 - **Affects:** `not-yet-done-content` — `auth.rs`, `auth/auth_plugin.rs` (new),
-  `auth/resolver.rs`, `auth/orchestrator.rs`, `AdapterStatus`,
-  `status_reporter.rs`; the TUI and CLI status renderers; the `cookie`
-  mechanisms of `not-yet-done-jira-adapter` and
+  `auth/resolver.rs`, `auth/orchestrator.rs`, `auth/session_store.rs`,
+  `AdapterStatus`, `status_reporter.rs`; the TUI and CLI status renderers;
+  the `auth_session` table of the jira, confluence, stoat and taiga adapters;
+  the `cookie` mechanisms of `not-yet-done-jira-adapter` and
   `not-yet-done-confluence-adapter`
 
 ## Context
@@ -154,11 +155,11 @@ wants something shown to the user says `error`.
 
 nyd writes:
 
-| Line                                                                         | Meaning                                                                                                                                           |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{"start":{"protocol":1,"request":["cookie"],"account":"…","session":null}}` | Once, first. `request` is the field names bound to this entry; `session` is the cached blob, so a plugin may refresh instead of logging in again. |
-| `{"input":{"otp":"424242"}}`                                                 | Answers to the form last asked — every answer so far, as `ScriptRequest.input` carries them.                                                      |
-| `{"cancel":{}}`                                                              | Give up and shut down: the deadline passed, or the user cancelled.                                                                                |
+| Line                                                           | Meaning                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{"start":{"protocol":1,"request":["cookie"],"session":null}}` | Once, first. `request` is the field names bound to this entry; `session` is the blob that just expired, so a plugin may refresh instead of logging in again — `null` on a first login, and on one the server rejected, where there is nothing worth refreshing. |
+| `{"input":{"otp":"424242"}}`                                   | Answers to the form last asked — every answer so far, as `ScriptRequest.input` carries them.                                                                                                                                                                    |
+| `{"cancel":{}}`                                                | Give up and shut down: the deadline passed, or the user cancelled.                                                                                                                                                                                              |
 
 The plugin writes:
 
@@ -179,7 +180,7 @@ for a credential script.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant N as nyd (PluginResolver)
+    participant N as nyd (orchestrator)
     participant P as Plugin process
     participant B as Browser
     N->>P: start {request, session}
@@ -244,9 +245,28 @@ share one script.
   login must decide what it does about a step that is waiting for its user,
   and silently defaulting to "paint it like any other" is the outcome worth
   preventing.
-- **`StatusReporter` gains `connect_attention(step)`**, and leaving the state
-  is the next ordinary `connect_step` — the reporter keeps the parts
-  consistent, as it already does for phases.
+- **`StatusReporter` gains `connect_attention(step, timeout_secs)`**, and
+  leaving the state is the next ordinary `connect_step` — the reporter keeps
+  the parts consistent, as it already does for phases. The timeout is a
+  parameter because the countdown shown while a person acts is the longer
+  one; showing the machine's would count down to a failure that is not
+  coming.
+- **The CLI's connect deadline is now against silence, not against the
+  login.** It used to give a whole connection 60 seconds from the first
+  report. A login that keeps naming its steps may take as long as it takes;
+  what it may not do is go quiet, and while it waits on a person the patience
+  is the longer one. A total budget could only have been a number that lies
+  about an SSO bounce through a browser.
+- **A plugin's values are not cached between logins**, unlike a prompt's.
+  What a plugin fetches _is_ the session: replaying an expired cookie into a
+  new login mints the same expired session again, and the plugin is the one
+  party that can tell the difference. Asking a person twice for the same
+  password, on the other hand, is rude — so prompts and script results keep
+  their cache.
+- **`SessionEntry` gains `expires_at`**, and the four adapters that persist
+  sessions gain a nullable column for it. Without it the expiry a plugin
+  states would hold until the next restart and then be forgotten, which is
+  the kind of half-kept promise that is worse than none.
 - **Jira and Confluence get an interactive SSO login with no adapter code.**
   Their `cookie` mechanism is unchanged; the script its doc has always
   promised becomes writable.

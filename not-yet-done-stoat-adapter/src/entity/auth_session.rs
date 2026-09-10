@@ -14,6 +14,10 @@ pub struct Model {
     pub connection_id: Uuid,
     pub blob: String,
     pub created_at_unix: i64,
+    /// When the session stops working, when whoever minted it knew — an
+    /// auth plugin that read the cookie's own expiry. `NULL` for the
+    /// sessions nobody could date, which is most of them.
+    pub expires_at_unix: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

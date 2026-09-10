@@ -64,10 +64,9 @@ enum ToPlugin<'a> {
         /// The field names bound to this plugin, so one generic plugin can
         /// serve several adapters without guessing.
         request: &'a [&'a str],
-        /// Which account is being logged in, when the config named one.
-        account: Option<&'a str>,
-        /// The cached session blob, so a plugin may refresh instead of
-        /// logging in again.
+        /// The session blob that just expired, so a plugin may refresh
+        /// instead of logging in again. `null` when there is nothing to
+        /// refresh: a first login, or one the server rejected.
         session: Option<&'a str>,
     },
     /// Answers to the form last asked — every answer collected so far, as
@@ -156,7 +155,6 @@ impl PluginSession {
         name: &str,
         command: &str,
         request: &[&str],
-        account: Option<&str>,
         session: Option<&str>,
     ) -> Result<Self, CredentialError> {
         let who = format!("auth plugin `{name}`");
@@ -171,9 +169,9 @@ impl PluginSession {
             // A backstop for the paths that cannot await a shutdown — a
             // dropped session must not leave a browser running.
             .kill_on_drop(true);
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| CredentialError::ProviderError(format!("{who}: spawn `{command}`: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            CredentialError::ProviderError(format!("{who}: spawn `{command}`: {e}"))
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -193,7 +191,6 @@ impl PluginSession {
         me.write(&ToPlugin::Start {
             protocol: PROTOCOL,
             request,
-            account,
             session,
         })
         .await?;
@@ -209,7 +206,7 @@ impl PluginSession {
         loop {
             let line = match tokio::time::timeout_at(deadline, self.lines.next_line()).await {
                 Ok(Ok(Some(line))) => line,
-                Ok(Ok(None)) => return Err(self.ended_early()),
+                Ok(Ok(None)) => return Err(self.ended_early().await),
                 Ok(Err(e)) => {
                     return Err(CredentialError::ProviderError(format!(
                         "{}: reading its output: {e}",
@@ -232,7 +229,10 @@ impl PluginSession {
     }
 
     /// Hand the plugin the answers to the form it asked for.
-    pub async fn answer(&mut self, input: &BTreeMap<String, String>) -> Result<(), CredentialError> {
+    pub async fn answer(
+        &mut self,
+        input: &BTreeMap<String, String>,
+    ) -> Result<(), CredentialError> {
         self.write(&ToPlugin::Input(input)).await
     }
 
@@ -268,9 +268,12 @@ impl PluginSession {
             CredentialError::ProviderError(format!("{}: encoding a line: {e}", self.who))
         })?;
         payload.push('\n');
-        self.stdin.write_all(payload.as_bytes()).await.map_err(|e| {
-            CredentialError::ProviderError(format!("{}: writing to it: {e}", self.who))
-        })?;
+        self.stdin
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| {
+                CredentialError::ProviderError(format!("{}: writing to it: {e}", self.who))
+            })?;
         self.stdin.flush().await.map_err(|e| {
             CredentialError::ProviderError(format!("{}: writing to it: {e}", self.who))
         })
@@ -279,9 +282,13 @@ impl PluginSession {
     /// Stdout closed before a `result` or an `error` arrived. The exit
     /// status is all there is to go on — the plugin's own diagnostics went
     /// to stderr, where a person can read them.
-    fn ended_early(&mut self) -> CredentialError {
-        let status = match self.child.try_wait() {
-            Ok(Some(status)) => match status.code() {
+    /// Closed stdout means it is on its way out, but the exit status may
+    /// not be collectable yet — so this waits for it rather than asking
+    /// once and reporting a plugin that "just stopped", which is the same
+    /// sentence for a crash and for a clean refusal.
+    async fn ended_early(&mut self) -> CredentialError {
+        let status = match tokio::time::timeout(SHUTDOWN_GRACE, self.child.wait()).await {
+            Ok(Ok(status)) => match status.code() {
                 Some(code) => format!(" (exited {code})"),
                 None => " (killed)".to_string(),
             },
@@ -433,15 +440,18 @@ mod tests {
             PluginSaid::Attention("Tap your phone".into())
         );
         let err = parse_line(who, &names, r#"{"attention":"  "}"#).expect_err("nothing said");
-        assert!(format!("{err}").contains("without saying what for"), "{err}");
+        assert!(
+            format!("{err}").contains("without saying what for"),
+            "{err}"
+        );
     }
 
     #[test]
     fn a_result_must_carry_every_field_that_was_asked_for() {
         let who = "auth plugin `p`";
         let names = request(&["cookie", "xsrf-token"]);
-        let err = parse_line(who, &names, r#"{"result":{"cookie":"c"}}"#)
-            .expect_err("one field short");
+        let err =
+            parse_line(who, &names, r#"{"result":{"cookie":"c"}}"#).expect_err("one field short");
         assert!(format!("{err}").contains("`xsrf-token`"), "{err}");
 
         let said = parse_line(
@@ -492,7 +502,7 @@ case "$start" in
 esac
 "#,
         );
-        let mut session = PluginSession::start("p", &command, &["cookie"], None, None)
+        let mut session = PluginSession::start("p", &command, &["cookie"], None)
             .await
             .expect("started");
         assert_eq!(
@@ -503,7 +513,8 @@ esac
             session.next(PATIENCE).await.expect("a step"),
             PluginSaid::Step("signing in".into())
         );
-        let PluginSaid::Values { values, .. } = session.next(PATIENCE).await.expect("values") else {
+        let PluginSaid::Values { values, .. } = session.next(PATIENCE).await.expect("values")
+        else {
             panic!("expected values");
         };
         assert_eq!(values["cookie"], "asked with protocol 1");
@@ -525,7 +536,7 @@ echo '{"attention":null}'
 printf '{"result":{"cookie":"%s"}}\n' "$(echo "$input" | sed 's/.*"otp":"\([^"]*\)".*/\1/')"
 "#,
         );
-        let mut session = PluginSession::start("p", &command, &["cookie"], None, None)
+        let mut session = PluginSession::start("p", &command, &["cookie"], None)
             .await
             .expect("started");
         let PluginSaid::Form(form) = session.next(PATIENCE).await.expect("a form") else {
@@ -535,7 +546,11 @@ printf '{"result":{"cookie":"%s"}}\n' "$(echo "$input" | sed 's/.*"otp":"\([^"]*
         assert_eq!(form.fields[0].name, "otp");
 
         session
-            .answer(&[("otp".to_string(), "424242".to_string())].into_iter().collect())
+            .answer(
+                &[("otp".to_string(), "424242".to_string())]
+                    .into_iter()
+                    .collect(),
+            )
             .await
             .expect("answered");
         assert_eq!(
@@ -546,7 +561,8 @@ printf '{"result":{"cookie":"%s"}}\n' "$(echo "$input" | sed 's/.*"otp":"\([^"]*
             session.next(PATIENCE).await.expect("attention over"),
             PluginSaid::AttentionOver
         );
-        let PluginSaid::Values { values, .. } = session.next(PATIENCE).await.expect("values") else {
+        let PluginSaid::Values { values, .. } = session.next(PATIENCE).await.expect("values")
+        else {
             panic!("expected values");
         };
         assert_eq!(values["cookie"], "424242");
@@ -561,7 +577,7 @@ printf '{"result":{"cookie":"%s"}}\n' "$(echo "$input" | sed 's/.*"otp":"\([^"]*
             "quits.sh",
             "#!/bin/sh\nread -r _start\nexit 3\n",
         );
-        let mut session = PluginSession::start("p", &command, &["cookie"], None, None)
+        let mut session = PluginSession::start("p", &command, &["cookie"], None)
             .await
             .expect("started");
         let err = session.next(PATIENCE).await.expect_err("it left");
@@ -574,7 +590,7 @@ printf '{"result":{"cookie":"%s"}}\n' "$(echo "$input" | sed 's/.*"otp":"\([^"]*
     async fn silence_ends_the_wait_rather_than_the_login_waiting_forever() {
         let dir = tempfile::tempdir().expect("tempdir");
         let command = plugin(dir.path(), "mute.sh", "#!/bin/sh\nsleep 30\n");
-        let mut session = PluginSession::start("p", &command, &["cookie"], None, None)
+        let mut session = PluginSession::start("p", &command, &["cookie"], None)
             .await
             .expect("started");
         let err = session

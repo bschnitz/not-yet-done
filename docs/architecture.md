@@ -496,8 +496,10 @@ round protocol behind `script-result` starts a fresh process per round, so a
 half-finished browser session cannot survive one, and a provider can say
 nothing at all between its start and its answer. The decided answer is a
 long-lived **auth plugin** speaking a line protocol that also carries progress
-and a "waiting for you" state — see
-[ADR 0010](decisions/0010-out-of-process-auth-plugins.md); not implemented yet.
+and a "waiting for you" state: `provider: { type: plugin, use: <name> }`,
+declared under `auth.plugins`. See
+[ADR 0010](decisions/0010-out-of-process-auth-plugins.md) for why it lives in
+the orchestrator rather than in a resolver, and the README for the protocol.
 
 ### Anonymization (`NYD_ANON`)
 

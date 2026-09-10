@@ -53,11 +53,13 @@ impl SessionStore for SqlAuthSessionStore {
         Some(SessionEntry {
             blob: row.blob,
             created_at: Self::from_unix(row.created_at_unix),
+            expires_at: row.expires_at_unix.map(Self::from_unix),
         })
     }
 
     async fn save(&self, entry: SessionEntry) {
         let unix = Self::unix_seconds(entry.created_at);
+        let expires = entry.expires_at.map(Self::unix_seconds);
         let txn = match self.db.begin().await {
             Ok(t) => t,
             Err(_) => return,
@@ -72,6 +74,7 @@ impl SessionStore for SqlAuthSessionStore {
                 let mut am = model.into_active_model();
                 am.blob = Set(entry.blob);
                 am.created_at_unix = Set(unix);
+                am.expires_at_unix = Set(expires);
                 let _ = am.update(&txn).await;
             }
             None => {
@@ -79,6 +82,7 @@ impl SessionStore for SqlAuthSessionStore {
                     connection_id: Set(self.scope_id),
                     blob: Set(entry.blob),
                     created_at_unix: Set(unix),
+                    expires_at_unix: Set(expires),
                 };
                 let _ = am.insert(&txn).await;
             }
@@ -120,6 +124,7 @@ mod tests {
         let entry = SessionEntry {
             blob: r#"{"auth_token":"synthetic"}"#.into(),
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(123_456),
+            expires_at: None,
         };
         store.save(entry.clone()).await;
         let loaded = store.load().await.expect("present");
@@ -140,12 +145,14 @@ mod tests {
             .save(SessionEntry {
                 blob: "first".into(),
                 created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+                expires_at: None,
             })
             .await;
         store
             .save(SessionEntry {
                 blob: "second".into(),
                 created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+                expires_at: None,
             })
             .await;
         let loaded = store.load().await.unwrap();
@@ -168,12 +175,14 @@ mod tests {
             .save(SessionEntry {
                 blob: "a-blob".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                expires_at: None,
             })
             .await;
         store_b
             .save(SessionEntry {
                 blob: "b-blob".into(),
                 created_at: SystemTime::UNIX_EPOCH,
+                expires_at: None,
             })
             .await;
 

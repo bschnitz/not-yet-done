@@ -23,6 +23,12 @@ pub struct SessionEntry {
     pub blob: String,
     /// Wall-clock time when the session was issued. Used by TTL policies.
     pub created_at: SystemTime,
+    /// When the session stops working, if whoever minted it said so — an
+    /// auth plugin that read the cookie's own expiry, say. An upper bound
+    /// on the configured policy and never an extension of it: a session
+    /// that is known to be dead is not worth an attempt, whatever the
+    /// policy would have allowed.
+    pub expires_at: Option<SystemTime>,
 }
 
 #[async_trait]
@@ -70,6 +76,7 @@ mod tests {
         let entry = SessionEntry {
             blob: "synthetic-token".into(),
             created_at: SystemTime::UNIX_EPOCH,
+            expires_at: None,
         };
         s.save(entry.clone()).await;
         assert_eq!(s.load().await, Some(entry));
@@ -84,11 +91,13 @@ mod tests {
         s.save(SessionEntry {
             blob: "a".into(),
             created_at: SystemTime::UNIX_EPOCH,
+            expires_at: None,
         })
         .await;
         s.save(SessionEntry {
             blob: "b".into(),
             created_at: SystemTime::UNIX_EPOCH,
+            expires_at: None,
         })
         .await;
         assert_eq!(s.load().await.unwrap().blob, "b");
