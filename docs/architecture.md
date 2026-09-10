@@ -491,6 +491,14 @@ This is what keeps the TUI from ever blocking: an adapter that needs
 credentials reports `NeedsCreds` over the status channel; the UI opens the
 form without stopping the render loop.
 
+A login that only a browser can perform fits none of the providers above: the
+round protocol behind `script-result` starts a fresh process per round, so a
+half-finished browser session cannot survive one, and a provider can say
+nothing at all between its start and its answer. The decided answer is a
+long-lived **auth plugin** speaking a line protocol that also carries progress
+and a "waiting for you" state — see
+[ADR 0010](decisions/0010-out-of-process-auth-plugins.md); not implemented yet.
+
 ### Anonymization (`NYD_ANON`)
 
 For screenshots and screencasts taken against production instances, a
