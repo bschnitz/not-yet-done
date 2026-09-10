@@ -1737,7 +1737,11 @@ static W_IMAGE: LazyLock<Regex> =
 static W_MONO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{(?:\{\})?(.+?)(?:\{\})?\}\}").unwrap());
 static W_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]|]+)\|([^\]]+)\]").unwrap());
-static W_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)?)\*").unwrap());
+/// Jira bold `*text*`. The inner tail is optional *and* lazy (`??`) so that a
+/// one-character span closes at its own delimiter instead of running on to the
+/// next span in the line; the same shape carries [`W_STRIKE`] and the three
+/// Markdown patterns below.
+static W_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)??)\*").unwrap());
 // Jira strikethrough `-text-`. The dashes are only delimiters at a word
 // boundary: the opener must follow the start of line or whitespace, the closer
 // must precede whitespace or the end. This keeps intra-word hyphens
@@ -1746,7 +1750,7 @@ static W_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)?)\
 // (A strike hugging punctuation, e.g. `-wrong-,`, is not detected and simply
 // round-trips as literal dashes — safe, never corrupting.)
 static W_STRIKE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(^|\s)-(\S(?:.*?\S)?)-(\s|$)").unwrap());
+    LazyLock::new(|| Regex::new(r"(^|\s)-(\S(?:.*?\S)??)-(\s|$)").unwrap());
 
 /// Jira colour macros. Opener `{color:VALUE}` → an HTML `<span style="color:…">`
 /// and the bare closer `{color}` → `</span>`. They are handled as *independent*
@@ -1839,9 +1843,16 @@ static W_LITERAL_TICK: LazyLock<Regex> = LazyLock::new(|| Regex::new("`").unwrap
 /// for a code delimiter, and restored as the bare character.
 static M_ESCAPED_TICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\`").unwrap());
 static M_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
-static M_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(\S(?:.*?\S)?)\*\*").unwrap());
-static M_STRIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~(\S(?:.*?\S)?)~~").unwrap());
-static M_ITALIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)?)\*").unwrap());
+/// Bold, strike-through and italic: a delimiter pair around at least one
+/// non-space character. The tail is optional *and* lazy (`??`), which is what
+/// makes a one-character span work. A plain `?` offers the tail with content
+/// first, and since a single character has no tail, `.*?` walks past the
+/// closing delimiter into the next span on the same line — `a **X** and
+/// **YZ** b` came back as `a *X** and **YZ* b`, with both spans torn open.
+/// Offering the empty branch first lets the lone character close its own pair.
+static M_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(\S(?:.*?\S)??)\*\*").unwrap());
+static M_STRIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~(\S(?:.*?\S)??)~~").unwrap());
+static M_ITALIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*(\S(?:.*?\S)??)\*").unwrap());
 
 /// Reverse of the colour macros: `<span style="color:…">` → `{color:…}` and
 /// `</span>` → `{color}`. Only the exact `color:`-style span this converter
@@ -2660,6 +2671,21 @@ a title-less panel whose sole attribute makes its opener marker long enough
         // instead of collapsing into an ambiguous `***x***`.
         assert_roundtrip("_*both*_", "_**both**_");
         assert!(roundtrip_diff("start _*mixed* emphasis_ end").is_none());
+    }
+
+    #[test]
+    fn single_character_emphasis_does_not_eat_the_next_span() {
+        // A one-character span has no inner tail, so the optional group must be
+        // tried empty first -- otherwise the match runs past its own closing
+        // delimiter into the next span and tears both open.
+        assert_eq!(md_to_wiki("a **X** and **YZ** b"), "a *X* and *YZ* b");
+        assert_eq!(md_to_wiki("**a** **b** **c**"), "*a* *b* *c*");
+        assert_eq!(md_to_wiki("~~X~~ and ~~YZ~~"), "-X- and -YZ-");
+        assert_eq!(md_to_wiki("*X* and *YZ*"), "_X_ and _YZ_");
+        assert!(roundtrip_diff("a *X* and *YZ* b").is_none());
+        // Same shape the other way round: Jira `*X*` / `-X-` back to Markdown.
+        assert_eq!(wiki_to_md("a *X* and *YZ* b"), "a **X** and **YZ** b");
+        assert_eq!(wiki_to_md("-X- and -YZ-"), "~~X~~ and ~~YZ~~");
     }
 
     #[test]
