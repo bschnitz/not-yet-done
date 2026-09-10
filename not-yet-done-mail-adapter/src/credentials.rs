@@ -158,6 +158,7 @@ mod tests {
             session_cache: SessionCachePolicy::default(),
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![
                 CredentialBinding {
                     field: "username".into(),

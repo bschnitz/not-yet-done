@@ -946,6 +946,7 @@ pub(in crate::adapter) async fn test_adapter() -> ConfluenceAdapter {
         mechanism: "cookie".into(),
         script: None,
         script_timeout_secs: 120,
+        plugins: Vec::new(),
         bindings: vec![CredentialBinding {
             field: "cookie".to_string(),
             provider: CredentialProvider::Literal {
@@ -1001,6 +1002,7 @@ mod tests {
             mechanism: "cookie".into(),
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![CredentialBinding {
                 field: "cookie".to_string(),
                 provider: CredentialProvider::Literal {

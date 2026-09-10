@@ -199,6 +199,7 @@ mod tests {
             mechanism: "cookie".into(),
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![CredentialBinding {
                 field: "cookie".to_string(),
                 provider: CredentialProvider::Literal {
@@ -260,6 +261,7 @@ mod tests {
             mechanism: "basic-auth".into(),
             script: None,
             script_timeout_secs: 120,
+            plugins: Vec::new(),
             bindings: vec![
                 CredentialBinding {
                     field: "username".to_string(),
