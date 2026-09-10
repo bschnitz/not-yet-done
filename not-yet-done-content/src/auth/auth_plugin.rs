@@ -55,25 +55,31 @@ pub const PROTOCOL: u32 = 1;
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// What nyd writes to the plugin, one JSON object per line.
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "snake_case")]
-enum ToPlugin<'a> {
+///
+/// Readable as well as writable, and owned rather than borrowed, so that a
+/// plugin written in Rust reads the line nyd wrote instead of transcribing
+/// its shape into a second set of types — the drift between two spellings of
+/// one protocol being the thing this module exists to prevent. The few
+/// allocations that costs happen once per login.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToPlugin {
     /// Once, first.
     Start {
         protocol: u32,
         /// The field names bound to this plugin, so one generic plugin can
         /// serve several adapters without guessing.
-        request: &'a [&'a str],
+        request: Vec<String>,
         /// The session blob that just expired, so a plugin may refresh
         /// instead of logging in again. `null` when there is nothing to
         /// refresh: a first login, or one the server rejected.
-        session: Option<&'a str>,
+        session: Option<String>,
     },
     /// Answers to the form last asked — every answer collected so far, as
     /// [`ScriptRequest`](super::credential_script::ScriptRequest) carries
     /// them. A plugin does remember its own state, but a re-asked form's
     /// earlier answers are the runtime's to keep, not the plugin's.
-    Input(&'a BTreeMap<String, String>),
+    Input(BTreeMap<String, String>),
     /// Give up and shut down.
     Cancel {},
 }
@@ -101,30 +107,92 @@ pub enum PluginSaid {
     Failed(String),
 }
 
-/// The five answer shapes as they arrive. Kept separate from
-/// [`PluginSaid`] so "exactly one of them" is checked here rather than
-/// being expressible in the type the caller sees.
-#[derive(Deserialize, Default)]
+/// The five answer shapes as they travel. Kept separate from
+/// [`PluginSaid`] so "exactly one of them" is checked in [`parse_line`]
+/// rather than being expressible in the type the caller sees.
+///
+/// A plugin writes these; nyd reads them. The constructors below are the
+/// writing half, so a plugin never has to know which key goes with which
+/// and cannot put two of them on one line.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct RawLine {
-    #[serde(default)]
-    step: Option<String>,
+pub struct PluginLine {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
     /// A `serde_json::Value` because an explicit `null` has to be told
     /// apart from an absent key: the one withdraws the attention, the
     /// other says nothing about it. `Option<Value>` alone cannot — serde
     /// reads a null into `None`, the same as no key at all — hence
-    /// [`present`], which only runs when the key is there.
-    #[serde(default, deserialize_with = "present")]
-    attention: Option<serde_json::Value>,
-    #[serde(default)]
-    form: Option<ScriptForm>,
-    #[serde(default)]
-    result: Option<BTreeMap<String, String>>,
+    /// [`present`], which only runs when the key is there. Writing it back
+    /// out works the same way round: `Some(Value::Null)` is the withdrawal,
+    /// `None` is silence and is left off the line.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attention: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<ScriptForm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<BTreeMap<String, String>>,
     /// A sibling of `result`, not a shape of its own.
-    #[serde(default)]
-    expires_at_unix_ms: Option<u64>,
-    #[serde(default)]
-    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PluginLine {
+    /// What the plugin is doing now.
+    pub fn step(step: impl Into<String>) -> Self {
+        Self {
+            step: Some(step.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The login is waiting on a person doing something elsewhere.
+    pub fn attention(said: impl Into<String>) -> Self {
+        Self {
+            attention: Some(serde_json::Value::String(said.into())),
+            ..Self::default()
+        }
+    }
+
+    /// That wait is over.
+    pub fn attention_over() -> Self {
+        Self {
+            attention: Some(serde_json::Value::Null),
+            ..Self::default()
+        }
+    }
+
+    /// Ask the user this.
+    pub fn form(form: ScriptForm) -> Self {
+        Self {
+            form: Some(form),
+            ..Self::default()
+        }
+    }
+
+    /// The requested values, and when they stop being usable if that is
+    /// known. Ends the conversation.
+    pub fn result(values: BTreeMap<String, String>, expires_at_unix_ms: Option<u64>) -> Self {
+        Self {
+            result: Some(values),
+            expires_at_unix_ms,
+            ..Self::default()
+        }
+    }
+
+    /// Give up, and say why in words the user will read.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            error: Some(message.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// Deserialize a value that is present, `null` included, into `Some`.
@@ -190,8 +258,8 @@ impl PluginSession {
         };
         me.write(&ToPlugin::Start {
             protocol: PROTOCOL,
-            request,
-            session,
+            request: me.request.clone(),
+            session: session.map(str::to_string),
         })
         .await?;
         Ok(me)
@@ -233,7 +301,7 @@ impl PluginSession {
         &mut self,
         input: &BTreeMap<String, String>,
     ) -> Result<(), CredentialError> {
-        self.write(&ToPlugin::Input(input)).await
+        self.write(&ToPlugin::Input(input.clone())).await
     }
 
     /// The plugin has given its values: close stdin and let it go.
@@ -263,7 +331,7 @@ impl PluginSession {
         }
     }
 
-    async fn write(&mut self, line: &ToPlugin<'_>) -> Result<(), CredentialError> {
+    async fn write(&mut self, line: &ToPlugin) -> Result<(), CredentialError> {
         let mut payload = serde_json::to_string(line).map_err(|e| {
             CredentialError::ProviderError(format!("{}: encoding a line: {e}", self.who))
         })?;
@@ -308,7 +376,7 @@ impl PluginSession {
 /// and catching it here beats an adapter later reporting a login failure
 /// for an absent field.
 fn parse_line(who: &str, request: &[String], line: &str) -> Result<PluginSaid, CredentialError> {
-    let raw: RawLine = serde_json::from_str(line).map_err(|e| {
+    let raw: PluginLine = serde_json::from_str(line).map_err(|e| {
         CredentialError::ProviderError(format!("{who}: this is not a protocol line ({e})"))
     })?;
 
