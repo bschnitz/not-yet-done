@@ -69,7 +69,7 @@ pub enum ScriptRound {
 }
 
 /// A form the script wants rendered on its behalf.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptForm {
     /// Title for the dialog, e.g. "Unlock the password store".
@@ -86,7 +86,7 @@ pub struct ScriptForm {
 /// One input the script wants from the user. Shaped like
 /// [`AuthField`](crate::AuthField) on purpose — the orchestrator passes
 /// these straight through to the frontend.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptFormField {
     /// Key the answer is filed under in the next round's `input`.

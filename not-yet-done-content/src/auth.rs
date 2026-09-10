@@ -37,7 +37,9 @@ mod orchestrator;
 mod resolver;
 mod session_store;
 
-pub use auth_plugin::{PROTOCOL as PLUGIN_PROTOCOL, PluginSaid, PluginSession};
+pub use auth_plugin::{
+    PROTOCOL as PLUGIN_PROTOCOL, PluginLine, PluginSaid, PluginSession, ToPlugin,
+};
 pub use credential_script::{ScriptForm, ScriptFormField, ScriptRequest, ScriptRound};
 pub use orchestrator::{AuthError, AuthOrchestrator, Clock, ResolvedSession, SystemClock};
 pub use resolver::{
