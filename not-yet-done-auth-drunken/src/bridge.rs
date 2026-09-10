@@ -14,8 +14,10 @@
 //!
 //! The one asymmetry is that a `tell:` has no end of its own. A run that
 //! has said something to a person goes on being about that person until it
-//! does something else, so the next thing that happens is what takes the
-//! attention back.
+//! does something else, so the next step to begin is what takes the
+//! attention back. The next *line* is not: a step that waits for somebody
+//! keeps checking while it waits, and every one of those checks is a line
+//! the run finished without anything having happened.
 
 use std::collections::BTreeMap;
 
@@ -112,17 +114,20 @@ pub async fn run(
                         }
                     }
                     Some("run") => {
-                        took_the_person_back(options, browser, &mut attending).await;
                         // Only the beginning of a step is worth a line of
                         // nyd's: every action inside one would be a status
                         // that changes faster than anybody can read it, and
-                        // the step is what the flow's author named.
+                        // the step is what the flow's author named. It is
+                        // also the only place the attention can end, for the
+                        // same reason read the other way round.
                         let happened = news.get("happened");
                         if happened.and_then(|h| h.get("happened")).and_then(Value::as_str)
                             == Some("began")
-                            && let Some(name) = happened.and_then(|h| text(h, "name"))
                         {
-                            say(PluginLine::step(name));
+                            took_the_person_back(options, browser, &mut attending).await;
+                            if let Some(name) = happened.and_then(|h| text(h, "name")) {
+                                say(PluginLine::step(name));
+                            }
                         }
                     }
                     Some("told") => {

@@ -217,9 +217,14 @@ async fn a_flow_that_passes_hands_back_what_it_yielded() {
 }
 
 /// A `tell:` is the case nyd's attention flag exists for, and the next
-/// thing the run does is what takes it back.
+/// step is what takes it back — not the next line.
+///
+/// The difference is the whole point of the flag: a step that waits for a
+/// person goes on checking while it waits, and every check is a line the
+/// run finished. Were those to end the attention, nyd would hold a login
+/// somebody is doing on their phone against its per-step deadline.
 #[tokio::test]
-async fn telling_somebody_something_is_an_attention_the_next_step_withdraws() {
+async fn telling_somebody_something_is_an_attention_only_the_next_step_withdraws() {
     let mut plugin = Fixture::start(&["cookie"], &["--field", "cookie=session"]).await;
     plugin.running().await;
 
@@ -229,6 +234,32 @@ async fn telling_somebody_something_is_an_attention_the_next_step_withdraws() {
     assert_eq!(
         plugin.said().await.get("attention").and_then(Value::as_str),
         Some("Approve the sign-in on your phone")
+    );
+
+    plugin
+        .news(json!({
+            "news": "run",
+            "happened": {
+                "happened": "did",
+                "step": 1,
+                "line": {
+                    "verb": "assert",
+                    "said": "the address is the site",
+                    "label": null,
+                    "outcome": { "outcome": "failed", "why": "still on the sign-on" },
+                    "took": { "secs": 0, "nanos": 12_000_000 }
+                }
+            }
+        }))
+        .await;
+    // Straight on to the next thing said: had that check taken the person
+    // back, an `attention: null` would be standing in front of this line.
+    plugin
+        .news(json!({ "news": "told", "said": "Still waiting for the sign-in" }))
+        .await;
+    assert_eq!(
+        plugin.said().await.get("attention").and_then(Value::as_str),
+        Some("Still waiting for the sign-in")
     );
 
     plugin
