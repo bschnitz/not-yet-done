@@ -181,29 +181,7 @@ fn parse_round(
     }
 
     if let Some(form) = raw.form {
-        if form.fields.is_empty() {
-            // A dialog with no inputs would park the login on something
-            // the user cannot answer. `result` and `error` are the ways
-            // to end a round without asking.
-            return Err(CredentialError::ProviderError(format!(
-                "credential script `{script}` asked for a form without fields"
-            )));
-        }
-        let mut seen: Vec<&str> = Vec::with_capacity(form.fields.len());
-        for f in &form.fields {
-            if f.name.is_empty() {
-                return Err(CredentialError::ProviderError(format!(
-                    "credential script `{script}`: a form field has an empty name"
-                )));
-            }
-            if seen.contains(&f.name.as_str()) {
-                return Err(CredentialError::ProviderError(format!(
-                    "credential script `{script}`: duplicate form field `{}`",
-                    f.name
-                )));
-            }
-            seen.push(&f.name);
-        }
+        check_form(&format!("credential script `{script}`"), &form)?;
         return Ok(ScriptRound::Form(form));
     }
 
@@ -224,6 +202,39 @@ fn parse_round(
         )));
     }
     Ok(ScriptRound::Values(values))
+}
+
+/// Reject a form the frontend could not render into an answer.
+///
+/// Shared with the [`auth_plugin`](super::auth_plugin) protocol, which asks
+/// with the same [`ScriptForm`] and would otherwise repeat these three
+/// checks. `who` names the helper in the message — a script and a plugin are
+/// both configured by hand, and which one is wrong is the useful half.
+pub(super) fn check_form(who: &str, form: &ScriptForm) -> Result<(), CredentialError> {
+    if form.fields.is_empty() {
+        // A dialog with no inputs would park the login on something the
+        // user cannot answer. `result` and `error` are the ways to end a
+        // round without asking.
+        return Err(CredentialError::ProviderError(format!(
+            "{who} asked for a form without fields"
+        )));
+    }
+    let mut seen: Vec<&str> = Vec::with_capacity(form.fields.len());
+    for f in &form.fields {
+        if f.name.is_empty() {
+            return Err(CredentialError::ProviderError(format!(
+                "{who}: a form field has an empty name"
+            )));
+        }
+        if seen.contains(&f.name.as_str()) {
+            return Err(CredentialError::ProviderError(format!(
+                "{who}: duplicate form field `{}`",
+                f.name
+            )));
+        }
+        seen.push(&f.name);
+    }
+    Ok(())
 }
 
 /// Run one invocation under `sh -c`, feeding it the request on stdin.
