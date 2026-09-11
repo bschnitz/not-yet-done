@@ -1635,9 +1635,10 @@ impl App {
 
         app.reload_link_refs();
 
-        // Broken view files draw their own panel, but only on their own tab.
-        // The log is what makes them readable from anywhere, and copyable.
-        app.log_broken_view_configs();
+        // A broken view file draws its own panel and a refused adapter config
+        // its own banner — both only on their own tab. The log is what makes
+        // them readable from anywhere, and copyable.
+        app.log_config_problems();
 
         app
     }
@@ -8535,20 +8536,31 @@ impl App {
         self.config_error_scroll = next.clamp(0, self.config_error_max_scroll as isize) as usize;
     }
 
-    /// Put every broken view file's problems into the notification log.
+    /// Put every view's configuration problems into the notification log.
     ///
-    /// The panel shows them, but only on its own tab and only as far as the
-    /// terminal is tall. The log is where they become one scrollable,
-    /// filterable, copyable page (`f10`) that survives switching away — so
-    /// the errors are recorded silently, and the bar gets one line per file
-    /// saying how many there were and where to read them.
-    pub(crate) fn log_broken_view_configs(&mut self) {
+    /// Two kinds, one thing as far as a reader is concerned — a tab that is
+    /// not going to work and a file to go and fix. A view file that would
+    /// not parse draws the error panel instead of its content; one that
+    /// parsed but whose adapter refused what it said draws a banner over
+    /// the content. Both are visible only on their own tab, and a tab
+    /// nobody switches to says nothing at all.
+    ///
+    /// The log is where they become one scrollable, filterable, copyable
+    /// page that survives switching away — so the errors are recorded
+    /// silently, and the bar gets one line per file saying how many there
+    /// were and where to read them.
+    pub(crate) fn log_config_problems(&mut self) {
         let broken: Vec<(String, Vec<String>)> = self
             .content_views
             .iter()
             .filter_map(|slot| match slot {
                 ContentSlot::Broken { name, errors, .. } => Some((name.clone(), errors.clone())),
-                ContentSlot::Working(_) => None,
+                // The banner's own wording, so the log and the tab say the
+                // same thing about the same file.
+                ContentSlot::Working(cv) => cv
+                    .adapter_init_error
+                    .as_ref()
+                    .map(|err| (slot.tab_name().to_string(), vec![err.clone()])),
             })
             .collect();
         // Name the key the user actually bound, not the default: on a config
