@@ -9027,6 +9027,7 @@ impl App {
                     let active = match action {
                         GlobalAction::ShortcutMenu => self.shortcut_menu.is_open(),
                         GlobalAction::ShortcutOverview => self.shortcut_overview.is_open(),
+                        GlobalAction::ShowNotifications => self.notification_center.is_open(),
                         _ => false,
                     };
                     crate::components::action_bar::ActionHint { key, desc, active }
