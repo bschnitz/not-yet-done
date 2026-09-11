@@ -72,4 +72,6 @@ pub enum ActiveSurface {
     ShortcutMenu,
     /// The grouped shortcut overview popup is open.
     ShortcutOverview,
+    /// The notification centre (both bars' logs on one page) is open.
+    NotificationCenter,
 }

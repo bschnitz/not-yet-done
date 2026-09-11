@@ -447,10 +447,21 @@ impl GlobalAction {
                 label: "keys",
                 surface: ActiveSurface::ShortcutOverview,
             },
+            // Where the errors are read. A slot of its own because it is the
+            // one global that reports on something *the app did* — a login
+            // that failed, a view file the adapter refused — and a report
+            // nobody is told about is a report nobody reads. Folds into its
+            // which-key group in the bars like any other entry, so a config
+            // that puts it on a leader still shows one entry, not two.
+            ShowNotifications => BarPlacement::Active {
+                label: "log",
+                surface: ActiveSurface::NotificationCenter,
+            },
             // Reachable from the shortcut menu; no permanent-bar slot.
-            SubtabNext | SubtabPrev | DismissNotifications | ShowNotifications | ShowLastError
-            | LinkMark | LinkPaste | LinkOpenPopup | LinkJumpBack | LinkJumpForward
-            | ToggleFullscreen => BarPlacement::MenuOnly,
+            SubtabNext | SubtabPrev | DismissNotifications | ShowLastError | LinkMark
+            | LinkPaste | LinkOpenPopup | LinkJumpBack | LinkJumpForward | ToggleFullscreen => {
+                BarPlacement::MenuOnly
+            }
         }
     }
 }
