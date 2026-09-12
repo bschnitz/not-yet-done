@@ -78,6 +78,11 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         // Markdown back (`-m`, `--file`, or stdin) and writes the ticket.
         NodeAction::new("to_markdown", "to markdown", InputSpec::None),
         NodeAction::new("from_markdown", "from markdown", InputSpec::Editor),
+        // The same ticket for a reader: no completion legend, no add-comment
+        // marker, no round-trip guard. `to_markdown` has to stay byte-faithful
+        // to what `from_markdown` takes back, so the reading form is its own
+        // action rather than a flag on that one.
+        NodeAction::new("show_markdown", "show markdown", InputSpec::None),
         NodeAction::new("edit_with_comments", "edit + comments", InputSpec::Editor),
         // The header fields on their own, for a caller that wants to move a
         // label or an assignee without putting the description at risk (see
@@ -516,7 +521,7 @@ impl Node for JiraIssueNode {
             "edit_markdown" => {
                 // Guarded build: refuses if the description or any comment
                 // wouldn't survive a lossless wiki→md→wiki round-trip.
-                let template = self.ticket_markdown(true).await?;
+                let template = self.ticket_markdown(Purpose::Editing).await?;
                 let detail = self.detail().await?;
                 // When a workspace base is configured, open a persistent
                 // `<base>/<KEY>-<slug>/ticket.edit.md` and sync attachments on
@@ -564,7 +569,7 @@ impl Node for JiraIssueNode {
                 // persistent workspace file — this is the CLI write-back entry
                 // point (`do_editor` supplies the edited text from `-m`/`--file`
                 // /stdin and never launches an interactive editor).
-                let template = self.ticket_markdown(true).await?;
+                let template = self.ticket_markdown(Purpose::Editing).await?;
                 let detail = self.detail().await?;
                 Ok(EditorPrep {
                     template,
@@ -590,6 +595,7 @@ impl Node for JiraIssueNode {
                     &comments,
                     &tables,
                     me.as_identity(),
+                    true,
                 );
                 Ok(EditorPrep {
                     template,
@@ -734,7 +740,15 @@ impl Node for JiraIssueNode {
                 // Print the exact buffer `edit_markdown`/`from_markdown` open
                 // with (guarded, so what round-trips out writes cleanly back).
                 Ok(ActionOutcome::Done {
-                    message: Some(self.ticket_markdown(true).await?),
+                    message: Some(self.ticket_markdown(Purpose::Editing).await?),
+                })
+            }
+            ("show_markdown", ActionInput::None) => {
+                // The reader's ticket: body and comments, nothing the editor
+                // needs. Unguarded — a body that wouldn't survive a write-back
+                // is still perfectly readable, and nothing here writes back.
+                Ok(ActionOutcome::Done {
+                    message: Some(self.ticket_markdown(Purpose::Reading).await?),
                 })
             }
             (
@@ -840,6 +854,18 @@ impl Node for JiraIssueNode {
     }
 }
 
+/// What a Markdown rendering of a ticket is for. Editing and reading differ in
+/// more than one place — the round-trip guard, the ownership marker, the
+/// completion legend, the add-comment marker — and every one of those follows
+/// from this single question, so it is asked once and answered by the caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Purpose {
+    /// The buffer goes to an editor and comes back to Jira.
+    Editing,
+    /// The buffer is read by a human or a tool and never written back.
+    Reading,
+}
+
 impl JiraIssueNode {
     /// Hand `<base>/browse/<KEY>` to `xdg-open`. The base URL is the
     /// normalized REST root (see `client::normalize_base_url`), which
@@ -849,16 +875,20 @@ impl JiraIssueNode {
     }
 
     /// Build the ticket body + comments as one Markdown buffer — the shared
-    /// content of the `edit_markdown` editor and the `export_workspace` file.
-    /// When `guarded`, refuse (with a descriptive error) if the description or
-    /// any comment would not survive a lossless wiki→md→wiki round-trip; the
-    /// unguarded path is for the read-only export, which never writes back.
-    async fn ticket_markdown(&self, guarded: bool) -> Result<String> {
+    /// content of the `edit_markdown` editor, the `show_markdown` output and
+    /// the `export_workspace` file.
+    ///
+    /// [`Purpose::Editing`] refuses (with a descriptive error) a description or
+    /// comment that would not survive a lossless wiki→md→wiki round-trip, and
+    /// carries the editing vocabulary; [`Purpose::Reading`] never writes back,
+    /// so it needs neither.
+    async fn ticket_markdown(&self, purpose: Purpose) -> Result<String> {
+        let editing = purpose == Purpose::Editing;
         let detail = self.detail().await?;
         let comments = fetch_comments(&self.client, &self.cache, &self.key)
             .await
             .map_err(other_err)?;
-        if guarded {
+        if editing {
             if let Some(diff) = wiki_md::roundtrip_diff(&detail.description) {
                 return Err(other_err(format!(
                     "Markdown edit unavailable for {}: the description uses Jira \
@@ -882,10 +912,10 @@ impl JiraIssueNode {
         let mention_sources: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
         super::cache::resolve_unknown_mentions(&self.client, &self.cache, &mention_sources).await;
         let tables = self.slug_tables(detail).await;
-        // Only the guarded buffer is written back, so only it carries the
-        // ownership marker; the export is a read-only snapshot and stays
-        // free of editing vocabulary.
-        let me = if guarded {
+        // Only the editing buffer is written back, so only it carries the
+        // ownership marker; a reading buffer is a snapshot and stays free of
+        // editing vocabulary.
+        let me = if editing {
             self.identity().await
         } else {
             OwnIdentity::default()
@@ -896,16 +926,17 @@ impl JiraIssueNode {
             &comments,
             &tables,
             me.as_identity(),
+            editing,
         );
         Ok(edit_with_comments::comments_canonical_to_md(&canonical))
     }
 
     /// Materialise the `export_workspace` folder: `<base>/<KEY>-<slug>/` with
-    /// `ticket.md` (unguarded Markdown) and on-demand `attachments/`. No editor
+    /// `ticket.md` (reading Markdown) and on-demand `attachments/`. No editor
     /// and no Jira write-back — a local, read-oriented snapshot.
     async fn export_workspace(&self, base_input: &str) -> Result<ActionOutcome> {
         let base = prepare_target_dir(base_input)?;
-        let markdown = self.ticket_markdown(false).await?;
+        let markdown = self.ticket_markdown(Purpose::Reading).await?;
         let detail = self.detail().await?;
         let dir =
             workspace::materialize(&self.client, &self.key, &detail.summary, &markdown, &base)
@@ -1790,6 +1821,7 @@ mod tests {
                 "edit_markdown",
                 "to_markdown",
                 "from_markdown",
+                "show_markdown",
                 "edit_with_comments",
                 "set_fields",
                 "transition",
@@ -1816,6 +1848,7 @@ mod tests {
         assert!(matches!(input("edit_markdown"), InputSpec::Editor));
         assert!(matches!(input("to_markdown"), InputSpec::None));
         assert!(matches!(input("from_markdown"), InputSpec::Editor));
+        assert!(matches!(input("show_markdown"), InputSpec::None));
         assert!(matches!(input("edit_with_comments"), InputSpec::Editor));
         assert!(matches!(input("set_fields"), InputSpec::Form { .. }));
         assert!(matches!(input("transition"), InputSpec::Picker));
@@ -1916,6 +1949,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             me,
+            true,
         );
         assert!(canonical.contains("[not yours] (id=10042)"), "{canonical}");
         let md = comments_canonical_to_md(&canonical);
@@ -1962,6 +1996,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
 
         let pos2 = buf.find("(id=2)").expect("id=2 marker");
@@ -1969,6 +2004,42 @@ mod tests {
         assert!(pos2 < pos1, "newest comment must come first");
         assert!(buf.contains("old comment"));
         assert!(buf.contains("newer comment"));
+    }
+
+    #[test]
+    fn the_reading_buffer_carries_no_editing_vocabulary() {
+        // `show_markdown` and the exported `ticket.md` are read, never written
+        // back. The CACHE legend lists every label, user and status of the
+        // instance — on a large Jira it dwarfs the ticket it was appended to.
+        let node = test_node(sample_detail());
+        let comments = vec![make_comment(
+            "1",
+            "bob",
+            "2025-05-01T10:00:00.000+0000",
+            "a comment",
+        )];
+        let render = |editing: bool| {
+            node.render_with_comments(
+                &edit_full_fields(),
+                node.detail_now(),
+                &comments,
+                &build_slug_tables(&node.cache),
+                Identity::default(),
+                editing,
+            )
+        };
+
+        let reading = render(false);
+        assert!(!reading.contains(CACHE_MARKER), "cache legend: {reading}");
+        assert!(
+            !reading.contains(ADD_COMMENT_MARKER),
+            "add marker: {reading}"
+        );
+        assert!(reading.contains("a comment"), "body missing: {reading}");
+
+        let editing = render(true);
+        assert!(editing.contains(CACHE_MARKER), "cache legend gone");
+        assert!(editing.contains(ADD_COMMENT_MARKER), "add marker gone");
     }
 
     #[test]
@@ -1984,6 +2055,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
 
         let parsed = node
@@ -2012,6 +2084,7 @@ mod tests {
             &[],
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         // Insert the new-comment block before the trailing CACHE section.
         let buf = match buf.find(CACHE_MARKER) {
@@ -2040,6 +2113,7 @@ mod tests {
             &[],
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         assert!(
             buf.contains(ADD_COMMENT_MARKER),
@@ -2058,6 +2132,7 @@ mod tests {
             &[],
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let parsed = node
             .parse_with_comments(&buf)
@@ -2078,6 +2153,7 @@ mod tests {
             &[],
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         // Insert a second add block that contains only whitespace.
         let buf = match buf.find(CACHE_MARKER) {
@@ -2113,6 +2189,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let md = comments_canonical_to_md(&canonical);
 
@@ -2147,6 +2224,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let md = comments_canonical_to_md(&canonical);
         let back = comments_md_to_canonical(&md);
@@ -2178,6 +2256,7 @@ mod tests {
             &[],
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let md = comments_canonical_to_md(&canonical);
         // User fills in the empty add placeholder.
@@ -2210,6 +2289,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let md = comments_canonical_to_md(&canonical);
         // User replaces the comment body with the sole-body delete keyword.
@@ -2266,6 +2346,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let md = comments_canonical_to_md(&canonical);
 
@@ -2348,6 +2429,7 @@ mod tests {
             &comments,
             &build_slug_tables(&node.cache),
             Identity::default(),
+            true,
         );
         let opened_md = comments_canonical_to_md(&canonical);
         let saved_md = opened_md.replace(

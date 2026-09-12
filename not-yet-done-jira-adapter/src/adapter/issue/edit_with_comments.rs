@@ -592,6 +592,11 @@ impl JiraIssueNode {
     /// Render the buffer for `edit_with_comments`: 3b header, then every
     /// comment newest→oldest, each preceded by `--- @author ts (id=N) ---`.
     /// The user adds new comments by writing `--- add ---` followed by a body.
+    ///
+    /// Without `editing` the two pieces only an editor needs are left out: the
+    /// add-comment marker and the trailing CACHE legend. That legend lists
+    /// every label, user and status of the instance and dwarfs the ticket on a
+    /// large Jira — a reader must not be handed it.
     pub(super) fn render_with_comments(
         &self,
         editable_fields: &[String],
@@ -599,6 +604,7 @@ impl JiraIssueNode {
         comments: &[JiraComment],
         tables: &SlugTables,
         me: Identity<'_>,
+        editing: bool,
     ) -> String {
         // Render the 3b header without the CACHE section — we append it
         // once at the very end after the comment list.
@@ -608,9 +614,11 @@ impl JiraIssueNode {
         }
         out.push('\n');
 
-        out.push_str(ADD_COMMENT_MARKER);
-        out.push('\n');
-        out.push('\n');
+        if editing {
+            out.push_str(ADD_COMMENT_MARKER);
+            out.push('\n');
+            out.push('\n');
+        }
 
         let mut sorted: Vec<&JiraComment> = comments.iter().collect();
         sorted.sort_by(|a, b| b.created.cmp(&a.created));
@@ -625,7 +633,9 @@ impl JiraIssueNode {
             out.push('\n');
         }
 
-        out.push_str(&render_cache_section(tables));
+        if editing {
+            out.push_str(&render_cache_section(tables));
+        }
         out
     }
 
