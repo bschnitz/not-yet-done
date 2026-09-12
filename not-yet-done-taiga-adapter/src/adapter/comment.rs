@@ -132,10 +132,15 @@ impl Node for TaigaCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit_full", ActionInput::Edited { text, .. }) => {
-                let body = parse_comment_buffer(&text);
+            ("edit_full", ActionInput::Edited { text, original, .. }) => {
+                let body = parse_comment_buffer(&text, &original);
                 if body == self.comment.body.trim() {
                     return Ok(ActionOutcome::NoChanges);
                 }
@@ -191,8 +196,16 @@ impl Content for TaigaCommentNode {
 }
 
 /// Strip the editor's `# `-prefixed header and `# ───` separator,
-/// returning the trimmed body text.
-fn parse_comment_buffer(text: &str) -> String {
+/// returning the trimmed body text. Everything below the separator is the
+/// body and is taken verbatim.
+///
+/// Without a separator — a body handed over as a file, or a buffer whose
+/// separator the user deleted — only the *leading* run of lines is looked
+/// at, and only lines the template itself carried are dropped. `# ` at the
+/// start of a line opens a heading in the Markdown that Taiga comments use,
+/// so dropping every such line anywhere in the buffer would silently
+/// swallow the comment's headings.
+fn parse_comment_buffer(text: &str, template: &str) -> String {
     let mut in_body = false;
     let mut body_lines = Vec::new();
 
@@ -205,17 +218,28 @@ fn parse_comment_buffer(text: &str) -> String {
             in_body = true;
             continue;
         }
-        if line.starts_with("# ") || line == "#" {
-            continue;
-        }
     }
 
     if !in_body {
-        body_lines.clear();
+        // Header of the template: everything up to and including the
+        // separator. The lines below it are the comment's own body and must
+        // never serve as a strip pattern.
+        let header: Vec<&str> = template
+            .lines()
+            .take_while(|l| !l.starts_with("# ───"))
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut in_header = !header.is_empty();
         for line in text.lines() {
-            if !line.starts_with("# ") && line != "#" {
-                body_lines.push(line);
+            if in_header {
+                let trimmed = line.trim_end();
+                if trimmed.is_empty() || header.contains(&trimmed) {
+                    continue;
+                }
+                in_header = false;
             }
+            body_lines.push(line);
         }
     }
 
@@ -235,7 +259,7 @@ mod tests {
              \n\
              First comment."
         );
-        let body = parse_comment_buffer(&text);
+        let body = parse_comment_buffer(&text, &text);
         assert_eq!(body, "First comment.");
     }
 
@@ -247,15 +271,27 @@ mod tests {
              \n\
              Updated body, longer now."
         );
-        let body = parse_comment_buffer(&text);
+        let body = parse_comment_buffer(&text, &text);
         assert_eq!(body, "Updated body, longer now.");
     }
 
+    /// Without a separator only the template's own header goes; a `# `
+    /// line further down is the comment's Markdown heading and stays.
     #[test]
-    fn parse_comment_buffer_no_separator_strips_comment_lines() {
-        let text = "# header\nactual body\n# trailing";
-        let body = parse_comment_buffer(text);
-        assert_eq!(body, "actual body");
+    fn parse_comment_buffer_no_separator_drops_only_the_template_header() {
+        let template = format!("# Comment on task:1\n{COMMENT_SEPARATOR}\n\nold body");
+        let text = "# Comment on task:1\n\nactual body\n\n# A heading";
+        let body = parse_comment_buffer(text, &template);
+        assert_eq!(body, "actual body\n\n# A heading");
+    }
+
+    /// A body supplied as a file (`--file`) carries no header at all, so
+    /// nothing is stripped from it — headings included.
+    #[test]
+    fn parse_comment_buffer_keeps_a_headed_body_from_a_file() {
+        let template = format!("# Comment on task:1\n{COMMENT_SEPARATOR}\n\nold body");
+        let text = "# Findings\n\nthe first one";
+        assert_eq!(parse_comment_buffer(text, &template), text);
     }
 
     /// `actions()`'s owner predicate is permissive when either side is
