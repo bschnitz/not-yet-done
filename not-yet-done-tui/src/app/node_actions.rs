@@ -286,6 +286,16 @@ pub fn dispatch_to_view_request(
         ActionDispatch::Reload => Some(ViewRequest::ReloadContentCurrentLevel {
             view_index,
             pane_id,
+            notice: None,
+        }),
+        // Reload *and* say what happened. The same refetch as `Reload`, with
+        // the adapter's verdict riding along — a write action that changed the
+        // row usually also has a sentence about it, and losing either half
+        // leaves the user guessing.
+        ActionDispatch::Done { message } => Some(ViewRequest::ReloadContentCurrentLevel {
+            view_index,
+            pane_id,
+            notice: message,
         }),
         // Generic confirm: the adapter wants a `(y/n)` prompt before doing
         // the work. On "y" the App re-invokes the *same* action on the
@@ -358,9 +368,40 @@ mod tests {
             Some(ViewRequest::ReloadContentCurrentLevel {
                 view_index,
                 pane_id,
+                notice,
             }) => {
                 assert_eq!(view_index, 7);
                 assert_eq!(pane_id, 3);
+                assert_eq!(notice, None);
+            }
+            other => panic!("expected ReloadContentCurrentLevel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_done_reloads_and_carries_the_message() {
+        let req = dispatch_to_view_request(
+            ActionDispatch::Done {
+                message: Some("started foo.service".into()),
+            },
+            7,
+            3,
+            "node-1".into(),
+            "start".into(),
+            Default::default(),
+            false,
+        );
+        // Both halves survive: the level is refetched *and* the adapter's
+        // verdict reaches the status bar.
+        match req {
+            Some(ViewRequest::ReloadContentCurrentLevel {
+                view_index,
+                pane_id,
+                notice,
+            }) => {
+                assert_eq!(view_index, 7);
+                assert_eq!(pane_id, 3);
+                assert_eq!(notice.as_deref(), Some("started foo.service"));
             }
             other => panic!("expected ReloadContentCurrentLevel, got {other:?}"),
         }

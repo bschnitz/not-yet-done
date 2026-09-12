@@ -56,10 +56,19 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// Whether a verb of this scope belongs on the level `type_id`.
+    ///
+    /// Every arm names the levels it covers rather than excluding the ones it
+    /// does not: the adapter has levels that are not units at all — the manager
+    /// root, a property row — and "everything except the unit files" would hand
+    /// them `stop`.
     fn covers(self, type_id: &str) -> bool {
         match self {
-            Scope::Any => true,
-            Scope::Loaded => type_id != "systemd:unitfile",
+            Scope::Any => matches!(
+                type_id,
+                "systemd:service" | "systemd:timer" | "systemd:unitfile"
+            ),
+            Scope::Loaded => matches!(type_id, "systemd:service" | "systemd:timer"),
             Scope::Processes => type_id == "systemd:service",
         }
     }
@@ -242,7 +251,17 @@ pub fn actions_for(type_id: &str) -> Vec<NodeAction> {
     VERBS
         .iter()
         .filter(|v| v.scope.covers(type_id))
-        .map(|v| NodeAction::new(v.id, v.label, InputSpec::None))
+        .map(|v| {
+            // `kill` is the only verb that needs an answer before it acts, and
+            // the answer is *which signal* — so it declares a picker and the
+            // frontend fetches the list instead of firing blind.
+            let input = if v.takes_value {
+                InputSpec::Picker
+            } else {
+                InputSpec::None
+            };
+            NodeAction::new(v.id, v.label, input)
+        })
         .collect()
 }
 
@@ -458,6 +477,30 @@ fn prop_i64(props: &Props, key: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_verb_that_needs_a_signal_declares_a_picker() {
+        let kill = actions_for("systemd:service")
+            .into_iter()
+            .find(|a| a.id == "kill")
+            .expect("services can be killed");
+        assert!(matches!(kill.input, InputSpec::Picker));
+        // And nothing else asks for input — the rest act on the row alone.
+        assert!(
+            actions_for("systemd:service")
+                .iter()
+                .filter(|a| a.id != "kill")
+                .all(|a| matches!(a.input, InputSpec::None))
+        );
+    }
+
+    #[test]
+    fn a_level_that_is_not_a_unit_is_offered_nothing() {
+        // The manager root and a property row are levels of this adapter too,
+        // and neither is something you can stop.
+        assert!(actions_for("systemd:manager").is_empty());
+        assert!(actions_for("systemd:property").is_empty());
+    }
 
     #[test]
     fn a_timer_is_not_offered_the_process_verbs() {

@@ -1604,6 +1604,17 @@ pub enum ActionDispatch {
     /// change) nor [`ActionDispatch::Noop`] (says "nothing happened") fit;
     /// `Notify` is the generic success-with-a-message channel.
     Notify { message: String },
+    /// The action did its work, the pane's data changed, **and** there is
+    /// something to tell the user about it.
+    ///
+    /// *Why it exists:* [`ActionDispatch::Reload`] refreshes the pane but
+    /// says nothing, and [`ActionDispatch::Notify`] speaks but explicitly
+    /// does not reload. A write action that both mutates the row and has a
+    /// verdict worth reading needs the two together — a systemd `start`
+    /// that reports "started" while the row still says `inactive` has told
+    /// the user half the truth. `message` is optional so the variant also
+    /// serves as "it worked, reload, nothing to add".
+    Done { message: Option<String> },
     /// The action produced a **set of node references** — a search, a
     /// lookup, any action whose result is "these nodes match".
     ///

@@ -23,7 +23,7 @@
 //!
 //! `protect:` adds to the built-in list and `unprotect:` removes from it, rather
 //! than one key replacing it wholesale. A replacing key means a config that
-//! names one extra unit silently drops the eleven defaults — the failure mode
+//! names one extra unit silently drops every default — the failure mode
 //! being protected against is precisely the one nobody notices until the
 //! session is gone. Lifting a default stays possible, but it has to be said.
 
@@ -39,9 +39,14 @@ pub const DEFAULT_PROTECTED: &[&str] = &[
     "*.slice",
     "*.scope",
     // The session bus itself — including the socket this adapter is talking
-    // over.
+    // over. Both implementations are named, because which one a machine runs
+    // is not something the user picked: `dbus-broker.service` is the default on
+    // most current distributions, `dbus.service` the older reference daemon.
+    // Listing only one leaves the other unguarded on exactly the machines that
+    // have it.
     "dbus.socket",
     "dbus.service",
+    "dbus-broker.service",
     // The targets the user manager's own dependency graph hangs off.
     "default.target",
     "basic.target",
@@ -111,6 +116,9 @@ mod tests {
     fn the_defaults_cover_the_session_plumbing() {
         let p = Protection::default();
         assert!(p.covers("dbus.socket"));
+        // Whichever of the two D-Bus daemons the machine runs.
+        assert!(p.covers("dbus.service"));
+        assert!(p.covers("dbus-broker.service"));
         assert!(p.covers("app.slice"));
         assert!(p.covers("session.scope"));
         assert!(p.covers("default.target"));

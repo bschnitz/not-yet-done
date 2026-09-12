@@ -9214,7 +9214,14 @@ impl App {
             ViewRequest::ReloadContentCurrentLevel {
                 view_index,
                 pane_id,
+                notice,
             } => {
+                // The notice goes out first: the refetch is asynchronous, and
+                // "started foo.service" is the answer the user is waiting for,
+                // not the redrawn row.
+                if let Some(msg) = notice {
+                    self.notify(msg);
+                }
                 self.reload_content_pane_current_level(view_index, pane_id);
                 EditorRequest::None
             }
@@ -10053,7 +10060,11 @@ impl App {
             crate::app::node_actions::MarkMoveEffect::ClearOnPasteSuccess => {
                 // The adapter performed the move; a `Reload` dispatch
                 // confirms success, so the source is no longer "cut".
-                if matches!(dispatch, not_yet_done_content::ActionDispatch::Reload) {
+                if matches!(
+                    dispatch,
+                    not_yet_done_content::ActionDispatch::Reload
+                        | not_yet_done_content::ActionDispatch::Done { .. }
+                ) {
                     self.content_marked_node = None;
                 }
                 // Fall through so the `Reload` reloads the target pane.
@@ -10073,7 +10084,11 @@ impl App {
         // A `Reload` dispatch means the adapter mutated state (e.g.
         // removing a bookmark) — invalidate sibling subtabs so they
         // re-load on next switch, mirroring the `ContentActionDone` path.
-        if matches!(dispatch, not_yet_done_content::ActionDispatch::Reload) {
+        if matches!(
+            dispatch,
+            not_yet_done_content::ActionDispatch::Reload
+                | not_yet_done_content::ActionDispatch::Done { .. }
+        ) {
             if let Some(cv) = self.content_view_mut(view_index) {
                 cv.invalidate_sibling_subtabs();
             }
