@@ -29,6 +29,7 @@
 //! | `_italic_`                    | `_italic_` (already valid MD)     |
 //! | `-strike-`                    | `~~strike~~`                      |
 //! | `{{mono}}`, `{{{}mono{}}}`    | `` `mono` `` (padding dropped)    |
+//! | `{{\{x\}}}`                   | `` `{x}` `` (braces escaped, not a macro) |
 //! | literal `` ` ``               | `` \` `` (a backtick is plain text in Jira) |
 //! | `[text\|url]`                 | `[text](url)`                     |
 //! | `{color:c}…{color}`           | `<span style="color:c">…</span>`  |
@@ -1735,7 +1736,7 @@ static W_IMAGE: LazyLock<Regex> =
 /// `}`). Because the padding cannot be restored on the way back,
 /// [`normalize_ws`] canonicalizes it away on both sides of the round-trip.
 static W_MONO: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{\{(?:\{\})?(.+?)(?:\{\})?\}\}").unwrap());
+    LazyLock::new(|| Regex::new(r"\{\{(?:\{\})?((?:\\.|[^\\])+?)(?:\{\})?\}\}").unwrap());
 static W_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]|]+)\|([^\]]+)\]").unwrap());
 /// Jira bold `*text*`. The inner tail is optional *and* lazy (`??`) so that a
 /// one-character span closes at its own delimiter instead of running on to the
@@ -1794,6 +1795,42 @@ fn image_m2w(alt: &str, params: Option<&str>) -> String {
     }
 }
 
+/// Escape the braces of an inline-code span on its way into Jira monospace.
+///
+/// `{{…}}` is not a verbatim span: Jira still reads macros inside it, so
+/// `` `{meta:x}` `` shows up as "Unknown macro" instead of the literal text it
+/// was. A backslash in front of the brace takes that reading away and renders
+/// the character itself.
+///
+/// A backslash already in the content is left as it is. Jira spells an escaped
+/// backslash `\\`, and that is its line break — doubling here would trade a
+/// wrong macro for a wrong line break. The round-trip survives it either way:
+/// [`unescape_braces`] only undoes a backslash that stands in front of a brace.
+fn escape_braces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '{' || c == '}' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Reverse of [`escape_braces`]: `\{` and `\}` come back as the bare brace,
+/// every other backslash stays where it stands.
+fn unescape_braces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn convert_inline_w2m(text: &str) -> String {
     let mut sh: Vec<String> = Vec::new();
     let s = ESCAPE_MACRO.replace_all(text, |c: &Captures| shield(&mut sh, c[0].to_string()));
@@ -1809,7 +1846,9 @@ fn convert_inline_w2m(text: &str) -> String {
         shield(&mut sh, format!("<span style=\"color:{}\">", &c[1]))
     });
     let s = W_COLOR_CLOSE.replace_all(&s, |_: &Captures| shield(&mut sh, "</span>".to_string()));
-    let s = W_MONO.replace_all(&s, |c: &Captures| shield(&mut sh, format!("`{}`", &c[1])));
+    let s = W_MONO.replace_all(&s, |c: &Captures| {
+        shield(&mut sh, format!("`{}`", unescape_braces(&c[1])))
+    });
     // A backtick is plain text in Jira but an inline-code delimiter in
     // Markdown, so `md_to_wiki` would turn a literal pair into `{{…}}`. Every
     // backtick still standing after the mono pass is literal: escape it the
@@ -1880,7 +1919,7 @@ fn convert_inline_m2w(text: &str) -> String {
     // escape). Shielding it first keeps the code pass below from pairing it.
     let s = M_ESCAPED_TICK.replace_all(&s, |_: &Captures| shield(&mut sh, "`".to_string()));
     let s = M_MONO.replace_all(&s, |c: &Captures| {
-        shield(&mut sh, format!("{{{{{}}}}}", &c[1]))
+        shield(&mut sh, format!("{{{{{}}}}}", escape_braces(&c[1])))
     });
     let s = M_LINK.replace_all(&s, |c: &Captures| {
         shield(&mut sh, format!("[{}|{}]", &c[1], &c[2]))
@@ -2216,6 +2255,24 @@ a title-less panel whose sole attribute makes its opener marker long enough
         assert_roundtrip("only {{right_pad{}}} here", "only `right_pad` here");
         // A ticket that never had the padding keeps converting byte-for-byte.
         assert_eq!(wiki_to_md("plain {{mono}}"), "plain `mono`");
+    }
+
+    /// `{{…}}` is no verbatim span — Jira reads macros inside it too, so an
+    /// inline-code span carrying braces came out as "Unknown macro". Escaped
+    /// braces render literally and come back as themselves.
+    #[test]
+    fn mono_with_braces_is_escaped() {
+        assert_eq!(
+            md_to_wiki("use `{meta:x}` here"),
+            "use {{\\{meta:x\\}}} here"
+        );
+        assert_roundtrip("use {{\\{meta:x\\}}} here", "use `{meta:x}` here");
+        // A brace on its own is escaped just the same: Jira only needs the
+        // opener to start reading a macro name.
+        assert_roundtrip("an {{a\\{b}} span", "an `a{b` span");
+        // A backslash in the content is *not* doubled — `\\` is Jira's line
+        // break — and still survives the round-trip.
+        assert_roundtrip("a {{c:\\tmp}} path", "a `c:\\tmp` path");
     }
 
     #[test]
