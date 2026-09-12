@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures::StreamExt;
 use not_yet_done_content::{ContentError, Result};
 use tokio::sync::OnceCell;
 use zbus_systemd::systemd1::ManagerProxy;
@@ -86,6 +87,8 @@ pub struct Bus {
     manager: Manager,
     timeout: Option<Duration>,
     conn: OnceCell<zbus::Connection>,
+    /// Latches once `Subscribe` has been sent — see [`Bus::enable_signals`].
+    subscribed: OnceCell<()>,
 }
 
 impl Bus {
@@ -94,6 +97,7 @@ impl Bus {
             manager,
             timeout,
             conn: OnceCell::new(),
+            subscribed: OnceCell::new(),
         }
     }
 
@@ -222,5 +226,256 @@ impl Bus {
             proxy.get_all(iface),
         )
         .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control
+// ---------------------------------------------------------------------------
+
+/// How long a job is watched before the adapter stops waiting for it.
+///
+/// Not a deadline in the [`Bus::deadline`] sense: the D-Bus call that *enqueues*
+/// the job returns in milliseconds, and what this bounds is the job itself —
+/// a `Type=notify` service that takes its time starting, a stop that waits out
+/// `TimeoutStopSec=`. Tripping it is not an error and cancels nothing; it means
+/// the adapter stops holding the pane's busy line and says the job is still
+/// queued. Generous, because reporting "still running" for something that
+/// finished two seconds later is the more annoying half of the trade.
+pub const JOB_WAIT_SECS: u64 = 120;
+
+/// Which manager method enqueues the job.
+///
+/// The job's *kind* is a transport fact — it picks the method — so it lives
+/// here; which verb the user pressed, and whether they were asked first, is
+/// [`crate::control`]'s business.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobKind {
+    Start,
+    Stop,
+    Restart,
+    Reload,
+    ReloadOrRestart,
+}
+
+impl JobKind {
+    /// The present participle, for the busy line ("Starting foo.service").
+    pub fn gerund(self) -> &'static str {
+        match self {
+            JobKind::Start => "Starting",
+            JobKind::Stop => "Stopping",
+            JobKind::Restart => "Restarting",
+            JobKind::Reload => "Reloading",
+            JobKind::ReloadOrRestart => "Reloading or restarting",
+        }
+    }
+}
+
+/// How a job ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobEnd {
+    /// The manager reported the outcome: `done`, `failed`, `canceled`,
+    /// `timeout`, `dependency`, `skipped`, `collected`, `once`.
+    Reported(String),
+    /// Still queued when [`JOB_WAIT_SECS`] ran out. The job was not cancelled.
+    StillRunning,
+}
+
+/// Which unit-file operation to perform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileChange {
+    Enable,
+    Disable,
+    Mask,
+    Unmask,
+}
+
+/// What a unit-file operation did.
+pub struct FileResult {
+    /// `false` when the unit has no `[Install]` section — systemd then made no
+    /// symlinks and the operation is a no-op the user has to be told about,
+    /// because nothing else on screen would change.
+    ///
+    /// Only `EnableUnitFiles` reports this; the other operations always set it
+    /// to `true`, since the question does not apply to them.
+    pub carries_install_info: bool,
+    /// One `(operation, filename, destination)` per symlink created or removed,
+    /// exactly as the manager reports them.
+    pub changes: Vec<(String, String, String)>,
+}
+
+impl Bus {
+    /// The object path of a **loaded** unit, by name.
+    ///
+    /// `GetUnit`, not `LoadUnit`: asking for the properties of a unit is a
+    /// read, and a read must not have the side effect of loading a unit the
+    /// manager had deliberately let go.
+    pub async fn unit_path(&self, name: &str) -> Result<OwnedObjectPath> {
+        let proxy = self.manager_proxy().await?;
+        self.deadline(
+            &format!("looking up {name}"),
+            proxy.get_unit(name.to_string()),
+        )
+        .await
+    }
+
+    /// Enqueue a job on `unit` and wait for the manager to say how it ended.
+    ///
+    /// The whole point of this phase: `StartUnit` returning a job path means
+    /// "queued", not "started", and a tab that reports the former as the latter
+    /// is lying at exactly the moment the user is watching. So the `JobRemoved`
+    /// stream is opened **before** the call goes out — a fast job is removed
+    /// again within a millisecond, and subscribing afterwards is a race that
+    /// loses most of the time — and the result word comes from the manager.
+    pub async fn run_job(&self, kind: JobKind, unit: &str) -> Result<JobEnd> {
+        let proxy = self.manager_proxy().await?;
+        self.enable_signals(&proxy).await;
+        let mut removed = proxy.receive_job_removed().await.map_err(|e| {
+            ContentError::Other(format!("watching jobs: {e}").into())
+        })?;
+
+        let name = unit.to_string();
+        let mode = "replace".to_string();
+        let enqueue = async {
+            match kind {
+                JobKind::Start => proxy.start_unit(name, mode).await,
+                JobKind::Stop => proxy.stop_unit(name, mode).await,
+                JobKind::Restart => proxy.restart_unit(name, mode).await,
+                JobKind::Reload => proxy.reload_unit(name, mode).await,
+                JobKind::ReloadOrRestart => proxy.reload_or_restart_unit(name, mode).await,
+            }
+        };
+        let job = self
+            .deadline(&format!("{} {unit}", kind.gerund().to_lowercase()), enqueue)
+            .await?;
+
+        let watch = async {
+            while let Some(signal) = removed.next().await {
+                let Ok(args) = signal.args() else { continue };
+                if args.job() == &job {
+                    return args.result().to_string();
+                }
+            }
+            // The stream ended, which means the connection did. Say so rather
+            // than claim an outcome.
+            String::new()
+        };
+        match tokio::time::timeout(Duration::from_secs(JOB_WAIT_SECS), watch).await {
+            Ok(result) if result.is_empty() => Err(ContentError::Other(
+                format!("lost the connection while waiting for the {unit} job").into(),
+            )),
+            Ok(result) => Ok(JobEnd::Reported(result)),
+            Err(_) => Ok(JobEnd::StillRunning),
+        }
+    }
+
+    /// Create or remove the symlinks behind enable / disable / mask / unmask,
+    /// then make the manager notice them.
+    ///
+    /// The `daemon-reload` is part of the operation, not a separate courtesy:
+    /// without it the manager keeps serving the old picture, so the row the
+    /// user is looking at would still say `disabled` after a successful enable.
+    /// It is what `systemctl` does too, for the same reason.
+    ///
+    /// `runtime` is always `false` — everything this adapter writes is meant to
+    /// survive a reboot. A `/run` variant is a phase-2 question, together with
+    /// the rest of the write scope.
+    pub async fn change_unit_file(&self, change: FileChange, unit: &str) -> Result<FileResult> {
+        let proxy = self.manager_proxy().await?;
+        let files = vec![unit.to_string()];
+        let what = format!("{} {unit}", change.verb());
+        let result = match change {
+            FileChange::Enable => {
+                let (install, changes) = self
+                    .deadline(&what, proxy.enable_unit_files(files, false, false))
+                    .await?;
+                FileResult {
+                    carries_install_info: install,
+                    changes,
+                }
+            }
+            FileChange::Disable => FileResult {
+                carries_install_info: true,
+                changes: self
+                    .deadline(&what, proxy.disable_unit_files(files, false))
+                    .await?,
+            },
+            FileChange::Mask => FileResult {
+                carries_install_info: true,
+                changes: self
+                    .deadline(&what, proxy.mask_unit_files(files, false, false))
+                    .await?,
+            },
+            FileChange::Unmask => FileResult {
+                carries_install_info: true,
+                changes: self
+                    .deadline(&what, proxy.unmask_unit_files(files, false))
+                    .await?,
+            },
+        };
+        self.deadline("reloading the manager", proxy.reload()).await?;
+        Ok(result)
+    }
+
+    /// Send `signal` to the unit's processes. `whom` is systemd's vocabulary:
+    /// `main`, `control` or `all`.
+    pub async fn kill(&self, unit: &str, whom: &str, signal: i32) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        self.deadline(
+            &format!("killing {unit}"),
+            proxy.kill_unit(unit.to_string(), whom.to_string(), signal),
+        )
+        .await
+    }
+
+    /// Clear a unit's `failed` state so it can be started again.
+    pub async fn reset_failed(&self, unit: &str) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        self.deadline(
+            &format!("resetting {unit}"),
+            proxy.reset_failed_unit(unit.to_string()),
+        )
+        .await
+    }
+
+    /// Suspend (`freeze`) or resume (`thaw`) every process in the unit's cgroup.
+    pub async fn freeze(&self, unit: &str, frozen: bool) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        let name = unit.to_string();
+        if frozen {
+            self.deadline(&format!("freezing {unit}"), proxy.freeze_unit(name))
+                .await
+        } else {
+            self.deadline(&format!("thawing {unit}"), proxy.thaw_unit(name))
+                .await
+        }
+    }
+
+    /// Ask the manager to emit unit and job signals, once per connection.
+    ///
+    /// systemd stays quiet until a client subscribes, and it answers a second
+    /// `Subscribe` from the same client with an error — so this happens exactly
+    /// once and its outcome is not worth failing an action over: if it did not
+    /// take, the job wait falls through to its timeout and reports "still
+    /// running" instead of an outcome, which is a degraded answer, not a wrong
+    /// one.
+    async fn enable_signals(&self, proxy: &ManagerProxy<'_>) {
+        self.subscribed
+            .get_or_init(|| async {
+                let _ = proxy.subscribe().await;
+            })
+            .await;
+    }
+}
+
+impl FileChange {
+    /// The verb as the user knows it, for messages.
+    pub fn verb(self) -> &'static str {
+        match self {
+            FileChange::Enable => "enabling",
+            FileChange::Disable => "disabling",
+            FileChange::Mask => "masking",
+            FileChange::Unmask => "unmasking",
+        }
     }
 }

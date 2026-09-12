@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use not_yet_done_filter::eval::{self, Field, RowFields};
 use not_yet_done_filter::{FilterExpr, query_filter};
 
-use crate::model::{ServiceRow, TimerRow, UnitFileRow};
+use crate::model::{PropertyRow, ServiceRow, TimerRow, UnitFileRow};
 
 /// Columns a Services query may reference.
 pub const SERVICE_COLUMNS: &[&str] = &[
@@ -53,6 +53,13 @@ pub const TIMER_COLUMNS: &[&str] = &[
     "result",
     "persistent",
 ];
+
+/// Columns a Properties query may reference.
+///
+/// Three, and all text: the level is deliberately untyped (see
+/// [`model::render`](crate::model)), so `[name, like, Timeout]` is the query
+/// this level is for.
+pub const PROPERTY_COLUMNS: &[&str] = &["name", "value", "interface"];
 
 /// Columns a Unit files query may reference.
 pub const UNIT_FILE_COLUMNS: &[&str] = &["name", "state", "path", "vendor"];
@@ -164,6 +171,17 @@ impl RowFields for TimerRow {
             "unit" => text_or_null(&self.unit),
             "result" => text_or_null(&self.result),
             "persistent" => Field::Bool(self.persistent),
+            _ => Field::Null,
+        }
+    }
+}
+
+impl RowFields for PropertyRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "name" => Field::Text(Cow::Borrowed(&self.name)),
+            "value" => text_or_null(&self.value),
+            "interface" => text_or_null(&self.interface),
             _ => Field::Null,
         }
     }
