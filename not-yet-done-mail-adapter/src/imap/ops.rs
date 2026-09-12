@@ -201,11 +201,7 @@ pub(crate) async fn move_messages(
     select_stable(state, path, uid_validity).await?;
     let set = uid_set(uids);
     if has_capability(state, "MOVE").await? {
-        state
-            .session
-            .uid_mv(&set, dest)
-            .await
-            .map_err(classify)?;
+        state.session.uid_mv(&set, dest).await.map_err(classify)?;
         drain_unsolicited(&mut state.session);
         return Ok(());
     }
@@ -216,11 +212,7 @@ pub(crate) async fn move_messages(
              anything else marked deleted there"
         )));
     }
-    state
-        .session
-        .uid_copy(&set, dest)
-        .await
-        .map_err(classify)?;
+    state.session.uid_copy(&set, dest).await.map_err(classify)?;
     // Only now: a copy that failed must leave the original alone.
     store_flags(state, path, uid_validity, uids, true, "\\Deleted").await?;
     {
@@ -255,7 +247,6 @@ fn uid_set(uids: &[u32]) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
-
 
 /// Message and unread counts for one mailbox, without selecting it.
 ///

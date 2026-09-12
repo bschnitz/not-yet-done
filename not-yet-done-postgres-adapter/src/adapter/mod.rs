@@ -23,11 +23,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities, AdapterStatus,
-    ContentAdapter, ContentError, CursorIntent, CustomQueryContext, CustomQueryResult, EditorPrep,
-    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeRef,
-    NodeSummary, NodeType, PageInfo, PageRequest, Result, script_buffer,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    AdapterStatus, ContentAdapter, ContentError, CursorIntent, CustomQueryContext,
+    CustomQueryResult, EditorPrep, InputSpec, ListParams, ListResult, Metadata, MetadataField,
+    Node, NodeAction, NodeRef, NodeSummary, NodeType, PageInfo, PageRequest, Result, script_buffer,
 };
 
 use not_yet_done_sql_core::db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptTree};
@@ -1686,7 +1686,12 @@ impl Node for TableNode {
         self.new_row().prepare().await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
                 "a table has no editor action `{action_id}`"
@@ -2055,7 +2060,12 @@ impl Node for RowNode {
     /// from a good one. When the statement itself is refused, the statement
     /// is shown next to the complaint — a type or constraint error is far
     /// easier to place with the `UPDATE` in front of you.
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().execute(input).await;
         }
@@ -2368,7 +2378,12 @@ impl Node for ViewNode {
     /// than failing the action: the user's text is the only copy of what
     /// they wrote, and a rejected definition is usually one edit away from
     /// a good one.
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         if action_id == NEW_ROW_ACTION {
             return self.new_row().execute(input).await;
         }
@@ -3234,7 +3249,11 @@ mod db_script_tree_tests {
     async fn a_row_answers_only_its_own_editor_action() {
         let (adapter, tmp) = build_adapter();
         let mut node = users_row(&adapter, 0);
-        assert!(node.prepare("edit_full", &Default::default()).await.is_err());
+        assert!(
+            node.prepare("edit_full", &Default::default())
+                .await
+                .is_err()
+        );
         assert!(
             node.execute(
                 "edit_full",

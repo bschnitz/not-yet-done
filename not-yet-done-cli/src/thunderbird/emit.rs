@@ -500,7 +500,11 @@ mod tests {
     fn no_password_reaches_the_generated_file() {
         // The importer never reads one, and the shape it writes has nowhere to
         // put one: everything comes from the store at login time.
-        let yaml = adapter_yaml(&[account("one", "One", "imap.example.org")], "mail", "/tmp/p");
+        let yaml = adapter_yaml(
+            &[account("one", "One", "imap.example.org")],
+            "mail",
+            "/tmp/p",
+        );
         assert!(yaml.contains("password=mail/one/pass"));
         assert!(yaml.contains("provider: { type: script-result }"));
         assert!(!yaml.to_lowercase().contains("password: "));

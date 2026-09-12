@@ -11,10 +11,10 @@ pub mod action_args;
 pub mod action_events;
 pub mod aliasing;
 pub mod anonymize;
-pub mod decorate;
 pub mod auth;
 pub mod auto_connect;
 pub mod children;
+pub mod decorate;
 pub mod describe;
 pub mod download;
 pub mod editor_marks;
@@ -35,12 +35,12 @@ pub mod workspace;
 pub use action_args::{
     ActionArgs, ArgKind, ArgProblem, ArgValue, ParamSpec, describe_problems, resolve_args,
 };
-pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
 pub use action_events::{HOOK_ACTION_INVOKED, action_event_adapter, publish_action_invoked};
 pub use aliasing::{ActionAlias, AliasSpec, AliasTable, aliasing_adapter};
-pub use decorate::{AdapterDecorator, NodeDecorator};
+pub use anonymize::{Anonymizer, StandardAnonymizer, anonymizing_factory};
 pub use auto_connect::AutoConnect;
 pub use children::{BoxFuture, Child, check_rows, child_types, columns_for, list, list_subtree};
+pub use decorate::{AdapterDecorator, NodeDecorator};
 pub use describe::{
     HELP_ACTION_ID, TypeNode, child_types_of_type, help_action, is_builtin, level_actions,
     level_actions_for_type, render_level, render_level_for_type, run_builtin,
@@ -4087,7 +4087,12 @@ mod form_contract_tests {
             Ok(m)
         }
 
-        async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+        async fn execute(
+            &mut self,
+            action_id: &str,
+            input: ActionInput,
+            _args: &ActionArgs,
+        ) -> Result<ActionOutcome> {
             assert_eq!(action_id, "edit");
             match input {
                 ActionInput::Form(values) => {

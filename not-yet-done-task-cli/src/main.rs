@@ -97,8 +97,7 @@ fn main() -> std::process::ExitCode {
     MODULE
         .set(module)
         .unwrap_or_else(|_| panic!("MODULE already set"));
-    DSN.set(dsn)
-        .unwrap_or_else(|_| panic!("DSN already set"));
+    DSN.set(dsn).unwrap_or_else(|_| panic!("DSN already set"));
 
     std::process::ExitCode::from(cli::exec_cli().unwrap_or(0))
 }

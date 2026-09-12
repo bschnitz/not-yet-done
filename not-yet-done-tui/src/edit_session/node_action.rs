@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use not_yet_done_content::{ActionArgs, ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec};
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOutcome, ContentAdapter, ContentError, InputSpec,
+};
 
 use crate::views::content_view::PaneId;
 
@@ -92,15 +94,16 @@ impl NodeActionEditSession {
         // Checked once, here: a missing required argument or a wrong kind
         // costs a message before `$EDITOR` ever opens, not a half-prepared
         // buffer.
-        let args = not_yet_done_content::resolve_args(&declared.params, &args).map_err(|problems| {
-            ContentError::Other(
-                format!(
-                    "action `{action_id}`: {}",
-                    not_yet_done_content::describe_problems(&problems)
+        let args =
+            not_yet_done_content::resolve_args(&declared.params, &args).map_err(|problems| {
+                ContentError::Other(
+                    format!(
+                        "action `{action_id}`: {}",
+                        not_yet_done_content::describe_problems(&problems)
+                    )
+                    .into(),
                 )
-                .into(),
-            )
-        })?;
+            })?;
         let prep = node.prepare(&action_id, &args).await?;
         Ok(Self {
             adapter,

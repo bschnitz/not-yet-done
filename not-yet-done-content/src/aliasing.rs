@@ -204,11 +204,17 @@ impl AliasTable {
 
 /// The alias's arguments under the invocation's, validated against the
 /// target's declared parameters.
-fn merged_args(alias: &ActionAlias, target: &NodeAction, supplied: &ActionArgs) -> Result<ActionArgs> {
+fn merged_args(
+    alias: &ActionAlias,
+    target: &NodeAction,
+    supplied: &ActionArgs,
+) -> Result<ActionArgs> {
     let mut args = alias.args.clone();
     args.merge(supplied);
     resolve_args(&target.params, &args).map_err(|problems| {
-        ContentError::Other(format!("alias '{}': {}", alias.id, describe_problems(&problems)).into())
+        ContentError::Other(
+            format!("alias '{}': {}", alias.id, describe_problems(&problems)).into(),
+        )
     })
 }
 
@@ -226,7 +232,10 @@ fn refuse_args(alias: &ActionAlias, path: &str) -> Result<()> {
 
 /// Wrap `inner` so that `table`'s aliases are listed and resolved on every
 /// level. A table without aliases returns `inner` untouched.
-pub fn aliasing_adapter(inner: Box<dyn ContentAdapter>, table: AliasTable) -> Box<dyn ContentAdapter> {
+pub fn aliasing_adapter(
+    inner: Box<dyn ContentAdapter>,
+    table: AliasTable,
+) -> Box<dyn ContentAdapter> {
     if table.is_empty() {
         return inner;
     }
@@ -292,7 +301,11 @@ impl AdapterDecorator for AliasingAdapter {
             .execute_addressed(node_type, id, action_id, input)
             .await
     }
-    async fn collection_prepare(&self, node_type: &NodeType, action_id: &str) -> Result<EditorPrep> {
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
         let actions = self.inner.collection_actions(node_type);
         let action_id = match self.table.resolve(&actions, action_id)? {
             None => action_id,
@@ -395,7 +408,10 @@ impl NodeDecorator for AliasingNode {
         let target = self.resolve_name(action_id)?;
         self.inner.picker_options(&target).await
     }
-    async fn form_prep(&self, action_id: &str) -> Result<std::collections::HashMap<String, String>> {
+    async fn form_prep(
+        &self,
+        action_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
         let target = self.resolve_name(action_id)?;
         self.inner.form_prep(&target).await
     }
@@ -523,10 +539,18 @@ mod tests {
         assert_eq!(ids, ["toggle-tracking", "plain", "my-toggle"]);
         let alias = listed.iter().find(|a| a.id == "my-toggle").unwrap();
         assert_eq!(alias.label, "track", "label falls back to the target's");
-        let group = alias.params.iter().find(|p| p.key == "group_paths").unwrap();
+        let group = alias
+            .params
+            .iter()
+            .find(|p| p.key == "group_paths")
+            .unwrap();
         assert_eq!(group.default, Some(ArgValue::List(vec!["^/Work".into()])));
         let limit = alias.params.iter().find(|p| p.key == "limit").unwrap();
-        assert_eq!(limit.default, Some(ArgValue::Int(50)), "untouched parameter keeps its default");
+        assert_eq!(
+            limit.default,
+            Some(ArgValue::Int(50)),
+            "untouched parameter keeps its default"
+        );
     }
 
     #[test]
@@ -545,7 +569,14 @@ mod tests {
         let adapter = adapter(table(&[("plain", "toggle-tracking", grouped())]));
         let listed = adapter.actions_for_type(&issue_type());
         assert_eq!(listed.iter().filter(|a| a.id == "plain").count(), 1);
-        assert!(listed.iter().find(|a| a.id == "plain").unwrap().params.is_empty());
+        assert!(
+            listed
+                .iter()
+                .find(|a| a.id == "plain")
+                .unwrap()
+                .params
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -553,13 +584,17 @@ mod tests {
         let adapter = adapter(table(&[("my-toggle", "toggle-tracking", grouped())]));
         let root = adapter.root().await.unwrap();
         let ctx = ActionContext::default();
-        let ActionDispatch::Notify { message } = root.invoke_action("my-toggle", &ctx).await.unwrap()
+        let ActionDispatch::Notify { message } =
+            root.invoke_action("my-toggle", &ctx).await.unwrap()
         else {
             panic!("expected the recorder's notify");
         };
         assert!(message.starts_with("toggle-tracking "), "{message}");
         assert!(message.contains("group_paths"), "{message}");
-        assert!(message.contains("limit"), "declared defaults are filled: {message}");
+        assert!(
+            message.contains("limit"),
+            "declared defaults are filled: {message}"
+        );
     }
 
     #[tokio::test]
@@ -570,11 +605,15 @@ mod tests {
             args: ActionArgs::new().with("group_paths", ArgValue::List(vec!["^/Other".into()])),
             ..Default::default()
         };
-        let ActionDispatch::Notify { message } = root.invoke_action("my-toggle", &ctx).await.unwrap()
+        let ActionDispatch::Notify { message } =
+            root.invoke_action("my-toggle", &ctx).await.unwrap()
         else {
             panic!("expected the recorder's notify");
         };
-        assert!(message.contains("^/Other") && !message.contains("^/Work"), "{message}");
+        assert!(
+            message.contains("^/Other") && !message.contains("^/Work"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
@@ -599,7 +638,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("alias 'my-toggle'") && err.contains("unknown argument 'nope'"), "{err}");
+        assert!(
+            err.contains("alias 'my-toggle'") && err.contains("unknown argument 'nope'"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -611,7 +653,10 @@ mod tests {
         let outcome = root
             .execute("my-toggle", ActionInput::None, &ActionArgs::new())
             .await;
-        let Ok(ActionOutcome::Done { message: Some(message) }) = outcome else {
+        let Ok(ActionOutcome::Done {
+            message: Some(message),
+        }) = outcome
+        else {
             panic!("expected done");
         };
         assert!(message.starts_with("toggle-tracking ") && message.contains("^/Work"));
@@ -671,7 +716,8 @@ my-toggle:
 bare:
   action: plain
 "#;
-        let specs: std::collections::BTreeMap<String, AliasSpec> = serde_yaml::from_str(yaml).unwrap();
+        let specs: std::collections::BTreeMap<String, AliasSpec> =
+            serde_yaml::from_str(yaml).unwrap();
         assert_eq!(specs["my-toggle"].action, "toggle-tracking");
         assert_eq!(specs["my-toggle"].label.as_deref(), Some("grouped"));
         assert_eq!(

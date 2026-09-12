@@ -279,7 +279,12 @@ impl Node for ConfluenceCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             (
                 "edit",
@@ -407,7 +412,10 @@ mod tests {
     #[tokio::test]
     async fn execute_rejects_unknown_action() {
         let mut node = ConfluenceCommentNode::new(synthetic_client(), sample_comment(), "12345");
-        match node.execute("nope", ActionInput::None, &Default::default()).await {
+        match node
+            .execute("nope", ActionInput::None, &Default::default())
+            .await
+        {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }

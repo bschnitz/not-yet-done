@@ -545,9 +545,9 @@ mod config_edit;
 pub mod editor;
 mod filter_persist;
 mod link;
-pub mod row_change;
 pub mod node_actions;
 pub mod option_menu;
+pub mod row_change;
 pub mod script;
 pub mod script_hook;
 
@@ -1571,10 +1571,9 @@ impl App {
                 shortcut_overview_min,
                 shortcut_overview_max,
             ),
-            notification_center:
-                crate::components::notification_center::NotificationCenter::new(Arc::clone(
-                    &shared_theme,
-                )),
+            notification_center: crate::components::notification_center::NotificationCenter::new(
+                Arc::clone(&shared_theme),
+            ),
             adapter_creds_popup: None,
             adapter_prompt_popup: None,
             adapter_prompt_queue: std::collections::VecDeque::new(),
@@ -2425,10 +2424,7 @@ impl App {
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
-    ) -> (
-        crate::views::content_view::PaneId,
-        Option<(String, String)>,
-    ) {
+    ) -> (crate::views::content_view::PaneId, Option<(String, String)>) {
         let pane_id = self
             .content_view(view_index)
             .and_then(|cv| cv.find_pane(pane_id))
@@ -8440,7 +8436,6 @@ fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
     }
 }
 
-
 /// The right-aligned hint both notification bars render, built from the live
 /// bindings of the two actions that act on them: dismiss, and open the log in
 /// the editor. Rebinding either key therefore updates the hint, and an unbound
@@ -8521,7 +8516,10 @@ impl App {
         let Some(text) = crate::ui::content_error::error_text(self, idx) else {
             return;
         };
-        let count = text.lines().filter(|l| l.trim_start().starts_with('\u{2022}')).count();
+        let count = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with('\u{2022}'))
+            .count();
         if crate::clipboard::copy(&text) {
             self.notify(format!("Copied {count} problem(s)"));
         } else {
@@ -8574,7 +8572,8 @@ impl App {
             .map(|b| b.display_label());
         for (name, errors) in broken {
             for err in &errors {
-                self.notification_bar.record_error(&format!("{name}: {err}"));
+                self.notification_bar
+                    .record_error(&format!("{name}: {err}"));
             }
             let where_to_read = match &centre {
                 Some(label) => format!(" \u{2014} {label} lists them"),
@@ -13200,11 +13199,7 @@ fn load_content_views(
                             }
                             Some(cfg) => {
                                 let built = factory
-                                    .create(
-                                        config.adapter.effective_instance_id(),
-                                        &cfg,
-                                        host_ctx,
-                                    )
+                                    .create(config.adapter.effective_instance_id(), &cfg, host_ctx)
                                     .map_err(|e| e.to_string())
                                     .and_then(|a| {
                                         not_yet_done_host::decorate_instance(
@@ -13212,7 +13207,7 @@ fn load_content_views(
                                             &config.adapter,
                                             host_ctx,
                                         )
-                                            .map_err(|e| e.to_string())
+                                        .map_err(|e| e.to_string())
                                     });
                                 match built {
                                     Ok(a) => {
@@ -13340,7 +13335,6 @@ mod tests {
         );
         assert_eq!(credential_form_title(None, None), "Login");
     }
-
 
     #[test]
     fn bar_hint_names_the_bound_keys() {

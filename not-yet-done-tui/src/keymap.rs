@@ -1287,7 +1287,6 @@ pub fn saved_query_shortcut_conflict(
     None
 }
 
-
 /// Run the validator on every leaf of `config` and collect a flat list
 /// of human-readable error strings. Each error names both colliding
 /// sources so the user can locate them in their YAML.

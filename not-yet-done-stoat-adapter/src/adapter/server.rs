@@ -20,10 +20,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
-    InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
-    Result,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError,
+    FormFieldSpec, InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
+    NodeType, Result,
 };
 
 use super::category::{categories_with_new, category_composite_id, move_marked_channel};
@@ -160,7 +160,12 @@ impl Node for StoatServerNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let name = form_field(&input, "name")?;
         match action_id {
             // A bare create — the channel lands in the server's

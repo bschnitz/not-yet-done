@@ -274,7 +274,12 @@ impl Node for KimaiRoot {
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         fetch_timesheet_node(&self.client, id).await
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(fields)) => self.execute_create(fields).await,
             (other, _) => Err(ContentError::NotSupported(format!(
@@ -584,7 +589,12 @@ impl Node for KimaiTimesheetNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("edit", ActionInput::Edited { text, version, .. }) => {
                 self.execute_edit(&text, &version).await

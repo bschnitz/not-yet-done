@@ -91,7 +91,11 @@ pub trait AdapterDecorator: Send + Sync {
     fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
         self.inner().collection_actions(node_type)
     }
-    async fn collection_prepare(&self, node_type: &NodeType, action_id: &str) -> Result<EditorPrep> {
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
         self.inner().collection_prepare(node_type, action_id).await
     }
     async fn execute_collection(
@@ -125,7 +129,10 @@ pub trait AdapterDecorator: Send + Sync {
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.inner().subscribe_status()
     }
-    fn subscribe_status_for(&self, query: Option<&str>) -> tokio::sync::watch::Receiver<AdapterStatus> {
+    fn subscribe_status_for(
+        &self,
+        query: Option<&str>,
+    ) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.inner().subscribe_status_for(query)
     }
     fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
@@ -267,7 +274,11 @@ impl<T: AdapterDecorator> ContentAdapter for T {
     fn collection_actions(&self, node_type: &NodeType) -> Vec<NodeAction> {
         <T as AdapterDecorator>::collection_actions(self, node_type)
     }
-    async fn collection_prepare(&self, node_type: &NodeType, action_id: &str) -> Result<EditorPrep> {
+    async fn collection_prepare(
+        &self,
+        node_type: &NodeType,
+        action_id: &str,
+    ) -> Result<EditorPrep> {
         <T as AdapterDecorator>::collection_prepare(self, node_type, action_id).await
     }
     async fn execute_collection(
@@ -299,7 +310,10 @@ impl<T: AdapterDecorator> ContentAdapter for T {
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         <T as AdapterDecorator>::subscribe_status(self)
     }
-    fn subscribe_status_for(&self, query: Option<&str>) -> tokio::sync::watch::Receiver<AdapterStatus> {
+    fn subscribe_status_for(
+        &self,
+        query: Option<&str>,
+    ) -> tokio::sync::watch::Receiver<AdapterStatus> {
         <T as AdapterDecorator>::subscribe_status_for(self, query)
     }
     fn subscribe_invalidations(&self) -> tokio::sync::broadcast::Receiver<Invalidation> {
@@ -551,9 +565,15 @@ mod completeness {
         let forwarded = method_names(SELF, "pub trait AdapterDecorator");
         let blanket = method_names(SELF, "impl<T: AdapterDecorator> ContentAdapter for T");
         let missing: Vec<_> = declared.difference(&forwarded).collect();
-        assert!(missing.is_empty(), "AdapterDecorator lacks forwarders for {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "AdapterDecorator lacks forwarders for {missing:?}"
+        );
         let missing: Vec<_> = declared.difference(&blanket).collect();
-        assert!(missing.is_empty(), "the ContentAdapter blanket impl lacks arms for {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "the ContentAdapter blanket impl lacks arms for {missing:?}"
+        );
     }
 
     #[test]
@@ -565,8 +585,14 @@ mod completeness {
         forwarded_only.remove("inner");
         forwarded_only.remove("inner_mut");
         let missing: Vec<_> = declared.difference(&forwarded_only).collect();
-        assert!(missing.is_empty(), "NodeDecorator lacks forwarders for {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "NodeDecorator lacks forwarders for {missing:?}"
+        );
         let missing: Vec<_> = declared.difference(&blanket).collect();
-        assert!(missing.is_empty(), "the Node blanket impl lacks arms for {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "the Node blanket impl lacks arms for {missing:?}"
+        );
     }
 }

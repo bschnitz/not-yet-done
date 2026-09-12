@@ -1204,7 +1204,9 @@ bindings:
     provider: { type: literal, value: "session=abc" }
 "#,
         );
-        let err = spec.validate_against(MECHANISMS).expect_err("an idle plugin");
+        let err = spec
+            .validate_against(MECHANISMS)
+            .expect_err("an idle plugin");
         assert!(err.contains("no binding uses it"), "{err}");
     }
 

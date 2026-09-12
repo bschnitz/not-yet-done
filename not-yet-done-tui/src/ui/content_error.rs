@@ -103,12 +103,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, slot_idx: usize) -> usiz
     let width = body.width.max(1) as usize;
     let lines = body_lines(theme, path, errors, width);
     let total = lines.len();
-    let offset = app.config_error_scroll.min(total.saturating_sub(body.height as usize));
+    let offset = app
+        .config_error_scroll
+        .min(total.saturating_sub(body.height as usize));
 
-    frame.render_widget(
-        Paragraph::new(lines).scroll((offset as u16, 0)),
-        body,
-    );
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), body);
 
     if let Some(row) = hint_row {
         // The centre's key is whatever the user bound it to — `f10` out of
@@ -120,7 +119,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, slot_idx: usize) -> usiz
             .get(&crate::config::keybindings::GlobalAction::ShowNotifications)
             .map(|b| b.display_label());
         frame.render_widget(
-            Paragraph::new(hint_line(theme, total, offset, body.height, centre.as_deref())),
+            Paragraph::new(hint_line(
+                theme,
+                total,
+                offset,
+                body.height,
+                centre.as_deref(),
+            )),
             row,
         );
     }
@@ -189,10 +194,8 @@ fn hint_line(
     } else if offset > 0 {
         spans.push(Span::styled(format!("{offset} above   "), med));
     }
-    let mut hints: Vec<(String, &str)> = HINTS
-        .iter()
-        .map(|(k, w)| (format!("[{k}]"), *w))
-        .collect();
+    let mut hints: Vec<(String, &str)> =
+        HINTS.iter().map(|(k, w)| (format!("[{k}]"), *w)).collect();
     if let Some(centre) = centre {
         hints.push((centre.to_string(), "notification centre"));
     }
@@ -256,7 +259,10 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         let bullets = rendered.iter().filter(|l| l.contains('•')).count();
-        assert_eq!(bullets, 2, "one bullet per problem, not per line: {rendered:#?}");
+        assert_eq!(
+            bullets, 2,
+            "one bullet per problem, not per line: {rendered:#?}"
+        );
         // The long one really did need more than one line.
         assert!(rendered.len() > 2 + 2 + 2, "nothing wrapped: {rendered:#?}");
         // No line is wider than the panel.
@@ -298,7 +304,10 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(rebound.contains("[z l] notification centre"), "got: {rebound}");
+        assert!(
+            rebound.contains("[z l] notification centre"),
+            "got: {rebound}"
+        );
         assert!(!rebound.contains("f10"), "got: {rebound}");
 
         // Unbound: the panel says nothing rather than pointing nowhere.

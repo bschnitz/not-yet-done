@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
-    FormFieldSpec, InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
-    NodeType, Result, ScriptStore,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError,
+    EditorPrep, FormFieldSpec, InputSpec, ListResult, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result, ScriptStore,
 };
 
 use crate::script_files as files;
@@ -589,7 +589,12 @@ impl Node for DbScriptsGroupNode {
     /// through the [`ScriptStore`], so both frontends share one write
     /// path. The new entry lives at the container root (this is the
     /// group node).
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let store = self.tree.store();
         match action_id {
             "add-script" => {
@@ -687,7 +692,12 @@ impl Node for DbScriptDirNode {
     /// "not empty (N entries)" error verbatim). Confirmation / name entry
     /// already happened frontend-side, so the TUI and the CLI share one
     /// code path.
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let store = self.tree.store();
         match action_id {
             "add-script" => {
@@ -857,7 +867,12 @@ impl Node for DbScriptNode {
     /// `delete` unlinks it and `rename` / `move` relocate it through the
     /// [`ScriptStore`]. Confirmation (delete) and name entry (rename)
     /// already happened frontend-side, so both front-ends share one path.
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         if action_id == "edit" {
             let ActionInput::Edited { text, .. } = input else {
                 return Err(ContentError::NotSupported(
@@ -1053,8 +1068,16 @@ mod tests {
         let t = tree(dir.path());
         let mut group = DbScriptTree::group_node(&t, "notes");
         let form = || ActionInput::Form(HashMap::from([("name".into(), "audit".into())]));
-        group.execute("add-script", form(), &Default::default()).await.expect("first");
-        assert!(group.execute("add-script", form(), &Default::default()).await.is_err());
+        group
+            .execute("add-script", form(), &Default::default())
+            .await
+            .expect("first");
+        assert!(
+            group
+                .execute("add-script", form(), &Default::default())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1270,7 +1293,10 @@ mod tests {
         let group = DbScriptTree::group_node(&t, "notes");
         let mut folder = group.get_child("util").await.expect("folder");
         // `ActionOutcome` has no `Debug`, so no `expect_err` here.
-        match folder.execute("delete-dir", ActionInput::None, &Default::default()).await {
+        match folder
+            .execute("delete-dir", ActionInput::None, &Default::default())
+            .await
+        {
             Ok(_) => panic!("a non-empty folder must not be deleted"),
             Err(e) => assert!(e.to_string().contains("not empty"), "{e}"),
         }

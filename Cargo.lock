@@ -4496,6 +4496,7 @@ dependencies = [
  "not-yet-done-scripts",
  "not-yet-done-sqlite-adapter",
  "not-yet-done-stoat-adapter",
+ "not-yet-done-systemd-adapter",
  "not-yet-done-taiga-adapter",
  "not-yet-done-workflow",
  "serde",
