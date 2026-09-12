@@ -1163,12 +1163,12 @@ mod tests {
         assert!(buffer.contains("# id: null\n"), "{buffer}");
 
         let parsed = parse(&buffer);
+        assert_eq!(parsed, vec![("title".into(), None), ("note".into(), None)]);
         assert_eq!(
-            parsed,
-            vec![("title".into(), None), ("note".into(), None)]
-        );
-        assert_eq!(
-            build_insert("\"t\"", &new_row_cells(&new_columns(), &parsed).expect("valid")),
+            build_insert(
+                "\"t\"",
+                &new_row_cells(&new_columns(), &parsed).expect("valid")
+            ),
             "INSERT INTO \"t\" (\n    \"title\",\n    \"note\"\n  ) VALUES (\n    NULL,\n    NULL\n  )"
         );
     }
@@ -1207,8 +1207,8 @@ mod tests {
 
     #[test]
     fn a_column_the_table_does_not_have_is_refused_by_name() {
-        let message = new_row_cells(&new_columns(), &[("titel".into(), None)])
-            .expect_err("unknown column");
+        let message =
+            new_row_cells(&new_columns(), &[("titel".into(), None)]).expect_err("unknown column");
         assert!(message.contains("titel"), "{message}");
         assert!(message.contains("id, title, note"), "{message}");
     }
@@ -1227,6 +1227,9 @@ mod tests {
     /// only INSERT that means anything then is one of pure defaults.
     #[test]
     fn no_cells_at_all_inserts_the_defaults() {
-        assert_eq!(build_insert("\"t\"", &[]), "INSERT INTO \"t\" DEFAULT VALUES");
+        assert_eq!(
+            build_insert("\"t\"", &[]),
+            "INSERT INTO \"t\" DEFAULT VALUES"
+        );
     }
 }

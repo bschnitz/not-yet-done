@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionInput, ActionOption, ActionOutcome, ColumnSchema, Content, ContentError, EditorPrep,
-    InputSpec,
-    Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOption, ActionOutcome, ColumnSchema, Content, ContentError,
+    EditorPrep, InputSpec, Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::field;
@@ -687,7 +686,12 @@ impl Node for MailMessageNode {
             .collect())
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("export_html", ActionInput::None) => self.export_html().await,
             ("reply", ActionInput::Edited { text, .. }) => self.reply_send(&text).await,

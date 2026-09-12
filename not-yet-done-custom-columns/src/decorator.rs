@@ -515,7 +515,6 @@ impl AdapterDecorator for CustomColumnsAdapter {
         &*self.inner
     }
 
-
     async fn root(&self) -> Result<Box<dyn Node>> {
         Ok(self.wrap(self.inner.root().await?).await)
     }
@@ -803,7 +802,12 @@ impl NodeDecorator for CustomColumnsNode {
         self.inner.form_prep(action_id).await
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         // The address-only actions share their implementation with
         // `CustomColumnsAdapter::execute_addressed`, so a cell written from a
         // node and one written from an address cannot drift apart.
@@ -954,7 +958,8 @@ mod tests {
     async fn column_form_bootstraps_a_new_column_on_first_write() {
         let store = mem_store("cc_bootstrap").await;
         let scope = "taiga/t1";
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Fresh store: no columns described beyond what the inner adapter offers.
         assert!(store.columns(scope, "mock:issue").await.unwrap().is_empty());
@@ -992,7 +997,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn retype_action_reports_what_blocks_it_then_migrates_the_column() {
         let store = mem_store("cc_retype_action").await;
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Two rows, both typed `text` — the default the forms offer.
         for (row, rank) in [("ISS-1", "30"), ("root", "later")] {
@@ -1016,7 +1022,11 @@ mod tests {
         // `later` blocks the retype and is named with its row id.
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         let err = match node
-            .execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")), &Default::default())
+            .execute(
+                RETYPE_COLUMN_ACTION_ID,
+                ActionInput::Form(retype("number")),
+                &Default::default(),
+            )
             .await
         {
             Err(e) => format!("{e}"),
@@ -1038,9 +1048,13 @@ mod tests {
         .await
         .unwrap();
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
-        node.execute(RETYPE_COLUMN_ACTION_ID, ActionInput::Form(retype("number")), &Default::default())
-            .await
-            .unwrap();
+        node.execute(
+            RETYPE_COLUMN_ACTION_ID,
+            ActionInput::Form(retype("number")),
+            &Default::default(),
+        )
+        .await
+        .unwrap();
 
         // The described column — what a sort resolves its `SortKind` from —
         // now says number.
@@ -1055,7 +1069,8 @@ mod tests {
     async fn column_form_clears_on_empty_and_skips_unchanged() {
         let store = mem_store("cc_clear").await;
         let scope = "taiga/t1";
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         // Seed a value.
         {
@@ -1123,7 +1138,8 @@ mod tests {
                     ),
             )
             .build();
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
 
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         node.execute(
@@ -1135,9 +1151,12 @@ mod tests {
         .unwrap();
 
         let root = adapter.root().await.unwrap();
-        let columns =
-            not_yet_done_content::children::columns_for(adapter.as_ref(), root.as_ref(), &issue_type())
-                .await;
+        let columns = not_yet_done_content::children::columns_for(
+            adapter.as_ref(),
+            root.as_ref(),
+            &issue_type(),
+        )
+        .await;
 
         let est = columns
             .iter()
@@ -1178,7 +1197,8 @@ mod tests {
                     ),
             )
             .build();
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(Box::new(inner), store.clone()));
 
         let mut node = adapter.get_by_id("ISS-1").await.unwrap();
         node.execute(
@@ -1190,9 +1210,12 @@ mod tests {
         .unwrap();
 
         let root = adapter.root().await.unwrap();
-        let columns =
-            not_yet_done_content::children::columns_for(adapter.as_ref(), root.as_ref(), &issue_type())
-                .await;
+        let columns = not_yet_done_content::children::columns_for(
+            adapter.as_ref(),
+            root.as_ref(),
+            &issue_type(),
+        )
+        .await;
 
         // One column, not two: the keys collide, so the union merges them.
         assert_eq!(columns.iter().filter(|c| c.key == "status").count(), 1);
@@ -1229,7 +1252,8 @@ mod tests {
                     ),
             )
             .build();
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(Box::new(inner), store));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(Box::new(inner), store));
         for (id, rank) in [("ISS-1", "30"), ("ISS-2", "10"), ("ISS-3", "20")] {
             let mut node = adapter.get_by_id(id).await.unwrap();
             node.execute(
@@ -1266,10 +1290,13 @@ mod tests {
         let adapter = ranked_adapter(mem_store("cc_sort").await).await;
         let root = adapter.root().await.unwrap();
 
-        let result =
-            not_yet_done_content::children::list(adapter.as_ref(), root.as_ref(), list_params(None))
-                .await
-                .unwrap();
+        let result = not_yet_done_content::children::list(
+            adapter.as_ref(),
+            root.as_ref(),
+            list_params(None),
+        )
+        .await
+        .unwrap();
 
         let order: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(order, vec!["ISS-2", "ISS-3", "ISS-1"], "ranks 10, 20, 30");
@@ -1291,10 +1318,13 @@ mod tests {
             offset: 0,
             limit: 2,
         };
-        let result =
-            not_yet_done_content::children::list(adapter.as_ref(), root.as_ref(), list_params(Some(page)))
-                .await
-                .unwrap();
+        let result = not_yet_done_content::children::list(
+            adapter.as_ref(),
+            root.as_ref(),
+            list_params(Some(page)),
+        )
+        .await
+        .unwrap();
 
         let order: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(order, vec!["ISS-1", "ISS-2"], "untouched, ranks 30 then 10");
@@ -1316,7 +1346,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_addressed_writes_without_resolving_the_node() {
         let store = mem_store("cc_addressed").await;
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
         assert!(adapter.get_by_id("ISS-404").await.is_err(), "unknown row");
 
         let outcome = adapter
@@ -1349,7 +1380,10 @@ mod tests {
     /// opted in and says so rather than guessing.
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_addressed_passes_a_foreign_action_to_the_inner_adapter() {
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), mem_store("cc_foreign").await));
+        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(
+            taiga_adapter(),
+            mem_store("cc_foreign").await,
+        ));
         let refused = adapter
             .execute_addressed(&issue_type(), "ISS-1", "delete", ActionInput::None)
             .await
@@ -1396,7 +1430,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn set_cells_writes_a_whole_document_without_any_node() {
         let store = mem_store("cc_bulk").await;
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         let outcome = adapter
             .execute_collection(
@@ -1442,7 +1477,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bad_line_leaves_the_whole_batch_unwritten() {
         let store = mem_store("cc_bulk_atomic").await;
-        let adapter: Box<dyn ContentAdapter> = Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
+        let adapter: Box<dyn ContentAdapter> =
+            Box::new(CustomColumnsAdapter::new(taiga_adapter(), store.clone()));
 
         let failed = adapter
             .execute_collection(

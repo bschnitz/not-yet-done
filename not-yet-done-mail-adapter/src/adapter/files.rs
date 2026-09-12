@@ -69,6 +69,9 @@ mod tests {
     /// the parts a reader recognises survive.
     #[test]
     fn a_component_keeps_its_readable_characters() {
-        assert_eq!(sanitize_component("Re: Angebot (1).pdf"), "Re__Angebot__1_.pdf");
+        assert_eq!(
+            sanitize_component("Re: Angebot (1).pdf"),
+            "Re__Angebot__1_.pdf"
+        );
     }
 }

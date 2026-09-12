@@ -274,7 +274,12 @@ impl NodeDecorator for ScriptsNode {
         Ok(Box::new(ScriptsNode::new(inner, self.repo.clone(), scope)))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match action_id {
             SCRIPTS_ACTION_ID => Ok(ActionOutcome::Done {
                 message: Some(self.list_message()?),
@@ -386,7 +391,12 @@ impl Node for ScriptNode {
         )))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             (SCRIPT_EDIT_ACTION_ID, ActionInput::Edited { text, .. }) => {
                 self.repo
@@ -451,7 +461,7 @@ fn required(fields: &HashMap<String, String>, key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
+    use not_yet_done_content::mock::{issue_type, MockAdapterBuilder, MockNodeData};
 
     fn adapter(repo: ScriptRepo) -> Box<dyn ContentAdapter> {
         let inner = MockAdapterBuilder::new("jira")
@@ -570,9 +580,13 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(dispatch, ActionDispatch::DeleteSelf { .. }));
-        leaf.execute(SCRIPT_DELETE_ACTION_ID, ActionInput::None, &Default::default())
-            .await
-            .unwrap();
+        leaf.execute(
+            SCRIPT_DELETE_ACTION_ID,
+            ActionInput::None,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
 
         // Gone from the listing.
         let listed = match a

@@ -24,8 +24,8 @@
 
 pub mod adapter;
 pub mod auth;
-pub mod config;
 pub(crate) mod compose;
+pub mod config;
 pub(crate) mod credentials;
 pub(crate) mod error;
 pub(crate) mod ids;

@@ -366,7 +366,11 @@ mod tests {
         node.invoke_action("broken", &ActionContext::default())
             .await
             .unwrap();
-        assert!(node.prepare("broken", &ActionArgs::default()).await.is_err());
+        assert!(
+            node.prepare("broken", &ActionArgs::default())
+                .await
+                .is_err()
+        );
         assert!(drain(&mut rx).is_empty());
     }
 

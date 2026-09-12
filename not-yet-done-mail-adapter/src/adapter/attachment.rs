@@ -11,9 +11,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionInput, ActionOutcome, ColumnSchema, ContentError, FormFieldSpec, InputSpec, ListResult,
-    Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOutcome, ColumnSchema, ContentError, FormFieldSpec, InputSpec,
+    ListResult, Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::files::{message_dir, safe_file_name, sanitize_component};
@@ -105,7 +105,8 @@ fn prepare_target_dir(dir_input: &str) -> Result<PathBuf> {
     }
     let expanded = match trimmed.strip_prefix('~') {
         Some(rest) => {
-            let home = dirs::home_dir().ok_or_else(|| other_err("cannot resolve home directory"))?;
+            let home =
+                dirs::home_dir().ok_or_else(|| other_err("cannot resolve home directory"))?;
             home.join(rest.trim_start_matches('/'))
         }
         None => PathBuf::from(trimmed),
@@ -264,7 +265,12 @@ impl Node for MailAttachmentNode {
         &self.metadata
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open", ActionInput::None) => self.open_external().await,
             ("download_all", input) => {

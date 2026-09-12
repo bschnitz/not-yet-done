@@ -131,7 +131,10 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
             continue;
         }
         let Some(host) = g("hostname") else {
-            skipped.push(Skipped { label, reason: "no hostname in the profile".into() });
+            skipped.push(Skipped {
+                label,
+                reason: "no hostname in the profile".into(),
+            });
             continue;
         };
 
@@ -146,7 +149,10 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
             .map(str::to_string);
 
         if username.is_empty() {
-            skipped.push(Skipped { label, reason: "no login name in the profile".into() });
+            skipped.push(Skipped {
+                label,
+                reason: "no login name in the profile".into(),
+            });
             continue;
         }
         if let Some(addr) = &address {
@@ -189,7 +195,12 @@ pub(super) fn collect(prefs: &Prefs) -> (Vec<Account>, Vec<Skipped>) {
 ///
 /// A profile that names none is the only case with anything to decide, and the
 /// port is the better evidence than any default would be.
-fn security_of(prefs: &Prefs, server: &str, port: Option<u16>, notes: &mut Vec<String>) -> Security {
+fn security_of(
+    prefs: &Prefs,
+    server: &str,
+    port: Option<u16>,
+    notes: &mut Vec<String>,
+) -> Security {
     match prefs.get_i32(&format!("mail.server.{server}.socketType")) {
         Some(0) => Security::None,
         Some(1) => {
@@ -369,7 +380,11 @@ fn slug(source: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let slug = cleaned.trim_matches('-').replace("--", "-");
-    if slug.is_empty() { "account".to_string() } else { slug }
+    if slug.is_empty() {
+        "account".to_string()
+    } else {
+        slug
+    }
 }
 
 #[cfg(test)]
@@ -460,7 +475,13 @@ user_pref("mail.server.server9.userName", "nobody");
         let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["example-org", "example-net", "example-com", "first-example", "second-example"]
+            [
+                "example-org",
+                "example-net",
+                "example-com",
+                "first-example",
+                "second-example"
+            ]
         );
         // Local Folders is a pseudo-account, not something the user meant to
         // import, so it is dropped without a complaint to read.
@@ -600,6 +621,11 @@ user_pref("mail.server.server1.userName", "ada");"#,
         );
         let (accounts, _) = collect(&prefs);
         assert_eq!(accounts[0].security, Security::Starttls);
-        assert!(accounts[0].notes.iter().any(|n| n.contains("derived from the port")));
+        assert!(
+            accounts[0]
+                .notes
+                .iter()
+                .any(|n| n.contains("derived from the port"))
+        );
     }
 }

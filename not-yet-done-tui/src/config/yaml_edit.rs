@@ -839,7 +839,9 @@ views:
         // Appended after the *whole* last item, not after its first line.
         assert!(
             out.contains("        type: search\n      - { key: d, id: delete }\nnode_type")
-                || out.contains("        type: search\n      - { key: d, id: delete }\n    node_type"),
+                || out.contains(
+                    "        type: search\n      - { key: d, id: delete }\n    node_type"
+                ),
             "got:\n{out}"
         );
         // Everything else is untouched, comments and block style included.
@@ -896,7 +898,9 @@ views:
             &[("key", "d"), ("id", "delete")],
         );
         assert!(
-            out.contains("        # why `e`: the editor opens in place\n      - { key: d, id: delete }"),
+            out.contains(
+                "        # why `e`: the editor opens in place\n      - { key: d, id: delete }"
+            ),
             "got:\n{out}"
         );
     }

@@ -13,10 +13,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, EditorPrep,
-    FormFieldSpec, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
-    NodeSummary, NodeType, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError,
+    EditorPrep, FormFieldSpec, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node,
+    NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::category::move_marked_channel;
@@ -229,7 +229,12 @@ impl Node for StoatChannelNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("send_message", ActionInput::Edited { text, .. }) => {
                 // Drop the CACHE section, then translate `@uu_slug`

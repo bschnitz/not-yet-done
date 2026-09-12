@@ -39,7 +39,11 @@ pub fn run(args: &[String]) -> Result<()> {
         );
     }
 
-    let adapter = emit::adapter_yaml(&accounts, &opts.pass_prefix, &prefs_path.display().to_string());
+    let adapter = emit::adapter_yaml(
+        &accounts,
+        &opts.pass_prefix,
+        &prefs_path.display().to_string(),
+    );
     let view = emit::view_yaml(&accounts);
 
     if opts.stdout {
@@ -50,11 +54,14 @@ pub fn run(args: &[String]) -> Result<()> {
             Some(dir) => dir.clone(),
             None => not_yet_done_host::views_dir(),
         };
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         write_file(&dir.join("mail-adapter.yaml"), &adapter, opts.force)?;
         write_file(&dir.join("mail.yaml"), &view, opts.force)?;
-        eprintln!("wrote {}/mail-adapter.yaml and {}/mail.yaml", dir.display(), dir.display());
+        eprintln!(
+            "wrote {}/mail-adapter.yaml and {}/mail.yaml",
+            dir.display(),
+            dir.display()
+        );
     }
 
     report(&accounts, &skipped, &opts.pass_prefix, &prefs_path);
@@ -78,7 +85,11 @@ fn write_file(path: &Path, content: &str, force: bool) -> Result<()> {
 /// What the import decided, printed where the user reads it rather than only
 /// buried in the file's comments.
 fn report(accounts: &[Account], skipped: &[Skipped], pass_prefix: &str, profile: &Path) {
-    eprintln!("\nimported {} account(s) from {}", accounts.len(), profile.display());
+    eprintln!(
+        "\nimported {} account(s) from {}",
+        accounts.len(),
+        profile.display()
+    );
     for account in accounts {
         let port = account
             .port
@@ -93,7 +104,10 @@ fn report(accounts: &[Account], skipped: &[Skipped], pass_prefix: &str, profile:
             account.security.as_yaml(),
             account.username,
         );
-        eprintln!("    password from: {pass_prefix}/{}/pass   (a GUESS — check it)", account.id);
+        eprintln!(
+            "    password from: {pass_prefix}/{}/pass   (a GUESS — check it)",
+            account.id
+        );
         match &account.smtp {
             Some(smtp) => {
                 let port = smtp
@@ -172,7 +186,9 @@ impl Options {
             };
             match arg.as_str() {
                 "--profile" => opts.profile = Some(value("--profile")?),
-                "--pass-prefix" => opts.pass_prefix = value("--pass-prefix")?.trim_matches('/').to_string(),
+                "--pass-prefix" => {
+                    opts.pass_prefix = value("--pass-prefix")?.trim_matches('/').to_string()
+                }
                 "--out-dir" => opts.out_dir = Some(prefs::expand_tilde(&value("--out-dir")?)),
                 "--stdout" => opts.stdout = true,
                 "--force" => opts.force = true,
@@ -274,7 +290,9 @@ user_pref("mail.identity.id2.useremail", "ada@work.example");
         let path = dir.path().join("mail.yaml");
         std::fs::write(&path, "# hand-written\n").unwrap();
 
-        let err = write_file(&path, "# generated\n", false).unwrap_err().to_string();
+        let err = write_file(&path, "# generated\n", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--force"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# hand-written\n");
 

@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionInput, ActionOutcome, ColumnSchema, ContentError, InputSpec, Metadata, MetadataField,
-    Node, NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey,
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOutcome, ColumnSchema, ContentError, InputSpec, Metadata,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SortDirection, SortKey,
 };
 
 use super::types::notification_type;
@@ -58,7 +58,12 @@ impl Node for TaigaNotificationNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn execute(&mut self, action_id: &str, _input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        _input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match action_id {
             "mark_as_read" => {
                 mark_notification_as_read(&self.client, self.notification_id)

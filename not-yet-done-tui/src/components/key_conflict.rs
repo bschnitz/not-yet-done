@@ -139,7 +139,11 @@ pub fn conflict_lines(
 pub fn conflict_width(summary: &str, items: &[ConflictItem], question: &str) -> usize {
     let mut w = summary.chars().count() + " conflicts with:".chars().count();
     w = w.max(question.chars().count());
-    w = w.max("Read-only bindings can't be removed — press n/Esc.".chars().count());
+    w = w.max(
+        "Read-only bindings can't be removed — press n/Esc."
+            .chars()
+            .count(),
+    );
     for item in items {
         let line = 4 + item.drop.chars().count() + 3 + item.name.chars().count();
         w = w.max(if item.removable { line } else { line + 13 });

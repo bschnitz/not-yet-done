@@ -607,7 +607,12 @@ impl Node for WorkflowRoot {
         Err(ContentError::NotFound(id.to_string()))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match action_id {
             CREATE_ACTION => {
                 let fields = form_fields(input)?;
@@ -721,7 +726,12 @@ impl Node for WorkflowNode {
         Ok(map)
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             (EDIT_ACTION, ActionInput::Edited { text, .. }) => {
                 self.ctx.repo.write(&self.name, &text).map_err(io_err)?;
@@ -882,7 +892,12 @@ impl Node for RunNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, _input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        _input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         let now = Utc::now().to_rfc3339();
         match action_id {
             ADVANCE_ACTION => match self.ctx.store.next_pending_step(&self.row.id).await? {
@@ -1239,7 +1254,12 @@ impl Node for StepNode {
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
     }
-    async fn execute(&mut self, action_id: &str, _input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        _input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         Err(ContentError::NotSupported(format!(
             "step node is read-only — drive the run instead of '{action_id}'"
         )))
@@ -1355,7 +1375,11 @@ mod tests {
 
         // Start a run; it snapshots the template's single step.
         let mut wf = a.get_by_id("wf:release").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        let run_id = match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1395,7 +1419,9 @@ mod tests {
 
         // Delete the workflow → the root lists nothing.
         let mut wf = a.get_by_id("wf:release").await.unwrap();
-        wf.execute(DELETE_ACTION, ActionInput::None, &Default::default()).await.unwrap();
+        wf.execute(DELETE_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap();
         let root = a.root().await.unwrap();
         let listed = children::list(&a, root.as_ref(), params(workflow_type()))
             .await
@@ -1434,7 +1460,11 @@ mod tests {
 
         // Start a run — only the entry step is seeded.
         let mut wf = a.get_by_id("wf:flow").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        let run_id = match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1483,7 +1513,9 @@ mod tests {
 
         // Reset takes the run back to a single pending entry visit.
         let mut run = a.get_by_id(&run_id).await.unwrap();
-        run.execute(RESET_ACTION, ActionInput::None, &Default::default()).await.unwrap();
+        run.execute(RESET_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap();
         let run_node = a.get_by_id(&run_id).await.unwrap();
         assert_eq!(run_node.metadata().fields[0].value, "pending");
         let run = a.get_by_id(&run_id).await.unwrap();
@@ -1517,7 +1549,11 @@ mod tests {
         .await
         .unwrap();
         let mut wf = a.get_by_id(&format!("wf:{name}")).await.unwrap();
-        match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         }
@@ -1670,7 +1706,11 @@ mod tests {
         .unwrap();
 
         let mut wf = a.get_by_id("wf:auto").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        let run_id = match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1722,7 +1762,11 @@ mod tests {
         .unwrap();
 
         let mut wf = a.get_by_id("wf:ai").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        let run_id = match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };
@@ -1769,7 +1813,11 @@ mod tests {
         .unwrap();
 
         let mut wf = a.get_by_id("wf:ai").await.unwrap();
-        let run_id = match wf.execute(RUN_ACTION, ActionInput::None, &Default::default()).await.unwrap() {
+        let run_id = match wf
+            .execute(RUN_ACTION, ActionInput::None, &Default::default())
+            .await
+            .unwrap()
+        {
             ActionOutcome::Navigate { node_id, .. } => node_id,
             _ => panic!("expected Navigate"),
         };

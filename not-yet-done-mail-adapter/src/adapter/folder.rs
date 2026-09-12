@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionInput, ActionOutcome, ColumnSchema, ContentError, EditorPrep, InputSpec, Metadata, Node,
-    NodeAction, NodeSummary, NodeType, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionInput, ActionOutcome, ColumnSchema, ContentError, EditorPrep, InputSpec,
+    Metadata, Node, NodeAction, NodeSummary, NodeType, Result,
 };
 
 use super::field;
@@ -128,7 +128,12 @@ impl Node for MailFolderNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("compose", ActionInput::Edited { text, .. }) => {
                 compose_send(&self.outbox, &text).await

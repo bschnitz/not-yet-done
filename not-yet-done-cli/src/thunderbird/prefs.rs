@@ -38,13 +38,16 @@ impl Prefs {
     }
 
     pub(super) fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(Self::parse(&text))
     }
 
     pub(super) fn get(&self, key: &str) -> Option<&str> {
-        self.values.get(key).map(String::as_str).filter(|v| !v.is_empty())
+        self.values
+            .get(key)
+            .map(String::as_str)
+            .filter(|v| !v.is_empty())
     }
 
     /// A pref holding a comma-separated list (`mail.accountmanager.accounts`).
@@ -189,7 +192,11 @@ pub(super) fn profile_in(root: &Path) -> Option<PathBuf> {
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut push = |raw: &str, relative: bool| {
-        let path = if relative { root.join(raw) } else { PathBuf::from(raw) };
+        let path = if relative {
+            root.join(raw)
+        } else {
+            PathBuf::from(raw)
+        };
         if !candidates.contains(&path) {
             candidates.push(path);
         }
@@ -264,9 +271,15 @@ user_pref("mail.server.server1.port", 993);
 user_pref("mail.server.server1.login_at_startup", true);
 "#,
         );
-        assert_eq!(prefs.get("mail.server.server1.hostname"), Some("imap.example.org"));
+        assert_eq!(
+            prefs.get("mail.server.server1.hostname"),
+            Some("imap.example.org")
+        );
         assert_eq!(prefs.get_u16("mail.server.server1.port"), Some(993));
-        assert_eq!(prefs.get_bool("mail.server.server1.login_at_startup"), Some(true));
+        assert_eq!(
+            prefs.get_bool("mail.server.server1.login_at_startup"),
+            Some(true)
+        );
         assert_eq!(prefs.get("mail.server.server1.missing"), None);
     }
 
@@ -278,7 +291,10 @@ user_pref("mail.server.server1.login_at_startup", true);
             r#"user_pref("mail.server.server1.namespace.personal", "\"\"");
 user_pref("mail.identity.id1.fullName", "Ada \"Speedy\" Lovelace");"#,
         );
-        assert_eq!(prefs.get("mail.server.server1.namespace.personal"), Some("\"\""));
+        assert_eq!(
+            prefs.get("mail.server.server1.namespace.personal"),
+            Some("\"\"")
+        );
         assert_eq!(
             prefs.get("mail.identity.id1.fullName"),
             Some("Ada \"Speedy\" Lovelace")
@@ -287,8 +303,12 @@ user_pref("mail.identity.id1.fullName", "Ada \"Speedy\" Lovelace");"#,
 
     #[test]
     fn a_trailing_comma_does_not_invent_an_account() {
-        let prefs = Prefs::parse(r#"user_pref("mail.accountmanager.accounts", "account1,account2,");"#);
-        assert_eq!(prefs.list("mail.accountmanager.accounts"), ["account1", "account2"]);
+        let prefs =
+            Prefs::parse(r#"user_pref("mail.accountmanager.accounts", "account1,account2,");"#);
+        assert_eq!(
+            prefs.list("mail.accountmanager.accounts"),
+            ["account1", "account2"]
+        );
     }
 
     #[test]

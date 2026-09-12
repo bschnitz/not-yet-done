@@ -14,10 +14,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError, FormFieldSpec,
-    InputSpec, ListResult, MarkedNode, Metadata, MetadataField, Node, NodeAction, NodeSummary,
-    NodeType, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, ContentError,
+    FormFieldSpec, InputSpec, ListResult, MarkedNode, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, Result,
 };
 
 use super::server::channel_summary;
@@ -264,7 +264,12 @@ impl Node for StoatCategoryNode {
     fn metadata(&self) -> &Metadata {
         &self.metadata
     }
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match action_id {
             // Two-step, because Stoat has no "create in category": make
             // the channel (lands uncategorized), then PATCH the server's

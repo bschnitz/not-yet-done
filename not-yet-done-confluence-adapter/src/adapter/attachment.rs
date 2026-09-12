@@ -199,7 +199,12 @@ impl Node for ConfluenceAttachmentNode {
         Err(ContentError::NotFound(format!("No child: {id}")))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("download", ActionInput::None) => self.download_and_open().await,
             (id, _) => Err(ContentError::NotSupported(format!(
@@ -283,7 +288,10 @@ mod tests {
     async fn execute_rejects_unknown_action() {
         let mut node =
             ConfluenceAttachmentNode::new(synthetic_client(), sample_attachment(), "12345");
-        match node.execute("nope", ActionInput::None, &Default::default()).await {
+        match node
+            .execute("nope", ActionInput::None, &Default::default())
+            .await
+        {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }
@@ -302,7 +310,10 @@ mod tests {
             download_path: String::new(),
         };
         let mut node = ConfluenceAttachmentNode::new(synthetic_client(), att, "12345");
-        match node.execute("download", ActionInput::None, &Default::default()).await {
+        match node
+            .execute("download", ActionInput::None, &Default::default())
+            .await
+        {
             Err(e) => assert!(format!("{e}").contains("x"), "error mentions att id: {e}"),
             Ok(_) => panic!("missing download link must be rejected"),
         }

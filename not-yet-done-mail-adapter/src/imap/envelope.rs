@@ -14,7 +14,9 @@
 //!   the number a mail client shows is the result of walking that tree and
 //!   deciding what counts.
 
-use async_imap::imap_proto::types::{Address, BodyContentCommon, BodyParams, BodyStructure, Envelope};
+use async_imap::imap_proto::types::{
+    Address, BodyContentCommon, BodyParams, BodyStructure, Envelope,
+};
 use async_imap::types::{Fetch, Flag};
 use chrono::{DateTime, FixedOffset};
 use mail_parser::MessageParser;
@@ -196,7 +198,10 @@ pub(crate) fn row_from(fetch: &Fetch, uid_validity: u32) -> Option<EnvelopeRow> 
             _ => {}
         }
     }
-    row.attachments = fetch.bodystructure().map(attachments_of).unwrap_or_default();
+    row.attachments = fetch
+        .bodystructure()
+        .map(attachments_of)
+        .unwrap_or_default();
     Some(row)
 }
 

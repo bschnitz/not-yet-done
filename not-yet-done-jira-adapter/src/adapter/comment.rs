@@ -170,9 +170,21 @@ impl Node for JiraCommentNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
-            ("edit_full", ActionInput::Edited { text, original, version }) => {
+            (
+                "edit_full",
+                ActionInput::Edited {
+                    text,
+                    original,
+                    version,
+                },
+            ) => {
                 let body = parse_comment_buffer(&text, &original);
                 if body == self.comment.body.trim() {
                     return Ok(ActionOutcome::NoChanges);
@@ -359,7 +371,10 @@ mod tests {
     #[tokio::test]
     async fn comment_prepare_contains_header_and_body() {
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        let prep = node.prepare("edit_full", &Default::default()).await.unwrap();
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
 
         assert!(prep.template.contains("# Comment on PROJ-42"));
         assert!(prep.template.contains("# Author: bob"));
@@ -396,7 +411,10 @@ mod tests {
     #[tokio::test]
     async fn comment_editor_roundtrip() {
         let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
-        let prep = node.prepare("edit_full", &Default::default()).await.unwrap();
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
         let body = parse_comment_buffer(&prep.template, &prep.template);
 
         // Unchanged template parses back to the original body.
