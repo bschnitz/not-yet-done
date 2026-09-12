@@ -383,3 +383,60 @@ The obligations, distributed over the phases that introduce the risk:
 - **`verify` before `daemon-reload`** (phase 2), never after.
 - **Anonymisation** (phase 0) — the default already covers it; an override is
   legibility, not safety.
+
+---
+
+## Implementation notes for phase 0
+
+Collected while surveying the existing adapters, so the phase does not start
+by rediscovering them.
+
+**Dependencies.** `zbus_systemd` is feature-gated per systemd interface, so
+only what is needed gets generated:
+
+```toml
+zbus_systemd = { version = "0.26100", default-features = false, features = [
+    "systemd1",
+    "zbus-async-tokio",
+] }
+```
+
+It pulls only `serde` and `zbus` (≥ 5.3), the published crate is 67 KB, and
+it requires Rust 1.87. `zbus` itself needs its `tokio` feature, which the
+`zbus-async-tokio` feature above selects.
+
+**What the traits actually require.** The spec in `content-adapter-spec.md`
+predates the `childs` refactor and still describes `children_types` / `list`
+on `Node`; the code does not. The real surface is much smaller:
+
+- `ContentAdapter` — only `adapter_type`, `root`, `get_by_id` and `childs`
+  have no default. Everything else (capabilities, status, invalidations,
+  actions, query handling, stores) is defaulted.
+- `Node` — only `id`, `label`, `node_type` and `metadata`.
+
+`childs<'a>(&'a self, node: &'a dyn Node) -> Vec<children::Child<'a>>` is the
+single source of truth for a level: each `Child` carries its `NodeType`, its
+`ColumnSchema` list and a **lazy** `list` callback ("list without the await").
+`child_types`, `columns_for` and `list` are derived from it as free functions,
+so a declared type without a fetcher is not expressible. The workflow adapter
+(`not-yet-done-workflow/src/adapter.rs`, `fn childs`) is the shortest example
+to copy the shape from.
+
+**The `in_rows` promise.** Every `ColumnSchema` with `in_rows: true` must
+appear as a metadata field on _every_ row that child's `list` returns.
+`children::check_rows` makes that testable — worth a unit test per level from
+the start rather than after the first level renders blank cells.
+
+**The view YAML need not be hand-written.** `not_yet_done_content::scaffold`
+(the CLI's `config generate`) projects the adapter's own type tree into a
+loadable view-config skeleton, with every action emitted commented out and a
+`# TODO key`. Generate it, then prune and tune — do not start from a blank
+file or from a copy of `sqlite.yaml`.
+
+**Property reads.** `ListUnits` already delivers name, description, load
+state, active state and sub state. The remaining columns come from
+`org.freedesktop.DBus.Properties.GetAll` per unit — split across two
+interfaces: `ActiveEnterTimestamp`, `UnitFileState`, `FragmentPath` and
+`NeedDaemonReload` on `…systemd1.Unit`, and `MainPID`, `MemoryCurrent`,
+`TasksCurrent`, `CPUUsageNSec`, `NRestarts` on `…systemd1.Service`. That is
+two calls per loaded unit; issue them concurrently rather than in sequence.
