@@ -27,6 +27,7 @@ mod factory;
 mod issue;
 mod jql;
 mod link;
+mod project;
 mod types;
 mod util;
 
@@ -353,7 +354,7 @@ impl ContentAdapter for JiraAdapter {
 
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         match node_type.type_id.as_str() {
-            "jira:root" => vec![create::create_action()],
+            "jira:root" => vec![create::create_action(), project::project_types_action()],
             "jira:issue" => issue::issue_actions(),
             "jira:comment" => comment::comment_actions(),
             "jira:attachment" => attachment::attachment_actions(),
@@ -493,10 +494,18 @@ impl Node for JiraRoot {
         ))
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => {
                 create::execute_create(&self.client, &values).await
+            }
+            ("project_types", ActionInput::Form(values)) => {
+                project::execute_project_types(&self.client, &values).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"

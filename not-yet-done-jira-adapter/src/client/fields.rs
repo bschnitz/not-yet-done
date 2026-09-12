@@ -164,6 +164,31 @@ impl JiraClient {
     pub async fn story_points_jql_clause(&self) -> Option<String> {
         self.story_points_field().await.map(|f| f.clause.clone())
     }
+
+    /// Write the story-points estimate of an issue; `None` clears it.
+    ///
+    /// A PUT of its own rather than one more argument to
+    /// `update_issue_full`: the field id is not known until the catalogue
+    /// has been asked, and only a caller that actually names an estimate
+    /// should pay for that lookup. A write that sets header fields *and*
+    /// the estimate therefore costs two requests -- rare enough, and the
+    /// alternative is threading an instance-specific field id through
+    /// every caller of the header write.
+    pub async fn set_story_points(&self, key: &str, points: Option<f64>) -> Result<(), String> {
+        let field = self.story_points_field().await.ok_or_else(|| {
+            "this Jira instance has no story-points field -- nothing written".to_string()
+        })?;
+        // Whole numbers go over as integers: a board that stores the
+        // estimate as text shows `5`, not `5.0`.
+        let value = match points {
+            None => serde_json::Value::Null,
+            Some(n) if n.fract() == 0.0 => serde_json::json!(n as i64),
+            Some(n) => serde_json::json!(n),
+        };
+        let mut fields = serde_json::Map::new();
+        fields.insert(field.id.clone(), value);
+        self.update_fields(key, fields).await
+    }
 }
 
 #[cfg(test)]

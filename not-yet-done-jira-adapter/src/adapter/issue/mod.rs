@@ -7,6 +7,8 @@
 //! - [`template`] — 3b template render/parse/validate/diff
 //! - [`slugs`] — `ll-…` / `uu-…` slug tables and mention rewriting
 //! - [`merge`] — diffy-based 3-way merge for conflict handling
+//! - [`fields`] — `set_fields`: header fields written on their own
+//! - [`upload`] — `upload-attachment`: files posted to the issue
 //! - [`edit_full`] — end-to-end `edit_full` action flow
 //! - [`edit_with_comments`] — combined header+comments edit flow
 //!
@@ -32,12 +34,14 @@ mod clone;
 mod edit_full;
 mod edit_with_comments;
 mod export;
+mod fields;
 mod link;
 mod markers;
 mod merge;
 mod slugs;
 mod template;
 mod transitions;
+mod upload;
 mod wiki_md;
 mod workspace;
 
@@ -62,8 +66,11 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
                 "workspace",
                 "base directory for the ticket folder (overrides ticket_workspace)",
             ),
-            ParamSpec::text("buffer", "file name of the editor buffer inside the ticket folder")
-                .with_default(workspace::EDIT_FILE),
+            ParamSpec::text(
+                "buffer",
+                "file name of the editor buffer inside the ticket folder",
+            )
+            .with_default(workspace::EDIT_FILE),
         ]),
         // CLI-oriented counterparts of `edit_markdown`, sharing its exact
         // buffer and write-back pipeline: `to_markdown` prints the Markdown to
@@ -72,6 +79,33 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         NodeAction::new("to_markdown", "to markdown", InputSpec::None),
         NodeAction::new("from_markdown", "from markdown", InputSpec::Editor),
         NodeAction::new("edit_with_comments", "edit + comments", InputSpec::Editor),
+        // The header fields on their own, for a caller that wants to move a
+        // label or an assignee without putting the description at risk (see
+        // [`fields`]). Every field is optional; `-` empties one.
+        NodeAction::new(
+            "set_fields",
+            "set fields",
+            InputSpec::Form {
+                fields: vec![
+                    FormFieldSpec::text("summary", "Summary (blank: keep)").optional(),
+                    FormFieldSpec::text(
+                        "labels",
+                        "Labels, comma-separated, replacing all (blank: keep, '-': clear)",
+                    )
+                    .optional(),
+                    FormFieldSpec::text(
+                        "assignee",
+                        "Assignee username (blank: keep, '-': unassign)",
+                    )
+                    .optional(),
+                    FormFieldSpec::text(
+                        "story_points",
+                        "Story points, a number (blank: keep, '-': clear)",
+                    )
+                    .optional(),
+                ],
+            },
+        ),
         NodeAction::new("transition", "transition", InputSpec::Picker),
         NodeAction::new("create_comment", "add comment", InputSpec::Editor),
         NodeAction::new("toggle_watch", "toggle watch", InputSpec::None),
@@ -92,6 +126,11 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
                     .with_default("relates to"),
                 ],
             },
+        ),
+        NodeAction::new(
+            "upload-attachment",
+            "upload attachment",
+            InputSpec::FilePicker { multi: true },
         ),
         NodeAction::new(
             "download-attachments",
@@ -176,6 +215,17 @@ fn build_metadata_from_detail(detail: &JiraIssueDetail) -> Metadata {
                 key: "assignee".into(),
                 value: detail.assignee.clone(),
                 display_label: "Assignee".into(),
+                editable: false,
+                allowed_values: None,
+            },
+            // The username beside the display name. `set_fields` names an
+            // assignee by username, so a caller that reads this row,
+            // changes it and writes it back needs the spelling it will
+            // have to send; the display name is not that spelling.
+            MetadataField {
+                key: "assignee_key".into(),
+                value: detail.assignee_key.clone(),
+                display_label: "Assignee (username)".into(),
                 editable: false,
                 allowed_values: None,
             },
@@ -495,7 +545,8 @@ impl Node for JiraIssueNode {
                     Some(base) => {
                         let dir = workspace::ticket_dir(&base, &self.key, &detail.summary);
                         workspace::sync_attachments(&self.client, &self.key, &dir).await?;
-                        let prep_args = ActionArgs::new().with("ticket_dir", ArgValue::Path(dir.clone()));
+                        let prep_args =
+                            ActionArgs::new().with("ticket_dir", ArgValue::Path(dir.clone()));
                         (Some(dir.join(&buffer)), prep_args)
                     }
                     None => (None, ActionArgs::new()),
@@ -650,7 +701,12 @@ impl Node for JiraIssueNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             (
                 "edit_full",
@@ -754,6 +810,10 @@ impl Node for JiraIssueNode {
             ("open_in_browser", ActionInput::None) => self.open_in_browser(),
             ("clone", ActionInput::Edited { text, .. }) => self.execute_clone(&text).await,
             ("link", ActionInput::Form(values)) => self.execute_link(&values).await,
+            ("set_fields", ActionInput::Form(values)) => self.execute_set_fields(&values).await,
+            ("upload-attachment", ActionInput::Files(paths)) => {
+                self.execute_upload_attachment(paths).await
+            }
             ("download-attachments", ActionInput::Form(values)) => {
                 let dir = values.get("dir").map(String::as_str).unwrap_or("");
                 self.download_attachments(dir).await
@@ -1731,6 +1791,7 @@ mod tests {
                 "to_markdown",
                 "from_markdown",
                 "edit_with_comments",
+                "set_fields",
                 "transition",
                 "create_comment",
                 "toggle_watch",
@@ -1739,29 +1800,43 @@ mod tests {
                 "open_in_browser",
                 "clone",
                 "link",
+                "upload-attachment",
                 "download-attachments",
                 "export-bundle",
                 "export_workspace",
                 "delete",
             ]
         );
-        assert!(matches!(actions[0].input, InputSpec::Editor)); // edit_full
-        assert!(matches!(actions[1].input, InputSpec::Editor)); // edit_markdown
-        assert!(matches!(actions[2].input, InputSpec::None)); // to_markdown
-        assert!(matches!(actions[3].input, InputSpec::Editor)); // from_markdown
-        assert!(matches!(actions[4].input, InputSpec::Editor)); // edit_with_comments
-        assert!(matches!(actions[5].input, InputSpec::Picker)); // transition
-        assert!(matches!(actions[6].input, InputSpec::Editor)); // create_comment
-        assert!(matches!(actions[7].input, InputSpec::None)); // toggle_watch
-        assert!(matches!(actions[8].input, InputSpec::None)); // toggle-bookmark
-        assert!(matches!(actions[9].input, InputSpec::None)); // remove-bookmark
-        assert!(matches!(actions[10].input, InputSpec::None)); // open_in_browser
-        assert!(matches!(actions[11].input, InputSpec::Editor)); // clone
-        assert!(matches!(actions[12].input, InputSpec::Form { .. })); // link
-        assert!(matches!(actions[13].input, InputSpec::Form { .. })); // download-attachments
-        assert!(matches!(actions[14].input, InputSpec::None)); // export-bundle
-        assert!(matches!(actions[15].input, InputSpec::Form { .. })); // export_workspace
-        assert!(matches!(actions[16].input, InputSpec::None)); // delete
+        // Looked up by id, not by position: an action inserted in the
+        // middle renumbers every index below it, and a test that has to be
+        // renumbered gets renumbered wrongly.
+        let input =
+            |id: &str| -> &InputSpec { &actions.iter().find(|a| a.id == id).expect(id).input };
+        assert!(matches!(input("edit_full"), InputSpec::Editor));
+        assert!(matches!(input("edit_markdown"), InputSpec::Editor));
+        assert!(matches!(input("to_markdown"), InputSpec::None));
+        assert!(matches!(input("from_markdown"), InputSpec::Editor));
+        assert!(matches!(input("edit_with_comments"), InputSpec::Editor));
+        assert!(matches!(input("set_fields"), InputSpec::Form { .. }));
+        assert!(matches!(input("transition"), InputSpec::Picker));
+        assert!(matches!(input("create_comment"), InputSpec::Editor));
+        assert!(matches!(input("toggle_watch"), InputSpec::None));
+        assert!(matches!(input("toggle-bookmark"), InputSpec::None));
+        assert!(matches!(input("remove-bookmark"), InputSpec::None));
+        assert!(matches!(input("open_in_browser"), InputSpec::None));
+        assert!(matches!(input("clone"), InputSpec::Editor));
+        assert!(matches!(input("link"), InputSpec::Form { .. }));
+        assert!(matches!(
+            input("upload-attachment"),
+            InputSpec::FilePicker { multi: true }
+        ));
+        assert!(matches!(
+            input("download-attachments"),
+            InputSpec::Form { .. }
+        ));
+        assert!(matches!(input("export-bundle"), InputSpec::None));
+        assert!(matches!(input("export_workspace"), InputSpec::Form { .. }));
+        assert!(matches!(input("delete"), InputSpec::None));
     }
 
     #[tokio::test]

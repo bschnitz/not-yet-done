@@ -1,9 +1,9 @@
 //! Jira REST API client — fetches issues via JQL.
 //!
 //! Split into submodules by concern: `search` (issues + JQL), `comments`,
-//! `attachments`, `transitions`, `users`. The client itself (struct + auth +
-//! `current_user`) lives in this file along with private DTOs shared across
-//! submodules (`Assignee`, `NameField`).
+//! `attachments`, `projects`, `transitions`, `users`. The client itself
+//! (struct + auth + `current_user`) lives in this file along with private
+//! DTOs shared across submodules (`Assignee`, `NameField`).
 
 use std::time::Duration;
 
@@ -18,6 +18,7 @@ mod create;
 mod delete;
 mod fields;
 mod links;
+mod projects;
 mod search;
 mod transitions;
 mod users;
@@ -28,6 +29,7 @@ pub use comments::JiraComment;
 pub use create::CreateIssueFields;
 use fields::CustomField;
 pub use links::{JiraIssueLink, JiraLinkType};
+pub use projects::JiraIssueType;
 pub use search::{JiraIssueDetail, JiraTicket};
 pub use transitions::JiraTransition;
 pub use users::JiraUser;
