@@ -40,6 +40,7 @@ not-yet-done-mail-adapter       = { path = "../not-yet-done-mail-adapter" }
 not-yet-done-local-adapter      = { path = "../not-yet-done-local-adapter" }
 not-yet-done-calendar-adapter   = { path = "../not-yet-done-calendar-adapter" }
 not-yet-done-workflow           = { path = "../not-yet-done-workflow" }
+not-yet-done-systemd-adapter    = { path = "../not-yet-done-systemd-adapter" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

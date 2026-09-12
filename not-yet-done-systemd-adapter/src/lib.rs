@@ -18,13 +18,20 @@
 //!   shows is a query the user switches at runtime, never configuration.
 //! * [`config`] — `manager:` and `timeout_secs:`, which is all that is left
 //!   once filtering is a query.
+//!
+//! On top of those sit [`adapter`] — the node protocol itself, three levels
+//! under one root — and [`factory`], which lifts it into the host registry.
 
+pub mod adapter;
 pub mod bus;
 pub mod config;
+pub mod factory;
 pub mod model;
 pub mod query;
 
+pub use adapter::SystemdAdapter;
 pub use config::{Manager, SystemdConfig};
+pub use factory::SystemdAdapterFactory;
 
 /// Node-id prefix for a loaded `.service` unit (`service:<name>`).
 pub const SERVICE_PREFIX: &str = "service:";
