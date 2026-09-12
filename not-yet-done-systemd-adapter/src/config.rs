@@ -5,12 +5,19 @@
 //! only things left here are which manager to talk to and how long to wait for
 //! it.
 //!
+//! The exception is the protection list, which is not about what is *shown* but
+//! about what may be *done* — see [`crate::protect`].
+//!
 //! ```yaml
 //! adapter:
 //!   type: systemd
 //!   config:
 //!     manager: user       # user | system
 //!     timeout_secs: 10    # deadline per D-Bus call
+//!     protect:            # refuse disruptive verbs on these, too
+//!       - ssh-agent.service
+//!     unprotect:          # lift one built-in entry, spelled exactly
+//!       - "*.slice"
 //! ```
 
 use fieldsmith::Buildable;
@@ -70,6 +77,21 @@ pub struct SystemdConfig {
     /// [`DEFAULT_TIMEOUT_SECS`]. `0` disables the deadline.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Units to protect **in addition to** the built-in list — a unit name or a
+    /// `*.<suffix>`. A disruptive verb (stop, restart, kill, mask, freeze)
+    /// refuses to touch them.
+    ///
+    /// Additive rather than replacing, so naming one unit here cannot silently
+    /// drop the defaults; see [`crate::protect`].
+    #[serde(default)]
+    pub protect: Vec<String>,
+    /// Entries to drop from the built-in list, spelled exactly as
+    /// [`DEFAULT_PROTECTED`](crate::protect::DEFAULT_PROTECTED) spells them.
+    ///
+    /// The escape hatch, and deliberately an explicit one: lifting protection
+    /// should read like a decision in the config, not like an omission.
+    #[serde(default)]
+    pub unprotect: Vec<String>,
 }
 
 impl SystemdConfig {
@@ -86,12 +108,38 @@ impl SystemdConfig {
     /// Reject a `manager:` that is neither `user` nor `system`, so the mistake
     /// surfaces as a sentence instead of as a tab pointing at the wrong bus.
     pub fn validate(&self) -> std::result::Result<(), String> {
-        match self.manager.as_deref() {
-            Some(raw) if Manager::parse(raw).is_none() => Err(format!(
+        if let Some(raw) = self.manager.as_deref()
+            && Manager::parse(raw).is_none()
+        {
+            return Err(format!(
                 "unknown manager {raw:?} — expected \"user\" or \"system\""
-            )),
-            _ => Ok(()),
+            ));
         }
+        // An `unprotect:` entry that matches nothing is almost certainly a
+        // misspelling, and the consequence of a misspelling here is that the
+        // protection the user meant to lift is still in place — which they only
+        // find out at the moment they wanted the verb to work.
+        let known: Vec<&str> = crate::protect::DEFAULT_PROTECTED
+            .iter()
+            .copied()
+            .chain(self.protect.iter().map(String::as_str))
+            .collect();
+        if let Some(stray) = self
+            .unprotect
+            .iter()
+            .find(|u| !known.contains(&u.trim()))
+        {
+            return Err(format!(
+                "unprotect: {stray:?} is not on the protection list — it must be spelled exactly \
+                 as the entry it lifts"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The protection list this instance runs with.
+    pub fn protection(&self) -> crate::protect::Protection {
+        crate::protect::Protection::new(&self.protect, &self.unprotect)
     }
 
     /// The configured per-call deadline, or the default. `None` = no deadline.
@@ -125,6 +173,21 @@ mod tests {
         assert!(err.contains("root"), "error should quote the word: {err}");
 
         assert!(serde_yaml::from_str::<SystemdConfig>("bogus: 1").is_err());
+    }
+
+    #[test]
+    fn a_misspelled_unprotect_entry_is_refused() {
+        let good: SystemdConfig =
+            serde_yaml::from_str("protect: [a.service]\nunprotect: [\"*.slice\"]").unwrap();
+        assert!(good.validate().is_ok());
+        assert!(good.protection().covers("a.service"));
+        assert!(!good.protection().covers("app.slice"));
+
+        // Lifting something that was never on the list would look like it
+        // worked while changing nothing.
+        let typo: SystemdConfig = serde_yaml::from_str("unprotect: [dbus.sockett]").unwrap();
+        let err = typo.validate().unwrap_err();
+        assert!(err.contains("dbus.sockett"), "must quote the entry: {err}");
     }
 
     #[test]

@@ -19,14 +19,22 @@
 //! * [`config`] — `manager:` and `timeout_secs:`, which is all that is left
 //!   once filtering is a query.
 //!
+//! * [`control`] — the verbs (start, stop, enable, mask, …): one table that is
+//!   at once the action list, the confirmation policy and the dispatcher.
+//! * [`protect`] — the units a disruptive verb refuses to touch, because a
+//!   confirmation prompt is no guard against the muscle memory that pressed
+//!   the key.
+//!
 //! On top of those sit [`adapter`] — the node protocol itself, three levels
 //! under one root — and [`factory`], which lifts it into the host registry.
 
 pub mod adapter;
 pub mod bus;
 pub mod config;
+pub mod control;
 pub mod factory;
 pub mod model;
+pub mod protect;
 pub mod query;
 
 pub use adapter::SystemdAdapter;
@@ -39,3 +47,9 @@ pub const SERVICE_PREFIX: &str = "service:";
 pub const TIMER_PREFIX: &str = "timer:";
 /// Node-id prefix for a unit file on disk (`unitfile:<name>`).
 pub const UNIT_FILE_PREFIX: &str = "unitfile:";
+/// Node-id prefix for one property of one unit (`property:<unit>:<Name>`).
+///
+/// Two segments because a property is only meaningful with the unit it belongs
+/// to, and unit names contain dots but never colons — so the first colon after
+/// the prefix splits the pair unambiguously.
+pub const PROPERTY_PREFIX: &str = "property:";

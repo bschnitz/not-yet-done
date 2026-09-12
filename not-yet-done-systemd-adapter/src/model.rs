@@ -52,6 +52,10 @@ pub fn timer_type() -> NodeType {
     node_type("systemd:timer", "Timer")
 }
 
+pub fn property_type() -> NodeType {
+    node_type("systemd:property", "Property")
+}
+
 pub fn unit_file_type() -> NodeType {
     node_type("systemd:unitfile", "Unit file")
 }
@@ -429,6 +433,140 @@ pub fn unit_file_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("path", "Path"),
         ColumnSchema::new("vendor", "Origin"),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Properties
+// ---------------------------------------------------------------------------
+
+/// One property of one unit — a row on the `systemd:property` level.
+///
+/// The level exists because `systemctl show` is two hundred lines of
+/// `Key=value` and a terminal can only scroll it. As a table it can be sorted,
+/// filtered and searched with everything the tab already has: `[name, like,
+/// Timeout]` answers in one keystroke what grepping a wall of text answers in
+/// three.
+#[derive(Clone, Debug, Default)]
+pub struct PropertyRow {
+    /// The unit these properties belong to, carried so the row can address
+    /// itself by id.
+    pub unit: String,
+    /// The property's name, as systemd spells it (`MainPID`, `TimeoutStopUSec`).
+    pub name: String,
+    /// Its value, rendered — see [`render`].
+    pub value: String,
+    /// The short interface name it came from: `Unit`, `Service`, `Timer`.
+    pub interface: String,
+}
+
+impl PropertyRow {
+    pub fn summary(&self) -> NodeSummary {
+        NodeSummary {
+            id: format!(
+                "{}{}:{}",
+                crate::PROPERTY_PREFIX,
+                self.unit,
+                self.name
+            ),
+            label: self.name.clone(),
+            node_type: property_type(),
+            metadata: Metadata {
+                fields: vec![
+                    field("name", "Property", self.name.clone()),
+                    field("value", "Value", self.value.clone()),
+                    field("interface", "Interface", self.interface.clone()),
+                ],
+            },
+            has_children: Some(false),
+        }
+    }
+}
+
+pub fn property_columns() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema::new("name", "Property"),
+        ColumnSchema::new("value", "Value"),
+        ColumnSchema::new("interface", "Interface"),
+    ]
+}
+
+/// Turn one interface's property map into rows.
+///
+/// `interface` is the short name the rows carry — the full
+/// `org.freedesktop.systemd1.Service` is noise in a column when every row on
+/// the level starts with it.
+pub fn property_rows(
+    unit: &str,
+    interface: &str,
+    props: &HashMap<String, OwnedValue>,
+) -> Vec<PropertyRow> {
+    props
+        .iter()
+        .map(|(name, value)| PropertyRow {
+            unit: unit.to_string(),
+            name: name.clone(),
+            value: render(value),
+            interface: interface.to_string(),
+        })
+        .collect()
+}
+
+/// A D-Bus value as one line of text.
+///
+/// Everything on this level is a string in the end, because the level's whole
+/// population is heterogeneous — a `bool`, a `u64`, an array of exec commands —
+/// and there is no column type that covers it. That is the trade the level
+/// makes: `show`-fidelity instead of typed comparison. The typed cells are the
+/// ones the service and timer levels lift out into real columns.
+///
+/// Containers are flattened rather than debug-printed: `Debug` for a zvariant
+/// array spells out its signature, which is true and unreadable.
+fn render(value: &OwnedValue) -> String {
+    render_value(value)
+}
+
+fn render_value(value: &Value<'_>) -> String {
+    match value {
+        Value::Str(s) => s.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::U8(n) => n.to_string(),
+        Value::I16(n) => n.to_string(),
+        Value::U16(n) => n.to_string(),
+        Value::I32(n) => n.to_string(),
+        Value::U32(n) => n.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::U64(n) => {
+            // The same "unset" sentinel the typed columns filter out. Here it
+            // stays visible as the word, because on a properties level the fact
+            // that systemd reports the maximum *is* the answer.
+            if *n == UNSET_U64 {
+                "(unset)".to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        Value::F64(n) => n.to_string(),
+        Value::ObjectPath(p) => p.to_string(),
+        Value::Signature(s) => s.to_string(),
+        Value::Value(inner) => render_value(inner),
+        Value::Array(a) => a
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::Structure(s) => s
+            .fields()
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::Dict(d) => d
+            .iter()
+            .map(|(k, v)| format!("{}={}", render_value(k), render_value(v)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]
