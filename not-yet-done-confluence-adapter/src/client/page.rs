@@ -573,6 +573,46 @@ impl ConfluenceClient {
         Ok(())
     }
 
+    /// `GET /rest/api/content?spaceKey={key}&title={title}&type=page` —
+    /// the pages of one space carrying exactly this title.
+    ///
+    /// Deliberately not CQL: `/content` filters the title as a whole
+    /// string, while CQL's `title ~ "..."` matches word-wise and its
+    /// `title = "..."` is not supported on every Confluence version.
+    /// The caller that needs "does this title already exist here?" —
+    /// a create path guarding against a duplicate — needs the whole
+    /// string and nothing near it.
+    ///
+    /// A space allows one page per title, so the answer holds at most
+    /// one row; it is returned as a list anyway, because that is what
+    /// the endpoint says and a caller that sees two has learnt
+    /// something worth seeing rather than a silently dropped row.
+    pub async fn find_pages_by_title(
+        &self,
+        space_key: &str,
+        title: &str,
+    ) -> Result<Vec<PageMeta>, String> {
+        let url = format!("{}/rest/api/content", self.base_url());
+        let resp = self
+            .send(
+                "GET",
+                &url,
+                self.inner_http().get(&url).query(&[
+                    ("spaceKey", space_key),
+                    ("title", title),
+                    ("type", "page"),
+                    ("limit", "25"),
+                ]),
+            )
+            .await?;
+        let resp = self.check_status("GET", &url, resp).await?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {e}"))?;
+        Ok(parse_page_envelope(&body)?.pages)
+    }
+
     async fn fetch_page_envelope(&self, url: &str) -> Result<PageList, String> {
         let resp = self.send("GET", url, self.inner_http().get(url)).await?;
         let resp = self.check_status("GET", url, resp).await?;
@@ -580,16 +620,22 @@ impl ConfluenceClient {
             .text()
             .await
             .map_err(|e| format!("Failed to read response: {e}"))?;
-        let env: PageEnvelope = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse pages response: {e}"))?;
-        Ok(PageList {
-            pages: env.results,
-            start: env.start,
-            limit: env.limit,
-            size: env.size,
-            has_next: env.links.next.is_some(),
-        })
+        parse_page_envelope(&body)
     }
+}
+
+/// Shared parse of the page-listing envelope, used by every endpoint
+/// that answers in it — the tree listings and the title lookup.
+fn parse_page_envelope(body: &str) -> Result<PageList, String> {
+    let env: PageEnvelope =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse pages response: {e}"))?;
+    Ok(PageList {
+        pages: env.results,
+        start: env.start,
+        limit: env.limit,
+        size: env.size,
+        has_next: env.links.next.is_some(),
+    })
 }
 
 #[cfg(test)]

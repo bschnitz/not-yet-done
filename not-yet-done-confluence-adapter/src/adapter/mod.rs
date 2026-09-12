@@ -24,6 +24,7 @@ mod create_template;
 mod factory;
 mod page;
 mod space;
+mod title_lookup;
 
 pub use factory::ConfluenceAdapterFactory;
 
@@ -443,7 +444,10 @@ impl ConfluenceRoot {
 /// (`InputSpec::None`) leaves it to each frontend to source the search
 /// string: the TUI prompts, the CLI takes `--text`.
 fn root_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new("find", "find pages", InputSpec::None)]
+    vec![
+        NodeAction::new("find", "find pages", InputSpec::None),
+        title_lookup::page_by_title_action(),
+    ]
 }
 
 /// Page size for the `find` action's CQL search. The adapter picks it,
@@ -492,11 +496,7 @@ impl Node for ConfluenceRoot {
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
             "find" => {
-                let Some(needle) = ctx
-                    .text
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
+                let Some(needle) = ctx.text.as_deref().map(str::trim).filter(|s| !s.is_empty())
                 else {
                     return Ok(ActionDispatch::Error(
                         "Search text must not be empty".to_string(),
@@ -519,6 +519,25 @@ impl Node for ConfluenceRoot {
                 })
             }
             _ => Ok(ActionDispatch::Noop),
+        }
+    }
+
+    /// `page_by_title` — the lookup beside `find`. It answers with a
+    /// listing rather than with nodes, because its caller wants the id
+    /// and the URL of the hit, not a place in the tree.
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            ("page_by_title", ActionInput::Form(values)) => {
+                title_lookup::execute_page_by_title(&self.client, &self.base_url, &values).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "execute: unknown action {other}"
+            ))),
         }
     }
 

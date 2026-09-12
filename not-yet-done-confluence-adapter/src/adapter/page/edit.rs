@@ -56,10 +56,26 @@ impl ConfluencePageNode {
         text: &str,
         original: &str,
         version: &str,
+        base_version: Option<i64>,
     ) -> Result<ActionOutcome> {
         let version_num: i64 = version
             .parse()
             .map_err(|e| other_err(format!("invalid page version stash {version:?}: {e}")))?;
+
+        // The caller named the revision its buffer came from. The stash
+        // is what the page reads *now*, so the two differ exactly when
+        // somebody wrote in between -- and then this buffer is the
+        // older text, which would bury the newer one. Refusing is the
+        // whole point; there is nothing to merge here, because the
+        // caller never saw the other change.
+        if let Some(base) = base_version {
+            if base != version_num {
+                return Err(other_err(format!(
+                    "page moved on since it was read (read v{base}, now v{version_num}) \
+                     -- nothing written; read it again and re-apply the change"
+                )));
+            }
+        }
 
         // Strip the conflict banner first (a buffer reopened after a 409
         // carries one above the `title:` line), then parse title + body.
@@ -141,7 +157,7 @@ mod tests {
     async fn no_changes_when_title_and_body_unchanged() {
         let buf = render_filled("Real Title", "<p>body</p>\n");
         let outcome = node()
-            .execute_edit(&buf, &buf, "7")
+            .execute_edit(&buf, &buf, "7", None)
             .await
             .expect("returns outcome");
         assert!(matches!(outcome, ActionOutcome::NoChanges));
@@ -154,7 +170,7 @@ mod tests {
         let original = render_filled("Real Title", "<p>body</p>\n");
         let edited = "title:  \n\n<p>body</p>\n";
         let outcome = node()
-            .execute_edit(edited, &original, "7")
+            .execute_edit(edited, &original, "7", None)
             .await
             .expect("returns outcome");
         match outcome {
@@ -173,10 +189,45 @@ mod tests {
         // travel to the server.
         let original = render_filled("Old Name", "<p>body</p>\n");
         let edited = render_filled("New Name", "<p>body</p>\n");
-        let outcome = node().execute_edit(&edited, &original, "7").await;
+        let outcome = node().execute_edit(&edited, &original, "7", None).await;
         assert!(
             !matches!(outcome, Ok(ActionOutcome::NoChanges)),
             "a pure rename must not be treated as no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_base_version_refuses_before_the_put() {
+        // The buffer was taken from v5, the page now reads v7: somebody
+        // wrote in between. Nothing may travel to the server -- and the
+        // check has to happen before the request, which this test shows
+        // by resolving against an unreachable host.
+        let original = render_filled("Real Title", "<p>old</p>\n");
+        let edited = render_filled("Real Title", "<p>new</p>\n");
+        let msg = match node().execute_edit(&edited, &original, "7", Some(5)).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a stale base version must be refused"),
+        };
+        assert!(
+            msg.contains("v5") && msg.contains("v7"),
+            "names both: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_base_version_does_not_short_circuit() {
+        // Same number on both sides -- the lock is satisfied and the
+        // edit takes its ordinary course (here: a failing PUT against
+        // the synthetic host, not a refusal).
+        let original = render_filled("Real Title", "<p>old</p>\n");
+        let edited = render_filled("Real Title", "<p>new</p>\n");
+        let msg = match node().execute_edit(&edited, &original, "7", Some(7)).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("the synthetic host cannot answer a PUT"),
+        };
+        assert!(
+            !msg.contains("moved on"),
+            "a matching version is not a conflict: {msg}"
         );
     }
 }
