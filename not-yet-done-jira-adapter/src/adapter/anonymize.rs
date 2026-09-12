@@ -51,7 +51,7 @@ impl Anonymizer for JiraAnonymizer {
             "key" | "issue" => pseudo_issue_key(value),
             // People.
             "assignee" | "creator" | "reporter" | "author" | "display_name" => pseudo_person(value),
-            "username" => pseudo_username(value),
+            "username" | "assignee_key" => pseudo_username(value),
             "email" => pseudo_email(value),
             // Files.
             "filename" => pseudo_filename(value),
