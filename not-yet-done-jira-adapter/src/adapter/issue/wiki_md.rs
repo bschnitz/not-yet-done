@@ -355,9 +355,17 @@ pub(super) fn wiki_to_md(wiki: &str) -> String {
         // is a title) or a bare `<!-- panel … -->` marker, closed by
         // `<!-- /panel -->`; body converted. Blank lines around the body keep
         // it readable in the editor and are ignored by the round-trip guard.
+        //
+        // The blank line that separates the panel from what precedes it is
+        // only added when there isn't one already (same rule as the table
+        // block below). `md_to_wiki` keeps a blank line, so an unconditional
+        // one would come back as content and earn another blank line on the
+        // next pass — the round trip has to be a fixed point, not a growth.
         if let Some(attrs) = parse_panel_open(trimmed) {
             let (_close, block, next) = collect_block(&lines, i + 1, "{panel}");
-            out.push(String::new());
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
             out.push(render_panel_open_md(&attrs));
             out.push(String::new());
             let inner = wiki_to_md(&block.join("\n"));
@@ -2448,6 +2456,30 @@ a title-less panel whose sole attribute makes its opener marker long enough
         assert!(md.contains("<!-- panel -->"), "bare marker missing: {md:?}");
         assert!(!md.contains("## "), "unexpected heading: {md:?}");
         assert!(roundtrip_diff(wiki).is_none(), "{:?}", roundtrip_diff(wiki));
+    }
+
+    #[test]
+    fn panel_round_trip_is_a_fixed_point() {
+        // `roundtrip_diff` compares modulo whitespace, so a blank line the
+        // conversion invents is invisible to it — but a mirror that compares
+        // bytes sees one more of them ahead of every panel after every write.
+        // Converting there and back must reproduce the input exactly.
+        let wiki = "{panel:title=A}\nbody a\n{panel}\n\n{panel:title=B}\nbody b\n{panel}";
+        let once = md_to_wiki(&wiki_to_md(wiki));
+        assert_eq!(once, wiki, "one round trip changed the markup");
+        let twice = md_to_wiki(&wiki_to_md(&once));
+        assert_eq!(twice, once, "the round trip is not a fixed point");
+    }
+
+    #[test]
+    fn panel_after_prose_keeps_its_separating_blank_line() {
+        // The blank line is only dropped where one already stands: glued to a
+        // paragraph, the panel heading would read as part of that paragraph.
+        let md = wiki_to_md("intro line\n{panel:title=A}\nbody a\n{panel}");
+        assert!(
+            md.contains("intro line\n\n## A"),
+            "panel not separated from the prose above it: {md:?}"
+        );
     }
 
     #[test]
