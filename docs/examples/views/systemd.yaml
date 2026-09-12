@@ -1,0 +1,329 @@
+# Example: systemd view configuration
+#
+# Place in: ~/.config/not_yet_done/views/systemd.yaml
+#
+# One tab, one systemd manager, three levels side by side:
+#
+#   * Services   — the `.service` units the manager has loaded, with their
+#                  runtime state (active/sub, main PID, memory, CPU, restarts).
+#   * Timers     — the `.timer` units, with next/last elapse and the unit each
+#                  one triggers.
+#   * Unit files — the unit files on disk, loaded or not. This is the only
+#                  level that can show a unit the manager has never touched.
+#
+# Which units a level shows is a *query*, not configuration: "what is failing"
+# and "what did I write myself" change by the minute, and a setting you edit
+# and restart is the wrong shape for a question that changes that often. The
+# Failed subtab below is exactly that — the Services level with a default
+# query, not a separate node type. See docs/plan-systemd-adapter.md (D2).
+#
+# Read-only for now: this is phase 0. start/stop/enable, editing a unit file
+# and the journal are later phases built on these same rows.
+
+tab:
+  name: systemd
+  order: 13
+  icon: "󰒓"
+
+adapter:
+  type: systemd
+  config_inline: |
+    # `user` = the per-user manager on the session bus (systemctl --user),
+    # `system` = the system manager. The two hold different units; there is
+    # no view that shows both.
+    manager: user
+    # Deadline for a single D-Bus call, in seconds. 0 = no deadline.
+    timeout_secs: 10
+  # Local and never logs in, so it loads at startup like the other local tabs.
+  manual_connect: false
+
+views:
+  # ---------------------------------------------------------------- services
+  - name: Services
+    key: "t s"
+    default: true
+    node_type: "systemd:service"
+
+    # Saved-query filter — the same mechanism the trackings and calendar tabs
+    # use. The body is a `FilterExpr` evaluated against each loaded row.
+    # Columns on this level: name, description, load, active, sub, enabled,
+    # since, pid, mem, tasks, cpu, restarts, needs_reload, fragment.
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the loaded services. Columns: name, description, load, active,
+        # sub, enabled, since, pid, mem, tasks, cpu, restarts, needs_reload,
+        # fragment.
+        #
+        #   query:
+        #     [active, =, failed]              # what is broken right now
+        #
+        #   query:
+        #     [restarts, gt, 0]                # crash loops (Restart=always)
+        #
+        #   query:
+        #     [fragment, like, '%/.config/systemd/%']   # units I wrote myself
+        #
+        #   query:
+        #     and:
+        #       - [active, =, active]
+        #       - [mem, gt, 104857600]         # over 100 MiB — bytes, not text
+        #
+        # `since` takes natural-language dates: [since, gte, "today"].
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+
+    columns:
+      - key: name
+        label: Unit
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: active
+        label: Active
+        sizing: "fixed(10)"
+      - key: sub
+        label: Sub
+        style: secondary
+        sizing: "fixed(10)"
+      - key: enabled
+        label: Enabled
+        style: tertiary
+        sizing: "fixed(9)"
+      # Whole seconds of CPU time. `kind: duration` is what makes it read as
+      # 1h 12m rather than 4320.
+      - key: cpu
+        label: CPU
+        kind: duration
+        sizing: "fixed(9)"
+      # Raw bytes on purpose: a pre-formatted "95.4 MiB" sorts as text and
+      # cannot be compared in a query. Until the table engine grows a
+      # `kind: bytes`, this column shows the number.
+      - key: mem
+        label: Mem
+        kind: number
+        sizing: "fixed(11)"
+      - key: tasks
+        label: Tasks
+        kind: number
+        sizing: "fixed(6)"
+      - key: restarts
+        label: Restarts
+        kind: number
+        sizing: "fixed(8)"
+      - key: since
+        label: Since
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+      - key: load
+        label: Load
+        sizing: "fixed(9)"
+        hidden: true
+      - key: pid
+        label: PID
+        kind: number
+        sizing: "fixed(8)"
+        hidden: true
+      - key: needs_reload
+        label: Reload?
+        sizing: "fixed(8)"
+        hidden: true
+      - key: fragment
+        label: Fragment
+        kind: path
+        sizing: "flex(2)"
+        hidden: true
+
+    actions:
+      - { name: refresh, key: r, type: reload }
+
+  # ------------------------------------------------------------------ failed
+  # The same level as Services, narrowed by a default query. A view, not a
+  # fourth node type — which is also its one limitation: a failed *timer* does
+  # not appear here, because this level lists services.
+  - name: Failed
+    key: "t f"
+    node_type: "systemd:service"
+    query:
+      editable: true
+      menu_key: q
+      default: |
+        query:
+          [active, =, failed]
+
+    columns:
+      - key: name
+        label: Unit
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: sub
+        label: Sub
+        sizing: "fixed(12)"
+      - key: enabled
+        label: Enabled
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: restarts
+        label: Restarts
+        kind: number
+        sizing: "fixed(8)"
+      - key: since
+        label: Since
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+      - key: fragment
+        label: Fragment
+        kind: path
+        sizing: "flex(2)"
+        hidden: true
+
+    actions:
+      - { name: refresh, key: r, type: reload }
+
+  # ------------------------------------------------------------------ timers
+  - name: Timers
+    key: "t t"
+    node_type: "systemd:timer"
+
+    # Columns on this level: name, description, active, sub, enabled, next,
+    # left, last, unit, result, persistent.
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the loaded timers. Columns: name, description, active, sub,
+        # enabled, next, left, last, unit, result, persistent.
+        #
+        #   query:
+        #     [result, '!=', success]          # a timer whose unit failed
+        #
+        #   query:
+        #     [next, lte, "end of day"]        # what still runs today
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+
+    columns:
+      - key: name
+        label: Timer
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: next
+        label: Next
+        kind: datetime
+        sizing: max
+      # Adapter-formatted ("2h 15min"), so it cannot be sorted on — sort by
+      # `next`, which is the same order and is a real instant.
+      - key: left
+        label: Left
+        style: secondary
+        sizing: "fixed(10)"
+      - key: last
+        label: Last
+        kind: datetime
+        style: secondary
+        sizing: max
+      # No value of its own: the table engine renders now − `last`, ticking
+      # live. This is what "ran 20 minutes ago" looks like without a column
+      # that goes stale between loads.
+      - key: passed
+        label: Ago
+        kind: elapsed
+        elapsed_from: last
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: unit
+        label: Triggers
+        sizing: "flex(2)"
+      - key: result
+        label: Result
+        sizing: "fixed(9)"
+      - key: active
+        label: Active
+        sizing: "fixed(10)"
+        hidden: true
+      - key: sub
+        label: Sub
+        style: secondary
+        sizing: "fixed(10)"
+        hidden: true
+      - key: enabled
+        label: Enabled
+        style: tertiary
+        sizing: "fixed(9)"
+        hidden: true
+      - key: persistent
+        label: Persistent
+        sizing: "fixed(10)"
+        hidden: true
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+
+    actions:
+      - { name: refresh, key: r, type: reload }
+
+  # -------------------------------------------------------------- unit files
+  - name: Unit files
+    key: "t u"
+    node_type: "systemd:unitfile"
+
+    # Columns on this level: name, state, path, vendor. Deliberately no
+    # `preset`/`drift`: systemd offers no D-Bus route to a unit file's preset
+    # (systemctl computes it locally from the preset files), so it would be a
+    # parser of its own rather than a free column. `vendor` is the next best
+    # thing — where the file comes from, read off its path.
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the unit files on disk. Columns: name, state, path, vendor.
+        #
+        #   query:
+        #     [vendor, =, user]                # units I wrote myself
+        #
+        #   query:
+        #     [state, =, masked]               # what is masked off
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+
+    columns:
+      - key: name
+        label: Unit file
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: state
+        label: State
+        sizing: "fixed(12)"
+      - key: vendor
+        label: Origin
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: path
+        label: Path
+        kind: path
+        style: secondary
+        sizing: "flex(3)"
+
+    actions:
+      - { name: refresh, key: r, type: reload }

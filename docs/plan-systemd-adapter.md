@@ -30,16 +30,16 @@ assumption in concrete.
 The phase table is the index; the per-phase sections say what is open and why
 it is open _there_ rather than now.
 
-| Phase                                                    | Delivers                                                                       | Decided in the round before it                                    |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| [0 — Skeleton & reading](#phase-0--skeleton--reading)    | crate, factory, config, root + services/timers/unit files read-only, view YAML | node type names, level set, config shape, columns — **done**      |
-| [1 — Control](#phase-1--control)                         | start/stop/restart/enable/…, job tracking, protection list, properties level   | key layout, confirmation policy, protection list                  |
-| [2 — Editing](#phase-2--editing)                         | `cat` as content, drop-in and full edit, `verify`, `daemon-reload`             | drop-in vs. full as the default, backup strategy, restart prompt  |
-| [3 — Creating](#phase-3--creating)                       | form wizard, skeleton templates, **timer + service as a pair**                 | form vs. editor default, `natural-date` → `OnCalendar`, templates |
-| [4 — Journal](#phase-4--journal)                         | `systemd:log` level, cursor pagination, `highlights:`, `--follow`              | level or external terminal, query syntax, follow yes/no           |
-| [5 — Live](#phase-5--live)                               | D-Bus signals → `Invalidation::Row`, dependency tree, timer countdown          | `kind: countdown` generic or adapter-side, signal scope           |
-| [6 — Diagnostics](#phase-6--diagnostics)                 | `analyze security` / `blame`, drift audit, resource columns, waybar            | which of the four, in which order                                 |
-| [7 — Beyond the user bus](#phase-7--beyond-the-user-bus) | system bus + polkit, remote hosts, containers                                  | polkit route, subtabs vs. instances, whether at all               |
+| Phase                                                    | Delivers                                                                       | Decided in the round before it                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| [0 — Skeleton & reading](#phase-0--skeleton--reading)    | crate, factory, config, root + services/timers/unit files read-only, view YAML | node type names, level set, config shape, columns — **done**              |
+| [1 — Control](#phase-1--control)                         | start/stop/restart/enable/…, job tracking, protection list, properties level   | key layout, confirmation policy, protection list                          |
+| [2 — Editing](#phase-2--editing)                         | `cat` as content, drop-in and full edit, `verify`, `daemon-reload`             | drop-in vs. full as the default, backup strategy, restart prompt          |
+| [3 — Creating](#phase-3--creating)                       | form wizard, skeleton templates, **timer + service as a pair**                 | form vs. editor default, `natural-date` → `OnCalendar`, templates         |
+| [4 — Journal](#phase-4--journal)                         | `systemd:log` level, cursor pagination, `highlights:`, `--follow`              | level or external terminal, query syntax, follow yes/no                   |
+| [5 — Live](#phase-5--live)                               | D-Bus signals → `Invalidation::Row`, dependency tree, timer countdown          | `kind: countdown` and `kind: bytes` generic or adapter-side, signal scope |
+| [6 — Diagnostics](#phase-6--diagnostics)                 | `analyze security` / `blame`, drift audit, resource columns, waybar            | which of the four, in which order                                         |
+| [7 — Beyond the user bus](#phase-7--beyond-the-user-bus) | system bus + polkit, remote hosts, containers                                  | polkit route, subtabs vs. instances, whether at all                       |
 
 After phase 2 this is a tab one uses daily. After phase 4 it replaces
 `systemctl` and `journalctl` for a handful of user units. From phase 5 it
@@ -168,7 +168,13 @@ is nothing to gain by hiding.
 **Delivers** a new crate `not-yet-done-systemd-adapter`, its factory
 registered in `not-yet-done-host`, and a read-only tab.
 
-Levels in this phase: **Services**, **Timers**, **Unit files**, **Failed**.
+Levels in this phase: **Services**, **Timers**, **Unit files** — and
+**Failed**, which turned out not to be a level at all. It is the Services
+level with a default query (`[active, =, failed]`), which is D2 applied to
+this adapter's own tab: a question that narrows a level is a view, not a node
+type. Its one limitation is worth stating, because it is invisible from the
+tab: a failed _timer_ does not appear there, since the level lists services.
+
 Sockets, paths, targets, mounts and slices are deliberately left out — once
 the mechanism stands they are a view-YAML addition, not code, which is the
 cheapest possible way to add them later.
@@ -187,16 +193,40 @@ a later one.
 
 Columns, as a starting point to be cut down once real data is on screen:
 
-- **Services** — `name`, `description`, `active`, `sub`, `enabled`, `since`
-  (`kind: elapsed` from `ActiveEnterTimestamp`, ticks live), `pid`, `mem`,
-  `tasks`, `cpu`, `restarts`, `needs_reload`, `fragment`
+- **Services** — `name`, `description`, `load`, `active`, `sub`, `enabled`,
+  `since` (the `ActiveEnterTimestamp` itself, `kind: datetime` — a live-ticking
+  `kind: elapsed` column is a view-YAML addition over the same value, not a
+  second cell), `pid`, `mem`, `tasks`, `cpu`, `restarts`, `needs_reload`,
+  `fragment`
 - **Timers** — `name`, `next`, `left`, `last`, `passed`, `unit`, `result`,
   `enabled`, `persistent`
-- **Unit files** — `name`, `state`, `preset`, `drift`, `path`, `vendor`
+- **Unit files** — `name`, `state`, `path`, `vendor`
 
 `restarts` (`NRestarts`) earns its place: a unit with `Restart=always` that
 crashes in a loop reads as "active" in `systemctl status`. A column plus a
 `highlights:` rule on `> 0` shows it at a glance.
+
+**`preset` and `drift` fell out of the Unit files level.** They were planned
+on the assumption that systemd reports a unit file's preset the way it reports
+its state; it does not. There is no `GetUnitFilePreset` on the manager
+interface — `UnitFilePreset` exists only as a property of an already-_loaded_
+unit, which is precisely the population this level exists to look past — and
+`systemctl` computes the preset locally by walking
+`/etc/systemd/user-preset/`, `/usr/lib/systemd/user-preset/` and friends.
+That parser is work of its own with its own rules (first match wins, glob
+patterns, the `enable`/`disable` verbs), not a free column, so it belongs with
+the **drift audit** in [phase 6](#phase-6--diagnostics) where the same parser
+pays for both. What the level does carry instead is `vendor` — where the file
+comes from (`vendor` / `admin` / `runtime` / `user`), which falls straight out
+of its path and answers the cheap half of the same question.
+
+**`mem` carries raw bytes, not a formatted string.** A pre-rendered
+"95.4 MiB" sorts as text (the sort compares cell strings) and cannot be
+compared in a query, so the column would look right and behave wrong. The
+adapter therefore emits the number and the display gap moves to the table
+engine, which has no `kind: bytes`. That is the same shape as the parked
+`kind: countdown` below, and the two are decided together in
+[phase 5](#phase-5--live).
 
 `left` is a **countdown** — `field − now`, into the future — where the table
 engine's `kind: elapsed` computes `now − field`. In this phase the adapter
@@ -326,7 +356,10 @@ sorting, drilling and per-row actions.
 
 **Open until the round before this phase:** whether the table engine gets a
 generic `kind: countdown` (useful well beyond systemd — calendar events want
-it too) or the adapter keeps formatting the string; and how wide the signal
+it too) or the adapter keeps formatting the string; whether it also gets a
+`kind: bytes`, which phase 0 walked into with `mem` (see above) and which is
+the same question one step over — a column whose value must stay a number to
+sort and compare, but whose display is not the number; and how wide the signal
 subscription should be, since `PropertiesChanged` on every unit is a lot of
 traffic for rows nobody is looking at.
 
@@ -344,7 +377,10 @@ nobody runs:
 - **Drift audit** as saved queries: `is-enabled` vs. preset, units needing a
   daemon-reload, units with drop-ins, units in `~/.config` shadowing
   `/usr/lib`, and a vendor diff for the last of those — the question one
-  actually has after a package update.
+  actually has after a package update. This is also where the `preset` and
+  `drift` columns that fell out of [phase 0](#phase-0--skeleton--reading)
+  return: they need a parser for the preset files, and so does this audit, so
+  one parser serves both.
 - **Resource view**: `MemoryCurrent`, `CPUUsageNSec`, `TasksCurrent`,
   `IOReadBytes` as sortable columns — a `top` over units, free, because the
   properties are already being read.

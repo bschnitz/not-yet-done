@@ -3069,6 +3069,55 @@ views:
         }
     }
 
+    /// The shipped `systemd.yaml` is what a user copies, so a typo or schema
+    /// drift in it must fail here rather than in their terminal. Parse and
+    /// fully validate the real file, then pin the thing it exists to show: two
+    /// subtabs over the *same* node type, told apart only by the query one of
+    /// them defaults to. That is how "Failed" is a view rather than a fourth
+    /// node type — see docs/plan-systemd-adapter.md (D2).
+    #[test]
+    fn committed_systemd_example_parses_and_validates() {
+        let yaml = include_str!("../../../docs/examples/views/systemd.yaml");
+        let cfg: ViewFileConfig =
+            serde_yaml::from_str(yaml).expect("committed systemd.yaml must parse");
+        cfg.validate(&KeyBindingConfig::default(), &Default::default())
+            .expect("committed systemd.yaml must validate");
+
+        let services: Vec<&ViewDef> = cfg
+            .views
+            .iter()
+            .filter(|v| v.node_type == "systemd:service")
+            .collect();
+        assert_eq!(services.len(), 2, "Services and Failed share the level");
+        let failed = services
+            .iter()
+            .find(|v| v.name == "Failed")
+            .expect("the Failed subtab");
+        let default = failed
+            .query
+            .as_ref()
+            .and_then(|q| q.default.as_ref())
+            .expect("Failed narrows the level by a default query");
+        assert!(
+            default.contains("[active, =, failed]"),
+            "the narrowing query is the one that selects failed units: {default}"
+        );
+
+        // The timers level renders "ran 20 minutes ago" from `last` rather
+        // than carrying a column that goes stale between loads.
+        let timers = cfg
+            .views
+            .iter()
+            .find(|v| v.node_type == "systemd:timer")
+            .expect("the Timers subtab");
+        let ago = timers
+            .columns
+            .iter()
+            .find(|c| c.key == "passed")
+            .expect("timers show how long ago they last ran");
+        assert_eq!(ago.elapsed_from.as_deref(), Some("last"));
+    }
+
     /// The comment drill-down is reached through a `navigate` action, never
     /// through a key on the `children:` entry — [`ChildDef`] has no `key`
     /// field, so one written there is silently dropped. That action must be

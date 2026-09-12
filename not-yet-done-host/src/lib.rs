@@ -24,8 +24,8 @@
 //! re-exported by the TUI's view-config module so there is a single source of
 //! truth for the `adapter:` block schema.
 
-use std::fmt;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,8 +43,8 @@ pub use not_yet_done_content::AutoConnect;
 pub mod hooks;
 pub use hooks::{
     ActionFilter, HOOK_DEPTH_ENV, HookBinding, HookConfig, HookInputs, HookOutcome, HookReport,
-    HookTarget, HookWhen, drain_event_hooks, event_hooks_suppressed, fire_connected_hooks, fire_hook,
-    fire_hook_event, fire_hook_with, spawn_event_hook_runner,
+    HookTarget, HookWhen, drain_event_hooks, event_hooks_suppressed, fire_connected_hooks,
+    fire_hook, fire_hook_event, fire_hook_with, spawn_event_hook_runner,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +117,10 @@ pub fn factories() -> HashMap<String, Box<dyn AdapterFactory>> {
     factories.insert(
         "workflow".to_string(),
         not_yet_done_content::typed(not_yet_done_workflow::WorkflowAdapterFactory::new()),
+    );
+    factories.insert(
+        "systemd".to_string(),
+        not_yet_done_content::typed(not_yet_done_systemd_adapter::SystemdAdapterFactory::new()),
     );
     // Wrap every factory in three decorators, one place, inherited by every
     // front-end:

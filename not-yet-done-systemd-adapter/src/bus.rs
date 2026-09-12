@@ -41,6 +41,12 @@ pub const SERVICE_IFACE: &str = "org.freedesktop.systemd1.Service";
 /// The interface a `.timer` unit's own properties live on.
 pub const TIMER_IFACE: &str = "org.freedesktop.systemd1.Timer";
 
+/// One interface's properties, as the bus returns them: the name of each
+/// property to its still-typed value. Named because it travels between the
+/// transport and the row builders, and a bare `HashMap<String, OwnedValue>` in
+/// three signatures says nothing about what is in it.
+pub type Props = HashMap<String, OwnedValue>;
+
 /// How many property reads are in flight at once.
 ///
 /// A level is a couple of hundred units at most and each read is a local
@@ -192,7 +198,7 @@ impl Bus {
         &self,
         path: &OwnedObjectPath,
         interface: &str,
-    ) -> HashMap<String, OwnedValue> {
+    ) -> Props {
         self.try_properties(path, interface).await.unwrap_or_default()
     }
 
@@ -200,7 +206,7 @@ impl Bus {
         &self,
         path: &OwnedObjectPath,
         interface: &str,
-    ) -> Result<HashMap<String, OwnedValue>> {
+    ) -> Result<Props> {
         let conn = self.connection().await?;
         let iface = InterfaceName::try_from(interface)
             .map_err(|e| ContentError::Other(format!("bad interface name: {e}").into()))?;
