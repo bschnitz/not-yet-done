@@ -25,10 +25,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use not_yet_done_content::{ActionArgs, 
-    ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError, EditorPrep,
-    InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction, NodeSummary,
-    NodeType, PageInfo, PageRequest, Result,
+use not_yet_done_content::{
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, Content, ContentError,
+    EditorPrep, InputSpec, ListParams, ListResult, Metadata, MetadataField, Node, NodeAction,
+    NodeSummary, NodeType, PageInfo, PageRequest, ParamSpec, Result,
 };
 
 use crate::client::{ConfluenceClient, PageDetail, PageMeta};
@@ -290,7 +290,18 @@ pub(super) fn page_node_type() -> NodeType {
 /// TUI can populate shortcut hints without instantiating a node.
 pub(super) fn page_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("edit", "edit", InputSpec::Editor),
+        // `base_version` turns the edit into a version-locked write:
+        // the buffer was taken from that revision, and if the page has
+        // moved on since, the write is refused instead of silently
+        // burying the newer one. A frontend that opens the editor and
+        // saves in one flow never needs it -- it reads the page at the
+        // moment it writes. A caller that reads now and writes later
+        // (a checkout, a review, a publish) does, because between the
+        // two is exactly where somebody else edits.
+        NodeAction::new("edit", "edit", InputSpec::Editor).param(ParamSpec::int(
+            "base_version",
+            "version the buffer was taken from; refuse the write if the page moved on",
+        )),
         NodeAction::new("create-child", "create child page", InputSpec::Editor),
         // CF-12: `c` opens an empty XHTML buffer for a new comment on
         // this page. The comment's body POSTs straight to
@@ -437,11 +448,39 @@ impl ConfluencePageNode {
     ///
     /// [`get_by_id`]: crate::adapter::ConfluenceAdapter::get_by_id
     pub(super) async fn hydrate_from_detail(&mut self) {
-        let (title, webui) = match self.detail().await {
-            Ok(detail) => (detail.title.clone(), detail.webui.clone()),
+        let (title, webui, version) = match self.detail().await {
+            Ok(detail) => (detail.title.clone(), detail.webui.clone(), detail.version),
             Err(_) => return,
         };
         self.apply_hydrated_title(title, &webui);
+        self.apply_hydrated_version(version);
+    }
+
+    /// Put the page's version number on the row. It is not in the
+    /// listing payload, so it appears only once the detail has been
+    /// fetched -- and that is the point at which it is worth having: a
+    /// caller that reads the page here and writes it back later hands
+    /// this number to `edit` as `base_version`, and the write is
+    /// refused if the page has moved on in between. Without it that
+    /// caller has no way to name the revision it actually read.
+    fn apply_hydrated_version(&mut self, version: i64) {
+        let value = version.to_string();
+        if let Some(field) = self
+            .cached_metadata
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "version")
+        {
+            field.value = value;
+            return;
+        }
+        self.cached_metadata.fields.push(MetadataField {
+            key: "version".into(),
+            value,
+            display_label: "Version".into(),
+            editable: false,
+            allowed_values: None,
+        });
     }
 
     /// CF-11: soft-delete the page (move to Trash) via
@@ -619,7 +658,12 @@ impl Node for ConfluencePageNode {
         }
     }
 
-    async fn execute(&mut self, action_id: &str, input: ActionInput, _args: &ActionArgs) -> Result<ActionOutcome> {
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("open-in-browser", ActionInput::None) => self.open_via_xdg().await,
             (
@@ -629,7 +673,10 @@ impl Node for ConfluencePageNode {
                     original,
                     version,
                 },
-            ) => self.execute_edit(&text, &original, &version).await,
+            ) => {
+                self.execute_edit(&text, &original, &version, args.int("base_version"))
+                    .await
+            }
             ("create-child", ActionInput::Edited { text, .. }) => {
                 self.execute_create_child(&text).await
             }
@@ -902,7 +949,10 @@ mod tests {
             "https://wiki.example.invalid",
             sample_page(),
         );
-        match node.execute("nope", ActionInput::None, &Default::default()).await {
+        match node
+            .execute("nope", ActionInput::None, &Default::default())
+            .await
+        {
             Err(e) => assert!(format!("{e}").contains("nope")),
             Ok(_) => panic!("unknown action must be rejected"),
         }
@@ -926,7 +976,10 @@ mod tests {
         };
         let mut node =
             ConfluencePageNode::new(synthetic_client(), "https://wiki.example.invalid", page);
-        match node.execute("open-in-browser", ActionInput::None, &Default::default()).await {
+        match node
+            .execute("open-in-browser", ActionInput::None, &Default::default())
+            .await
+        {
             Err(_) => {}
             Ok(_) => panic!("empty webui must never spawn a browser"),
         }
