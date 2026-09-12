@@ -191,9 +191,15 @@ pub enum ViewRequest {
     /// adapter's `ActionDispatch::Reload` means — the action ran against a row
     /// of the level the user is looking at, so that level is what has to be
     /// refetched.
+    ///
+    /// `notice` carries the adapter's word on what it just did
+    /// (`ActionDispatch::Done`): shown before the refetch starts, because the
+    /// reload is asynchronous and the user should not have to wait for rows
+    /// to learn that the job succeeded.
     ReloadContentCurrentLevel {
         view_index: usize,
         pane_id: PaneId,
+        notice: Option<String>,
     },
     /// Hard reload of a content view (the `r` action): asks the adapter to
     /// `refresh()` first — abort every in-flight load and drop caches — then

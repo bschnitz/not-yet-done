@@ -1521,6 +1521,13 @@ async fn do_dispatch(
             println!("{message}");
             Ok(())
         }
+        // Reload-and-report. The CLI has no pane to refresh, so only the
+        // report survives — and a `Done` without a message is the same
+        // silent success as `Reload`.
+        ActionDispatch::Done { message } => {
+            println!("{}", message.as_deref().unwrap_or("ok"));
+            Ok(())
+        }
         ActionDispatch::Error(msg) => Err(anyhow!("{msg}")),
         // Generic confirm gate. With `--yes` we already passed
         // `confirmed: true`, so the adapter does the work instead of asking;

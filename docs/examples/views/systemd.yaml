@@ -17,8 +17,14 @@
 # Failed subtab below is exactly that — the Services level with a default
 # query, not a separate node type. See docs/plan-systemd-adapter.md (D2).
 #
-# Read-only for now: this is phase 0. start/stop/enable, editing a unit file
-# and the journal are later phases built on these same rows.
+# Under a service and a timer sits one further level: Properties — everything
+# `systemctl show` prints, as a table that can be sorted and filtered. Not
+# under a unit file: one the manager has never loaded has no D-Bus object
+# behind it, so there is nothing to read.
+#
+# Acting on a unit lives on the `a` leader (see the Services subtab below).
+# Editing a unit file, creating one and the journal are later phases built on
+# these same rows.
 
 tab:
   name: systemd
@@ -32,8 +38,35 @@ adapter:
     # `system` = the system manager. The two hold different units; there is
     # no view that shows both.
     manager: user
-    # Deadline for a single D-Bus call, in seconds. 0 = no deadline.
+    # Deadline for a single D-Bus call, in seconds. 0 = no deadline. It
+    # bounds the round trip, not the job: a start that takes a minute is a
+    # job the adapter waits for separately (and reports as "still running"
+    # rather than failed if it outlasts two minutes).
     timeout_secs: 10
+    # Units the disruptive verbs refuse to touch. The built-in list already
+    # covers the session plumbing — *.slice, *.scope, dbus.socket,
+    # dbus.service, dbus-broker.service, default.target, basic.target,
+    # sockets.target,
+    # timers.target, paths.target, graphical-session.target,
+    # graphical-session-pre.target — so both keys below are for adjusting it.
+    #
+    # It exists because a confirmation prompt is no guard here: `y` is the
+    # same muscle memory as the key that opened the prompt, and the mistake
+    # it would catch is the one that takes the desktop down with it. A
+    # protected unit still accepts start, enable and the other additive
+    # verbs; only stop, restart, mask and their like are refused.
+    #
+    # `protect:` adds your own. Anything you would not want to lose mid-work:
+    #   protect:
+    #     - ssh-agent.service
+    #     - "*.socket"
+    #
+    # `unprotect:` lifts one entry, spelled exactly as it appears on the list
+    # above. An entry that matches nothing is refused when this file loads —
+    # otherwise a typo would look like it worked while the protection quietly
+    # stayed in place.
+    #   unprotect:
+    #     - "*.slice"
   # Local and never logs in, so it loads at startup like the other local tabs.
   manual_connect: false
 
@@ -144,6 +177,101 @@ views:
 
     actions:
       - { name: refresh, key: r, type: reload }
+    # Acting on the unit under the cursor. `a` is the project-wide action
+    # leader; nothing else in this tab claims it, so the whole verb set fits
+    # on one level of chord. Related letters sit together: the running verbs
+    # (start/stop/restart/reload) on `s x r l`, the boot-time ones
+    # (enable/disable/mask/unmask) on `e d m u`, and a capital means "and
+    # now" — `a E` enables *and* starts, `a D` disables *and* stops.
+    #
+    # Which of these a level actually offers is the adapter's decision, not
+    # this file's: a verb declares the scope it works in, and a binding for a
+    # verb the level does not serve is simply inert. Timers have no processes
+    # and so have no `reload`, `kill` or `freeze`; a unit file is not loaded
+    # and so has no `reset-failed`.
+    #
+    # The disruptive ones ask before they act, and the adapter writes the
+    # question — only it knows that stopping a unit stops whatever depends on
+    # it. Protected units (see `protect:` in the adapter config) refuse the
+    # disruptive verbs outright rather than asking: a prompt answers "did you
+    # mean it", which is no answer to "this would take the session down".
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      # `reload` asks the unit to re-read its config without dropping what it
+      # is doing; `reload-or-restart` falls back to a restart when the unit
+      # cannot. Only services — a timer has nothing to re-read.
+      - { name: reload, key: "a l", id: reload }
+      - { name: reload or restart, key: "a L", id: reload-or-restart }
+      # The [Install] side: what happens at the next login, not now.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # Masking points the unit at /dev/null, so nothing can start it —
+      # not a dependency, not systemctl, not this tab. It is the one verb
+      # whose effect outlives a reboot and is invisible in the running state,
+      # which is why `unmask` sits right next to it.
+      - { name: mask, key: "a m", id: mask }
+      - { name: unmask, key: "a u", id: unmask }
+      # Clears the failed state so the unit can be started again — and so it
+      # stops showing up in the Failed subtab. Changes nothing about what is
+      # running.
+      - { name: reset failed, key: "a f", id: reset-failed }
+      # Signals. `a k` opens a menu rather than sending anything: the
+      # deliberate act of picking SIGTERM or SIGKILL out of a list is what
+      # takes the place of a y/n here.
+      - { name: kill, key: "a k", id: kill }
+      # Freeze suspends every process in the unit's cgroup without killing
+      # it; pressing it again thaws. One key for both directions, because the
+      # adapter can see which state the unit is in and you cannot mis-aim it.
+      - { name: freeze or thaw, key: "a z", id: freeze }
+      # Everything the manager knows about this unit, as a table — what
+      # `systemctl show` prints, only sortable and filterable.
+      - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+
+    children:
+      # `systemctl show` is two hundred `Key=value` lines and a terminal can
+      # only scroll them. The same content as a level is sortable and
+      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # answers in one keystroke what grepping a wall of text answers in three.
+      #
+      # Both interfaces at once: the generic `Unit` one (ActiveState,
+      # LoadState, the dependency lists) and the unit's own. The `interface`
+      # column says which a row came from.
+      #
+      # Only under a *loaded* unit. A unit file the manager has never touched
+      # has no D-Bus object behind it, so there is nothing to read — which is
+      # why the Unit files level below has no such child.
+      - name: Properties
+        node_type: "systemd:property"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the properties. Columns: name, value, interface.
+            #
+            #   query:
+            #     [name, like, Timeout]        # every timeout at once
+            #     [interface, =, Service]      # drop the generic Unit half
+            #     [value, like, /home]         # what points into my home
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Property
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: value
+            label: Value
+            sizing: "flex(5)"
+          - key: interface
+            label: Interface
+            style: tertiary
+            sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
 
   # ------------------------------------------------------------------ failed
   # The same level as Services, narrowed by a default query. A view, not a
@@ -193,6 +321,101 @@ views:
 
     actions:
       - { name: refresh, key: r, type: reload }
+    # Acting on the unit under the cursor. `a` is the project-wide action
+    # leader; nothing else in this tab claims it, so the whole verb set fits
+    # on one level of chord. Related letters sit together: the running verbs
+    # (start/stop/restart/reload) on `s x r l`, the boot-time ones
+    # (enable/disable/mask/unmask) on `e d m u`, and a capital means "and
+    # now" — `a E` enables *and* starts, `a D` disables *and* stops.
+    #
+    # Which of these a level actually offers is the adapter's decision, not
+    # this file's: a verb declares the scope it works in, and a binding for a
+    # verb the level does not serve is simply inert. Timers have no processes
+    # and so have no `reload`, `kill` or `freeze`; a unit file is not loaded
+    # and so has no `reset-failed`.
+    #
+    # The disruptive ones ask before they act, and the adapter writes the
+    # question — only it knows that stopping a unit stops whatever depends on
+    # it. Protected units (see `protect:` in the adapter config) refuse the
+    # disruptive verbs outright rather than asking: a prompt answers "did you
+    # mean it", which is no answer to "this would take the session down".
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      # `reload` asks the unit to re-read its config without dropping what it
+      # is doing; `reload-or-restart` falls back to a restart when the unit
+      # cannot. Only services — a timer has nothing to re-read.
+      - { name: reload, key: "a l", id: reload }
+      - { name: reload or restart, key: "a L", id: reload-or-restart }
+      # The [Install] side: what happens at the next login, not now.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # Masking points the unit at /dev/null, so nothing can start it —
+      # not a dependency, not systemctl, not this tab. It is the one verb
+      # whose effect outlives a reboot and is invisible in the running state,
+      # which is why `unmask` sits right next to it.
+      - { name: mask, key: "a m", id: mask }
+      - { name: unmask, key: "a u", id: unmask }
+      # Clears the failed state so the unit can be started again — and so it
+      # stops showing up in the Failed subtab. Changes nothing about what is
+      # running.
+      - { name: reset failed, key: "a f", id: reset-failed }
+      # Signals. `a k` opens a menu rather than sending anything: the
+      # deliberate act of picking SIGTERM or SIGKILL out of a list is what
+      # takes the place of a y/n here.
+      - { name: kill, key: "a k", id: kill }
+      # Freeze suspends every process in the unit's cgroup without killing
+      # it; pressing it again thaws. One key for both directions, because the
+      # adapter can see which state the unit is in and you cannot mis-aim it.
+      - { name: freeze or thaw, key: "a z", id: freeze }
+      # Everything the manager knows about this unit, as a table — what
+      # `systemctl show` prints, only sortable and filterable.
+      - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+
+    children:
+      # `systemctl show` is two hundred `Key=value` lines and a terminal can
+      # only scroll them. The same content as a level is sortable and
+      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # answers in one keystroke what grepping a wall of text answers in three.
+      #
+      # Both interfaces at once: the generic `Unit` one (ActiveState,
+      # LoadState, the dependency lists) and the unit's own. The `interface`
+      # column says which a row came from.
+      #
+      # Only under a *loaded* unit. A unit file the manager has never touched
+      # has no D-Bus object behind it, so there is nothing to read — which is
+      # why the Unit files level below has no such child.
+      - name: Properties
+        node_type: "systemd:property"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the properties. Columns: name, value, interface.
+            #
+            #   query:
+            #     [name, like, Timeout]        # every timeout at once
+            #     [interface, =, Service]      # drop the generic Unit half
+            #     [value, like, /home]         # what points into my home
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Property
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: value
+            label: Value
+            sizing: "flex(5)"
+          - key: interface
+            label: Interface
+            style: tertiary
+            sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
 
   # ------------------------------------------------------------------ timers
   - name: Timers
@@ -279,6 +502,88 @@ views:
 
     actions:
       - { name: refresh, key: r, type: reload }
+    # Acting on the unit under the cursor. `a` is the project-wide action
+    # leader; nothing else in this tab claims it, so the whole verb set fits
+    # on one level of chord. Related letters sit together: the running verbs
+    # (start/stop/restart/reload) on `s x r l`, the boot-time ones
+    # (enable/disable/mask/unmask) on `e d m u`, and a capital means "and
+    # now" — `a E` enables *and* starts, `a D` disables *and* stops.
+    #
+    # Which of these a level actually offers is the adapter's decision, not
+    # this file's: a verb declares the scope it works in, and a binding for a
+    # verb the level does not serve is simply inert. Timers have no processes
+    # and so have no `reload`, `kill` or `freeze`; a unit file is not loaded
+    # and so has no `reset-failed`.
+    #
+    # The disruptive ones ask before they act, and the adapter writes the
+    # question — only it knows that stopping a unit stops whatever depends on
+    # it. Protected units (see `protect:` in the adapter config) refuse the
+    # disruptive verbs outright rather than asking: a prompt answers "did you
+    # mean it", which is no answer to "this would take the session down".
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      # The [Install] side: what happens at the next login, not now.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # Masking points the unit at /dev/null, so nothing can start it —
+      # not a dependency, not systemctl, not this tab. It is the one verb
+      # whose effect outlives a reboot and is invisible in the running state,
+      # which is why `unmask` sits right next to it.
+      - { name: mask, key: "a m", id: mask }
+      - { name: unmask, key: "a u", id: unmask }
+      # Clears the failed state so the unit can be started again — and so it
+      # stops showing up in the Failed subtab. Changes nothing about what is
+      # running.
+      - { name: reset failed, key: "a f", id: reset-failed }
+      # Everything the manager knows about this unit, as a table — what
+      # `systemctl show` prints, only sortable and filterable.
+      - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+
+    children:
+      # `systemctl show` is two hundred `Key=value` lines and a terminal can
+      # only scroll them. The same content as a level is sortable and
+      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # answers in one keystroke what grepping a wall of text answers in three.
+      #
+      # Both interfaces at once: the generic `Unit` one (ActiveState,
+      # LoadState, the dependency lists) and the unit's own. The `interface`
+      # column says which a row came from.
+      #
+      # Only under a *loaded* unit. A unit file the manager has never touched
+      # has no D-Bus object behind it, so there is nothing to read — which is
+      # why the Unit files level below has no such child.
+      - name: Properties
+        node_type: "systemd:property"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the properties. Columns: name, value, interface.
+            #
+            #   query:
+            #     [name, like, Timeout]        # every timeout at once
+            #     [interface, =, Service]      # drop the generic Unit half
+            #     [value, like, /home]         # what points into my home
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Property
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: value
+            label: Value
+            sizing: "flex(5)"
+          - key: interface
+            label: Interface
+            style: tertiary
+            sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
 
   # -------------------------------------------------------------- unit files
   - name: Unit files
@@ -327,3 +632,35 @@ views:
 
     actions:
       - { name: refresh, key: r, type: reload }
+    # Acting on the unit under the cursor. `a` is the project-wide action
+    # leader; nothing else in this tab claims it, so the whole verb set fits
+    # on one level of chord. Related letters sit together: the running verbs
+    # (start/stop/restart/reload) on `s x r l`, the boot-time ones
+    # (enable/disable/mask/unmask) on `e d m u`, and a capital means "and
+    # now" — `a E` enables *and* starts, `a D` disables *and* stops.
+    #
+    # Which of these a level actually offers is the adapter's decision, not
+    # this file's: a verb declares the scope it works in, and a binding for a
+    # verb the level does not serve is simply inert. Timers have no processes
+    # and so have no `reload`, `kill` or `freeze`; a unit file is not loaded
+    # and so has no `reset-failed`.
+    #
+    # The disruptive ones ask before they act, and the adapter writes the
+    # question — only it knows that stopping a unit stops whatever depends on
+    # it. Protected units (see `protect:` in the adapter config) refuse the
+    # disruptive verbs outright rather than asking: a prompt answers "did you
+    # mean it", which is no answer to "this would take the session down".
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      # The [Install] side: what happens at the next login, not now.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # Masking points the unit at /dev/null, so nothing can start it —
+      # not a dependency, not systemctl, not this tab. It is the one verb
+      # whose effect outlives a reboot and is invisible in the running state,
+      # which is why `unmask` sits right next to it.
+      - { name: mask, key: "a m", id: mask }
+      - { name: unmask, key: "a u", id: unmask }

@@ -246,10 +246,30 @@ can wait.
 `systemd:property` level (all of `show`, as a filterable table — which is
 where a 200-property wall becomes usable).
 
-Candidate actions, all on one which-key leader so they do not shadow
-search/reload/edit: start, stop, restart, reload, reload-or-restart, enable,
-enable-now, disable, disable-now, mask/unmask, kill (signal via
-`option_menu` + `list_values("signals")`), reset-failed, freeze/thaw, preset.
+Fourteen actions on the `a` leader, one level of chord. Related letters sit
+together, and a capital means "and now":
+
+| Key   | Verb              | Key   | Verb          |
+| ----- | ----------------- | ----- | ------------- |
+| `a s` | start             | `a e` | enable        |
+| `a x` | stop              | `a E` | enable --now  |
+| `a r` | restart           | `a d` | disable       |
+| `a l` | reload            | `a D` | disable --now |
+| `a L` | reload-or-restart | `a m` | mask          |
+| `a f` | reset-failed      | `a u` | unmask        |
+| `a k` | kill (signal)     | `a z` | freeze / thaw |
+
+`preset` is **not** here. Without knowing what the vendor preset says, the key
+does something you cannot predict from the row in front of you — so it moves to
+phase 6, where the drift audit shows the preset next to the current state and
+the verb finally has a visible meaning.
+
+Which verbs a level offers is the adapter's decision, not the view's: each verb
+declares the scope it works in. A timer has no processes and so is never offered
+`reload`, `kill` or `freeze`; a unit file is not loaded and so is never offered
+`reset-failed` — but it _is_ offered `start`, because `StartUnit` takes a name
+whether the manager has loaded it or not, and the unit-files level is the only
+one that can see a unit the manager has never touched.
 
 **Job tracking is the substance of this phase.** `StartUnit` returns a job
 path; the adapter waits for `JobRemoved` and reports the real outcome
@@ -258,10 +278,42 @@ While the job runs, `StatusReporter::busy("Starting backup-photos.service")`. On
 failure, the unit's last journal lines go straight into the notification —
 that is the moment they are wanted.
 
-**Open until the round before this phase:** which leader key; which actions
-get `confirm: true`; and the protection list — `init.scope`, `*.slice`,
-`dbus.socket`, `graphical-session.target` should refuse stop/mask with
-`ActionDispatch::Error` rather than dismantle the running session.
+### Confirmation and protection are different instruments
+
+**Confirmation** asks "did you mean it". The adapter writes the question,
+because only it knows the consequence — that stopping a unit stops whatever
+depends on it, that a mask survives a reboot. It is returned as
+`ActionDispatch::Confirm { prompt }` on the first invocation and the frontend
+re-invokes the same action with `confirmed: true`.
+
+Asked: `stop`, `disable`, `disable --now`, `mask`. Not asked: `start`,
+`restart`, `reload`, `reload-or-restart`, `enable`, `enable --now`, `unmask`,
+`reset-failed`, `freeze` — each is either additive or plainly reversible by the
+key next to it. `kill` is asked in a different currency: it opens the signal
+menu, and picking SIGKILL out of a list is the deliberate act a y/n would
+otherwise stand in for.
+
+**Protection** is not a question. A prompt is no answer to "this would take the
+session down", because the muscle memory that pressed the key presses `y` too.
+A protected unit **refuses** the disruptive verbs outright and still accepts the
+additive ones.
+
+The built-in list covers the session plumbing — `*.slice`, `*.scope`,
+`dbus.socket`, `dbus.service`, `dbus-broker.service`, `default.target`, `basic.target`,
+`sockets.target`, `timers.target`, `paths.target`, `graphical-session.target`,
+`graphical-session-pre.target`. Config adds to it with `protect:` and lifts an
+entry with `unprotect:`, which must spell the entry exactly; an `unprotect:`
+that matches nothing is refused when the config loads, because otherwise a
+misspelling looks like success while the protection is still in place.
+
+### The reload-plus-message gap
+
+Every verb here both changes the row and has a verdict worth reading, and
+`ActionDispatch` had no variant for that: `Reload` refreshes without speaking,
+`Notify` speaks but explicitly does not reload. A `start` that reports "started"
+while the row still says `inactive` tells the user half the truth. Phase 1 adds
+`ActionDispatch::Done { message: Option<String> }` to the content protocol —
+additively, so no existing adapter changes.
 
 ## Phase 2 — Editing
 

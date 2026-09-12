@@ -31,10 +31,21 @@
 //! query the user switches at runtime, not a setting they edit and restart.
 //! See decision D2 in `docs/plan-systemd-adapter.md`.
 //!
-//! # Phase 0 is read-only
+//! Under a service and a timer hangs one further level:
 //!
-//! No actions, no writes. `start`/`stop`/`enable`, editing a unit file and the
-//! journal are later phases that build on exactly these rows.
+//! * **property** (`systemd:property`, id `property:<unit>:<Name>`) — one row
+//!   per property the manager reports, from the generic `Unit` interface and
+//!   from the unit's own. Not under **unitfile**: a unit the manager has not
+//!   loaded has no D-Bus object, and therefore no properties to read.
+//!
+//! # Acting on a unit
+//!
+//! The verbs live in [`control`](crate::control), which owns the table; this
+//! file only routes. A shortcut reaches [`Node::invoke_action`], which checks
+//! the protection list, asks for confirmation where the verb declares one, and
+//! then runs it. `kill` is the exception: it needs a signal, so it is an
+//! `InputSpec::Picker` and travels the `picker_options` → `execute` road
+//! instead.
 
 use std::sync::Arc;
 
@@ -44,27 +55,44 @@ use futures::stream::{self, StreamExt};
 
 use not_yet_done_content::*;
 
-use crate::bus::{Bus, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry};
-use crate::config::SystemdConfig;
-use crate::model::{
-    ServiceRow, TimerRow, UnitFileRow, boot_instant, manager_type, service_columns, service_type,
-    timer_columns, timer_type, unit_file_columns, unit_file_type,
+use crate::bus::{
+    Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry,
 };
+use crate::config::SystemdConfig;
+use crate::control;
+use crate::model::{
+    PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, manager_type, property_columns,
+    property_rows, property_type, service_columns, service_type, timer_columns, timer_type,
+    unit_file_columns, unit_file_type,
+};
+use crate::protect::Protection;
 use crate::query::{self, UnitQuery};
 
 /// Id of the adapter root, addressable via [`ContentAdapter::get_by_id`].
 const ROOT_ID: &str = "root";
 
-/// A systemd manager as a content tree.
-pub struct SystemdAdapter {
-    instance_id: String,
-    /// Shared with every in-flight list: the levels borrow it, the node the
-    /// root hands out does not need it.
+/// Everything a node needs in order to *do* something, in one handle.
+///
+/// A row reached through `get_by_id` is handed one of these, which is the whole
+/// reason it exists: a [`UnitNode`] built only from its summary knows its name
+/// and its cells but has no way to reach the manager, and a verb it cannot
+/// execute is a verb that should not be offered. The three parts are the three
+/// questions every verb asks — *whom do I talk to*, *am I allowed*, and *who
+/// says a call is in flight*.
+struct Shared {
     bus: Arc<Bus>,
+    status: StatusReporter,
+    protect: Protection,
     /// The deadline a single call runs under, for the busy line. `0` = none,
     /// which is also what the status channel means by "no deadline".
     timeout_secs: u64,
-    status: StatusReporter,
+}
+
+/// A systemd manager as a content tree.
+pub struct SystemdAdapter {
+    instance_id: String,
+    /// Shared with every in-flight list and with every node that acts.
+    shared: Arc<Shared>,
     saved_queries: FsQueryStore,
 }
 
@@ -80,20 +108,36 @@ impl SystemdAdapter {
             .join("queries");
         Self {
             instance_id,
-            bus: Arc::new(bus),
-            timeout_secs: cfg.timeout().map(|d| d.as_secs()).unwrap_or(0),
-            // The connection is opened by the first load, not here — so the
-            // reporter starts out ready and the first level is what reports
-            // a manager that is not running.
-            status: StatusReporter::new(),
+            shared: Arc::new(Shared {
+                bus: Arc::new(bus),
+                // The connection is opened by the first load, not here — so the
+                // reporter starts out ready and the first level is what reports
+                // a manager that is not running.
+                status: StatusReporter::new(),
+                protect: cfg.protection(),
+                timeout_secs: cfg.timeout().map(|d| d.as_secs()).unwrap_or(0),
+            }),
             saved_queries: FsQueryStore::new(queries_root, ".yaml"),
         }
     }
 
+    fn bus(&self) -> &Bus {
+        &self.shared.bus
+    }
+
+    fn status(&self) -> &StatusReporter {
+        &self.shared.status
+    }
+
     fn root_node(&self) -> SystemdRoot {
         SystemdRoot {
-            label: format!("systemd ({})", self.bus.manager().as_str()),
+            label: format!("systemd ({})", self.bus().manager().as_str()),
         }
+    }
+
+    /// A row, carrying the handle it needs to act on itself.
+    fn node(&self, summary: NodeSummary) -> UnitNode {
+        UnitNode::new(summary, Arc::clone(&self.shared))
     }
 }
 
@@ -117,27 +161,41 @@ impl ContentAdapter for SystemdAdapter {
         }
         if let Some(name) = id.strip_prefix(crate::SERVICE_PREFIX) {
             let entry = self.find_unit(name).await?;
-            let unit = self.bus.properties(&entry.path, UNIT_IFACE).await;
-            let service = self.bus.properties(&entry.path, SERVICE_IFACE).await;
+            let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
+            let service = self.bus().properties(&entry.path, SERVICE_IFACE).await;
             let row = ServiceRow::build(&entry, &unit, &service);
-            return Ok(Box::new(UnitNode::from(row.summary())));
+            return Ok(Box::new(self.node(row.summary())));
         }
         if let Some(name) = id.strip_prefix(crate::TIMER_PREFIX) {
             let entry = self.find_unit(name).await?;
-            let unit = self.bus.properties(&entry.path, UNIT_IFACE).await;
-            let timer = self.bus.properties(&entry.path, TIMER_IFACE).await;
+            let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
+            let timer = self.bus().properties(&entry.path, TIMER_IFACE).await;
             let row = TimerRow::build(&entry, &unit, &timer, boot_instant());
-            return Ok(Box::new(UnitNode::from(row.summary(Utc::now()))));
+            return Ok(Box::new(self.node(row.summary(Utc::now()))));
         }
         if let Some(name) = id.strip_prefix(crate::UNIT_FILE_PREFIX) {
             let entry = self
-                .bus
+                .bus()
                 .list_unit_files()
                 .await?
                 .into_iter()
                 .find(|e| e.path.rsplit('/').next().unwrap_or(&e.path) == name)
                 .ok_or_else(|| ContentError::NotFound(format!("no unit file {name}")))?;
-            return Ok(Box::new(UnitNode::from(UnitFileRow::build(&entry).summary())));
+            return Ok(Box::new(self.node(UnitFileRow::build(&entry).summary())));
+        }
+        if let Some(rest) = id.strip_prefix(crate::PROPERTY_PREFIX) {
+            // A unit name may hold dots but never a colon, so the *last* colon
+            // is the one that separates the unit from the property name.
+            let (unit, prop) = rest
+                .rsplit_once(':')
+                .ok_or_else(|| ContentError::NotFound(format!("malformed property id {id}")))?;
+            let row = self
+                .read_properties(unit)
+                .await?
+                .into_iter()
+                .find(|r| r.name == prop)
+                .ok_or_else(|| ContentError::NotFound(format!("{unit} has no property {prop}")))?;
+            return Ok(Box::new(self.node(row.summary())));
         }
         Err(ContentError::NotFound(format!("unknown systemd id {id}")))
     }
@@ -147,7 +205,18 @@ impl ContentAdapter for SystemdAdapter {
     /// closure borrows the adapter's own bus, so a level fetches lazily and
     /// nothing has to be cloned into the node the root handed out.
     fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<Child<'a>> {
-        if node.node_type().type_id != manager_type().type_id {
+        let type_id = node.node_type().type_id.as_str();
+        // A loaded unit has a D-Bus object, so it can be asked what it is; a
+        // unit file has none, which is why the third level stays a leaf.
+        if type_id == service_type().type_id || type_id == timer_type().type_id {
+            let id = node.id();
+            return vec![Child {
+                node_type: property_type(),
+                columns: property_columns(),
+                list: Box::new(move |params| Box::pin(self.list_properties(id, params))),
+            }];
+        }
+        if type_id != manager_type().type_id {
             return Vec::new();
         }
         vec![
@@ -170,11 +239,27 @@ impl ContentAdapter for SystemdAdapter {
     }
 
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
-        self.status.subscribe()
+        self.status().subscribe()
     }
 
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         Some(&self.saved_queries)
+    }
+
+    /// What each level may do, straight out of the verb table. A level is
+    /// offered a verb when the verb says it works there — a timer has no
+    /// processes and so is never offered `kill`, a unit file is not loaded and
+    /// so is never offered `reset-failed`.
+    fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        control::actions_for(&node_type.type_id)
+    }
+
+    /// The one named value list this adapter serves: the signals `kill` sends.
+    async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
+        match source {
+            "signals" => Ok(control::signal_options()),
+            other => Err(ContentError::NotFound(format!("no value list {other}"))),
+        }
     }
 }
 
@@ -186,7 +271,7 @@ impl SystemdAdapter {
     /// in it is genuinely not addressable as a unit (it may still exist as a
     /// unit file, which is a different level with a different id prefix).
     async fn find_unit(&self, name: &str) -> Result<UnitEntry> {
-        self.bus
+        self.bus()
             .list_units()
             .await?
             .into_iter()
@@ -196,7 +281,7 @@ impl SystemdAdapter {
 
     async fn list_services(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::SERVICE_COLUMNS)?;
-        let _busy = self.status.busy("Reading services", self.timeout_secs);
+        let _busy = self.status().busy("Reading services", self.shared.timeout_secs);
         let units = self.units_with_suffix(".service").await?;
         let rows = self
             .with_properties(units, SERVICE_IFACE, |entry, unit, own| {
@@ -215,7 +300,7 @@ impl SystemdAdapter {
 
     async fn list_timers(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::TIMER_COLUMNS)?;
-        let _busy = self.status.busy("Reading timers", self.timeout_secs);
+        let _busy = self.status().busy("Reading timers", self.shared.timeout_secs);
         let units = self.units_with_suffix(".timer").await?;
         // Read once for the whole level: a monotonic timer's next elapse is an
         // offset from this boot, and re-deriving it per row would let rows
@@ -239,9 +324,9 @@ impl SystemdAdapter {
 
     async fn list_unit_files(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::UNIT_FILE_COLUMNS)?;
-        let _busy = self.status.busy("Reading unit files", self.timeout_secs);
+        let _busy = self.status().busy("Reading unit files", self.shared.timeout_secs);
         let rows: Vec<UnitFileRow> = self
-            .bus
+            .bus()
             .list_unit_files()
             .await?
             .iter()
@@ -257,11 +342,54 @@ impl SystemdAdapter {
         ))
     }
 
+    /// Every property of one loaded unit, from both interfaces that have
+    /// something to say about it.
+    ///
+    /// Two `GetAll` calls, not one per property: `systemctl show` is a single
+    /// round trip and this level should not be slower than the command it
+    /// replaces. The generic `Unit` interface comes first because that is where
+    /// the questions usually start (`ActiveState`, `LoadState`, the
+    /// dependencies); the type-specific one follows.
+    async fn read_properties(&self, unit: &str) -> Result<Vec<PropertyRow>> {
+        let (iface, label) = if unit.ends_with(".timer") {
+            (TIMER_IFACE, "Timer")
+        } else {
+            (SERVICE_IFACE, "Service")
+        };
+        let entry = self.find_unit(unit).await?;
+        let generic = self.bus().properties(&entry.path, UNIT_IFACE).await;
+        let own = self.bus().properties(&entry.path, iface).await;
+        let mut rows = property_rows(unit, "Unit", &generic);
+        rows.extend(property_rows(unit, label, &own));
+        Ok(rows)
+    }
+
+    /// The property level of the row the user drilled into.
+    async fn list_properties(&self, node_id: &str, params: ListParams) -> Result<ListResult> {
+        let query = compile(params.query.as_deref(), query::PROPERTY_COLUMNS)?;
+        let unit = node_id
+            .strip_prefix(crate::SERVICE_PREFIX)
+            .or_else(|| node_id.strip_prefix(crate::TIMER_PREFIX))
+            .ok_or_else(|| ContentError::NotFound(format!("{node_id} is not a loaded unit")))?;
+        let _busy = self
+            .status()
+            .busy(&format!("Reading {unit}"), self.shared.timeout_secs);
+        let rows = self.read_properties(unit).await?;
+        Ok(finish(
+            query::retain(rows, &query)
+                .iter()
+                .map(PropertyRow::summary)
+                .collect(),
+            &params.sort,
+            &property_columns(),
+        ))
+    }
+
     /// The loaded units whose name ends in `suffix` — how a level picks its
     /// own population out of the one listing the manager offers.
     async fn units_with_suffix(&self, suffix: &str) -> Result<Vec<UnitEntry>> {
-        let units = self.bus.list_units().await?;
-        self.status.connected();
+        let units = self.bus().list_units().await?;
+        self.status().connected();
         Ok(units
             .into_iter()
             .filter(|u| u.name.ends_with(suffix))
@@ -283,8 +411,8 @@ impl SystemdAdapter {
     {
         stream::iter(units)
             .map(|entry| async move {
-                let unit = self.bus.properties(&entry.path, UNIT_IFACE).await;
-                let own = self.bus.properties(&entry.path, iface).await;
+                let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
+                let own = self.bus().properties(&entry.path, iface).await;
                 build(&entry, &unit, &own)
             })
             .buffer_unordered(crate::bus::MAX_INFLIGHT)
@@ -358,24 +486,59 @@ impl Node for SystemdRoot {
 
 /// A single unit row addressed on its own — the same cells the level showed.
 ///
-/// One type for all three levels: what distinguishes a service from a timer is
-/// its `node_type` and its cells, both of which the summary already carries, so
-/// three near-identical structs would only be three places to forget an edit.
+/// One type for all three levels (and for a property row): what distinguishes a
+/// service from a timer is its `node_type` and its cells, both of which the
+/// summary already carries, so three near-identical structs would only be three
+/// places to forget an edit.
 struct UnitNode {
     id: String,
     label: String,
     node_type: NodeType,
     metadata: Metadata,
+    shared: Arc<Shared>,
 }
 
-impl From<NodeSummary> for UnitNode {
-    fn from(s: NodeSummary) -> Self {
+impl UnitNode {
+    fn new(s: NodeSummary, shared: Arc<Shared>) -> Self {
         Self {
             id: s.id,
             label: s.label,
             node_type: s.node_type,
             metadata: s.metadata,
+            shared,
         }
+    }
+
+    /// The unit this row stands for, stripped of the level's id prefix.
+    ///
+    /// `None` on a property row: a property is not something you can start, and
+    /// answering with the unit name would let a verb through on a level that
+    /// never offered it.
+    fn unit(&self) -> Option<&str> {
+        self.id
+            .strip_prefix(crate::SERVICE_PREFIX)
+            .or_else(|| self.id.strip_prefix(crate::TIMER_PREFIX))
+            .or_else(|| self.id.strip_prefix(crate::UNIT_FILE_PREFIX))
+    }
+
+    /// The checks every verb passes before it reaches the manager, in the order
+    /// they matter: is this unit off-limits, and does the verb want a yes first.
+    ///
+    /// Protection comes first and is a refusal, not a question. A prompt asks
+    /// "did you mean it", which is no answer to "this would take the session
+    /// down" — the muscle memory that pressed the key presses `y` too.
+    fn gate(&self, verb: &control::Verb, unit: &str, ctx: &ActionContext) -> Result<Option<String>> {
+        if verb.disruptive && self.shared.protect.covers(unit) {
+            return Err(ContentError::PermissionDenied(
+                self.shared.protect.refusal(unit, verb.label),
+            ));
+        }
+        if let Some(prompt) = verb.confirm
+            && !ctx.confirmed
+        {
+            return Ok(Some(prompt.replace("{unit}", unit)));
+        }
+        Ok(None)
     }
 }
 
@@ -395,6 +558,89 @@ impl Node for UnitNode {
 
     fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// Run a verb on this unit.
+    ///
+    /// An unknown name answers `Noop` rather than an error: the frontend routes
+    /// every unhandled shortcut here, and a view that binds something this
+    /// adapter does not serve should stay quiet instead of accusing the user.
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        let (Some(verb), Some(unit)) = (control::verb(name), self.unit()) else {
+            return Ok(ActionDispatch::Noop);
+        };
+        // `kill` needs a signal, so it travels the picker road instead; landing
+        // here would mean firing one without ever having been asked which.
+        if verb.takes_value {
+            return Ok(ActionDispatch::Noop);
+        }
+        if let Some(prompt) = self.gate(verb, unit, ctx)? {
+            return Ok(ActionDispatch::Confirm { prompt });
+        }
+        // The busy line runs on the job's clock, not the D-Bus call's: the call
+        // returns as soon as the job is enqueued, and what the user is waiting
+        // for is the job.
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("{} {unit}", verb.label), JOB_WAIT_SECS);
+        let message = control::run(&self.shared.bus, verb, unit, ctx.value.as_deref()).await?;
+        // Both halves: the state that just changed *and* what the manager said
+        // about it.
+        Ok(ActionDispatch::Done {
+            message: Some(message),
+        })
+    }
+
+    /// The signal menu for `kill` — the one action here that asks something
+    /// before it acts.
+    async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
+        if control::verb(action_id).is_none_or(|v| !v.takes_value) {
+            return Ok(Vec::new());
+        }
+        Ok(control::signal_options()
+            .into_iter()
+            .map(|o| ActionOption {
+                label: o.label,
+                value: o.value,
+            })
+            .collect())
+    }
+
+    /// The second half of `kill`: the signal has been chosen, so send it.
+    ///
+    /// Picking an entry out of a menu is itself the deliberate act, which is why
+    /// this path has no second `(y/n)` on top of it. The protection list still
+    /// applies — that one is not a question.
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
+        let (Some(verb), Some(unit)) = (control::verb(action_id), self.unit()) else {
+            return Err(ContentError::NotSupported(format!(
+                "systemd has no action {action_id} here"
+            )));
+        };
+        let ActionInput::Picked(value) = input else {
+            return Err(ContentError::NotSupported(format!(
+                "{action_id} needs a value"
+            )));
+        };
+        if verb.disruptive && self.shared.protect.covers(unit) {
+            return Err(ContentError::PermissionDenied(
+                self.shared.protect.refusal(unit, verb.label),
+            ));
+        }
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("{} {unit}", verb.label), JOB_WAIT_SECS);
+        let message = control::run(&self.shared.bus, verb, unit, Some(&value)).await?;
+        Ok(ActionOutcome::Done {
+            message: Some(message),
+        })
     }
 }
 
@@ -426,10 +672,88 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_a_leaf() {
+    fn a_loaded_unit_drills_into_its_properties_and_a_unit_file_does_not() {
         let a = adapter();
-        let node = UnitNode::from(ServiceRow::default().summary());
-        assert!(a.childs(&node).is_empty());
+        // A service is loaded, so the manager holds an object that can be
+        // asked what it is.
+        let service = a.node(ServiceRow::default().summary());
+        let under: Vec<String> = a
+            .childs(&service)
+            .into_iter()
+            .map(|c| c.node_type.type_id)
+            .collect();
+        assert_eq!(under, vec!["systemd:property".to_string()]);
+
+        // A unit file may never have been loaded — there is no object behind
+        // it and therefore nothing to read.
+        let file = a.node(UnitFileRow::default().summary());
+        assert!(a.childs(&file).is_empty());
+
+        // And a property is where the drilling stops.
+        let prop = a.node(PropertyRow::default().summary());
+        assert!(a.childs(&prop).is_empty());
+    }
+
+    #[test]
+    fn a_property_row_resolves_back_to_its_unit_and_name() {
+        let row = PropertyRow {
+            unit: "foo.service".into(),
+            name: "MainPID".into(),
+            ..Default::default()
+        };
+        let id = row.summary().id;
+        let rest = id.strip_prefix(crate::PROPERTY_PREFIX).unwrap();
+        // The unit name carries dots, so only splitting at the *last* colon
+        // gets both halves back out.
+        assert_eq!(rest.rsplit_once(':'), Some(("foo.service", "MainPID")));
+    }
+
+    #[test]
+    fn a_protected_unit_refuses_the_disruptive_verbs_and_keeps_the_rest() {
+        let a = adapter();
+        let node = a.node(
+            ServiceRow {
+                name: "dbus.service".into(),
+                ..Default::default()
+            }
+            .summary(),
+        );
+        let ctx = ActionContext::default();
+        // `stop` would take the session down with it.
+        let stop = node.gate(control::verb("stop").unwrap(), "dbus.service", &ctx);
+        assert!(matches!(stop, Err(ContentError::PermissionDenied(_))));
+        // `start` on something already running is not a way to lose anything,
+        // so protection has nothing to say about it.
+        assert!(
+            node.gate(control::verb("start").unwrap(), "dbus.service", &ctx)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_verb_that_asks_asks_once() {
+        let a = adapter();
+        let node = a.node(
+            ServiceRow {
+                name: "backup.service".into(),
+                ..Default::default()
+            }
+            .summary(),
+        );
+        let stop = control::verb("stop").unwrap();
+        // First time round the adapter wants a yes, and the prompt names the
+        // unit rather than leaving the user to remember which row they were on.
+        let prompt = node
+            .gate(stop, "backup.service", &ActionContext::default())
+            .unwrap()
+            .expect("stop asks");
+        assert!(prompt.contains("backup.service"));
+        // With the yes in hand it does not ask again.
+        let confirmed = ActionContext {
+            confirmed: true,
+            ..Default::default()
+        };
+        assert_eq!(node.gate(stop, "backup.service", &confirmed).unwrap(), None);
     }
 
     #[test]
