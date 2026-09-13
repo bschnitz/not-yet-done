@@ -24,6 +24,10 @@
 //! * [`edit`] — writing a unit's configuration: which file a change lands in,
 //!   the staging check that runs before it does, and the one question a write
 //!   leaves behind.
+//! * [`create`] — making a unit that does not exist yet: the timer/service
+//!   pair from one form, and the empty file in the editor.
+//! * [`calendar`] — what a person types, turned into an `OnCalendar=` systemd
+//!   agrees with.
 //! * [`protect`] — the units a disruptive verb refuses to touch, because a
 //!   confirmation prompt is no guard against the muscle memory that pressed
 //!   the key.
@@ -33,8 +37,10 @@
 
 pub mod adapter;
 pub mod bus;
+pub mod calendar;
 pub mod config;
 pub mod control;
+pub mod create;
 pub mod edit;
 pub mod factory;
 pub mod model;

@@ -55,9 +55,12 @@ use futures::stream::{self, StreamExt};
 
 use not_yet_done_content::*;
 
+use std::collections::HashMap;
+
 use crate::bus::{Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry};
 use crate::config::SystemdConfig;
 use crate::control;
+use crate::create;
 use crate::edit;
 use crate::model::{
     PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, manager_type, property_columns,
@@ -131,6 +134,7 @@ impl SystemdAdapter {
     fn root_node(&self) -> SystemdRoot {
         SystemdRoot {
             label: format!("systemd ({})", self.bus().manager().as_str()),
+            shared: Arc::clone(&self.shared),
         }
     }
 
@@ -245,7 +249,8 @@ impl ContentAdapter for SystemdAdapter {
         Some(&self.saved_queries)
     }
 
-    /// What each level may do: the verb table, then the editing actions.
+    /// What each level may do: the verb table, then the editing actions, then
+    /// what the manager itself can make.
     ///
     /// A level is offered a verb when the verb says it works there — a timer
     /// has no processes and so is never offered `kill`, a unit file is not
@@ -253,12 +258,15 @@ impl ContentAdapter for SystemdAdapter {
     /// a second question on top of the level: they write to
     /// `~/.config/systemd/user`, so against the **system** manager there are
     /// none of them (see [`crate::edit::actions_for`]).
+    ///
+    /// Creating hangs off the **manager** type rather than off a row, because
+    /// a unit that does not exist yet has no row to hang off
+    /// (see [`crate::create::actions_for`]).
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
+        let manager = self.shared.bus.manager();
         let mut actions = control::actions_for(&node_type.type_id);
-        actions.extend(edit::actions_for(
-            &node_type.type_id,
-            self.shared.bus.manager(),
-        ));
+        actions.extend(edit::actions_for(&node_type.type_id, manager));
+        actions.extend(create::actions_for(&node_type.type_id, manager));
         actions
     }
 
@@ -468,9 +476,86 @@ fn finish(mut items: Vec<NodeSummary>, sort: &[SortKey], columns: &[ColumnSchema
     }
 }
 
-/// The manager node: the root every level hangs off.
+/// The manager node: the root every level hangs off — and the only place a
+/// unit that does not exist yet can be made from, since it has no row.
 struct SystemdRoot {
     label: String,
+    shared: Arc<Shared>,
+}
+
+impl SystemdRoot {
+    /// A submitted creating form: build the files, check them, write them,
+    /// and only then start anything.
+    async fn create_units(
+        &self,
+        action_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<ActionOutcome> {
+        let draft = create::draft(action_id, values).await?;
+        let mut message = {
+            let _busy = self
+                .shared
+                .status
+                .busy("writing the unit files", self.shared.timeout_secs);
+            create::write(&self.shared.bus, &draft).await?
+        };
+        if let Some(unit) = &draft.enable {
+            let _busy = self
+                .shared
+                .status
+                .busy(&format!("enabling {unit}"), JOB_WAIT_SECS);
+            message.push_str(&format!(
+                ". {}",
+                create::enable(&self.shared.bus, unit).await?
+            ));
+        }
+        Ok(create::outcome(message))
+    }
+
+    /// A saved [`create::NEW_FILE`] buffer. The name comes out of the buffer's
+    /// own header, so a buffer that was never named goes back to the editor
+    /// saying so rather than landing under a name nobody chose.
+    /// The editor road: the buffer names itself, and anything that stops it
+    /// from being written comes back *in* the buffer rather than as a
+    /// notification over an editor that has already closed. Nothing else holds
+    /// a copy of what the user typed.
+    async fn create_file(&self, text: &str) -> Result<ActionOutcome> {
+        let Some(unit) = create::name_from_buffer(text) else {
+            return Ok(ActionOutcome::Reopen {
+                content: create::reopen(
+                    text,
+                    &["the unit line still carries the placeholder name".to_string()],
+                ),
+                new_version: None,
+            });
+        };
+        let draft = create::Draft {
+            files: vec![(unit, edit::strip_header(text).to_string())],
+            enable: None,
+            schedule: None,
+        };
+        let _busy = self
+            .shared
+            .status
+            .busy("writing the unit file", self.shared.timeout_secs);
+        // Refused before anything was touched (the name is taken, systemd will
+        // not have the file) — hand the text back with the reason on top. A
+        // failure *after* that point is a failure to write a file that has
+        // already passed every check, and reopening the buffer would suggest
+        // the text is at fault when it is not.
+        let staged = match create::stage(&draft).await {
+            Ok(staged) => staged,
+            Err(e) => {
+                return Ok(ActionOutcome::Reopen {
+                    content: create::reopen(text, &[e.to_string()]),
+                    new_version: None,
+                });
+            }
+        };
+        Ok(create::outcome(
+            create::commit(&self.shared.bus, &draft, staged).await?,
+        ))
+    }
 }
 
 #[async_trait]
@@ -491,6 +576,40 @@ impl Node for SystemdRoot {
     fn metadata(&self) -> &Metadata {
         static EMPTY: Metadata = Metadata { fields: vec![] };
         &EMPTY
+    }
+
+    /// The skeleton [`create::NEW_FILE`] opens on.
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
+        if action_id != create::NEW_FILE {
+            return Err(ContentError::NotSupported(format!(
+                "the manager has no editor action {action_id}"
+            )));
+        }
+        Ok(EditorPrep {
+            template: create::file_template(),
+            // Nothing on disk to be out of date with: the file is new.
+            version: String::new(),
+            suffix: ".service".into(),
+            ..Default::default()
+        })
+    }
+
+    /// The two roads into creating: a form, or a buffer that names itself.
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
+        match (action_id, input) {
+            (create::NEW_FILE, ActionInput::Edited { text, .. }) => self.create_file(&text).await,
+            (create::NEW_SERVICE | create::NEW_TIMER, ActionInput::Form(values)) => {
+                self.create_units(action_id, &values).await
+            }
+            (other, _) => Err(ContentError::NotSupported(format!(
+                "the manager has no action {other}"
+            ))),
+        }
     }
 }
 

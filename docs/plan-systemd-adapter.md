@@ -429,37 +429,143 @@ mistake as `stop`, only deferred to the next start.
 
 ## Phase 3 — Creating
 
-**Delivers** three ways to make a unit, which coexist rather than compete:
-
-1. **A form** (`InputSpec::Form` on the existing spec-driven form driver) —
-   name, description, type, `ExecStart`, working directory, restart policy,
-   `After=`, environment, plus "enable now" / "start now" toggles. The
-   adapter writes the file, reloads, optionally enables and starts.
-2. **The editor template** from phase 2, for the full file.
-3. **Skeletons from a directory** —
-   `~/.config/not_yet_done/systemd-templates/*.service`, picked via
-   `create_child`: oneshot script, long-running daemon, path watcher pair,
-   socket activated, resource-limited service. Files, not Rust constants, so
-   the set grows without a rebuild.
+**Delivers** the timer/service pair from one form, the empty unit file in the
+editor, and `OnCalendar` input that does not require knowing systemd's calendar
+grammar by heart.
 
 **The timer/service pair is the point of this phase.** A timer alone is
 useless; one always writes two files and forgets half of one. One form, one
-result: name, what it runs (new `ExecStart` _or_ an `option_menu` over
+result: name, what it runs (a new `ExecStart` _or_ an `option_menu` over
 existing services), schedule, `Persistent=`, `RandomizedDelaySec=`,
 `AccuracySec=`, enable now. The adapter writes `foo.service` and `foo.timer`
 together.
 
-Two candidates to decide on:
+### The scope, and what waits
 
-- **`natural-date` → `OnCalendar`.** The crate is in this workspace already.
-  "every monday at 9" → `Mon *-*-* 09:00:00`, validated through
-  `systemd-analyze calendar`, which also returns the next elapses.
-- **A live preview inside the form** — a derived field the adapter recomputes
-  on every change (the counterpart to the existing `FormNotice`), showing the
-  normalised expression and the next firing while the user types. Generic,
-  not systemd-specific. The cheap alternative is a `validate` action that
-  writes the same information into a notification: ~90 % of the value for
-  ~10 % of the work.
+The plan named three ways to make a unit. They coexist rather than compete, but
+they do not all arrive at once:
+
+1. **The pair form** and **the empty editor template** — this phase, and with
+   them a plain **service form**, which fell out of the pair for free: writing
+   `foo.service` alone is the pair minus the timer. The editor template is
+   nearly free for the same reason — phase 2 already renders a buffer, checks it
+   in a staging directory and writes it, so creating is the same road starting
+   from a skeleton instead of a file.
+2. **Skeletons from a directory** —
+   `~/.config/not_yet_done/systemd-templates/*.service`, picked via
+   `create_child`: oneshot script, long-running daemon, path watcher pair,
+   socket activated, resource-limited. Files, not Rust constants, so the set
+   grows without a rebuild. **After** the form, because the form is what shows
+   which fields a skeleton actually has to cover.
+
+Creating sits on its own `n` leader — `n s` service, `n t` the timer/service
+pair, `n f` an empty file in the editor. Not under `a`: that leader means "a
+verb on the row under the cursor", and creating has no row. Not `a` by itself
+either, though that is what every other tab uses for adding, because here `a` is
+already the verb leader and `e` the editor leader.
+
+### `OnCalendar` is normalised, not translated
+
+`natural-date` cannot do this job, and that is not a gap in it: its whole API
+(`resolve_datetime`, `resolve_date`, `resolve_offset`) resolves to _one_
+instant, while `OnCalendar` is a recurrence. Using it would mean writing a
+recurrence grammar.
+
+That turns out not to be needed, because systemd already accepts nearly
+everything a person would type. Measured against `systemd-analyze calendar` on
+systemd 261:
+
+| accepted                                           | rejected            |
+| -------------------------------------------------- | ------------------- |
+| `daily`, `weekly`, `hourly`, `monthly`, `yearly`   | `every monday at 9` |
+| `monday`, `Mon 09:00`, `mon 9:00`, `friday 18:00`  | `each monday 09:00` |
+| `Mon,Fri 09:00`, `Mon..Fri 09:00`, `sat,sun 10:00` | `monday 9`, `mon 9` |
+| `9:00`, `09:00`, `*:0/15`, `2026-09-14 09:00`      | `15 minutes`        |
+
+What is missing is filler words and an hour without minutes. So the adapter
+**normalises** — drops `every`, `each`, `at`, `on`, completes a bare hour to
+`H:00` — and hands the rest to systemd unchanged, writing systemd's own
+normalised form into the file. A translator would make the field and the file
+two different languages, of which the file only speaks one.
+
+`natural-date` still has a place here, for the other kind of timer: the
+**one-shot** (`tomorrow at 9`), where a single instant is exactly right and
+`OnCalendar=2026-09-14 09:00:00` is what the file wants.
+
+Unlike `systemd-analyze verify`, **the exit code is the gate here**: an
+unparseable expression exits 1, a good one exits 0 and prints the normalised
+form plus the next elapses (`--iterations=N` for more than one).
+
+### Validation on submit, not a live preview
+
+A field that recomputes while the user types would need a form event on every
+keystroke plus an adapter round-trip from it — and `FormEvent` has only
+`Submitted` / `Cancelled` / `Consumed`, with `FormNotice` set from outside. The
+round-trip would cross a sync key path into an async adapter and fork
+`systemd-analyze` per keystroke; `picker_options` blocking the event loop is the
+same shape of mistake, already made once.
+
+So: validate on submit. A rejected expression keeps the form open with systemd's
+own message as `FormNotice::Alert`; an accepted one puts the normalised form and
+the next three elapses into the success notification. That is the ~90 % for
+~10 %, and a live preview stays a generic form-protocol project rather than a
+by-product of this phase.
+
+### What it took, beyond the plan
+
+**The form had to be able to come back.** The decision above says a rejected
+expression keeps the form open; the TUI could not do that. `execute_content_action_form`
+took the popup on submit and turned any `Err` into a notification, so a mistyped
+schedule cost the whole form. A submitted form now stays on screen, frozen,
+until its answer arrives — Esc abandons it, every other key is swallowed so a
+slow write cannot be sent twice — and a failure re-arms it with the adapter's
+own sentence under the fields. That is not systemd-specific: every form action
+in the app now keeps what was typed when it is refused. It is also why the
+failure messages lost their `Action failed: <id>:` prefix — inside a form the
+heading already names the action, and the adapter's sentence reads better
+everywhere else too.
+
+**The editor road has no channel but the buffer.** `ActionOutcome::Reopen`
+carries content and nothing else. So for `n f` the reason a save did not take
+has to be _in_ the file that comes back, the way a rejected drop-in already does
+it in phase 2 — which means the checks have to run, and be able to refuse,
+before anything is touched. Hence the split: `stage` answers "may this be
+written, and why not", `commit` puts it on disk. The form road runs both in one
+call; the editor road stops between them, because a form can be handed back with
+its fields filled in while an editor buffer holds a whole file that nothing else
+has a copy of. The header is rebuilt rather than patched, so a second refusal
+replaces the first notice instead of stacking, and the `# unit:` line keeps the
+name the user typed.
+
+**The normaliser is wider than "filler words".** Measured against
+`systemd-analyze calendar` on systemd 261, these are what a person types and
+systemd refuses, with what the adapter hands over instead:
+
+| typed              | handed to systemd | why                                    |
+| ------------------ | ----------------- | -------------------------------------- |
+| `every day at 9`   | `*-*-* 9:00`      | filler out, bare hour completed        |
+| `weekdays 9:00`    | `Mon..Fri 9:00`   | English period word                    |
+| `weekend 10:00`    | `Sat,Sun 10:00`   | English period word                    |
+| `mondays 9:00`     | `monday 9:00`     | the plural is ours, not systemd's      |
+| `9am`, `9 pm`      | `09:00`, `21:00`  | the 12-hour clock                      |
+| `noon`, `midnight` | `12:00`, `00:00`  | English word for a time                |
+| `daily` _(alone)_  | `daily`           | already systemd's own word — untouched |
+
+The last row is the rule the rest obey: a word that systemd has its own meaning
+for is only rewritten when something else stands next to it. `daily` is a
+complete expression; `every day at 9` is not.
+
+**What `verify` calls fatal drew the same line as in phase 2.** Measured while
+creating: `Type=nonsense` and an unrecognised directive are warnings — the file
+is written and the complaint goes into the notification. A `[Service]` with no
+`ExecStart=` is fatal and nothing is written at all; for a pair that is the
+whole point, since a rejected timer must not leave its service behind. Creating
+needed no policy of its own.
+
+**One caveat about the `n` leader.** `n` is also "next search match", but that
+claim is only made while a search is live with hits — the keymap leaves `n` free
+otherwise, by design. So the three creating keys work at all times except with a
+search open, where Esc comes first. The view YAML says so.
 
 ## Phase 4 — Journal
 
