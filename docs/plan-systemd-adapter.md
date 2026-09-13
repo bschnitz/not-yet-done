@@ -581,10 +581,44 @@ search open, where Esc comes first. The view YAML says so.
   same pattern the Stoat adapter uses for incoming messages, including the
   `first_unread` behaviour.
 
-**Open until the round before this phase:** whether the journal is a level at
-all or just a key that opens `journalctl -fu <unit>` in a terminal on the
-current workspace (much cheaper, much less); the level's query syntax; and
-whether follow is in scope.
+### The three open questions, decided — and a fourth from measuring
+
+**A level _and_ a terminal key**, not one or the other. The level is the
+substance of the phase: sorting, the query language, `highlights:`, multi-line
+rows, the details pane, copying — all of it already exists and none of it
+exists in a pager. The terminal key costs ten lines, opens
+`journalctl -fu <unit>` on the current workspace, and covers colour and follow
+the day the phase lands.
+
+**The tab's own query language**, not journalctl's `FIELD=value` matches:
+`[prio, <=, 3]`, `[message, like, foo]`, `[since, =, yesterday]`. What
+journalctl can do itself is pushed down to it (`PRIORITY=`, `--since/--until`,
+`--grep=`) and the rest is filtered on the rows already fetched — the same
+shape the HTTP adapters use. Pass-through would be more powerful and would make
+this one level speak a different language from the rest of the tab, which is
+D2's point over again.
+
+**Follow is not in this phase.** It is the same question as phase 5 — a
+background task pushing `Invalidation::Row`, and one decision about repaint
+pressure under a unit that logs hundreds of lines a minute. Better made once,
+there, than twice. Until then the terminal key is the follow.
+
+**`MESSAGE` is not always a string.** Measured: `journalctl --output=json`
+emits it as a **JSON array of bytes** whenever it is not plainly printable
+UTF-8, and that is not a corner — it is every line a service logs through
+`tracing`'s colours, and was 148 of 148 rows for Chromium in a sample window.
+An adapter that reads `MESSAGE` as a string shows nothing at all for those
+units. So: decode the bytes lossily, and **drop the ANSI escapes on read**. The
+colours carry nothing the `prio` column does not already say, and the cell is
+styled by `highlights:` anyway; interpreting them instead would mean a small
+terminal emulator inside a table cell.
+
+Two more numbers from the same measurement, for whoever writes the fetch:
+`--output=json` costs about 1.9 KB per row across 31 fields, `--output-fields=`
+brings that to roughly 600 B, and the address fields (`__CURSOR`, both
+timestamps, `_BOOT_ID`, `__SEQNUM_ID`) are emitted whether asked for or not.
+`--after-cursor` behaves exactly as the cursor pagination needs: the cursor of
+the third-from-last row returns precisely the two after it.
 
 ## Phase 5 — Live
 
