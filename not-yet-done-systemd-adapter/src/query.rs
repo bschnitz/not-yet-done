@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use not_yet_done_filter::eval::{self, Field, RowFields};
 use not_yet_done_filter::{FilterExpr, query_filter};
 
-use crate::model::{PropertyRow, ServiceRow, TimerRow, UnitFileRow};
+use crate::model::{LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow};
 
 /// Columns a Services query may reference.
 pub const SERVICE_COLUMNS: &[&str] = &[
@@ -61,13 +61,21 @@ pub const TIMER_COLUMNS: &[&str] = &[
 /// this level is for.
 pub const PROPERTY_COLUMNS: &[&str] = &["name", "value", "interface"];
 
+/// Columns a Journal query may reference.
+///
+/// `prio` and `level` are the same severity twice — the number to compare
+/// against (`[prio, lte, 3]`) and the word to read and to paint by
+/// (`[level, =, err]`). Both are queryable because a person writing the query
+/// by hand reaches for whichever is on their screen.
+pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
+
 /// Columns a Unit files query may reference.
 pub const UNIT_FILE_COLUMNS: &[&str] = &["name", "state", "path", "vendor"];
 
 /// The columns compared as instants. A comparison against one of these needs a
 /// right-hand side that resolved to a real date, or the query would silently
 /// match nothing.
-const DATETIME_COLUMNS: &[&str] = &["since", "next", "last"];
+const DATETIME_COLUMNS: &[&str] = &["since", "next", "last", "time"];
 
 /// A compiled level query: parsed, date-resolved, validated against the level's
 /// own columns.
@@ -77,6 +85,13 @@ pub struct UnitQuery {
 }
 
 impl UnitQuery {
+    /// The compiled expression, for a level that can hand part of it to the
+    /// backend — see [`crate::journal`], the only one that has a backend to
+    /// hand anything to.
+    pub fn expr(&self) -> &FilterExpr {
+        &self.expr
+    }
+
     /// Parse a raw query body against `columns`. The error is meant for the
     /// status bar — a malformed query must say so rather than empty the table.
     pub fn parse(raw: &str, columns: &[&str]) -> Result<Self, String> {
@@ -182,6 +197,19 @@ impl RowFields for PropertyRow {
             "name" => Field::Text(Cow::Borrowed(&self.name)),
             "value" => text_or_null(&self.value),
             "interface" => text_or_null(&self.interface),
+            _ => Field::Null,
+        }
+    }
+}
+
+impl RowFields for LogRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "time" => time_or_null(self.time),
+            "level" => text_or_null(&self.level),
+            "prio" => num_or_null(self.prio),
+            "pid" => num_or_null(self.pid),
+            "message" => text_or_null(&self.message),
             _ => Field::Null,
         }
     }

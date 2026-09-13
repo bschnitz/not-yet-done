@@ -26,6 +26,8 @@
 //!   leaves behind.
 //! * [`create`] — making a unit that does not exist yet: the timer/service
 //!   pair from one form, and the empty file in the editor.
+//! * [`journal`] — a unit's log lines as rows, read from `journalctl
+//!   --output=json`, and the one key that opens the pager instead.
 //! * [`calendar`] — what a person types, turned into an `OnCalendar=` systemd
 //!   agrees with.
 //! * [`protect`] — the units a disruptive verb refuses to touch, because a
@@ -43,6 +45,7 @@ pub mod control;
 pub mod create;
 pub mod edit;
 pub mod factory;
+pub mod journal;
 pub mod model;
 pub mod protect;
 pub mod query;
@@ -63,3 +66,10 @@ pub const UNIT_FILE_PREFIX: &str = "unitfile:";
 /// to, and unit names contain dots but never colons — so the first colon after
 /// the prefix splits the pair unambiguously.
 pub const PROPERTY_PREFIX: &str = "property:";
+/// Node-id prefix for one journal entry of one unit (`log:<unit>:<cursor>`).
+///
+/// Two segments for the same reason as [`PROPERTY_PREFIX`], and split the same
+/// way — from the right. A journal cursor never contains a colon; a unit name
+/// can (`dbus-:1.19-org.a11y.atspi.Registry@0.service`), so the *last* colon is
+/// the one that separates the pair.
+pub const LOG_PREFIX: &str = "log:";

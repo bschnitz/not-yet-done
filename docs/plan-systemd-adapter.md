@@ -620,6 +620,66 @@ timestamps, `_BOOT_ID`, `__SEQNUM_ID`) are emitted whether asked for or not.
 `--after-cursor` behaves exactly as the cursor pagination needs: the cursor of
 the third-from-last row returns precisely the two after it.
 
+### What it took, beyond the plan
+
+**Offsets, not `--after-cursor`.** The plan picked the cursor because
+journalctl hands one out and because this application has cursor pagination.
+They are two different roads, though: `CursorIntent` and
+`CustomQueryResult::cursor_id` belong to `execute_query`, and a drill level is
+loaded by `childs()`/`list()`, whose `ListParams.page` is an offset and a limit.
+So the window is cut the way an offset-based interface wants it — `--reverse
+--lines=<offset + limit>`, then drop the first `offset` rows. Stateless, exact,
+newest first, and one process per page. `-r --after-cursor <c> -n <n>` was
+measured and does walk backwards from an entry; that is what phase 5's follow
+will want, and it is written down in the module docs for whoever gets there.
+
+**`--grep` is deliberately not pushed down**, against the decision above. It
+matches the bytes as the journal stored them, and those bytes are full of the
+ANSI escapes the cell no longer has — the very escapes this phase decided to
+drop on read. A pattern spanning one of them matches the cell the user is
+looking at and not the row on disk, so the pushdown would drop rows the
+in-memory filter keeps. Pushdown here may only ever narrow _what is read_:
+severity and the time bounds qualify, the message does not. The in-memory pass
+stays the authority in every case.
+
+**Five columns, not four: `level` next to `prio`.** The plan listed `time`,
+`prio`, `pid`, `message`. A column of bare digits is not something anyone
+reads, and a column of words cannot be asked "at least this bad" — so the
+severity travels twice. `prio` is systemd's number, which is what `[prio, lte,
+3]` compares and what sorts; `level` is the same value as the word systemd
+prints, which is what the eye reads and what the `highlights:` rules paint.
+`prio` is `hidden: true` in the shipped view: it is there to be queried, not to
+be looked at. (`time` rather than the plan's `since`, too — `since` is when a
+unit entered its state, and reusing the name one level down would have made
+`[since, gte, …]` mean two things in one tab.)
+
+**The terminal key needed a config line, not `OpenExternal`.** That outcome
+routes through the TUI's `navigation.link_opener` — `xdg-open`, which is right
+for a URL and useless for a terminal emulator. So `follow` is an ordinary
+`InputSpec::None` node action that the adapter spawns itself and lets go of,
+the way the Jira adapter already opens a browser. Which terminal is the
+adapter's new `terminal:` setting, falling back to `$TERMINAL -e` and then to
+`xterm -e`: emulators disagree about whether the command comes after `-e`,
+after `--`, or bare, so it has to be a command line rather than a program name.
+
+**`J` and `a j`, not a `j` leader.** `j` is the cursor moving down and cannot
+be taken; `l`, `enter`, `<`, `>`, `p`, `G` and `gg` are all spoken for as well.
+So the level opens on `J` — beside `p` for properties, the tab's other drill —
+and the terminal on `a j`, where the rest of the verbs live.
+
+**A `query:` on a drill level was dead config.** The journal's query language is
+the point of this phase, and a level is where its vocabulary is taught — but
+`ChildDef` had no `query:` field, so the block the Properties levels have
+carried since phase 0 was parsed, dropped, and never seen. Pressing `q` one
+level down offered the _parent's_ template: `[active, =, failed]` over rows that
+have no `active` column. `ChildDef` now carries a `query:` block and the three
+lookups that read it prefer the level on screen, falling back to the view root
+so every existing view file behaves exactly as before. Only the editor is per
+level; which query is _live_ still belongs to the pane and follows the user down
+the drill. The shipped `systemd.yaml` is now checked for unknown keys in the
+same test that parses it, so the next piece of inert configuration fails there
+instead of in a user's terminal.
+
 ## Phase 5 — Live
 
 **Delivers** the payoff of D1: `Subscribe()` plus signal handling, so unit

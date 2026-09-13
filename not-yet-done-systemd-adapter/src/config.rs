@@ -18,6 +18,7 @@
 //!       - ssh-agent.service
 //!     unprotect:          # lift one built-in entry, spelled exactly
 //!       - "*.slice"
+//!     terminal: "foot -e" # what the journal-follow key opens
 //! ```
 
 use fieldsmith::Buildable;
@@ -25,6 +26,15 @@ use serde::Deserialize;
 
 /// Default deadline for a single D-Bus call, in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// The terminal the journal-follow key falls back to when nothing is
+/// configured and `$TERMINAL` is unset.
+///
+/// `xterm` because it is the one emulator that is installed on a machine that
+/// has any at all. It is meant to be replaced by a config line, and the
+/// message a failed spawn produces names the program, so the fallback tells
+/// the user what to set rather than failing anonymously.
+pub const DEFAULT_TERMINAL: &str = "xterm -e";
 
 /// Which systemd manager an instance talks to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,6 +102,15 @@ pub struct SystemdConfig {
     /// should read like a decision in the config, not like an omission.
     #[serde(default)]
     pub unprotect: Vec<String>,
+    /// The command the journal-follow key opens, with the `journalctl` argv
+    /// appended to it — `foot -e`, `alacritty -e`, `kitty`.
+    ///
+    /// A whole command line rather than a program name, because terminals
+    /// disagree about how a command is handed to them: some want `-e`, some
+    /// want `--`, some want nothing at all. Unset means `$TERMINAL -e`, and
+    /// failing that [`DEFAULT_TERMINAL`].
+    #[serde(default)]
+    pub terminal: Option<String>,
 }
 
 impl SystemdConfig {
@@ -135,6 +154,24 @@ impl SystemdConfig {
             ));
         }
         Ok(())
+    }
+
+    /// The terminal the journal-follow key opens.
+    ///
+    /// Three sources in order: the config line, `$TERMINAL` (with `-e`
+    /// appended, which is what the majority of emulators want), and the
+    /// fallback. The environment is consulted because a user who has set
+    /// `$TERMINAL` has already answered this question once.
+    pub fn terminal(&self) -> String {
+        if let Some(configured) = self.terminal.as_deref().map(str::trim)
+            && !configured.is_empty()
+        {
+            return configured.to_string();
+        }
+        match std::env::var("TERMINAL") {
+            Ok(term) if !term.trim().is_empty() => format!("{} -e", term.trim()),
+            _ => DEFAULT_TERMINAL.to_string(),
+        }
     }
 
     /// The protection list this instance runs with.
@@ -188,6 +225,16 @@ mod tests {
         let typo: SystemdConfig = serde_yaml::from_str("unprotect: [dbus.sockett]").unwrap();
         let err = typo.validate().unwrap_err();
         assert!(err.contains("dbus.sockett"), "must quote the entry: {err}");
+    }
+
+    /// The config line wins over the environment, and neither leaves the key
+    /// without something to open.
+    #[test]
+    fn the_terminal_comes_from_the_config_then_the_environment() {
+        let configured: SystemdConfig = serde_yaml::from_str("terminal: \"foot -e\"").unwrap();
+        assert_eq!(configured.terminal(), "foot -e");
+        let blank: SystemdConfig = serde_yaml::from_str("terminal: \"  \"").unwrap();
+        assert!(!blank.terminal().is_empty());
     }
 
     #[test]

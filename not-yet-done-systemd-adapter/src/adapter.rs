@@ -62,10 +62,11 @@ use crate::config::SystemdConfig;
 use crate::control;
 use crate::create;
 use crate::edit;
+use crate::journal;
 use crate::model::{
-    PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, manager_type, property_columns,
-    property_rows, property_type, service_columns, service_type, timer_columns, timer_type,
-    unit_file_columns, unit_file_type,
+    LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, log_columns, log_type,
+    manager_type, property_columns, property_rows, property_type, service_columns, service_type,
+    timer_columns, timer_type, unit_file_columns, unit_file_type,
 };
 use crate::protect::Protection;
 use crate::query::{self, UnitQuery};
@@ -88,6 +89,9 @@ struct Shared {
     /// The deadline a single call runs under, for the busy line. `0` = none,
     /// which is also what the status channel means by "no deadline".
     timeout_secs: u64,
+    /// The command line the journal-follow key opens — see
+    /// [`SystemdConfig::terminal`].
+    terminal: String,
 }
 
 /// A systemd manager as a content tree.
@@ -118,6 +122,7 @@ impl SystemdAdapter {
                 status: StatusReporter::new(),
                 protect: cfg.protection(),
                 timeout_secs: cfg.timeout().map(|d| d.as_secs()).unwrap_or(0),
+                terminal: cfg.terminal(),
             }),
             saved_queries: FsQueryStore::new(queries_root, ".yaml"),
         }
@@ -186,6 +191,15 @@ impl ContentAdapter for SystemdAdapter {
                 .ok_or_else(|| ContentError::NotFound(format!("no unit file {name}")))?;
             return Ok(Box::new(self.node(UnitFileRow::build(&entry).summary())));
         }
+        if let Some(rest) = id.strip_prefix(crate::LOG_PREFIX) {
+            // A cursor never holds a colon, a unit name may — so split from the
+            // right, the same way a property id is split.
+            let (unit, cursor) = rest
+                .rsplit_once(':')
+                .ok_or_else(|| ContentError::NotFound(format!("malformed journal id {id}")))?;
+            let row = journal::entry(self.bus().manager(), unit, cursor).await?;
+            return Ok(Box::new(self.node(row.summary())));
+        }
         if let Some(rest) = id.strip_prefix(crate::PROPERTY_PREFIX) {
             // A unit name may hold dots but never a colon, so the *last* colon
             // is the one that separates the unit from the property name.
@@ -211,12 +225,31 @@ impl ContentAdapter for SystemdAdapter {
         let type_id = node.node_type().type_id.as_str();
         // A loaded unit has a D-Bus object, so it can be asked what it is; a
         // unit file has none, which is why the third level stays a leaf.
+        // The journal hangs off every unit level, including unit files: reading
+        // a unit's log needs no D-Bus object, only a name, so a unit the
+        // manager has never loaded still has a journal from the last time it
+        // ran. Properties are the opposite and stay where the object is.
         if type_id == service_type().type_id || type_id == timer_type().type_id {
             let id = node.id();
+            return vec![
+                Child {
+                    node_type: property_type(),
+                    columns: property_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_properties(id, params))),
+                },
+                Child {
+                    node_type: log_type(),
+                    columns: log_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_journal(id, params))),
+                },
+            ];
+        }
+        if type_id == unit_file_type().type_id {
+            let id = node.id();
             return vec![Child {
-                node_type: property_type(),
-                columns: property_columns(),
-                list: Box::new(move |params| Box::pin(self.list_properties(id, params))),
+                node_type: log_type(),
+                columns: log_columns(),
+                list: Box::new(move |params| Box::pin(self.list_journal(id, params))),
             }];
         }
         if type_id != manager_type().type_id {
@@ -267,6 +300,7 @@ impl ContentAdapter for SystemdAdapter {
         let mut actions = control::actions_for(&node_type.type_id);
         actions.extend(edit::actions_for(&node_type.type_id, manager));
         actions.extend(create::actions_for(&node_type.type_id, manager));
+        actions.extend(journal::actions_for(&node_type.type_id));
         actions
     }
 
@@ -407,6 +441,42 @@ impl SystemdAdapter {
         ))
     }
 
+    /// The journal of the unit the user drilled into.
+    ///
+    /// The one level that pages. Every other one holds a complete D-Bus listing
+    /// and is done; a journal has no end, so what a level shows is a window
+    /// into it — newest first, `[offset, offset + limit)`, and what is on
+    /// screen decides how far back the read goes.
+    async fn list_journal(&self, node_id: &str, params: ListParams) -> Result<ListResult> {
+        let query = compile(params.query.as_deref(), query::LOG_COLUMNS)?;
+        let unit = node_id
+            .strip_prefix(crate::SERVICE_PREFIX)
+            .or_else(|| node_id.strip_prefix(crate::TIMER_PREFIX))
+            .or_else(|| node_id.strip_prefix(crate::UNIT_FILE_PREFIX))
+            .ok_or_else(|| ContentError::NotFound(format!("{node_id} is not a unit")))?;
+        let window = params.page.unwrap_or(PageRequest {
+            offset: 0,
+            limit: journal::DEFAULT_LIMIT,
+        });
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("Reading the journal of {unit}"), self.shared.timeout_secs);
+        let page = journal::page(
+            self.bus().manager(),
+            unit,
+            query.as_ref().map(UnitQuery::expr),
+            window.offset,
+            window.limit,
+        )
+        .await?;
+        let items: Vec<NodeSummary> = query::retain(page.rows, &query)
+            .iter()
+            .map(LogRow::summary)
+            .collect();
+        Ok(sorted_page(items, &params.sort, window, page.has_more))
+    }
+
     /// The loaded units whose name ends in `suffix` — how a level picks its
     /// own population out of the one listing the manager offers.
     async fn units_with_suffix(&self, suffix: &str) -> Result<Vec<UnitEntry>> {
@@ -471,6 +541,44 @@ fn finish(mut items: Vec<NodeSummary>, sort: &[SortKey], columns: &[ColumnSchema
         items,
         applied_sort,
         page: None,
+        batch_download_available: false,
+        downloaded: vec![],
+    }
+}
+
+/// A journal window as a level result.
+///
+/// Sorted newest first unless the user asked otherwise — and the sort is over
+/// the *window*, not over the journal, which is the honest thing a paging level
+/// can offer: sorting the page by `pid` reorders what is on screen, it does not
+/// go looking for the loudest process in yesterday's log.
+fn sorted_page(
+    mut items: Vec<NodeSummary>,
+    sort: &[SortKey],
+    window: PageRequest,
+    has_more: bool,
+) -> ListResult {
+    let requested: Vec<SortKey> = if sort.is_empty() {
+        vec![SortKey {
+            column: "time".into(),
+            direction: SortDirection::Desc,
+        }]
+    } else {
+        sort.to_vec()
+    };
+    let applied_sort = apply_sort(&mut items, &requested, &log_columns());
+    ListResult {
+        items,
+        applied_sort,
+        page: Some(PageInfo {
+            offset: window.offset,
+            limit: window.limit,
+            // journalctl does not count, and asking it to would mean reading
+            // the whole journal to say how much of it there is.
+            total: None,
+            has_next: has_more,
+            has_prev: window.offset > 0,
+        }),
         batch_download_available: false,
         downloaded: vec![],
     }
@@ -900,6 +1008,15 @@ impl Node for UnitNode {
     /// every unhandled shortcut here, and a view that binds something this
     /// adapter does not serve should stay quiet instead of accusing the user.
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
+        if name == journal::FOLLOW {
+            let unit = self.unit_or_err()?;
+            let ActionOutcome::Done { message } =
+                journal::follow(&self.shared.terminal, self.shared.bus.manager(), unit)?
+            else {
+                return Ok(ActionDispatch::Noop);
+            };
+            return Ok(ActionDispatch::Done { message });
+        }
         let (Some(verb), Some(unit)) = (control::verb(name), self.unit()) else {
             return Ok(ActionDispatch::Noop);
         };
@@ -1007,23 +1124,31 @@ mod tests {
         );
     }
 
+    /// The two child levels answer to two different questions about a unit,
+    /// and only one of them needs the manager to have loaded it.
     #[test]
-    fn a_loaded_unit_drills_into_its_properties_and_a_unit_file_does_not() {
+    fn properties_need_a_loaded_unit_and_the_journal_does_not() {
         let a = adapter();
         // A service is loaded, so the manager holds an object that can be
-        // asked what it is.
+        // asked what it is — and it has a journal like anything else.
         let service = a.node(ServiceRow::default().summary());
         let under: Vec<String> = a
             .childs(&service)
             .into_iter()
             .map(|c| c.node_type.type_id)
             .collect();
-        assert_eq!(under, vec!["systemd:property".to_string()]);
+        assert_eq!(under, vec!["systemd:property", "systemd:log"]);
 
         // A unit file may never have been loaded — there is no object behind
-        // it and therefore nothing to read.
+        // it and therefore no properties. Its journal is still readable: that
+        // takes a name, not an object.
         let file = a.node(UnitFileRow::default().summary());
-        assert!(a.childs(&file).is_empty());
+        let under: Vec<String> = a
+            .childs(&file)
+            .into_iter()
+            .map(|c| c.node_type.type_id)
+            .collect();
+        assert_eq!(under, vec!["systemd:log"]);
 
         // And a property is where the drilling stops.
         let prop = a.node(PropertyRow::default().summary());
