@@ -146,6 +146,26 @@ impl Bus {
             .await
     }
 
+    /// A cloned handle on the same connection, for a task that outlives the
+    /// call that started it.
+    ///
+    /// [`crate::live`] runs for as long as the adapter does and cannot borrow
+    /// from `&self`. A `zbus::Connection` is an `Arc` inside, so this shares
+    /// the one connection rather than opening a second one — which matters
+    /// because `Subscribe` is per client, and a second connection would be a
+    /// second client the manager has to feed.
+    pub async fn connection_handle(&self) -> Result<zbus::Connection> {
+        self.connection().await.cloned()
+    }
+
+    /// Ask the manager to emit unit and job signals, from outside a call that
+    /// already holds a proxy. Idempotent — see [`Bus::enable_signals`].
+    pub async fn subscribe_signals(&self) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        self.enable_signals(&proxy).await;
+        Ok(())
+    }
+
     async fn manager_proxy(&self) -> Result<ManagerProxy<'_>> {
         let conn = self.connection().await?;
         self.deadline("opening the manager proxy", ManagerProxy::new(conn))

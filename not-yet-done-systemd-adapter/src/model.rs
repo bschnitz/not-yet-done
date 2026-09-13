@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use not_yet_done_content::{ColumnSchema, Metadata, MetadataField, NodeSummary, NodeType};
-use zbus_systemd::zvariant::{OwnedValue, Value};
+use zbus_systemd::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::bus::{UnitEntry, UnitFileEntry};
 
@@ -117,6 +117,35 @@ fn monotonic(
 ) -> Option<DateTime<Utc>> {
     let usec = as_u64(props, key).filter(|n| *n > 0)?;
     Some(boot? + chrono::TimeDelta::microseconds(i64::try_from(usec).ok()?))
+}
+
+/// A [`UnitEntry`] rebuilt from one unit's generic properties, the way
+/// `ListUnits` would have reported it.
+///
+/// The listing tuple and the `Unit` interface carry the same five facts under
+/// the same names, so a row can be built without the listing — which is what
+/// [`crate::live`] needs: a `PropertiesChanged` signal names an object path,
+/// not a listing row, and re-listing every unit to find one of them would make
+/// a single state change cost what a whole level costs.
+///
+/// `None` when the map has no `Id`, which is how a unit that vanished between
+/// the signal and the read announces itself (see [`crate::bus::Bus::properties`]).
+pub fn entry_from_properties(
+    path: &OwnedObjectPath,
+    unit: &HashMap<String, OwnedValue>,
+) -> Option<UnitEntry> {
+    let name = as_str(unit, "Id");
+    if name.is_empty() {
+        return None;
+    }
+    Some(UnitEntry {
+        name,
+        description: as_str(unit, "Description"),
+        load_state: as_str(unit, "LoadState"),
+        active_state: as_str(unit, "ActiveState"),
+        sub_state: as_str(unit, "SubState"),
+        path: path.clone(),
+    })
 }
 
 /// When this machine booted, read from `/proc/uptime`.

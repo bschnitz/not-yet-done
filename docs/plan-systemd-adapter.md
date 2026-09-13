@@ -697,6 +697,83 @@ sort and compare, but whose display is not the number; and how wide the signal
 subscription should be, since `PropertiesChanged` on every unit is a lot of
 traffic for rows nobody is looking at.
 
+### The three open questions, decided — and what measuring changed about one
+
+Measured first, on the user bus of a machine with 421 loaded units:
+
+| What                           | Measured                                                       |
+| ------------------------------ | -------------------------------------------------------------- |
+| Idle bus, `Subscribe()` active | **0 signals in 36 s**                                          |
+| One unit started and stopped   | 23 signals over 7 object paths                                 |
+| …of those, for the unit itself | **5 `PropertiesChanged`**, plus `UnitNew`/`UnitRemoved`/`Job*` |
+| What the payload carries       | `ActiveState`, `SubState`, `MainPID`, `Result`, the timestamps |
+| What it does **not** carry     | `Description`, `LoadState`, `UnitFileState`, `MemoryCurrent`   |
+
+**1. The subscription is global.** The worry this phase was opened with —
+`PropertiesChanged` on every unit being a lot of traffic for rows nobody is
+looking at — is measurably not the case: an idle manager emits nothing at all,
+because the traffic is proportional to state _changes_, not to the number of
+units. So there is no narrow subscription to design, and no bookkeeping about
+which units are on screen. What a change does produce is a small burst — five
+signals for one unit's start — so the adapter coalesces per unit over a short
+window and pushes **one** `Invalidation::Row` per unit that settled. Because
+the signal does not carry the static half of a row, the fire reads that one
+unit's properties: one round trip per real change, none while nothing happens.
+
+**2. `kind: countdown` is generic, in the table engine.** The `left` column is
+a string the adapter formats today, which means it sorts lexically and does
+not tick. A `countdown_to:` column is the exact mirror of the engine's existing
+`kind: elapsed` / `elapsed_from`, rides the same repaint pulse, and is wanted
+by the calendar too — so it belongs beside it, not in this adapter.
+
+**3. `kind: bytes` comes with it**, on the same seam as `kind: duration`: the
+cell's value stays the number, so `[mem, gt, 100000000]` and sorting keep
+working, and only the rendering is the human form. Phase 0 walked into this
+with `mem` and left it a bare byte count nobody reads.
+
+**4. The dependency tree shows `Requires`, `Requisite`, `Wants`, `BindsTo`,
+`PartOf` and `Upholds`** — what `systemctl list-dependencies` shows — and puts
+the _ordering_ relations `After` / `Before` on their own level rather than
+mixing them in: "needs" and "comes after" are two different questions, and a
+tree that answers both at once answers neither. Cycles are cut and the depth is
+bounded.
+
+**Cut inside the phase:** live rows first and complete, the dependency tree
+after. Both are phase 5, but the live half is the payoff of D1 and stands on
+its own, so it ships as its own usable state.
+
+### What it took, beyond the plan — the live half
+
+Three things the design above did not anticipate, all found by building it.
+
+**A `Node` invalidation cannot reach a root-level pane.** `Invalidation::Node
+{ id }` is delivered to a pane whose _parent_ is that node, and the three unit
+levels sit at the root of their view, where the frontend has no parent frame to
+compare an id against — so the obvious `Node { id: "root" }` for a unit that
+appeared or vanished would have been silently delivered to nobody. The
+structural signal is therefore `Invalidation::All`, which is the narrowest
+thing that actually addresses those levels. Worth knowing for every adapter
+whose interesting level _is_ the root one.
+
+**The object path is a type test, and a free one.** systemd escapes a unit name
+into its object path, encoding everything outside `[A-Za-z0-9_]` as `_xx`, so
+`sshd.service` lives at `…/unit/sshd_2eservice`. That makes the path suffix as
+reliable as the name — and it is in the signal header, so a `.scope` or a
+`.socket` (the two that churn on a desktop) is rejected before it costs the
+round trip that reading `Id` would have cost.
+
+**The watcher starts with the first level, not with the adapter.** Construction
+must not open a connection — a `--user` manager may not be running, and a tab
+exists long before anyone looks at it — and `Subscribe()` needs one. Tying it
+to the service and timer levels rather than to `root()` also means a systemd
+tab that is never opened never makes the manager emit a single signal.
+
+**Measured after the fact, same probe as before:** one transient unit started
+and stopped, which emits about five `PropertiesChanged` per transition, now
+produces **2** `Invalidation::Row` — one per settled state. That is the
+coalescing working, and it is what the ignored live test in `live.rs` asserts
+(`cargo test -p not-yet-done-systemd-adapter -- --ignored live`).
+
 ## Phase 6 — Diagnostics
 
 **Delivers**, in an order to be decided, the commands that exist but that

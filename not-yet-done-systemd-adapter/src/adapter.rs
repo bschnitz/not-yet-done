@@ -49,6 +49,8 @@
 
 use std::sync::Arc;
 
+use tokio::sync::{OnceCell, broadcast};
+
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
@@ -63,6 +65,7 @@ use crate::control;
 use crate::create;
 use crate::edit;
 use crate::journal;
+use crate::live;
 use crate::model::{
     LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, log_columns, log_type,
     manager_type, property_columns, property_rows, property_type, service_columns, service_type,
@@ -92,6 +95,13 @@ struct Shared {
     /// The command line the journal-follow key opens — see
     /// [`SystemdConfig::terminal`].
     terminal: String,
+    /// Out-of-band content changes, fanned out to every view bound to this
+    /// instance. Held as the sender so the channel survives having no
+    /// subscriber; each `subscribe_invalidations` call takes a fresh receiver.
+    inv_tx: broadcast::Sender<Invalidation>,
+    /// Latches once [`crate::live`] is running — see
+    /// [`SystemdAdapter::ensure_watcher`].
+    watcher: OnceCell<()>,
 }
 
 /// A systemd manager as a content tree.
@@ -123,6 +133,11 @@ impl SystemdAdapter {
                 protect: cfg.protection(),
                 timeout_secs: cfg.timeout().map(|d| d.as_secs()).unwrap_or(0),
                 terminal: cfg.terminal(),
+                // 64, like the other pushing adapters: a burst is a handful of
+                // rows, and a subscriber that falls this far behind has a
+                // bigger problem than a dropped repaint.
+                inv_tx: broadcast::channel(64).0,
+                watcher: OnceCell::new(),
             }),
             saved_queries: FsQueryStore::new(queries_root, ".yaml"),
         }
@@ -304,6 +319,14 @@ impl ContentAdapter for SystemdAdapter {
         actions
     }
 
+    /// The stream the live watcher pushes into — see [`crate::live`] for what
+    /// it carries and why. The channel exists from construction even though
+    /// nothing writes to it until a level has been loaded, so a view can
+    /// subscribe before the first load without racing the watcher's start.
+    fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
+        self.shared.inv_tx.subscribe()
+    }
+
     /// The one named value list this adapter serves: the signals `kill` sends.
     async fn list_values(&self, source: &str) -> Result<Vec<ValueOption>> {
         match source {
@@ -329,7 +352,26 @@ impl SystemdAdapter {
             .ok_or_else(|| ContentError::NotFound(format!("no loaded unit {name}")))
     }
 
+    /// Start the live watcher, once, the first time a level that has live rows
+    /// is loaded.
+    ///
+    /// Not in `new()`: constructing an adapter must not open a connection (a
+    /// `--user` manager may not be running, and a tab exists long before anyone
+    /// looks at it), and `Subscribe()` needs one. Not in `root()` either —
+    /// tying it to the *levels* means a systemd tab that is never opened never
+    /// makes the manager emit a single signal.
+    async fn ensure_watcher(&self) {
+        let shared = self.shared.clone();
+        self.shared
+            .watcher
+            .get_or_init(|| async {
+                live::spawn(shared.bus.clone(), shared.inv_tx.clone());
+            })
+            .await;
+    }
+
     async fn list_services(&self, params: ListParams) -> Result<ListResult> {
+        self.ensure_watcher().await;
         let query = compile(params.query.as_deref(), query::SERVICE_COLUMNS)?;
         let _busy = self
             .status()
@@ -351,6 +393,7 @@ impl SystemdAdapter {
     }
 
     async fn list_timers(&self, params: ListParams) -> Result<ListResult> {
+        self.ensure_watcher().await;
         let query = compile(params.query.as_deref(), query::TIMER_COLUMNS)?;
         let _busy = self
             .status()
