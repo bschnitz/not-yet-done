@@ -17,14 +17,19 @@
 # Failed subtab below is exactly that — the Services level with a default
 # query, not a separate node type. See docs/plan-systemd-adapter.md (D2).
 #
-# Under a service and a timer sits one further level: Properties — everything
-# `systemctl show` prints, as a table that can be sorted and filtered. Not
-# under a unit file: one the manager has never loaded has no D-Bus object
-# behind it, so there is nothing to read.
+# Under a service and a timer sit two further levels:
+#
+#   * Properties — everything `systemctl show` prints, as a table that can be
+#                  sorted and filtered. Not under a unit file: one the manager
+#                  has never loaded has no D-Bus object behind it, so there is
+#                  nothing to read.
+#   * Journal    — the unit's own log lines, newest first. This one *is* under
+#                  a unit file too: reading a journal needs a unit name, not a
+#                  D-Bus object, and "this thing never starts" is a question
+#                  asked about exactly the units the manager has not loaded.
 #
 # Acting on a unit lives on the `a` leader, editing its configuration on `e`,
-# and writing a new one on `n` (see the Services subtab below). Reading the
-# journal is a later phase built on these same rows.
+# and writing a new one on `n` (see the Services subtab below).
 
 tab:
   name: systemd
@@ -272,6 +277,20 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # The unit's own journal, as a level: `journalctl --unit=<unit>` in a
+      # table that sorts and filters like every other level here. `J` and not
+      # `j` because `j` is the cursor moving down — a level key has to be one
+      # nothing else has already claimed.
+      #
+      # `a j` opens the same journal *following* in a terminal of its own.
+      # That is the one thing a table cannot do: a level shows what the
+      # journal held when it was read, and watching a unit start means
+      # watching lines arrive. Which terminal is the adapter's `terminal:`
+      # setting (see the config block at the top of this file) — emulators
+      # disagree about whether the command comes after `-e`, after `--`, or
+      # bare, so it is a command line and not a program name.
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit. `n` is the leader for making something that is not
       # there yet. It acts on the manager, not on the row under the cursor, so
       # the same three keys work from whichever of these levels you happen to
@@ -357,6 +376,95 @@ views:
             label: Interface
             style: tertiary
             sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+      # `journalctl --unit=<unit>`, as rows. A pager can scroll a journal and
+      # nothing else; a level can sort it, filter it by severity or by time,
+      # and sit beside the unit it belongs to.
+      #
+      # journalctl is the only way in: the journal has no D-Bus interface, so
+      # this level shells out to `journalctl --output=json` and decodes what
+      # comes back. Which also means the entries are the raw ones — a
+      # `MESSAGE` that is not plain text arrives as an array of bytes, and
+      # every line a Rust program colours arrives full of escape sequences.
+      # Both are decoded on the way in, so what a cell holds is text.
+      #
+      # Under a unit file too, unlike Properties: a journal is read by unit
+      # *name*, and a unit the manager never loaded is precisely the one whose
+      # log you want.
+      - name: Journal
+        node_type: "systemd:log"
+        # Newest first, and `>` / `<` walk older / newer in windows of this
+        # size. A journal has no end to load towards, so "all rows" is not an
+        # option the way it is for a list of units.
+        pagination: { mode: server, page_size: 200 }
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the journal. Columns: time, level, prio, pid, message.
+            #
+            #   query:
+            #     [prio, lte, 3]                 # errors and worse
+            #     [message, has, timeout]        # what mentions a timeout
+            #     [time, gte, "today"]           # since midnight
+            #
+            #   query:
+            #     and:
+            #       - [prio, lte, 4]
+            #       - [time, gte, "yesterday"]
+            #
+            # `[level, =, err]` and `[prio, =, 3]` select the same rows —
+            # `prio` is the number, `level` the word for it. What journalctl
+            # can answer itself the adapter hands to it: a severity bound and
+            # a time bound narrow what is *read*. Everything else is matched
+            # here, on the decoded line, which is why `message` is never
+            # pushed down — the bytes on disk still carry the colour escapes
+            # that the cell no longer does.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [message, has, ""]
+        columns:
+          - key: time
+            label: Time
+            kind: datetime
+            style: secondary
+            sizing: max
+          - key: level
+            label: Level
+            sizing: "fixed(8)"
+          - key: pid
+            label: PID
+            kind: number
+            style: tertiary
+            sizing: "fixed(8)"
+          # The first line of the entry. `v` unfolds the rest: a message that
+          # spans lines — a backtrace, a config dump — wraps into the column
+          # instead of being cut off. A query on `message` sees the whole
+          # entry either way.
+          - key: message
+            label: Message
+            source: label
+            long_source: message
+            sizing: "flex(6)"
+          # The number behind `level`, for `[prio, lte, 3]` and for sorting by
+          # severity. Hidden because the word beside it says the same thing
+          # legibly — a column of bare digits is not something anyone reads.
+          - key: prio
+            label: Prio
+            kind: number
+            sizing: "fixed(5)"
+            hidden: true
+        # Severity as colour, so a wall of log lines has a shape before it is
+        # read. In file order, later rules layering over earlier ones.
+        highlights:
+          - when: { field: level, matches: '^(emerg|alert|crit|err)$' }
+            style: error
+          - when: { field: level, matches: '^warning$' }
+            style: warning
+          - when: { field: level, matches: '^debug$' }
+            style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
 
@@ -503,6 +611,10 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # The unit's own journal — `J` opens it as a level, `a j` follows it in
+      # a terminal. The Services subtab above carries the explanation.
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
       # on the row under the cursor, so they are the same three keys on every
@@ -551,6 +663,83 @@ views:
             label: Interface
             style: tertiary
             sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+      # The unit's own journal, newest first — see the Services subtab above
+      # for what this level is and how its query reads.
+      - name: Journal
+        node_type: "systemd:log"
+        # Newest first, and `>` / `<` walk older / newer in windows of this
+        # size. A journal has no end to load towards, so "all rows" is not an
+        # option the way it is for a list of units.
+        pagination: { mode: server, page_size: 200 }
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the journal. Columns: time, level, prio, pid, message.
+            #
+            #   query:
+            #     [prio, lte, 3]                 # errors and worse
+            #     [message, has, timeout]        # what mentions a timeout
+            #     [time, gte, "today"]           # since midnight
+            #
+            #   query:
+            #     and:
+            #       - [prio, lte, 4]
+            #       - [time, gte, "yesterday"]
+            #
+            # `[level, =, err]` and `[prio, =, 3]` select the same rows —
+            # `prio` is the number, `level` the word for it. What journalctl
+            # can answer itself the adapter hands to it: a severity bound and
+            # a time bound narrow what is *read*. Everything else is matched
+            # here, on the decoded line, which is why `message` is never
+            # pushed down — the bytes on disk still carry the colour escapes
+            # that the cell no longer does.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [message, has, ""]
+        columns:
+          - key: time
+            label: Time
+            kind: datetime
+            style: secondary
+            sizing: max
+          - key: level
+            label: Level
+            sizing: "fixed(8)"
+          - key: pid
+            label: PID
+            kind: number
+            style: tertiary
+            sizing: "fixed(8)"
+          # The first line of the entry. `v` unfolds the rest: a message that
+          # spans lines — a backtrace, a config dump — wraps into the column
+          # instead of being cut off. A query on `message` sees the whole
+          # entry either way.
+          - key: message
+            label: Message
+            source: label
+            long_source: message
+            sizing: "flex(6)"
+          # The number behind `level`, for `[prio, lte, 3]` and for sorting by
+          # severity. Hidden because the word beside it says the same thing
+          # legibly — a column of bare digits is not something anyone reads.
+          - key: prio
+            label: Prio
+            kind: number
+            sizing: "fixed(5)"
+            hidden: true
+        # Severity as colour, so a wall of log lines has a shape before it is
+        # read. In file order, later rules layering over earlier ones.
+        highlights:
+          - when: { field: level, matches: '^(emerg|alert|crit|err)$' }
+            style: error
+          - when: { field: level, matches: '^warning$' }
+            style: warning
+          - when: { field: level, matches: '^debug$' }
+            style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
 
@@ -721,6 +910,10 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # The unit's own journal — `J` opens it as a level, `a j` follows it in
+      # a terminal. The Services subtab above carries the explanation.
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
       # on the row under the cursor, so they are the same three keys on every
@@ -769,6 +962,83 @@ views:
             label: Interface
             style: tertiary
             sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+      # The unit's own journal, newest first — see the Services subtab above
+      # for what this level is and how its query reads.
+      - name: Journal
+        node_type: "systemd:log"
+        # Newest first, and `>` / `<` walk older / newer in windows of this
+        # size. A journal has no end to load towards, so "all rows" is not an
+        # option the way it is for a list of units.
+        pagination: { mode: server, page_size: 200 }
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the journal. Columns: time, level, prio, pid, message.
+            #
+            #   query:
+            #     [prio, lte, 3]                 # errors and worse
+            #     [message, has, timeout]        # what mentions a timeout
+            #     [time, gte, "today"]           # since midnight
+            #
+            #   query:
+            #     and:
+            #       - [prio, lte, 4]
+            #       - [time, gte, "yesterday"]
+            #
+            # `[level, =, err]` and `[prio, =, 3]` select the same rows —
+            # `prio` is the number, `level` the word for it. What journalctl
+            # can answer itself the adapter hands to it: a severity bound and
+            # a time bound narrow what is *read*. Everything else is matched
+            # here, on the decoded line, which is why `message` is never
+            # pushed down — the bytes on disk still carry the colour escapes
+            # that the cell no longer does.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [message, has, ""]
+        columns:
+          - key: time
+            label: Time
+            kind: datetime
+            style: secondary
+            sizing: max
+          - key: level
+            label: Level
+            sizing: "fixed(8)"
+          - key: pid
+            label: PID
+            kind: number
+            style: tertiary
+            sizing: "fixed(8)"
+          # The first line of the entry. `v` unfolds the rest: a message that
+          # spans lines — a backtrace, a config dump — wraps into the column
+          # instead of being cut off. A query on `message` sees the whole
+          # entry either way.
+          - key: message
+            label: Message
+            source: label
+            long_source: message
+            sizing: "flex(6)"
+          # The number behind `level`, for `[prio, lte, 3]` and for sorting by
+          # severity. Hidden because the word beside it says the same thing
+          # legibly — a column of bare digits is not something anyone reads.
+          - key: prio
+            label: Prio
+            kind: number
+            sizing: "fixed(5)"
+            hidden: true
+        # Severity as colour, so a wall of log lines has a shape before it is
+        # read. In file order, later rules layering over earlier ones.
+        highlights:
+          - when: { field: level, matches: '^(emerg|alert|crit|err)$' }
+            style: error
+          - when: { field: level, matches: '^warning$' }
+            style: warning
+          - when: { field: level, matches: '^debug$' }
+            style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
 
@@ -894,6 +1164,10 @@ views:
       # decides what the unit comes back as.
       - { name: edit drop-in, key: "e e", id: edit }
       - { name: edit whole unit file, key: "e f", id: edit-full }
+      # The unit's own journal — `J` opens it as a level, `a j` follows it in
+      # a terminal. The Services subtab above carries the explanation.
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
       # on the row under the cursor, so they are the same three keys on every
@@ -901,3 +1175,82 @@ views:
       - { name: new service, key: "n s", type: custom, id: new-service, on_container: true }
       - { name: new timer, key: "n t", type: custom, id: new-timer, on_container: true }
       - { name: new unit file, key: "n f", type: create, id: new-file }
+
+    children:
+      # The unit's own journal, newest first — see the Services subtab above
+      # for what this level is and how its query reads.
+      - name: Journal
+        node_type: "systemd:log"
+        # Newest first, and `>` / `<` walk older / newer in windows of this
+        # size. A journal has no end to load towards, so "all rows" is not an
+        # option the way it is for a list of units.
+        pagination: { mode: server, page_size: 200 }
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the journal. Columns: time, level, prio, pid, message.
+            #
+            #   query:
+            #     [prio, lte, 3]                 # errors and worse
+            #     [message, has, timeout]        # what mentions a timeout
+            #     [time, gte, "today"]           # since midnight
+            #
+            #   query:
+            #     and:
+            #       - [prio, lte, 4]
+            #       - [time, gte, "yesterday"]
+            #
+            # `[level, =, err]` and `[prio, =, 3]` select the same rows —
+            # `prio` is the number, `level` the word for it. What journalctl
+            # can answer itself the adapter hands to it: a severity bound and
+            # a time bound narrow what is *read*. Everything else is matched
+            # here, on the decoded line, which is why `message` is never
+            # pushed down — the bytes on disk still carry the colour escapes
+            # that the cell no longer does.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [message, has, ""]
+        columns:
+          - key: time
+            label: Time
+            kind: datetime
+            style: secondary
+            sizing: max
+          - key: level
+            label: Level
+            sizing: "fixed(8)"
+          - key: pid
+            label: PID
+            kind: number
+            style: tertiary
+            sizing: "fixed(8)"
+          # The first line of the entry. `v` unfolds the rest: a message that
+          # spans lines — a backtrace, a config dump — wraps into the column
+          # instead of being cut off. A query on `message` sees the whole
+          # entry either way.
+          - key: message
+            label: Message
+            source: label
+            long_source: message
+            sizing: "flex(6)"
+          # The number behind `level`, for `[prio, lte, 3]` and for sorting by
+          # severity. Hidden because the word beside it says the same thing
+          # legibly — a column of bare digits is not something anyone reads.
+          - key: prio
+            label: Prio
+            kind: number
+            sizing: "fixed(5)"
+            hidden: true
+        # Severity as colour, so a wall of log lines has a shape before it is
+        # read. In file order, later rules layering over earlier ones.
+        highlights:
+          - when: { field: level, matches: '^(emerg|alert|crit|err)$' }
+            style: error
+          - when: { field: level, matches: '^warning$' }
+            style: warning
+          - when: { field: level, matches: '^debug$' }
+            style: text_dim
+        actions:
+          - { name: refresh, key: r, type: reload }

@@ -60,6 +60,10 @@ pub fn unit_file_type() -> NodeType {
     node_type("systemd:unitfile", "Unit file")
 }
 
+pub fn log_type() -> NodeType {
+    node_type("systemd:log", "Journal")
+}
+
 // ---------------------------------------------------------------------------
 // Reading D-Bus property maps
 // ---------------------------------------------------------------------------
@@ -654,4 +658,104 @@ mod tests {
         assert_eq!(row.name, "backup-photos.timer");
         assert_eq!(row.vendor, "vendor");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Journal
+// ---------------------------------------------------------------------------
+
+/// One journal entry of one unit — a row on the `systemd:log` level.
+///
+/// Built from `journalctl --output=json` rather than from D-Bus, which is the
+/// one level here that is: the journal has no bus interface. See
+/// [`crate::journal`] for why the command is the supported interface and what
+/// the JSON does to a message that is not plain text.
+#[derive(Clone, Debug, Default)]
+pub struct LogRow {
+    /// The unit the entry belongs to, carried so the row can address itself.
+    pub unit: String,
+    /// journald's own address for this entry (`__CURSOR`) — stable across
+    /// reboots and rotations, which is what makes it the row's id.
+    pub cursor: String,
+    pub time: Option<DateTime<Utc>>,
+    /// The syslog severity as a number, `0`..=`7`. The queryable, sortable,
+    /// comparable form: `[prio, lte, 3]` is the query this level is for.
+    pub prio: Option<u64>,
+    /// The same severity as the word systemd uses for it. Not a second source
+    /// of truth — it is derived from [`LogRow::prio`] — but a column of bare
+    /// digits is one nobody can read at a glance, and `highlights:` rules read
+    /// better against `err` than against `3`.
+    pub level: String,
+    pub pid: Option<u64>,
+    pub message: String,
+}
+
+impl LogRow {
+    /// One `--output=json` line as a row. `None` for a line that is not an
+    /// entry — journalctl prints the occasional note among them, and a note is
+    /// not a row.
+    pub fn parse(unit: &str, line: &str) -> Option<Self> {
+        let fields = crate::journal::decode(line)?;
+        let cursor = fields.get("__CURSOR")?.clone();
+        let prio = fields.get("PRIORITY").and_then(|p| p.trim().parse().ok());
+        Some(Self {
+            unit: unit.to_string(),
+            cursor,
+            time: fields
+                .get("__REALTIME_TIMESTAMP")
+                .and_then(|t| crate::journal::instant(t)),
+            prio,
+            level: level_word(prio),
+            pid: fields.get("_PID").and_then(|p| p.trim().parse().ok()),
+            message: fields.get("MESSAGE").cloned().unwrap_or_default(),
+        })
+    }
+
+    pub fn summary(&self) -> NodeSummary {
+        NodeSummary {
+            // The unit first and the cursor last, because a cursor never holds
+            // a colon and a unit name may (`dbus-:1.19-….service`) — so the
+            // *last* colon is the one that splits the pair.
+            id: format!("{}{}:{}", crate::LOG_PREFIX, self.unit, self.cursor),
+            label: self.message.lines().next().unwrap_or_default().to_string(),
+            node_type: log_type(),
+            metadata: Metadata {
+                fields: vec![
+                    field("time", "Time", instant(self.time)),
+                    field("level", "Level", self.level.clone()),
+                    field("prio", "Prio", num(self.prio)),
+                    field("pid", "PID", num(self.pid)),
+                    field("message", "Message", self.message.clone()),
+                ],
+            },
+            has_children: Some(false),
+        }
+    }
+}
+
+pub fn log_columns() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema::new("time", "Time").typed("datetime"),
+        ColumnSchema::new("level", "Level"),
+        ColumnSchema::new("prio", "Prio").typed("number"),
+        ColumnSchema::new("pid", "PID").typed("number"),
+        ColumnSchema::new("message", "Message"),
+    ]
+}
+
+/// The word systemd uses for a syslog severity. An absent or out-of-range
+/// priority has no word — an empty cell, not a guess.
+fn level_word(prio: Option<u64>) -> String {
+    match prio {
+        Some(0) => "emerg",
+        Some(1) => "alert",
+        Some(2) => "crit",
+        Some(3) => "err",
+        Some(4) => "warning",
+        Some(5) => "notice",
+        Some(6) => "info",
+        Some(7) => "debug",
+        _ => "",
+    }
+    .to_string()
 }

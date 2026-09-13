@@ -59,7 +59,7 @@ use crate::config::view_config::{
     ActionDef, ActionTarget, AggregateDef, ApplyQueryConfig, ApplyQueryScope, CardBorderMode,
     CardConfig, CardLabelMode, ChildDef, ColumnDef, ColumnKind, CursorOnOpen, DateBucket,
     ExpandDepth, GroupBy, GroupHeadersDef, GroupOrder, LineLayout, PaginationMode, PreviewConfig,
-    ReminderConfig, SplitDirection, TreeAggregateDefault, ViewDef, ViewFileConfig,
+    QueryConfig, ReminderConfig, SplitDirection, TreeAggregateDefault, ViewDef, ViewFileConfig,
 };
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
@@ -5460,16 +5460,29 @@ impl ContentPane {
         self.default_query_text(view_defs)
     }
 
+    /// The `query:` block of the level currently on screen.
+    ///
+    /// Mirrors [`Self::current_highlights`]: a drilled-into level answers
+    /// with its own block if it has one, and only a level without one falls
+    /// back to the view root. Falling back rather than going empty is what
+    /// keeps every existing view file working — none of them carried a
+    /// `query:` on a child before, and every drill level in them expects the
+    /// subtab's editor.
+    pub fn query_config<'a>(&'a self, view_defs: &'a [ViewDef]) -> Option<&'a QueryConfig> {
+        if let Some(query) = self.active_child.as_ref().and_then(|c| c.query.as_ref()) {
+            return Some(query);
+        }
+        self.view_def(view_defs).and_then(|vd| vd.query.as_ref())
+    }
+
     pub fn default_query_text(&self, view_defs: &[ViewDef]) -> String {
-        self.view_def(view_defs)
-            .and_then(|vd| vd.query.as_ref())
+        self.query_config(view_defs)
             .and_then(|q| q.template.clone().or_else(|| q.default.clone()))
             .unwrap_or_default()
     }
 
     pub fn is_query_editable(&self, view_defs: &[ViewDef]) -> bool {
-        self.view_def(view_defs)
-            .and_then(|vd| vd.query.as_ref())
+        self.query_config(view_defs)
             .map(|q| q.editable)
             .unwrap_or(false)
     }
@@ -9497,11 +9510,12 @@ impl ContentView {
         }
     }
 
-    /// The query-menu key from the *active* ViewDef. Pulled from config
-    /// dynamically because each subtab can carry its own menu key.
+    /// The query-menu key of the level the active pane is showing. Pulled
+    /// from config dynamically because each subtab — and, once drilled into,
+    /// each level (see [`ContentPane::query_config`]) — can carry its own.
     pub fn query_menu_key(&self) -> Option<&str> {
-        self.active_view_def()
-            .and_then(|vd| vd.query.as_ref())
+        self.active_pane()
+            .query_config(&self.view_defs)
             .and_then(|q| q.menu_key.as_deref())
     }
 
@@ -15087,6 +15101,7 @@ mod tests {
                 }],
                 children: vec![ChildDef {
                     highlights: Vec::new(),
+                    query: None,
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -16104,6 +16119,7 @@ mod tests {
         root.smooth_scroll = false;
         root.children = vec![ChildDef {
             highlights: Vec::new(),
+            query: None,
             card: None,
             row_layout: Some(vec![
                 LineLayout {
@@ -16501,6 +16517,7 @@ mod tests {
                 actions: vec![],
                 children: vec![ChildDef {
                     highlights: Vec::new(),
+                    query: None,
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -16660,6 +16677,7 @@ mod tests {
     ) -> ChildDef {
         ChildDef {
             highlights: Vec::new(),
+            query: None,
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -19534,6 +19552,7 @@ mod tests {
         // Add a "Rows" leaf as Schemas' only child, with split: right.
         config.views[0].children[0].children.push(ChildDef {
             highlights: Vec::new(),
+            query: None,
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -19640,6 +19659,7 @@ mod tests {
         let mut config = test_config_with_tree();
         config.views[0].children[0].children.push(ChildDef {
             highlights: Vec::new(),
+            query: None,
             card: None,
             row_layout: None,
             smooth_scroll: false,
@@ -22282,6 +22302,7 @@ mod tests {
                 actions: node_actions(view_actions),
                 children: vec![ChildDef {
                     highlights: Vec::new(),
+                    query: None,
                     card: None,
                     row_layout: None,
                     smooth_scroll: false,
@@ -23812,6 +23833,7 @@ views:
             actions: vec![],
             children: vec![ChildDef {
                 highlights: Vec::new(),
+                query: None,
                 card: None,
                 row_layout: None,
                 smooth_scroll: false,

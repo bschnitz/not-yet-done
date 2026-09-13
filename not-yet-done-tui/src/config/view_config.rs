@@ -2511,6 +2511,19 @@ pub enum ApplyQueryScope {
 pub struct ChildDef {
     pub name: String,
     pub node_type: String,
+    /// The query editor for this drill level. Same shape as
+    /// [`ViewDef::query`], and read in preference to it while this level is
+    /// the one on screen — a level's query is written in terms of *its*
+    /// columns, so the parent's template would teach the wrong vocabulary
+    /// (systemd: `[name, like, Timeout]` on the properties of a unit, not
+    /// `[active, =, failed]` on the unit itself).
+    ///
+    /// Only the editor is per level. Which query is *live* belongs to the
+    /// pane and follows the user down the drill, so `default:` and
+    /// `inherit_default:` here have nothing to act on and are ignored;
+    /// `template:`, `editable:` and `menu_key:` are what this block is for.
+    #[serde(default)]
+    pub query: Option<QueryConfig>,
     #[serde(default)]
     pub columns: Vec<ColumnDef>,
     /// Highlight rules for this drill level's rows. Same semantics as
@@ -3078,8 +3091,13 @@ views:
     #[test]
     fn committed_systemd_example_parses_and_validates() {
         let yaml = include_str!("../../../docs/examples/views/systemd.yaml");
-        let cfg: ViewFileConfig =
-            serde_yaml::from_str(yaml).expect("committed systemd.yaml must parse");
+        let (cfg, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+            .expect("committed systemd.yaml must parse");
+        // A key this schema does not have is silently dropped, so a file that
+        // *looks* right can be doing nothing — which is how the Properties
+        // levels carried a `query:` block that no one ever saw. Nothing this
+        // file writes may be inert.
+        assert!(unknown.is_empty(), "systemd.yaml has dead config: {unknown:?}");
         cfg.validate(&KeyBindingConfig::default(), &Default::default())
             .expect("committed systemd.yaml must validate");
 
@@ -3160,6 +3178,80 @@ views:
                     "{id} addresses the manager"
                 );
             }
+        }
+
+        // The journal hangs off every level, unit files included: reading one
+        // takes a unit *name*, not a loaded D-Bus object, and "why does this
+        // never start" is asked about exactly the units the manager has not
+        // touched. `J` and not `j` — `j` is the cursor moving down.
+        for view in &cfg.views {
+            let journal = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "systemd:log")
+                .unwrap_or_else(|| panic!("subtab `{}` drills into the journal", view.name));
+
+            let navigate = view
+                .actions
+                .iter()
+                .find(|a| a.navigate_to.as_deref() == Some("systemd:log"))
+                .unwrap_or_else(|| panic!("subtab `{}` binds the journal drill", view.name));
+            assert!(
+                navigate.key_strings().iter().any(|k| k == "J"),
+                "subtab `{}` opens the journal with `J`, not {:?}",
+                view.name,
+                navigate.key
+            );
+
+            let follow = view
+                .actions
+                .iter()
+                .find(|a| a.id.as_deref() == Some("follow"))
+                .unwrap_or_else(|| panic!("subtab `{}` follows the journal", view.name));
+            assert!(
+                follow.key_strings().iter().any(|k| k == "a j"),
+                "subtab `{}` follows the journal with `a j`",
+                view.name
+            );
+
+            // The severity travels twice: `prio` is what a query compares and
+            // what sorts, `level` is the word the eye reads and what the
+            // highlight rules paint. Losing either one costs the level half
+            // of what it is for.
+            let prio = journal
+                .columns
+                .iter()
+                .find(|c| c.key == "prio")
+                .expect("the journal carries the numeric priority");
+            assert!(prio.hidden, "the number is there to query, not to read");
+            assert!(journal.columns.iter().any(|c| c.key == "level"));
+            assert!(
+                !journal.highlights.is_empty(),
+                "severity is painted, not spelled out"
+            );
+
+            // A log line can be a backtrace. The cell is its first line; `v`
+            // unfolds the whole entry into the column.
+            let message = journal
+                .columns
+                .iter()
+                .find(|c| c.key == "message")
+                .expect("the journal shows the message");
+            assert_eq!(message.source.as_deref(), Some("label"));
+            assert_eq!(message.long_source.as_deref(), Some("message"));
+
+            // The journal's query editor is the journal's own — the parent's
+            // template would teach the wrong columns entirely.
+            let query = journal
+                .query
+                .as_ref()
+                .expect("the journal level carries its own query editor");
+            assert!(query.editable);
+            let template = query.template.as_deref().unwrap_or_default();
+            assert!(
+                template.contains("[prio, lte, 3]"),
+                "the template teaches the severity filter: {template}"
+            );
         }
     }
 

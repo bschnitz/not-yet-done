@@ -818,6 +818,7 @@ mod tests {
     ) -> ChildDef {
         ChildDef {
             highlights: Vec::new(),
+            query: None,
             card: None,
             row_layout: None,
             smooth_scroll: false,
