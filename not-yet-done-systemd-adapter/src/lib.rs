@@ -28,6 +28,9 @@
 //!   pair from one form, and the empty file in the editor.
 //! * [`journal`] — a unit's log lines as rows, read from `journalctl
 //!   --output=json`, and the one key that opens the pager instead.
+//! * [`live`] — the manager's own signals, coalesced into the row and level
+//!   invalidations the frontend acts on. What makes a level watchable rather
+//!   than a snapshot.
 //! * [`calendar`] — what a person types, turned into an `OnCalendar=` systemd
 //!   agrees with.
 //! * [`protect`] — the units a disruptive verb refuses to touch, because a
@@ -46,6 +49,7 @@ pub mod create;
 pub mod edit;
 pub mod factory;
 pub mod journal;
+pub mod live;
 pub mod model;
 pub mod protect;
 pub mod query;
