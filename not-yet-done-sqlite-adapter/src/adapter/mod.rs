@@ -2519,6 +2519,7 @@ mod tests {
             ActionOutcome::Navigate { .. } => "Navigate",
             ActionOutcome::OpenExternal { .. } => "OpenExternal",
             ActionOutcome::OpenEditor { .. } => "OpenEditor",
+            ActionOutcome::OpenPicker { .. } => "OpenPicker",
         }
     }
 

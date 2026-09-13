@@ -428,6 +428,17 @@ impl Bus {
         .await
     }
 
+    /// Have the manager re-read every unit file on disk.
+    ///
+    /// What makes an edited file *configuration*. It changes nothing that is
+    /// running: a unit that is up keeps the settings it started with until it
+    /// is restarted, which is exactly the question the edit flow asks
+    /// afterwards rather than answering for the user.
+    pub async fn daemon_reload(&self) -> Result<()> {
+        let proxy = self.manager_proxy().await?;
+        self.deadline("reloading the manager", proxy.reload()).await
+    }
+
     /// Clear a unit's `failed` state so it can be started again.
     pub async fn reset_failed(&self, unit: &str) -> Result<()> {
         let proxy = self.manager_proxy().await?;

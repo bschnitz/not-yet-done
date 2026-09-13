@@ -264,6 +264,21 @@ pub enum FollowUp {
     /// [`crate::edit_session::FileEditSession::with_error`] — the old
     /// in-memory config keeps running until the user fixes the file.
     ReloadConfig { path: std::path::PathBuf },
+    /// The editor's action finished writing and asked a follow-up question
+    /// ([`not_yet_done_content::ActionOutcome::OpenPicker`]): surface
+    /// `message`, then open the picker for `action_id` on the same node —
+    /// the very popup an ordinary `InputSpec::Picker` action would open.
+    ///
+    /// The pane is *not* reloaded first: the picker's own `execute` is what
+    /// finally changes the row, and a reload in between would move the
+    /// cursor out from under the question.
+    OpenNodePicker {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
+        action_id: String,
+        message: Option<String>,
+    },
     /// A saved-query body was edited (`:query edit/new`); the content
     /// view at `view_index` should refresh its saved-query list so the
     /// new body is picked up on next apply. `message` is surfaced via

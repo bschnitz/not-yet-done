@@ -928,6 +928,21 @@ impl App {
                 self.reload_content_saved_queries(view_index);
                 self.notify(message);
             }
+            FollowUp::OpenNodePicker {
+                view_index,
+                pane_id,
+                node_id,
+                action_id,
+                message,
+            } => {
+                // The verdict on the write first, then the question it left
+                // behind — in that order, so the popup does not arrive
+                // looking like the whole answer.
+                if let Some(m) = message {
+                    self.notify(m);
+                }
+                self.open_content_action_popup(view_index, pane_id, node_id, action_id);
+            }
         }
     }
 

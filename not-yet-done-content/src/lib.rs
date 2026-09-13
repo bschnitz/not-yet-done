@@ -1458,6 +1458,27 @@ pub enum ActionOutcome {
     /// Interactive-only: the flow needs `$EDITOR`, so non-interactive
     /// frontends (the CLI) reject it.
     OpenEditor { action_id: String },
+    /// The mutation is done, and it raised a question only the user can
+    /// answer: the frontend opens the **picker** for `action_id` on the
+    /// *same* node, reusing the ordinary [`Node::picker_options`] →
+    /// [`Node::execute`] road. No new prompt plumbing.
+    ///
+    /// *Why it exists:* [`Self::OpenEditor`] is this same idea one step
+    /// earlier — a menu that decides which editor to open. This is the step
+    /// *after* a write. A systemd unit file has been saved and the manager
+    /// has re-read it; only now does it matter whether the still-running
+    /// unit should be restarted, reloaded, or left alone until tonight.
+    /// Asking beforehand would be asking before there is anything to decide,
+    /// and deciding for the user means restarting a service nobody asked to
+    /// restart. `message` carries what the write itself did, so the question
+    /// arrives with its context instead of replacing it.
+    ///
+    /// Interactive-only, like [`Self::OpenEditor`]: a frontend that cannot
+    /// prompt reports `message` and says the follow-up was left undone.
+    OpenPicker {
+        action_id: String,
+        message: Option<String>,
+    },
 }
 
 /// Initial state for an `InputSpec::Editor` action.

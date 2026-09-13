@@ -260,6 +260,25 @@ impl EditSession for NodeActionEditSession {
             // *shortcut* (picker) path, not by an editor commit; there's no
             // session-reopen-as-a-different-action here, so surface a note and
             // close cleanly to keep the match exhaustive.
+            // The write went through and left a decision behind (systemd:
+            // the unit is still running the old configuration). Hand the
+            // question to the App, which opens the node's picker.
+            Ok(ActionOutcome::OpenPicker { action_id, message }) => {
+                self.mark_applied(text);
+                match self.reload {
+                    Some(target) => CommitOutcome::FollowUp(FollowUp::OpenNodePicker {
+                        view_index: target.view_index,
+                        pane_id: target.pane_id,
+                        node_id: self.node_id.clone(),
+                        action_id,
+                        message,
+                    }),
+                    // No originating pane (the editor was opened from
+                    // somewhere that cannot host a popup): the write still
+                    // happened, so say so rather than swallowing it.
+                    None => CommitOutcome::Cancelled { message },
+                }
+            }
             Ok(ActionOutcome::OpenEditor { action_id }) => CommitOutcome::Cancelled {
                 message: Some(format!("`{action_id}` must be opened from the action menu")),
             },
@@ -731,6 +750,148 @@ mod tests {
         // The reopened content is now the baseline, and the new version stuck.
         assert_eq!(s.template(), "merged");
         assert_eq!(s.version, "v2");
+    }
+
+    /// A node whose editor action writes and then has a question left over —
+    /// the systemd shape: the unit file is saved and re-read, and only now
+    /// does it matter whether the still-running unit should be restarted.
+    struct PickerAdapter {
+        meta: Metadata,
+    }
+    struct PickerNode {
+        node_type: NodeType,
+        meta: Metadata,
+    }
+
+    #[async_trait]
+    impl ContentAdapter for PickerAdapter {
+        fn adapter_type(&self) -> &str {
+            "picker"
+        }
+        fn instance_id(&self) -> &str {
+            "picker"
+        }
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities::default()
+        }
+        fn actions_for_type(&self, _node_type: &NodeType) -> Vec<NodeAction> {
+            vec![
+                NodeAction::new("edit", "edit", InputSpec::Editor),
+                NodeAction::new("apply", "apply", InputSpec::Picker),
+            ]
+        }
+        async fn root(&self) -> ContentResult<Box<dyn Node>> {
+            self.get_by_id("unit").await
+        }
+        async fn get_by_id(&self, _id: &str) -> ContentResult<Box<dyn Node>> {
+            Ok(Box::new(PickerNode {
+                node_type: ntype("picker:node"),
+                meta: self.meta.clone(),
+            }))
+        }
+        fn childs<'a>(&'a self, _node: &'a dyn Node) -> Vec<not_yet_done_content::Child<'a>> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait]
+    impl Node for PickerNode {
+        fn id(&self) -> &str {
+            "unit"
+        }
+        fn label(&self) -> &str {
+            "unit"
+        }
+        fn node_type(&self) -> &NodeType {
+            &self.node_type
+        }
+        fn metadata(&self) -> &Metadata {
+            &self.meta
+        }
+        async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
+            Ok(EditorPrep {
+                template: "orig".into(),
+                version: "v1".into(),
+                suffix: ".conf".into(),
+                file_path: None,
+                args: Default::default(),
+            })
+        }
+        async fn execute(
+            &mut self,
+            _action_id: &str,
+            _input: ActionInput,
+            _args: &ActionArgs,
+        ) -> ContentResult<ActionOutcome> {
+            Ok(ActionOutcome::OpenPicker {
+                action_id: "apply".into(),
+                message: Some("Wrote override.conf".into()),
+            })
+        }
+    }
+
+    async fn picker_session(reload: Option<ReloadTarget>) -> NodeActionEditSession {
+        let adapter = Arc::new(PickerAdapter {
+            meta: Metadata::default(),
+        });
+        NodeActionEditSession::new(
+            adapter,
+            "unit".into(),
+            "edit".into(),
+            "edit".into(),
+            None,
+            reload,
+            None,
+            false,
+            Default::default(),
+        )
+        .await
+        .expect("session builds")
+    }
+
+    /// `OpenPicker` after a write becomes a follow-up that opens the picker on
+    /// the *same* node, in the pane the editor came from. The pane is
+    /// deliberately not reloaded first: the picked verb is what finally changes
+    /// the row, and a reload in between moves the cursor out from under the
+    /// question.
+    #[tokio::test]
+    async fn a_write_with_a_question_left_opens_the_nodes_picker() {
+        let mut s = picker_session(Some(ReloadTarget {
+            view_index: 4,
+            pane_id: 11,
+        }))
+        .await;
+
+        match s.commit("edited").await {
+            CommitOutcome::FollowUp(FollowUp::OpenNodePicker {
+                view_index,
+                pane_id,
+                node_id,
+                action_id,
+                message,
+            }) => {
+                assert_eq!(view_index, 4);
+                assert_eq!(pane_id, 11);
+                assert_eq!(node_id, "unit");
+                assert_eq!(action_id, "apply");
+                assert_eq!(message.as_deref(), Some("Wrote override.conf"));
+            }
+            _ => panic!("expected an OpenNodePicker follow-up"),
+        }
+    }
+
+    /// Opened from somewhere that cannot host a popup, the question has
+    /// nowhere to go — but the write already happened, so the session reports
+    /// what it did rather than swallowing it.
+    #[tokio::test]
+    async fn without_a_pane_the_write_is_still_reported() {
+        let mut s = picker_session(None).await;
+        match s.commit("edited").await {
+            CommitOutcome::Cancelled { message } => {
+                assert_eq!(message.as_deref(), Some("Wrote override.conf"));
+            }
+            _ => panic!("expected the write to be reported"),
+        }
     }
 
     /// Without `commit_on_save`, intermediate saves stay no-ops (the legacy

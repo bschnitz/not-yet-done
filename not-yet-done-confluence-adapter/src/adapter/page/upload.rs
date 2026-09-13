@@ -110,7 +110,7 @@ mod tests {
             Ok(ActionOutcome::OpenExternal { .. }) => {
                 panic!("expected NoChanges for empty selection, got OpenExternal")
             }
-            Ok(ActionOutcome::OpenEditor { .. }) => {
+            Ok(ActionOutcome::OpenEditor { .. }) | Ok(ActionOutcome::OpenPicker { .. }) => {
                 panic!("expected NoChanges for empty selection, got OpenEditor")
             }
             Err(e) => panic!("expected NoChanges, got Err: {e}"),

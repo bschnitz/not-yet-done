@@ -55,11 +55,10 @@ use futures::stream::{self, StreamExt};
 
 use not_yet_done_content::*;
 
-use crate::bus::{
-    Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry,
-};
+use crate::bus::{Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry};
 use crate::config::SystemdConfig;
 use crate::control;
+use crate::edit;
 use crate::model::{
     PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, manager_type, property_columns,
     property_rows, property_type, service_columns, service_type, timer_columns, timer_type,
@@ -246,12 +245,21 @@ impl ContentAdapter for SystemdAdapter {
         Some(&self.saved_queries)
     }
 
-    /// What each level may do, straight out of the verb table. A level is
-    /// offered a verb when the verb says it works there — a timer has no
-    /// processes and so is never offered `kill`, a unit file is not loaded and
-    /// so is never offered `reset-failed`.
+    /// What each level may do: the verb table, then the editing actions.
+    ///
+    /// A level is offered a verb when the verb says it works there — a timer
+    /// has no processes and so is never offered `kill`, a unit file is not
+    /// loaded and so is never offered `reset-failed`. The editing actions ask
+    /// a second question on top of the level: they write to
+    /// `~/.config/systemd/user`, so against the **system** manager there are
+    /// none of them (see [`crate::edit::actions_for`]).
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
-        control::actions_for(&node_type.type_id)
+        let mut actions = control::actions_for(&node_type.type_id);
+        actions.extend(edit::actions_for(
+            &node_type.type_id,
+            self.shared.bus.manager(),
+        ));
+        actions
     }
 
     /// The one named value list this adapter serves: the signals `kill` sends.
@@ -281,7 +289,9 @@ impl SystemdAdapter {
 
     async fn list_services(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::SERVICE_COLUMNS)?;
-        let _busy = self.status().busy("Reading services", self.shared.timeout_secs);
+        let _busy = self
+            .status()
+            .busy("Reading services", self.shared.timeout_secs);
         let units = self.units_with_suffix(".service").await?;
         let rows = self
             .with_properties(units, SERVICE_IFACE, |entry, unit, own| {
@@ -300,7 +310,9 @@ impl SystemdAdapter {
 
     async fn list_timers(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::TIMER_COLUMNS)?;
-        let _busy = self.status().busy("Reading timers", self.shared.timeout_secs);
+        let _busy = self
+            .status()
+            .busy("Reading timers", self.shared.timeout_secs);
         let units = self.units_with_suffix(".timer").await?;
         // Read once for the whole level: a monotonic timer's next elapse is an
         // offset from this boot, and re-deriving it per row would let rows
@@ -324,7 +336,9 @@ impl SystemdAdapter {
 
     async fn list_unit_files(&self, params: ListParams) -> Result<ListResult> {
         let query = compile(params.query.as_deref(), query::UNIT_FILE_COLUMNS)?;
-        let _busy = self.status().busy("Reading unit files", self.shared.timeout_secs);
+        let _busy = self
+            .status()
+            .busy("Reading unit files", self.shared.timeout_secs);
         let rows: Vec<UnitFileRow> = self
             .bus()
             .list_unit_files()
@@ -435,11 +449,7 @@ fn compile(raw: Option<&str>, columns: &[&str]) -> Result<Option<UnitQuery>> {
 /// Without a requested sort the rows arrive in whatever order the concurrent
 /// property reads finished, which would reshuffle the table on every load; by
 /// name is the order the unit lists have everywhere else.
-fn finish(
-    mut items: Vec<NodeSummary>,
-    sort: &[SortKey],
-    columns: &[ColumnSchema],
-) -> ListResult {
+fn finish(mut items: Vec<NodeSummary>, sort: &[SortKey], columns: &[ColumnSchema]) -> ListResult {
     let requested: Vec<SortKey> = if sort.is_empty() {
         vec![SortKey {
             column: "name".into(),
@@ -527,7 +537,12 @@ impl UnitNode {
     /// Protection comes first and is a refusal, not a question. A prompt asks
     /// "did you mean it", which is no answer to "this would take the session
     /// down" — the muscle memory that pressed the key presses `y` too.
-    fn gate(&self, verb: &control::Verb, unit: &str, ctx: &ActionContext) -> Result<Option<String>> {
+    fn gate(
+        &self,
+        verb: &control::Verb,
+        unit: &str,
+        ctx: &ActionContext,
+    ) -> Result<Option<String>> {
         if verb.disruptive && self.shared.protect.covers(unit) {
             return Err(ContentError::PermissionDenied(
                 self.shared.protect.refusal(unit, verb.label),
@@ -539,6 +554,206 @@ impl UnitNode {
             return Ok(Some(prompt.replace("{unit}", unit)));
         }
         Ok(None)
+    }
+
+    /// The unit this row stands for, or the reason it is not one.
+    fn unit_or_err(&self) -> Result<&str> {
+        self.unit().ok_or_else(|| {
+            ContentError::NotSupported("this row is not a unit — there is nothing to edit".into())
+        })
+    }
+
+    /// Which file an editing action means, refusing the units the protection
+    /// list covers.
+    ///
+    /// Writing a unit's configuration is as final as stopping it, only later:
+    /// the file decides what the unit comes back as. So the list that refuses
+    /// `stop` refuses this too — and it refuses *before* the editor opens,
+    /// rather than after a buffer has been filled in.
+    async fn edit_target(&self, action_id: &str) -> Result<edit::Target> {
+        let layer = match action_id {
+            edit::EDIT => edit::Layer::DropIn,
+            edit::EDIT_FULL => edit::Layer::Full,
+            other => {
+                return Err(ContentError::NotSupported(format!(
+                    "systemd has no editor action {other}"
+                )));
+            }
+        };
+        let unit = self.unit_or_err()?;
+        if self.shared.protect.covers(unit) {
+            return Err(ContentError::PermissionDenied(
+                self.shared.protect.refusal(unit, "Edit"),
+            ));
+        }
+        edit::resolve(&self.shared.bus, unit, layer).await
+    }
+
+    /// Hand the buffer back with the reason it did not land at the top of it.
+    async fn reopen(
+        &self,
+        target: &edit::Target,
+        body: &str,
+        notice: Vec<String>,
+    ) -> ActionOutcome {
+        let state = edit::state(&self.shared.bus, &target.unit).await;
+        ActionOutcome::Reopen {
+            content: edit::template(target, &state, body, &notice),
+            new_version: Some(edit::version(target)),
+        }
+    }
+
+    /// The write path: check, back up, write, reload — and only then ask.
+    ///
+    /// The order is the whole point. A file that does not survive
+    /// [`edit::verify`] never reaches `~/.config`, so a rejected buffer cannot
+    /// be picked up by somebody else's `daemon-reload` later; and the manager
+    /// re-reads the file before anyone is asked what to do about the process,
+    /// so the question is about a configuration that already exists.
+    async fn save_unit_file(&self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        let ActionInput::Edited { text, version, .. } = input else {
+            return Err(ContentError::NotSupported(format!(
+                "{action_id} is an editor action"
+            )));
+        };
+        let target = self.edit_target(action_id).await?;
+        let body = edit::strip_header(&text).to_string();
+
+        // The buffer says what the file already says.
+        if std::fs::read_to_string(&target.path).is_ok_and(|on_disk| on_disk == body) {
+            return Ok(ActionOutcome::NoChanges);
+        }
+        // A drop-in that was opened and closed without typing anything: the
+        // buffer is still the bare `[Service]` heading the template offers, and
+        // writing it would leave an inert file behind that systemd reads on
+        // every reload and that `systemctl revert` then has to clean up. The
+        // whole-file layer is deliberately not included — saving the vendor
+        // text verbatim there *is* the act, because the copy stops following
+        // the package.
+        if target.layer == edit::Layer::DropIn
+            && !target.path.exists()
+            && body == edit::body(&target)
+        {
+            return Ok(ActionOutcome::NoChanges);
+        }
+        // The file moved while the editor was open. Not a merge — the plain
+        // fact, plus a fresh token so the next save is the user's decision
+        // rather than a second refusal.
+        if edit::version(&target) != version {
+            return Ok(self
+                .reopen(
+                    &target,
+                    &body,
+                    vec![format!(
+                        "{} changed on disk while you were editing it. Saving again overwrites \
+                         that change; the backup keeps whatever is there now.",
+                        target.path.display()
+                    )],
+                )
+                .await);
+        }
+
+        let findings = edit::verify(&target, &body).await?;
+        if findings.fatal {
+            return Ok(self.reopen(&target, &body, findings.lines).await);
+        }
+
+        let backed_up = edit::backup(&target)?;
+        edit::write_file(&target.path, &body)?;
+        {
+            let _busy = self
+                .shared
+                .status
+                .busy("reloading the manager", self.shared.timeout_secs);
+            self.shared.bus.daemon_reload().await?;
+        }
+
+        let mut message = format!("Wrote {} and reloaded the manager", target.path.display());
+        if let Some(path) = backed_up {
+            message.push_str(&format!("; the previous version is in {}", path.display()));
+        }
+        // Not fatal, but systemd will quietly ignore it, and quietly is how a
+        // directive that never took effect goes unnoticed for weeks.
+        if !findings.is_clean() {
+            message.push_str(&format!(". systemd had a note: {}", findings.summary()));
+        }
+
+        // The file is configuration now; the running process is not. Ask only
+        // where the two can actually differ.
+        let state = edit::state(&self.shared.bus, &target.unit).await;
+        if edit::needs_applying(&state) {
+            return Ok(ActionOutcome::OpenPicker {
+                action_id: edit::APPLY.into(),
+                message: Some(message),
+            });
+        }
+        Ok(ActionOutcome::Done {
+            message: Some(message),
+        })
+    }
+
+    /// The answer to the question a write leaves behind.
+    ///
+    /// `restart` and `reload-or-restart` are looked up in the verb table
+    /// rather than reimplemented here: the follow-up must be the same act as
+    /// the `a` leader's, protection list included.
+    async fn apply(&self, input: ActionInput) -> Result<ActionOutcome> {
+        let ActionInput::Picked(choice) = input else {
+            return Err(ContentError::NotSupported(
+                "apply needs one of its choices".into(),
+            ));
+        };
+        let unit = self.unit_or_err()?;
+        if choice == edit::NOTHING {
+            return Ok(ActionOutcome::Done {
+                message: Some(format!(
+                    "{unit} keeps running the configuration it started with"
+                )),
+            });
+        }
+        let verb = control::verb(&choice).ok_or_else(|| {
+            ContentError::NotSupported(format!("{choice} is not one of the apply choices"))
+        })?;
+        if verb.disruptive && self.shared.protect.covers(unit) {
+            return Err(ContentError::PermissionDenied(
+                self.shared.protect.refusal(unit, verb.label),
+            ));
+        }
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("{} {unit}", verb.label), JOB_WAIT_SECS);
+        let message = control::run(&self.shared.bus, verb, unit, None).await?;
+        Ok(ActionOutcome::Done {
+            message: Some(message),
+        })
+    }
+
+    /// The phase-1 road: a verb that takes a value, now that it has one.
+    async fn run_verb(&self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
+        let (Some(verb), Some(unit)) = (control::verb(action_id), self.unit()) else {
+            return Err(ContentError::NotSupported(format!(
+                "systemd has no action {action_id} here"
+            )));
+        };
+        let ActionInput::Picked(value) = input else {
+            return Err(ContentError::NotSupported(format!(
+                "{action_id} needs a value"
+            )));
+        };
+        if verb.disruptive && self.shared.protect.covers(unit) {
+            return Err(ContentError::PermissionDenied(
+                self.shared.protect.refusal(unit, verb.label),
+            ));
+        }
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("{} {unit}", verb.label), JOB_WAIT_SECS);
+        let message = control::run(&self.shared.bus, verb, unit, Some(&value)).await?;
+        Ok(ActionOutcome::Done {
+            message: Some(message),
+        })
     }
 }
 
@@ -592,9 +807,27 @@ impl Node for UnitNode {
         })
     }
 
-    /// The signal menu for `kill` — the one action here that asks something
-    /// before it acts.
+    /// Render the buffer for an editing action.
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
+        let target = self.edit_target(action_id).await?;
+        let state = edit::state(&self.shared.bus, &target.unit).await;
+        let body = edit::body(&target);
+        Ok(EditorPrep {
+            template: edit::template(&target, &state, &body, &[]),
+            version: edit::version(&target),
+            // The unit's own extension, not the drop-in's `.conf`: `.service`
+            // is what an editor recognises.
+            suffix: edit::suffix(&target.unit),
+            ..Default::default()
+        })
+    }
+
+    /// The two menus: the signals `kill` can send, and what to do with a unit
+    /// that is still running the configuration it started with.
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
+        if action_id == edit::APPLY {
+            return Ok(edit::apply_options());
+        }
         if control::verb(action_id).is_none_or(|v| !v.takes_value) {
             return Ok(Vec::new());
         }
@@ -607,40 +840,24 @@ impl Node for UnitNode {
             .collect())
     }
 
-    /// The second half of `kill`: the signal has been chosen, so send it.
+    /// Three roads, told apart by the action's own id: a saved buffer, an
+    /// answer to the follow-up question, or a verb that was waiting for a
+    /// value.
     ///
-    /// Picking an entry out of a menu is itself the deliberate act, which is why
-    /// this path has no second `(y/n)` on top of it. The protection list still
-    /// applies — that one is not a question.
+    /// Picking an entry out of a menu is itself the deliberate act, which is
+    /// why none of these carries a second `(y/n)` on top of it. The protection
+    /// list still applies — that one is not a question.
     async fn execute(
         &mut self,
         action_id: &str,
         input: ActionInput,
         _args: &ActionArgs,
     ) -> Result<ActionOutcome> {
-        let (Some(verb), Some(unit)) = (control::verb(action_id), self.unit()) else {
-            return Err(ContentError::NotSupported(format!(
-                "systemd has no action {action_id} here"
-            )));
-        };
-        let ActionInput::Picked(value) = input else {
-            return Err(ContentError::NotSupported(format!(
-                "{action_id} needs a value"
-            )));
-        };
-        if verb.disruptive && self.shared.protect.covers(unit) {
-            return Err(ContentError::PermissionDenied(
-                self.shared.protect.refusal(unit, verb.label),
-            ));
+        match action_id {
+            edit::EDIT | edit::EDIT_FULL => self.save_unit_file(action_id, input).await,
+            edit::APPLY => self.apply(input).await,
+            _ => self.run_verb(action_id, input).await,
         }
-        let _busy = self
-            .shared
-            .status
-            .busy(&format!("{} {unit}", verb.label), JOB_WAIT_SECS);
-        let message = control::run(&self.shared.bus, verb, unit, Some(&value)).await?;
-        Ok(ActionOutcome::Done {
-            message: Some(message),
-        })
     }
 }
 

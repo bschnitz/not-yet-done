@@ -21,6 +21,9 @@
 //!
 //! * [`control`] — the verbs (start, stop, enable, mask, …): one table that is
 //!   at once the action list, the confirmation policy and the dispatcher.
+//! * [`edit`] — writing a unit's configuration: which file a change lands in,
+//!   the staging check that runs before it does, and the one question a write
+//!   leaves behind.
 //! * [`protect`] — the units a disruptive verb refuses to touch, because a
 //!   confirmation prompt is no guard against the muscle memory that pressed
 //!   the key.
@@ -32,6 +35,7 @@ pub mod adapter;
 pub mod bus;
 pub mod config;
 pub mod control;
+pub mod edit;
 pub mod factory;
 pub mod model;
 pub mod protect;
