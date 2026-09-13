@@ -317,33 +317,115 @@ additively, so no existing adapter changes.
 
 ## Phase 2 — Editing
 
-**Delivers** the assembled unit as `Content` (syntax `systemd`/`ini`), an
-edit path, `systemd-analyze verify`, and `daemon-reload`.
+**Delivers** an edit path for a unit's configuration, `systemd-analyze verify`
+before anything is written, `daemon-reload` after, and the one question a write
+leaves behind.
 
-The editor-template seam fits unusually well here because **the template is
-the unit file itself** — no translation, so none of the round-trip risk the
-Jira wiki markup carries. Only a comment header with the current state and
-`# available:` hints for enumerated directives.
+The editor-template seam fits unusually well here because **the template is the
+unit file itself** — no translation, so none of the round-trip risk the Jira
+wiki markup carries. Only a comment header above a cut marker, carrying the
+unit's current state and, for a drop-in, the warning below. Everything above the
+marker is stripped on save; a buffer whose marker the user deleted is taken as
+content in full, because guessing which leading comments were ours eventually
+eats one of theirs.
 
-Two variants to choose between as the default:
+Write scope in this phase is `~/.config/systemd/user` only. The system manager
+is phase 7 and a privilege question, not an editing question.
 
-- **drop-in** (what `systemctl edit` does) — writes
-  `~/.config/systemd/user/<unit>.d/override.conf`, leaves the vendor unit
-  alone
-- **full** (`--full`) — copies the vendor unit into `~/.config` on first edit
+### The four open questions, decided
 
-Write scope in this phase is `~/.config/systemd/user` only. The system
-manager is phase 7 and a privilege question, not an editing question.
+**Drop-in is the default** (`e e`), because it is what `systemctl edit` does and
+what `systemctl --user revert` undoes in one word: the vendor unit keeps
+receiving package updates underneath. `e f` edits the whole file, copying the
+vendor one into the user's tree on first use — complete control, and no further
+updates. One exception bends the default: if the unit already loads from a file
+in `~/.config/systemd/user`, `e e` edits **that file**. There is nothing
+underneath left to preserve, and a drop-in would only split one unit across two
+files.
 
-**Order matters:** `verify` runs _before_ `daemon-reload`, never after. A
-rejected file is not activated, the message goes to the notification centre,
-and the buffer stays open. Afterwards the user is asked what to do —
-restart, reload-or-restart, or just the daemon-reload.
+A drop-in is read _in addition to_ the unit file, so a list-valued directive —
+`ExecStart=`, `ExecStartPre=`, `Environment=`, `After=` — **appends**. Replacing
+one means clearing the list first:
 
-**Open until the round before this phase:** drop-in or full as the default;
-the backup strategy before overwriting a unit file (the local adapter's
-backup-on-hook pattern is the obvious template); and how insistent the
-restart prompt should be.
+```ini
+[Service]
+ExecStart=
+ExecStart=/the/new/command
+```
+
+Without the empty line systemd answers `Service has more than one ExecStart=
+setting, which is only allowed for Type=oneshot services. Refusing.` — a message
+that never mentions drop-ins. Every drop-in buffer says so in its header.
+
+**The buffer lives in a temp file**, not at the live path. `EditorPrep.file_path`
+is deliberately left `None`: a rejected buffer must never exist inside
+`~/.config/systemd/user`, where somebody else's `daemon-reload` would pick it up
+mid-edit. The price is that a crash during editing loses the buffer, which is
+the cheaper of the two failures.
+
+**Backups live outside the systemd tree**, at
+`~/.local/share/not_yet_done/systemd-backups/<unit>/<timestamp>-<filename>`, the
+last ten kept. A drop-in directory reads _every_ `*.conf` in it, so a backup
+filed next to the file it backs up is safe by naming convention only — and the
+convention is one rename away from being configuration.
+
+**The restart question is asked only when there is a choice.** A write changes
+what the manager will load, not what is running. If the unit is inactive, the
+adapter reloads the manager and says so. If it is up, a picker offers `restart`,
+`reload-or-restart` or nothing — the first two being the phase 1 verbs, so the
+protection list still applies to them unchanged.
+
+### What `verify` actually says
+
+Measured against systemd 261, not assumed:
+
+| written                     | `systemd-analyze verify` says    | exit  |
+| --------------------------- | -------------------------------- | ----- |
+| `NoSuchKey=1`               | `Unknown key … ignoring.`        | 0     |
+| `Restart=nonsense`          | `Failed to parse … ignoring`     | 0     |
+| a line outside any section  | `Assignment outside of section.` | 0     |
+| `ExecStart=/does/not/exist` | `Command … is not executable`    | **1** |
+
+So the exit code is not the gate — it only separates "systemd would load this
+anyway" from "systemd refuses the unit". The usable signal is that a clean file
+prints **nothing at all**: every line is a finding. A fatal one blocks the write
+and reopens the buffer with the reason on top; a non-fatal one is written and
+named in the notification, because a directive that quietly never took effect is
+how an edit goes unnoticed for weeks. `LC_ALL=C` on the subprocess, or systemd
+answers in the caller's language inside an otherwise English buffer.
+
+A missing `systemd-analyze` is reported as one non-fatal finding, not an error:
+refusing to write because the _checker_ is absent helps nobody.
+
+### The check runs before the file exists
+
+`verify` needs the unit to be findable, and the pending text is not on disk yet.
+So it is staged: the buffer is written to `<tmp>/<unit>.d/override.conf` and
+`SYSTEMD_UNIT_PATH=<tmp>:` puts that directory ahead of the defaults (the
+trailing colon appends them rather than replacing them). A drop-in of the same
+name in the higher-priority directory **shadows** the real one, while the vendor
+fragment and every _other_ drop-in still merge — so what is checked is the
+effective unit as it would be, and a file that fails never reaches `~/.config`.
+Paths in the findings are rewritten from the staging directory to the real
+target before the user sees them.
+
+### The question-after-the-write gap
+
+The commit path could say "done", "open this again" or "cancelled" — it had no
+way to say "done, and now one thing needs deciding". Phase 2 adds
+`ActionOutcome::OpenPicker { action_id, message }` to the content protocol,
+additively. It is `OpenEditor` one step later: instead of a menu choosing which
+editor to open, it is a menu that follows a write, opened on the _same_ node
+through the ordinary `picker_options` → `execute` road. No new prompt plumbing,
+and the frontend that cannot prompt (the CLI) reports the message and says which
+action was left undone rather than turning a successful write into an error.
+
+### Protection covers editing too
+
+The phase 1 list was approved for the disruptive verbs. It refuses the editor as
+well, at `prepare` time, before the buffer opens: the unit file decides what the
+unit comes back as, so a broken override on `dbus-broker.service` is the same
+mistake as `stop`, only deferred to the next start.
 
 ## Phase 3 — Creating
 
@@ -466,9 +548,15 @@ The obligations, distributed over the phases that introduce the risk:
   `dbus.socket`, `graphical-session.target` is refused, not confirmed.
 - **`confirm: true`** (phase 1) on stop, disable, mask, delete; mask with an
   explicit warning about what masking means.
-- **Backup before every unit-file write** (phase 2), adapter-side, following
-  the local adapter's pattern.
-- **`verify` before `daemon-reload`** (phase 2), never after.
+- **Backup before every unit-file write** (phase 2), adapter-side, to
+  `~/.local/share/not_yet_done/systemd-backups/` — outside the systemd tree,
+  where a stray `*.conf` would be read as configuration.
+- **`verify` before the write** (phase 2), not merely before `daemon-reload`:
+  the buffer is staged in a temp directory and checked there, so a unit systemd
+  would refuse never reaches `~/.config` at all.
+- **Protection covers the editor** (phase 2) as well as the verbs: a protected
+  unit refuses to open for editing, because the file decides what it comes back
+  as.
 - **Anonymisation** (phase 0) — the default already covers it; an override is
   legibility, not safety.
 

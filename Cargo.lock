@@ -4721,6 +4721,7 @@ dependencies = [
  "not-yet-done-filter",
  "serde",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "zbus_systemd",
 ]

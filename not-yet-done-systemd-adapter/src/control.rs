@@ -456,7 +456,7 @@ async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
     })
 }
 
-fn prop_str(props: &Props, key: &str) -> String {
+pub(crate) fn prop_str(props: &Props, key: &str) -> String {
     use zbus_systemd::zvariant::Value;
     match props.get(key).map(|v| &**v) {
         Some(Value::Str(s)) => s.to_string(),

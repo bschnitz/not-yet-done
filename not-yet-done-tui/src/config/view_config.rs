@@ -3116,6 +3116,20 @@ views:
             .find(|c| c.key == "passed")
             .expect("timers show how long ago they last ran");
         assert_eq!(ago.elapsed_from.as_deref(), Some("last"));
+
+        // Editing sits on the `e` leader on every level the adapter offers it
+        // on, and the two verbs stay distinct: `e e` layers a drop-in over the
+        // vendor unit, `e f` takes the whole file over. Bound on all four
+        // levels because a unit file that was never loaded is exactly the one
+        // a user is most likely to want to open.
+        for view in &cfg.views {
+            for (id, key) in [("edit", "e e"), ("edit-full", "e f")] {
+                let bound = view.actions.iter().any(|a| {
+                    a.id.as_deref() == Some(id) && a.key_strings().iter().any(|k| k == key)
+                });
+                assert!(bound, "subtab `{}` binds `{key}` to {id}", view.name);
+            }
+        }
     }
 
     /// The comment drill-down is reached through a `navigate` action, never

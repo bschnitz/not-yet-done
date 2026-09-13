@@ -22,9 +22,9 @@
 # under a unit file: one the manager has never loaded has no D-Bus object
 # behind it, so there is nothing to read.
 #
-# Acting on a unit lives on the `a` leader (see the Services subtab below).
-# Editing a unit file, creating one and the journal are later phases built on
-# these same rows.
+# Acting on a unit lives on the `a` leader, editing its configuration on `e`
+# (see the Services subtab below). Creating a unit from scratch and reading the
+# journal are later phases built on these same rows.
 
 tab:
   name: systemd
@@ -214,6 +214,49 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # Editing the unit's configuration. `e` is the editor leader everywhere
+      # else in the app and it means the same here: a buffer opens, you save
+      # it, the adapter writes the file.
+      #
+      # `e e` is what `systemctl edit` does — a *drop-in* at
+      # ~/.config/systemd/user/<unit>.d/override.conf, layered on top of the
+      # file the distribution ships. The vendor unit keeps receiving package
+      # updates, and `systemctl --user revert <unit>` takes the change back
+      # out in one word.
+      #
+      # A drop-in is read *in addition to* the unit file, so a directive that
+      # takes a list — ExecStart=, ExecStartPre=, Environment=, After= — ADDS
+      # an entry rather than replacing one. Replacing means clearing the list
+      # first: `ExecStart=` on a line of its own, then the new value. The
+      # buffer says so at the top, every time, because a second ExecStart= is
+      # refused by systemd and the message does not mention drop-ins.
+      #
+      # `e f` edits the whole file instead, copying the vendor one into
+      # ~/.config/systemd/user on first use. It shadows the vendor unit
+      # completely — which also means it stops following its updates. If the
+      # unit already loads from a file in that tree, `e e` edits that same
+      # file: there is nothing underneath left to preserve, and a drop-in
+      # would only split one unit across two files.
+      #
+      # Nothing is written before `systemd-analyze verify` has seen the text
+      # in a staging directory. A unit systemd would refuse never reaches
+      # ~/.config at all; one it merely complains about is written, and the
+      # complaint is in the notification — a directive that silently never
+      # took effect is how an edit goes unnoticed for weeks. The previous
+      # version is kept under
+      # ~/.local/share/not_yet_done/systemd-backups/<unit>/ (the last ten),
+      # outside the systemd tree on purpose: every *.conf next to a drop-in is
+      # configuration systemd would read, so a backup filed beside the file
+      # would be safe by naming convention only.
+      #
+      # After the write the manager re-reads the file, which changes nothing
+      # about what is already running. If the unit is up, a picker asks what
+      # to do about that — restart, reload-or-restart, or nothing for now; if
+      # it is not, there is no question to ask and none is asked. Protected
+      # units (see `protect:` above) refuse the editor too: the unit file
+      # decides what the unit comes back as.
+      - { name: edit drop-in, key: "e e", id: edit }
+      - { name: edit whole unit file, key: "e f", id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -358,6 +401,49 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # Editing the unit's configuration. `e` is the editor leader everywhere
+      # else in the app and it means the same here: a buffer opens, you save
+      # it, the adapter writes the file.
+      #
+      # `e e` is what `systemctl edit` does — a *drop-in* at
+      # ~/.config/systemd/user/<unit>.d/override.conf, layered on top of the
+      # file the distribution ships. The vendor unit keeps receiving package
+      # updates, and `systemctl --user revert <unit>` takes the change back
+      # out in one word.
+      #
+      # A drop-in is read *in addition to* the unit file, so a directive that
+      # takes a list — ExecStart=, ExecStartPre=, Environment=, After= — ADDS
+      # an entry rather than replacing one. Replacing means clearing the list
+      # first: `ExecStart=` on a line of its own, then the new value. The
+      # buffer says so at the top, every time, because a second ExecStart= is
+      # refused by systemd and the message does not mention drop-ins.
+      #
+      # `e f` edits the whole file instead, copying the vendor one into
+      # ~/.config/systemd/user on first use. It shadows the vendor unit
+      # completely — which also means it stops following its updates. If the
+      # unit already loads from a file in that tree, `e e` edits that same
+      # file: there is nothing underneath left to preserve, and a drop-in
+      # would only split one unit across two files.
+      #
+      # Nothing is written before `systemd-analyze verify` has seen the text
+      # in a staging directory. A unit systemd would refuse never reaches
+      # ~/.config at all; one it merely complains about is written, and the
+      # complaint is in the notification — a directive that silently never
+      # took effect is how an edit goes unnoticed for weeks. The previous
+      # version is kept under
+      # ~/.local/share/not_yet_done/systemd-backups/<unit>/ (the last ten),
+      # outside the systemd tree on purpose: every *.conf next to a drop-in is
+      # configuration systemd would read, so a backup filed beside the file
+      # would be safe by naming convention only.
+      #
+      # After the write the manager re-reads the file, which changes nothing
+      # about what is already running. If the unit is up, a picker asks what
+      # to do about that — restart, reload-or-restart, or nothing for now; if
+      # it is not, there is no question to ask and none is asked. Protected
+      # units (see `protect:` above) refuse the editor too: the unit file
+      # decides what the unit comes back as.
+      - { name: edit drop-in, key: "e e", id: edit }
+      - { name: edit whole unit file, key: "e f", id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -534,6 +620,49 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # Editing the unit's configuration. `e` is the editor leader everywhere
+      # else in the app and it means the same here: a buffer opens, you save
+      # it, the adapter writes the file.
+      #
+      # `e e` is what `systemctl edit` does — a *drop-in* at
+      # ~/.config/systemd/user/<unit>.d/override.conf, layered on top of the
+      # file the distribution ships. The vendor unit keeps receiving package
+      # updates, and `systemctl --user revert <unit>` takes the change back
+      # out in one word.
+      #
+      # A drop-in is read *in addition to* the unit file, so a directive that
+      # takes a list — ExecStart=, ExecStartPre=, Environment=, After= — ADDS
+      # an entry rather than replacing one. Replacing means clearing the list
+      # first: `ExecStart=` on a line of its own, then the new value. The
+      # buffer says so at the top, every time, because a second ExecStart= is
+      # refused by systemd and the message does not mention drop-ins.
+      #
+      # `e f` edits the whole file instead, copying the vendor one into
+      # ~/.config/systemd/user on first use. It shadows the vendor unit
+      # completely — which also means it stops following its updates. If the
+      # unit already loads from a file in that tree, `e e` edits that same
+      # file: there is nothing underneath left to preserve, and a drop-in
+      # would only split one unit across two files.
+      #
+      # Nothing is written before `systemd-analyze verify` has seen the text
+      # in a staging directory. A unit systemd would refuse never reaches
+      # ~/.config at all; one it merely complains about is written, and the
+      # complaint is in the notification — a directive that silently never
+      # took effect is how an edit goes unnoticed for weeks. The previous
+      # version is kept under
+      # ~/.local/share/not_yet_done/systemd-backups/<unit>/ (the last ten),
+      # outside the systemd tree on purpose: every *.conf next to a drop-in is
+      # configuration systemd would read, so a backup filed beside the file
+      # would be safe by naming convention only.
+      #
+      # After the write the manager re-reads the file, which changes nothing
+      # about what is already running. If the unit is up, a picker asks what
+      # to do about that — restart, reload-or-restart, or nothing for now; if
+      # it is not, there is no question to ask and none is asked. Protected
+      # units (see `protect:` above) refuse the editor too: the unit file
+      # decides what the unit comes back as.
+      - { name: edit drop-in, key: "e e", id: edit }
+      - { name: edit whole unit file, key: "e f", id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -664,3 +793,46 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # Editing the unit's configuration. `e` is the editor leader everywhere
+      # else in the app and it means the same here: a buffer opens, you save
+      # it, the adapter writes the file.
+      #
+      # `e e` is what `systemctl edit` does — a *drop-in* at
+      # ~/.config/systemd/user/<unit>.d/override.conf, layered on top of the
+      # file the distribution ships. The vendor unit keeps receiving package
+      # updates, and `systemctl --user revert <unit>` takes the change back
+      # out in one word.
+      #
+      # A drop-in is read *in addition to* the unit file, so a directive that
+      # takes a list — ExecStart=, ExecStartPre=, Environment=, After= — ADDS
+      # an entry rather than replacing one. Replacing means clearing the list
+      # first: `ExecStart=` on a line of its own, then the new value. The
+      # buffer says so at the top, every time, because a second ExecStart= is
+      # refused by systemd and the message does not mention drop-ins.
+      #
+      # `e f` edits the whole file instead, copying the vendor one into
+      # ~/.config/systemd/user on first use. It shadows the vendor unit
+      # completely — which also means it stops following its updates. If the
+      # unit already loads from a file in that tree, `e e` edits that same
+      # file: there is nothing underneath left to preserve, and a drop-in
+      # would only split one unit across two files.
+      #
+      # Nothing is written before `systemd-analyze verify` has seen the text
+      # in a staging directory. A unit systemd would refuse never reaches
+      # ~/.config at all; one it merely complains about is written, and the
+      # complaint is in the notification — a directive that silently never
+      # took effect is how an edit goes unnoticed for weeks. The previous
+      # version is kept under
+      # ~/.local/share/not_yet_done/systemd-backups/<unit>/ (the last ten),
+      # outside the systemd tree on purpose: every *.conf next to a drop-in is
+      # configuration systemd would read, so a backup filed beside the file
+      # would be safe by naming convention only.
+      #
+      # After the write the manager re-reads the file, which changes nothing
+      # about what is already running. If the unit is up, a picker asks what
+      # to do about that — restart, reload-or-restart, or nothing for now; if
+      # it is not, there is no question to ask and none is asked. Protected
+      # units (see `protect:` above) refuse the editor too: the unit file
+      # decides what the unit comes back as.
+      - { name: edit drop-in, key: "e e", id: edit }
+      - { name: edit whole unit file, key: "e f", id: edit-full }

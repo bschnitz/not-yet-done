@@ -1619,6 +1619,21 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
         ActionOutcome::OpenEditor { action_id: next } => Err(anyhow!(
             "'{action_id}' opens an interactive editor for '{next}' — use the TUI"
         )),
+        // The work is done; only the follow-up question cannot be put here.
+        // That is not a failure, so it does not become one — the message says
+        // what happened and the next line says how to answer it by hand.
+        ActionOutcome::OpenPicker {
+            action_id: next,
+            message,
+        } => {
+            if let Some(msg) = message {
+                println!("{msg}");
+            }
+            println!(
+                "'{next}' is left undone — run it here with --value (omit it to list the choices)"
+            );
+            Ok(())
+        }
     }
 }
 
