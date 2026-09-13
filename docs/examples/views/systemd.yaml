@@ -22,9 +22,9 @@
 # under a unit file: one the manager has never loaded has no D-Bus object
 # behind it, so there is nothing to read.
 #
-# Acting on a unit lives on the `a` leader, editing its configuration on `e`
-# (see the Services subtab below). Creating a unit from scratch and reading the
-# journal are later phases built on these same rows.
+# Acting on a unit lives on the `a` leader, editing its configuration on `e`,
+# and writing a new one on `n` (see the Services subtab below). Reading the
+# journal is a later phase built on these same rows.
 
 tab:
   name: systemd
@@ -272,6 +272,50 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # Creating a unit. `n` is the leader for making something that is not
+      # there yet. It acts on the manager, not on the row under the cursor, so
+      # the same three keys work from whichever of these levels you happen to
+      # be standing on.
+      #
+      # `n s` writes one `.service` from a short form: a name, the command,
+      # the service type, optionally a working directory and a restart policy.
+      # `n t` writes a *pair* — a `.timer` and the `.service` it triggers —
+      # because a timer on its own triggers nothing; one name covers both
+      # files. Leave the command empty and only the `.timer` is written, for
+      # the case where the service already exists.
+      #
+      # The schedule field takes what you would say out loud. "every day at
+      # 9", "weekdays 9:00", "*:0/15" are stripped of their filler words and
+      # handed to `systemd-analyze calendar`, and systemd's own normalised
+      # form is what lands in the file. This tab does not invent a second
+      # calendar grammar; it only clears the way to systemd's, which is why a
+      # phrase it cannot make sense of is systemd's "Failed to parse" and not
+      # a message of our own. Such a form stays open with what you typed and
+      # the reason underneath, so a typo costs one correction instead of the
+      # whole form. An accepted one reports the next three times it will fire
+      # — the only way to notice that `*-*-01 9:00` is monthly and not daily.
+      #
+      # Tick `once` and the same field is read as a point in time instead —
+      # "tomorrow 9:00", "next monday 14:00" — and written as that one date.
+      #
+      # `n f` skips the forms: an empty unit file opens in `$EDITOR` with the
+      # three usual sections. It has no name yet, so the buffer names itself —
+      # the `# unit:` line in the header above the cut line is the filename,
+      # and a buffer that still says `name-me.service` comes back unwritten
+      # rather than landing under a guessed name.
+      #
+      # Nothing is written before `systemd-analyze verify` has seen it, and
+      # never over a file that already exists — an existing unit is something
+      # to edit (`e e` / `e f`), not to overwrite. A pair is written only if
+      # both halves verify, so a rejected timer leaves no orphaned service
+      # behind. Afterwards the manager re-reads its files once, and the
+      # `enable` field decides whether the new unit also starts now.
+      #
+      # One caveat about the leader: while a search is live with hits, `n`
+      # belongs to "next match" — press Esc first.
+      - { name: new service, key: "n s", type: custom, id: new-service, on_container: true }
+      - { name: new timer, key: "n t", type: custom, id: new-timer, on_container: true }
+      - { name: new unit file, key: "n f", type: create, id: new-file }
 
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
@@ -459,6 +503,13 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # Creating a unit — `n s` a service, `n t` a timer with its service,
+      # `n f` an empty file in `$EDITOR`. These act on the manager rather than
+      # on the row under the cursor, so they are the same three keys on every
+      # level; the Services level above carries the explanation.
+      - { name: new service, key: "n s", type: custom, id: new-service, on_container: true }
+      - { name: new timer, key: "n t", type: custom, id: new-timer, on_container: true }
+      - { name: new unit file, key: "n f", type: create, id: new-file }
 
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
@@ -670,6 +721,13 @@ views:
       # Everything the manager knows about this unit, as a table — what
       # `systemctl show` prints, only sortable and filterable.
       - { name: properties, key: p, type: navigate, navigate_to: "systemd:property" }
+      # Creating a unit — `n s` a service, `n t` a timer with its service,
+      # `n f` an empty file in `$EDITOR`. These act on the manager rather than
+      # on the row under the cursor, so they are the same three keys on every
+      # level; the Services level above carries the explanation.
+      - { name: new service, key: "n s", type: custom, id: new-service, on_container: true }
+      - { name: new timer, key: "n t", type: custom, id: new-timer, on_container: true }
+      - { name: new unit file, key: "n f", type: create, id: new-file }
 
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
@@ -836,3 +894,10 @@ views:
       # decides what the unit comes back as.
       - { name: edit drop-in, key: "e e", id: edit }
       - { name: edit whole unit file, key: "e f", id: edit-full }
+      # Creating a unit — `n s` a service, `n t` a timer with its service,
+      # `n f` an empty file in `$EDITOR`. These act on the manager rather than
+      # on the row under the cursor, so they are the same three keys on every
+      # level; the Services level above carries the explanation.
+      - { name: new service, key: "n s", type: custom, id: new-service, on_container: true }
+      - { name: new timer, key: "n t", type: custom, id: new-timer, on_container: true }
+      - { name: new unit file, key: "n f", type: create, id: new-file }

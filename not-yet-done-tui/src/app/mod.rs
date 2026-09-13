@@ -7,7 +7,7 @@ use not_yet_done_content::{DefaultQuery, QueryKind};
 use not_yet_done_core::repository::{
     LinkRepository, QueryShortcutRepository, ScriptHookRepository, SettingsRepository,
 };
-use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent};
+use not_yet_done_ratatui::{DetachedEditor, FilePicker, FilePickerEvent, FormNotice};
 
 use uuid::Uuid;
 
@@ -141,6 +141,17 @@ pub enum LoadMsg {
     /// failures are surfaced in the inline error bar AND remembered as
     /// `last_error` so the user can reopen the message in `$EDITOR`.
     ContentActionDone {
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        result: Result<String, String>,
+    },
+    /// The same, but for an action submitted from the generic form popup —
+    /// which is still on screen, frozen, waiting for this answer. `Ok` closes
+    /// it and finishes exactly like `ContentActionDone`; `Err` hands the form
+    /// back to the user with its values intact and the adapter's own sentence
+    /// as a [`FormNotice::Alert`], so
+    /// a refused entry can be corrected in place instead of being retyped.
+    ContentFormActionDone {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         result: Result<String, String>,
@@ -854,6 +865,15 @@ pub struct ContentFormPopupState {
     /// [`InputSpec::Form`], which submits the untyped
     /// [`ActionInput::Form`](not_yet_done_content::ActionInput::Form).
     pub column_types: Option<std::collections::HashMap<String, String>>,
+    /// Set between a submission and its answer. The popup deliberately stays
+    /// on screen for that stretch — the typed values are the only copy, and an
+    /// adapter that refuses them (a calendar expression it cannot parse, a name
+    /// already taken) should hand the form back with the reason rather than
+    /// take the input down with it. While pending the form is frozen: keys are
+    /// swallowed so a slow write cannot be submitted twice, and only Esc gets
+    /// through, which abandons the form and lets the answer fall through to the
+    /// ordinary notification path.
+    pub pending: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -4725,23 +4745,36 @@ impl App {
                     view_index,
                     pane_id,
                     result,
+                } => self.content_action_done(view_index, pane_id, result),
+                LoadMsg::ContentFormActionDone {
+                    view_index,
+                    pane_id,
+                    result,
                 } => {
-                    let ok = result.is_ok();
+                    let pending = self
+                        .content_form_popup
+                        .as_ref()
+                        .is_some_and(|state| state.pending);
                     match result {
-                        Ok(msg) => self.notify(msg),
-                        Err(msg) => {
-                            self.set_query_error(Some(msg.clone()));
-                            self.notification_bar.push(msg);
+                        Err(msg) if pending => {
+                            // Hand the form back with what the user typed and
+                            // the adapter's own sentence under the fields. It
+                            // is logged and remembered as the last error (so a
+                            // long one can still be opened in `$EDITOR`), but
+                            // deliberately kept out of the inline error bar:
+                            // the form already says it, on the very screen the
+                            // user is looking at.
+                            let state = self.content_form_popup.as_mut().unwrap();
+                            state.popup.set_notice(Some(FormNotice::Alert(msg.clone())));
+                            state.pending = false;
+                            not_yet_done_content::http_log::log_error("form", &msg);
+                            self.last_error = Some(msg);
                         }
-                    }
-                    self.reload_content_pane_current_level(view_index, pane_id);
-                    // A successful mutation in one subtab can change what a
-                    // sibling subtab lists (e.g. bookmarking here vs. the
-                    // bookmarks subtab) — invalidate the siblings so they
-                    // reload on next switch instead of showing a stale row.
-                    if ok {
-                        if let Some(cv) = self.content_view_mut(view_index) {
-                            cv.invalidate_sibling_subtabs();
+                        result => {
+                            if pending {
+                                self.content_form_popup = None;
+                            }
+                            self.content_action_done(view_index, pane_id, result);
                         }
                     }
                 }
@@ -5568,16 +5601,35 @@ impl App {
         // editing; we only act on Submitted/Cancelled.
         if matches!(self.active_tab, Tab::Content(_)) && self.content_form_popup.is_some() {
             let popup_state = self.content_form_popup.as_mut().unwrap();
+            // A submitted form is frozen until its answer arrives (see
+            // `ContentFormPopupState::pending`): Esc abandons it, everything
+            // else is swallowed rather than editing values that are already
+            // on their way to the adapter.
+            if popup_state.pending {
+                if key == "esc" {
+                    self.content_form_popup = None;
+                }
+                self.sync_components();
+                return EditorRequest::None;
+            }
             match popup_state.popup.handle_key(key) {
                 ContentFormEvent::Submitted(values) => {
-                    let popup = self.content_form_popup.take().unwrap();
+                    popup_state.pending = true;
+                    popup_state
+                        .popup
+                        .set_notice(Some(FormNotice::Info("Working…".to_string())));
+                    let view_index = popup_state.view_index;
+                    let pane_id = popup_state.pane_id;
+                    let node_id = popup_state.node_id.clone();
+                    let action_id = popup_state.action_id.clone();
+                    let column_types = popup_state.column_types.clone();
                     self.execute_content_action_form(
-                        popup.view_index,
-                        popup.pane_id,
-                        popup.node_id,
-                        popup.action_id,
+                        view_index,
+                        pane_id,
+                        node_id,
+                        action_id,
                         values,
-                        popup.column_types,
+                        column_types,
                     );
                 }
                 ContentFormEvent::Cancelled => {
@@ -10556,6 +10608,7 @@ impl App {
             node_id,
             action_id,
             column_types,
+            pending: false,
         });
     }
 
@@ -10692,6 +10745,36 @@ impl App {
         });
     }
 
+    /// Finish a custom action on a content node: say what happened and reload
+    /// the pane it ran in. Shared by [`LoadMsg::ContentActionDone`] and the
+    /// form-popup variant [`LoadMsg::ContentFormActionDone`], which reaches
+    /// here once the popup is out of the way.
+    fn content_action_done(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        result: Result<String, String>,
+    ) {
+        let ok = result.is_ok();
+        match result {
+            Ok(msg) => self.notify(msg),
+            Err(msg) => {
+                self.set_query_error(Some(msg.clone()));
+                self.notification_bar.push(msg);
+            }
+        }
+        self.reload_content_pane_current_level(view_index, pane_id);
+        // A successful mutation in one subtab can change what a sibling subtab
+        // lists (e.g. bookmarking here vs. the bookmarks subtab) — invalidate
+        // the siblings so they reload on next switch instead of showing a
+        // stale row.
+        if ok {
+            if let Some(cv) = self.content_view_mut(view_index) {
+                cv.invalidate_sibling_subtabs();
+            }
+        }
+    }
+
     fn execute_content_action_form(
         &mut self,
         view_index: usize,
@@ -10746,9 +10829,12 @@ impl App {
                     Ok(message.unwrap_or_else(|| format!("{aid_for_msg} executed")))
                 }
                 Ok(_) => Ok(format!("{aid_for_msg} executed")),
-                Err(e) => Err(format!("Action failed: {aid_for_msg}: {e}")),
+                // The adapter's own sentence, unprefixed: when the form is
+                // still open this is what goes under its fields, and the form's
+                // heading already names the action.
+                Err(e) => Err(e.to_string()),
             };
-            let _ = tx.send(LoadMsg::ContentActionDone {
+            let _ = tx.send(LoadMsg::ContentFormActionDone {
                 view_index: vi,
                 pane_id: pid,
                 result,

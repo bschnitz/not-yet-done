@@ -3130,6 +3130,37 @@ views:
                 assert!(bound, "subtab `{}` binds `{key}` to {id}", view.name);
             }
         }
+
+        // Creating sits on its own `n` leader, on all four levels — it acts on
+        // the manager, so there is no level where it would not make sense. The
+        // two forms reach the manager as `on_container` custom actions (the
+        // root node, not the row under the cursor, which at the flat root does
+        // not exist); the editor road is a `create` action, which resolves the
+        // same root from the nav stack.
+        for view in &cfg.views {
+            for (id, key, kind) in [
+                ("new-service", "n s", "custom"),
+                ("new-timer", "n t", "custom"),
+                ("new-file", "n f", "create"),
+            ] {
+                let action = view
+                    .actions
+                    .iter()
+                    .find(|a| a.id.as_deref() == Some(id))
+                    .unwrap_or_else(|| panic!("subtab `{}` offers {id}", view.name));
+                assert!(
+                    action.key_strings().iter().any(|k| k == key),
+                    "subtab `{}` binds {id} to `{key}`",
+                    view.name
+                );
+                assert_eq!(action.action_type, kind, "{id} is a `{kind}` action");
+                assert_eq!(
+                    action.on_container,
+                    kind == "custom",
+                    "{id} addresses the manager"
+                );
+            }
+        }
     }
 
     /// The comment drill-down is reached through a `navigate` action, never

@@ -22,6 +22,10 @@ tokio       = { workspace = true }
 # (0.26100.x = systemd 261). Only the interfaces we speak are compiled in.
 zbus_systemd = { workspace = true }
 
+# The one-shot timer's "tomorrow at 9": a single instant, which is exactly
+# what this resolver does — a recurrence is systemd's job (see `calendar`).
+natural-date        = { path = "../natural-date" }
+
 not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-filter  = { path = "../not-yet-done-filter" }
 

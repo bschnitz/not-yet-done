@@ -70,8 +70,9 @@ pub const NOTHING: &str = "nothing";
 pub const BACKUPS_KEPT: usize = 10;
 
 /// The line that ends the buffer's header. Everything above it is stripped
-/// before the file is written; everything below it is the file.
-const CUT: &str = "# ---------------------------------------------------------------- 8< ---";
+/// before the file is written; everything below it is the file. Shared with
+/// [`crate::create`], whose new-file buffer has the same two halves.
+pub const CUT: &str = "# ---------------------------------------------------------------- 8< ---";
 
 /// The editing actions a level offers.
 ///
