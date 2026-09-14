@@ -1006,6 +1006,129 @@ nothing to show until a copy of an inert `fluidsynth.service` was laid into
 never sees it. Both probes were removed and `~/.config/systemd/user` compared
 by hash against its pre-state: identical.
 
+### Phase 6b — the security level
+
+**Delivers** `systemd-analyze security` as a level under every unit: one row
+per check, with its status, the exposure it contributes and the directive that
+would close it; the unit's overall score as a hidden column on the Services
+list; and `e h`, which prefills the unit's drop-in with the fix for the check
+under the cursor and opens it for review.
+
+### The questions, decided
+
+**The score is a column; the checks are the level.** systemd prints this
+analysis as a table with one overall score under it, and the score is the part
+everyone quotes — "9.4 UNSAFE". On this machine 21 of the 27 loaded user
+services score exactly 9.4, one 9.3, and four sit between 6.9 and 7.6. A number
+that is identical for four rows out of five sorts nothing and suggests nothing;
+what is actionable is the individual checks behind it. So the checks are the
+rows, and the score is a column on the list above them — worth having, because
+the handful of units that differ are the interesting ones, and hidden by
+default, because on the other twenty-one it is noise.
+
+That column costs one call for the whole listing rather than one per row:
+`systemd-analyze --user security` with no unit named reports every loaded
+service at once — 53 ms for 27 units here, against 8 ms for a single unit, so
+the shared call pays for itself at four rows. The same form is why the Unit
+files level carries no such column: it reports **loaded** services only, and a
+unit the manager has never touched is precisely that level's population.
+
+**Every check is a row, the ones that pass included.** A level that listed only
+the failures would answer "what is wrong" and never "what is already covered",
+and which of the two is being asked changes by the minute. Both are one query
+away (`[status, =, exposed]`), which is the trade
+[D2](#d2--filtering-is-a-query-not-configuration) already made for the unit
+levels themselves.
+
+**`status` is a word, because systemd answers three things.** The `set` field
+in the JSON is tri-state: `true`, `false`, and **null** for a check that cannot
+apply to a per-user service at all — `RemoveIPC=` is the only one on this
+systemd. A boolean column would have to file that third case under one of the
+other two and would misreport it either way, so the column says `ok`, `exposed`
+or `no-effect`. `exposure` is empty rather than `0` where a check passes, which
+is what makes `[exposure, gte, 0.3]` mean "what is still open, worst first"
+without a second clause about the status.
+
+**The fix is a curated table inside the adapter.** The plan said `enter` would
+jump into the drop-in edit "with that directive prefilled", which quietly
+assumed that the name of a check _is_ the directive that settles it. It is not
+— see below — so the adapter keeps a table of all 81 checks mapped to the lines
+that actually close them — and, for the three that have no line to write, a
+comment saying why: `RootDirectory=` versus `RootImage=` and `User=` versus
+`DynamicUser=` are a choice, and `RemoveIPC=` has no effect at user level at
+all. This is the one place in the crate
+that holds knowledge rather than reading it, and that is a real cost: a systemd
+release that adds a check adds a row here. The alternative was writing text
+into unit files that systemd ignores without a word of complaint, which is
+worse than offering nothing.
+
+**Hardening is an editor action, not a verb.** `e h` opens the same buffer,
+under the same `systemd-analyze verify` pass and the same backup as `e e`
+([phase 2](#phase-2--editing)), with the fix appended at the bottom under a
+comment naming the check. Nothing is written until the buffer is saved, so the
+action is also the way to _read_ what a fix would be. It appends rather than
+replaces, so hardening a second check adds a second stanza to the same drop-in;
+a repeated `[Service]` heading merges cleanly — measured, not assumed — which
+is why the stanza brings its own heading instead of parsing for one.
+
+**A timer is answered for by the service it triggers.** `systemd-analyze
+security` refuses a `.timer` outright ("is not a service unit"), and it is
+right to: a timer starts no processes of its own and has no sandbox to
+describe. But the question a user has while standing on a timer row is a real
+one, and its answer is one property away, so the level under a timer analyses
+`Unit=`. The rows name the unit they were measured on, and `e h` writes into
+_that_ unit's drop-in rather than the timer's.
+
+### What it took, beyond the plan
+
+**The name of a check is a display label, and the first hardening drop-in did
+nothing.** A probe service at 9.4 UNSAFE, given an 80-line drop-in built by
+taking every check's name as the line to write, came back at 2.2 OK with **23
+checks still exposed**. The reason is that many names are shorthand for a
+group: `CapabilityBoundingSet=~CAP_SET(UID|GID|PCAP)`,
+`CapabilityBoundingSet=~CAP_MAC_*`, and a `RestrictAddressFamilies=~…` with a
+literal ellipsis in it. None of those is valid configuration. Worse, only the
+address-family lines drew a journald warning; the capability lines were
+swallowed silently, and every capability that _did_ flip in that run turned out
+to have been dropped as a side effect of a different directive —
+`ProtectClock=yes` taking `CAP_SYS_TIME` and `CAP_WAKE_ALARM` with it,
+`PrivateDevices=yes` taking `CAP_MKNOD` and `CAP_SYS_RAWIO`. Not one explicit
+capability line had taken effect. So the table expands every group into the
+real capability names.
+
+**The table was measured rather than reasoned.** Each of the 78 fix lines was
+applied to a throwaway unit on its own and the check re-read: 78 of 78 flipped.
+Then the whole table at once, which took the probe from 9.4 UNSAFE to **0.2
+SAFE**. Reasoning about this file would have been cheaper and would have
+produced the 80-line drop-in above again.
+
+**Two checks cannot both pass, and that is systemd's arithmetic.**
+`ProtectClock=yes` implies `DeviceAllow=char-rtc r`, so the `DeviceAllow=`
+check stays exposed whenever the clock is protected — in either order, whatever
+the file says. It is documented in the level's own comments rather than worked
+around, because the alternative would be a table that quietly stops protecting
+the clock in order to make a column look tidy.
+
+**`RestrictAddressFamilies=` has two checks and only one line satisfies both.**
+The obvious fix for "all other address families are allowed" is
+`RestrictAddressFamilies=AF_UNIX` — which re-allows `AF_UNIX` and breaks the
+sibling check that had been passing. `RestrictAddressFamilies=none` satisfies
+both. Found by running the table as a whole, not by reading either check.
+
+**The action was declared as a verb, and the CLI answered "ok (no change)".**
+`harden` first carried `InputSpec::None`, so nothing ever called `prepare` and
+no buffer was ever built; the action reported success and did nothing. It needs
+`InputSpec::Editor`, like `edit`. Only an end-to-end run through the CLI
+surfaced it — the unit tests were all green, because there was nothing wrong
+with the code the action never reached.
+
+**The obvious key was taken, and the validator said so before the terminal
+did.** The level wanted `S` for security; capital `S` is the app-wide sort-mode
+key, and the view-config test failed with both claimants and both scopes
+named. It is on `H` for hardening. That the shipped example is parsed and
+validated by a test rather than trusted is what turned a key collision into a
+build failure instead of a key that silently does the wrong thing.
+
 ## Phase 7 — Beyond the user bus
 
 **Delivers** the system manager, and possibly remote hosts (`-H`) and

@@ -7917,6 +7917,78 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       template, and `★` on one keeps it as a saved query — the audit is kept
       by the user, not declared in the YAML.
 
+## systemd — the security level (phase 6b)
+
+`systemd-analyze security` as a level: one row per check, the score as a column
+on the list above it, and `e h` to write a fix. Needs the systemd tab. Do the
+writing half on a throwaway unit, not on something you depend on.
+
+- [ ] Services subtab (`t s`), any row, `H` — the Security level opens with one
+      row per check (81 on systemd 261) and a `Status` of `ok`, `exposed` or
+      `no-effect`, coloured green / amber / dim. The breadcrumb names the unit.
+- [ ] `Exposure` is **blank** on every `ok` row and carries a number on the
+      exposed ones. Sort by it (`c s`): the column sorts numerically, not as
+      text — `0.5` above `0.2`, and the blanks together at one end.
+- [ ] `q` → `[status, =, exposed]` narrows to what is still open;
+      `[status, "!=", exposed]` shows the passing rows **and** the `no-effect`
+      one. There is exactly one of the latter on a user manager, `RemoveIPC=`
+      — the check that cannot apply here at all. Its `Exposure` is blank and
+      its `Fix` is too.
+- [ ] `[exposure, gte, 0.3]` returns only exposed rows without a word about the
+      status. A passing check has no exposure rather than an exposure of zero,
+      which is what makes the short query correct.
+- [ ] The `Fix` column is not a copy of `Check`. Find a group check —
+      `CapabilityBoundingSet=~CAP_SET(UID|GID|PCAP)` or one of the `CAP_MAC_*`
+      rows — and read its `Fix`: the capabilities are spelled out
+      individually. That difference is the whole point of the column; the name
+      in `Check` is a label systemd prints, and writing it into a unit file
+      does nothing at all.
+- [ ] Services subtab: `c c` switches on the hidden `Exposure` column. Every
+      loaded service has a score, most of them the same one. Cross-check a few
+      against `systemd-analyze --user security` in a terminal — same units,
+      same numbers — and note that the whole listing is no slower to load: the
+      scores arrive from one call, not one per row.
+- [ ] `[exposure, lt, 9.0]` on the Services level returns exactly the units
+      that are hardened at all. On a stock system that is a handful.
+- [ ] Unit files subtab (`t u`), a `.service` row the manager has **never
+      loaded** (`Origin` says where it lives; `systemctl --user is-active` says
+      `inactive`), `H` — the level opens anyway. This is the one level that can
+      ask the question about a unit with no D-Bus object, because the analysis
+      reads the file.
+- [ ] Same subtab, a `.socket` or `.target` row, `H` — it refuses, in systemd's
+      own words ("Unit … is not a service unit, refusing."). An empty table
+      would have read as "nothing to find" instead of "wrong question".
+- [ ] Timers subtab (`t t`), any row, `H` — the level opens on the service the
+      timer **triggers**, not on the timer. The busy line says which unit is
+      being analysed, and the `Id` column (switch it on with `c c`) confirms it
+      by naming that unit. If the machine has no user timers, write a pair with
+      `n t` first and remove it afterwards.
+- [ ] `e h` on an exposed row of a throwaway unit opens the drop-in buffer with
+      the unit's existing drop-in unchanged and, at the bottom, a comment
+      naming the check and description followed by `[Service]` and the fix
+      line. Leave without saving: nothing is written, and the row does not
+      move. That is the read-only way to use the action.
+- [ ] Save it. The manager reloads, and the row's `Status` flips to `ok` with
+      an empty `Exposure` — `r` if the level was open before the write. The
+      unit's overall score on the Services level has dropped by that check's
+      exposure.
+- [ ] Do it a second time on another check. The buffer comes up with the first
+      stanza already in it and the second appended below, each under its own
+      `[Service]` heading — a repeated section header is fine, and systemd
+      merges them. Both checks read `ok` afterwards.
+- [ ] `e h` on `RootDirectory=/RootImage=`, `User=/DynamicUser=` or
+      `RemoveIPC=` writes **comments only** — a sentence saying why there is no
+      single line. Saving it changes nothing and the check stays as it was,
+      which is the honest outcome for a check no directive settles.
+- [ ] The one conflict worth knowing: harden `ProtectClock=` and then look at
+      `DeviceAllow=`. It stays `exposed`, and no ordering of the two fixes
+      changes that — `ProtectClock=yes` implies `DeviceAllow=char-rtc r`.
+      Not a gap in the fix table.
+- [ ] Undo the whole session with `systemctl --user revert <unit>` (or delete
+      the throwaway unit and `systemctl --user daemon-reload`) and confirm the
+      level reads as it did at the start. The previous buffer versions are
+      under `~/.local/share/not_yet_done/systemd-backups/<unit>/` either way.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

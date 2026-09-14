@@ -76,12 +76,14 @@ use crate::edit;
 use crate::journal;
 use crate::live;
 use crate::model::{
-    LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, log_columns, log_type,
-    manager_type, property_columns, property_rows, property_type, service_columns, service_type,
-    timer_columns, timer_type, unit_file_columns, unit_file_type,
+    LogRow, PropertyRow, SecurityRow, ServiceRow, TimerRow, UnitFileRow, boot_instant, log_columns,
+    log_type, manager_type, property_columns, property_rows, property_type, security_columns,
+    security_type, service_columns, service_type, timer_columns, timer_type, unit_file_columns,
+    unit_file_type,
 };
 use crate::protect::Protection;
 use crate::query::{self, UnitQuery};
+use crate::security;
 
 /// Id of the adapter root, addressable via [`ContentAdapter::get_by_id`].
 const ROOT_ID: &str = "root";
@@ -227,6 +229,10 @@ impl ContentAdapter for SystemdAdapter {
             let row = journal::entry(self.bus().manager(), unit, cursor).await?;
             return Ok(Box::new(self.node(row.summary())));
         }
+        if let Some((unit, field)) = security::parse_id(id) {
+            let row = security::check(self.bus().manager(), unit, field).await?;
+            return Ok(Box::new(self.node(row.summary())));
+        }
         if deps::parse(id).is_some() {
             let row = deps::row_by_id(self.bus(), id).await?;
             return Ok(Box::new(self.node(row.summary())));
@@ -260,6 +266,11 @@ impl ContentAdapter for SystemdAdapter {
         // a unit's log needs no D-Bus object, only a name, so a unit the
         // manager has never loaded still has a journal from the last time it
         // ran. Properties are the opposite and stay where the object is.
+        // The security level hangs off both for the same reason as the
+        // journal: `systemd-analyze security` reads files, not bus objects, so
+        // a unit the manager never loaded still answers. Under a timer it
+        // answers about the service the timer triggers — see
+        // [`SystemdAdapter::triggered_unit`].
         // A dependency row hangs under itself: that is what makes the needs
         // level a tree. The ordering level does not — see [`crate::deps`].
         if type_id == deps::dep_type().type_id {
@@ -293,15 +304,27 @@ impl ContentAdapter for SystemdAdapter {
                     columns: log_columns(),
                     list: Box::new(move |params| Box::pin(self.list_journal(id, params))),
                 },
+                Child {
+                    node_type: security_type(),
+                    columns: security_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_security(id, params))),
+                },
             ];
         }
         if type_id == unit_file_type().type_id {
             let id = node.id();
-            return vec![Child {
-                node_type: log_type(),
-                columns: log_columns(),
-                list: Box::new(move |params| Box::pin(self.list_journal(id, params))),
-            }];
+            return vec![
+                Child {
+                    node_type: log_type(),
+                    columns: log_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_journal(id, params))),
+                },
+                Child {
+                    node_type: security_type(),
+                    columns: security_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_security(id, params))),
+                },
+            ];
         }
         if type_id != manager_type().type_id {
             return Vec::new();
@@ -352,6 +375,7 @@ impl ContentAdapter for SystemdAdapter {
         actions.extend(edit::actions_for(&node_type.type_id, manager));
         actions.extend(create::actions_for(&node_type.type_id, manager));
         actions.extend(journal::actions_for(&node_type.type_id));
+        actions.extend(security::actions_for(&node_type.type_id, manager));
         actions
     }
 
@@ -413,11 +437,21 @@ impl SystemdAdapter {
             .status()
             .busy("Reading services", self.shared.timeout_secs);
         let units = self.units_with_suffix(".service").await?;
-        let rows = self
+        let mut rows = self
             .with_properties(units, SERVICE_IFACE, |entry, unit, own| {
                 ServiceRow::build(entry, unit, own)
             })
             .await;
+        // One `systemd-analyze security` call for the whole level rather than
+        // one per row: 53 ms for every loaded service against 8 ms for a
+        // single one, so the shared read is what makes the column affordable
+        // at all. A unit the overview does not name keeps an empty cell.
+        let exposure = security::overview(self.bus().manager()).await;
+        for row in &mut rows {
+            if let Some(score) = exposure.get(&row.name) {
+                row.exposure = score.clone();
+            }
+        }
         Ok(finish(
             query::retain(rows, &query)
                 .iter()
@@ -598,6 +632,65 @@ impl SystemdAdapter {
             .map(LogRow::summary)
             .collect();
         Ok(sorted_page(items, &params.sort, window, page.has_more))
+    }
+
+    /// What `systemd-analyze security` says about the unit the user drilled
+    /// into.
+    ///
+    /// Every check is a row, passing ones included: a level that showed only
+    /// the failures would answer "what is wrong" and never "what is already
+    /// covered", and which of the two is wanted is what a query decides
+    /// (`[status, =, exposed]`).
+    async fn list_security(&self, node_id: &str, params: ListParams) -> Result<ListResult> {
+        let query = compile(params.query.as_deref(), query::SECURITY_COLUMNS)?;
+        // A timer is answered for by the service it triggers — see
+        // [`Self::triggered_unit`]. Everywhere else the row is the unit.
+        let unit = match node_id.strip_prefix(crate::TIMER_PREFIX) {
+            Some(timer) => self.triggered_unit(timer).await?,
+            None => node_id
+                .strip_prefix(crate::SERVICE_PREFIX)
+                .or_else(|| node_id.strip_prefix(crate::UNIT_FILE_PREFIX))
+                .ok_or_else(|| ContentError::NotFound(format!("{node_id} is not a unit")))?
+                .to_string(),
+        };
+        let _busy = self
+            .shared
+            .status
+            .busy(&format!("Analysing {unit}"), self.shared.timeout_secs);
+        let rows = security::checks(self.bus().manager(), &unit).await?;
+        Ok(finish(
+            query::retain(rows, &query)
+                .iter()
+                .map(SecurityRow::summary)
+                .collect(),
+            &params.sort,
+            &security_columns(),
+        ))
+    }
+
+    /// The unit a timer triggers — what a timer's security level is about.
+    ///
+    /// `systemd-analyze security` refuses a `.timer` outright ("is not a
+    /// service unit"), and it is right to: a timer starts no processes of its
+    /// own, so it has no sandbox to describe. What it does have is a service
+    /// it starts, and that service's sandbox is the question the level is
+    /// opened to answer. So the level under a timer analyses `Unit=` —
+    /// `<name>.service` unless the timer names something else — and the rows
+    /// say so, because each one carries the unit it was measured on and the
+    /// harden action writes into *that* unit's drop-in.
+    ///
+    /// A timer without `Unit=` is not something systemd produces, but an empty
+    /// name would analyse whatever came next in the command line. Falling back
+    /// to the timer itself means systemd refuses in its own words instead.
+    async fn triggered_unit(&self, timer: &str) -> Result<String> {
+        let entry = self.find_unit(timer).await?;
+        let props = self.bus().properties(&entry.path, TIMER_IFACE).await;
+        let unit = crate::model::as_str(&props, "Unit");
+        Ok(if unit.is_empty() {
+            timer.to_string()
+        } else {
+            unit
+        })
     }
 
     /// The loaded units whose name ends in `suffix` — how a level picks its
@@ -884,6 +977,9 @@ impl UnitNode {
             .or_else(|| self.id.strip_prefix(crate::TIMER_PREFIX))
             .or_else(|| self.id.strip_prefix(crate::UNIT_FILE_PREFIX))
             .or_else(|| deps::unit_of(&self.id))
+            // A security row is about one unit too, and the drop-in the harden
+            // action opens is that unit's.
+            .or_else(|| security::unit_of(&self.id))
     }
 
     /// The checks every verb passes before it reaches the manager, in the order
@@ -927,7 +1023,12 @@ impl UnitNode {
     /// rather than after a buffer has been filled in.
     async fn edit_target(&self, action_id: &str) -> Result<edit::Target> {
         let layer = match action_id {
-            edit::EDIT => edit::Layer::DropIn,
+            // Hardening asks for a drop-in: the point is to add directives to
+            // a unit somebody else ships, not to take a copy of it. `resolve`
+            // still has the last word — a unit that already loads from the
+            // user's own tree is edited in place, because there is nothing
+            // underneath to preserve.
+            edit::EDIT | security::HARDEN => edit::Layer::DropIn,
             edit::EDIT_FULL => edit::Layer::Full,
             other => {
                 return Err(ContentError::NotSupported(format!(
@@ -1175,7 +1276,17 @@ impl Node for UnitNode {
     async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         let target = self.edit_target(action_id).await?;
         let state = edit::state(&self.shared.bus, &target.unit).await;
-        let body = edit::body(&target);
+        let mut body = edit::body(&target);
+        // Hardening opens the same drop-in as `edit`, with one check's answer
+        // already typed into it — at the end, appended, so whatever the file
+        // already says is still there and still first.
+        if action_id == security::HARDEN {
+            let (_, field) = security::parse_id(&self.id).ok_or_else(|| {
+                ContentError::NotSupported("this row is not a security check".into())
+            })?;
+            let row = security::check(self.shared.bus.manager(), &target.unit, field).await?;
+            body.push_str(&security::drop_in(&row));
+        }
         Ok(EditorPrep {
             template: edit::template(&target, &state, &body, &[]),
             version: edit::version(&target),
@@ -1218,7 +1329,9 @@ impl Node for UnitNode {
         _args: &ActionArgs,
     ) -> Result<ActionOutcome> {
         match action_id {
-            edit::EDIT | edit::EDIT_FULL => self.save_unit_file(action_id, input).await,
+            edit::EDIT | edit::EDIT_FULL | security::HARDEN => {
+                self.save_unit_file(action_id, input).await
+            }
             edit::APPLY => self.apply(input).await,
             _ => self.run_verb(action_id, input).await,
         }
@@ -1252,14 +1365,14 @@ mod tests {
         );
     }
 
-    /// The child levels answer four different questions about a unit, and only
+    /// The child levels answer five different questions about a unit, and only
     /// the ones that read the manager's object need it to have loaded the unit.
     #[test]
     fn properties_need_a_loaded_unit_and_the_journal_does_not() {
         let a = adapter();
         // A service is loaded, so the manager holds an object that can be
         // asked what it needs, what it is ordered against and what it is — and
-        // it has a journal like anything else.
+        // it has a journal, and an analysis, like anything else.
         let service = a.node(ServiceRow::default().summary());
         let under: Vec<String> = a
             .childs(&service)
@@ -1272,7 +1385,8 @@ mod tests {
                 "systemd:dep",
                 "systemd:order",
                 "systemd:property",
-                "systemd:log"
+                "systemd:log",
+                "systemd:security"
             ]
         );
 
@@ -1299,15 +1413,15 @@ mod tests {
         assert_eq!(under, vec!["systemd:dep"]);
 
         // A unit file may never have been loaded — there is no object behind
-        // it and therefore no properties. Its journal is still readable: that
-        // takes a name, not an object.
+        // it and therefore no properties. Its journal and its security analysis
+        // are still readable: both take a name, not an object.
         let file = a.node(UnitFileRow::default().summary());
         let under: Vec<String> = a
             .childs(&file)
             .into_iter()
             .map(|c| c.node_type.type_id)
             .collect();
-        assert_eq!(under, vec!["systemd:log"]);
+        assert_eq!(under, vec!["systemd:log", "systemd:security"]);
 
         // And a property is where the drilling stops.
         let prop = a.node(PropertyRow::default().summary());

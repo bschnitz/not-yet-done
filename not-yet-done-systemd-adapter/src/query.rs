@@ -21,7 +21,7 @@ use not_yet_done_filter::eval::{self, Field, RowFields};
 use not_yet_done_filter::{FilterExpr, query_filter};
 
 use crate::deps::DepRow;
-use crate::model::{LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow};
+use crate::model::{LogRow, PropertyRow, SecurityRow, ServiceRow, TimerRow, UnitFileRow};
 
 /// Columns a Services query may reference.
 pub const SERVICE_COLUMNS: &[&str] = &[
@@ -40,6 +40,7 @@ pub const SERVICE_COLUMNS: &[&str] = &[
     "needs_reload",
     "dropins",
     "fragment",
+    "exposure",
 ];
 
 /// Columns a Timers query may reference.
@@ -70,6 +71,22 @@ pub const PROPERTY_COLUMNS: &[&str] = &["name", "value", "interface"];
 /// (`[level, =, err]`). Both are queryable because a person writing the query
 /// by hand reaches for whichever is on their screen.
 pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
+
+/// Columns a Security query may reference.
+///
+/// `status` is the word and `exposure` the number, and they answer two
+/// different questions: `[status, =, exposed]` is "what is open", while
+/// `[exposure, gte, 0.3]` is "what is open and actually costs something". `id`
+/// is systemd's own stable name for the check, which is what a query about a
+/// family of checks reaches for (`[id, like, 'Capability%']`).
+pub const SECURITY_COLUMNS: &[&str] = &[
+    "check",
+    "status",
+    "exposure",
+    "description",
+    "fix",
+    "id",
+];
 
 /// Columns either dependency query may reference.
 ///
@@ -178,6 +195,10 @@ impl RowFields for ServiceRow {
             "needs_reload" => Field::Bool(self.needs_reload),
             "dropins" => Field::Number(self.dropins as f64),
             "fragment" => text_or_null(&self.fragment),
+            "exposure" => match self.exposure.trim().parse::<f64>() {
+                Ok(n) => Field::Number(n),
+                Err(_) => Field::Null,
+            },
             // Unreachable: parse() validated the column set up front.
             _ => Field::Null,
         }
@@ -221,6 +242,25 @@ impl RowFields for LogRow {
             "prio" => num_or_null(self.prio),
             "pid" => num_or_null(self.pid),
             "message" => text_or_null(&self.message),
+            _ => Field::Null,
+        }
+    }
+}
+
+impl RowFields for SecurityRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "check" => text_or_null(&self.check),
+            "status" => text_or_null(&self.status),
+            // Null and not zero on a passing check: zero would answer
+            // `[exposure, lte, 0.1]` with every check the unit already passes.
+            "exposure" => match self.exposure {
+                Some(n) => Field::Number(n),
+                None => Field::Null,
+            },
+            "description" => text_or_null(&self.description),
+            "fix" => text_or_null(&self.fix),
+            "id" => Field::Text(Cow::Borrowed(&self.id)),
             _ => Field::Null,
         }
     }
