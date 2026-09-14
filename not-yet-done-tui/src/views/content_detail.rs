@@ -66,6 +66,7 @@ fn detail_column(key: &str, label: &str, sizing: String, style: Option<&str>) ->
         format: None,
         separator: None,
         elapsed_from: None,
+        countdown_to: None,
         tree_aggregate: None,
         hidden: false,
     }

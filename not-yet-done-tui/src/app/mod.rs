@@ -353,6 +353,17 @@ pub enum LoadMsg {
     /// view is active, otherwise it marks the view due in
     /// `pending_live_refresh` for a single coalesced refresh on switch-back.
     LiveTick { view_index: usize },
+    /// One beat of the **repaint pulse**: the ~1 Hz heartbeat that advances
+    /// time-derived cells (`kind: elapsed`, `kind: countdown`) without any
+    /// refetch. Carries nothing — the handler recomputes the visible panes
+    /// that actually have such a column against a fresh `now` and marks the
+    /// frame dirty only if one of them did, so a view without a live column
+    /// costs a channel message and nothing else.
+    ///
+    /// Distinct from [`LoadMsg::LiveTick`], which paces an adapter's
+    /// *refetch*: this one never talks to an adapter and never changes a
+    /// cell's underlying value, only the clock it is rendered against.
+    RepaintPulse,
     /// In-flight retry progress for a failed content/drill/tree load on
     /// `view_index` / `pane_id`. Updates the pane's `retry_state` so
     /// the auth-status banner reads `"Retrying (n/total): {err}"`
@@ -1659,7 +1670,43 @@ impl App {
         // them readable from anywhere, and copyable.
         app.log_config_problems();
 
+        app.start_repaint_pulse();
+
         app
+    }
+
+    /// Start the ~1 Hz repaint pulse that makes `kind: elapsed` and
+    /// `kind: countdown` cells advance.
+    ///
+    /// The engine has always been able to *recompute* those cells
+    /// ([`ContentView::repaint_live_columns`]); what it lacked was anything
+    /// to ask it to. The original driver was the task tracker's own
+    /// heartbeat, which only beats while a tracking runs — so a countdown in
+    /// a systemd or calendar tab stood still for anyone not tracking time,
+    /// which is to say it was not live at all. The pulse is therefore the
+    /// app's own, unconditional and independent of any adapter.
+    ///
+    /// One second is the resolution of the smallest unit either kind prints.
+    /// Idle cost is one message per second plus a walk over the visible
+    /// panes' column lists; nothing is redrawn unless a pane really was
+    /// rebuilt, so a session parked on a tab without a live column stays as
+    /// quiet as it was before.
+    fn start_repaint_pulse(&self) {
+        // A headless construction (tests, `--keymap`) has no reactor to spawn
+        // onto, and nothing to repaint either.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let tx = self.load_tx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                ticker.tick().await;
+                if tx.send(LoadMsg::RepaintPulse).is_err() {
+                    return; // app gone
+                }
+            }
+        });
     }
 
     /// Apply the jump-mode label alphabet (`navigation.jump_chars`) to
@@ -2326,9 +2373,11 @@ impl App {
     ///   node's children (a message in the open channel reloads; one in
     ///   any other channel costs nothing).
     /// - [`Invalidation::Repaint`] → no pane reloads (no refetch), but the
-    ///   live (`kind: elapsed`) panes are rebuilt in place against a fresh
-    ///   `now` so a time-derived cell (e.g. a running "elapsed" duration)
-    ///   advances; the rebuild marks the frame dirty.
+    ///   live (`kind: elapsed` / `kind: countdown`) panes are rebuilt in
+    ///   place against a fresh `now` so a time-derived cell advances; the
+    ///   rebuild marks the frame dirty. An adapter that knows its own
+    ///   cadence can push this; the app's own [`LoadMsg::RepaintPulse`]
+    ///   drives the same recompute once a second regardless.
     fn handle_adapter_invalidation(
         &mut self,
         view_index: usize,
@@ -2337,8 +2386,9 @@ impl App {
         use not_yet_done_content::Invalidation;
         // Repaint is redraw-only: no refetch. But the table rows are
         // pre-built and cached, so a dirty frame alone would redraw a stale
-        // string for a time-derived cell. Recompute the live (`kind:
-        // elapsed`) panes in place against a fresh `now`, then fall through
+        // string for a time-derived cell. Recompute the live (`kind: elapsed`
+        // / `kind: countdown`) panes in place against a fresh `now`, then
+        // fall through
         // — the rebuild marks the frame dirty so the new value is drawn.
         if matches!(inv, Invalidation::Repaint) {
             if let Some(cv) = self.content_view_mut(view_index) {
@@ -4665,6 +4715,18 @@ impl App {
                             self.reload_content_pane_current_level(view_index, pane_id);
                         }
                     }
+                }
+                LoadMsg::RepaintPulse => {
+                    // Only the visible tab: a background tab redraws from
+                    // scratch when it is switched to, so ticking it would be
+                    // work nobody sees. `repaint_live_columns` reports whether
+                    // any pane actually had a live column — if none did, the
+                    // frame stays clean and the pulse costs nothing.
+                    let Tab::Content(view_index) = self.active_tab;
+                    let repainted = self
+                        .content_view_mut(view_index)
+                        .is_some_and(|cv| cv.repaint_live_columns());
+                    return repainted;
                 }
                 LoadMsg::LiveTick { view_index } => {
                     // A background tab's tick must not touch the visible tab:

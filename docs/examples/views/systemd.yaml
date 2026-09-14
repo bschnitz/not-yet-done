@@ -142,12 +142,13 @@ views:
         label: CPU
         kind: duration
         sizing: "fixed(9)"
-      # Raw bytes on purpose: a pre-formatted "95.4 MiB" sorts as text and
-      # cannot be compared in a query. Until the table engine grows a
-      # `kind: bytes`, this column shows the number.
+      # The adapter sends the raw byte count — a pre-formatted "95.4 MiB"
+      # sorts as text and cannot be compared in a query — and `kind: bytes`
+      # renders it on the binary scale. `[mem, gt, 104857600]` still means
+      # what it says.
       - key: mem
         label: Mem
-        kind: number
+        kind: bytes
         sizing: "fixed(11)"
       - key: tasks
         label: Tasks
@@ -939,13 +940,15 @@ views:
     tree_label: name
 
     # Columns on this level: name, description, active, sub, enabled, next,
-    # left, last, unit, result, persistent.
+    # last, unit, result, persistent. (`left` and `passed` are derived by the
+    # table engine from `next` and `last`, so they cannot be queried — query
+    # the instant instead.)
     query:
       editable: true
       menu_key: q
       template: |
         # Filter the loaded timers. Columns: name, description, active, sub,
-        # enabled, next, left, last, unit, result, persistent.
+        # enabled, next, last, unit, result, persistent.
         #
         #   query:
         #     [result, '!=', success]          # a timer whose unit failed
@@ -967,10 +970,14 @@ views:
         label: Next
         kind: datetime
         sizing: max
-      # Adapter-formatted ("2h 15min"), so it cannot be sorted on — sort by
-      # `next`, which is the same order and is a real instant.
+      # No value of its own — the mirror of `passed` below: the engine renders
+      # `next` − now and ticks it live, on a two-unit scale ("1w 2d", "5h
+      # 24min", "13s"). A timer whose elapse has passed counts on downwards
+      # with a leading "-", which is how one sees that it is late.
       - key: left
         label: Left
+        kind: countdown
+        countdown_to: next
         style: secondary
         sizing: "fixed(10)"
       - key: last

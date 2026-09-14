@@ -388,18 +388,22 @@ is `text` — every existing (remote) column therefore stays unchanged.
 - { key: count, source: count, kind: number } # right-aligned
 - { key: taskpath, source: taskpath, kind: path, separator: " › " }
 - { key: running, kind: elapsed, elapsed_from: started } # live now − started
+- { key: left, kind: countdown, countdown_to: next } # live next − now
+- { key: mem, source: mem, kind: bytes } # 95.4 MiB, right-aligned
 ```
 
-| `kind:`    | Canonical adapter input              | Display                           | Alignment |
-| ---------- | ------------------------------------ | --------------------------------- | --------- |
-| `text`     | anything                             | unchanged                         | left      |
-| `number`   | decimal number (`"42"`)              | unchanged                         | right     |
-| `duration` | integer **seconds** (`"5400"`)       | `H:MM:SS` (via `format_duration`) | right     |
-| `datetime` | RFC 3339 (`"2026-06-09T08:15:00Z"`)  | local time zone, `%Y-%m-%d %H:%M` | left      |
-| `path`     | `/`-separated segments (`"/a/b/c"`)  | joined with `separator:`, styled  | left      |
-| `elapsed`  | _no own value_ — reads another field | `now − field` as `H:MM:SS`, live  | right     |
+| `kind:`     | Canonical adapter input              | Display                           | Alignment |
+| ----------- | ------------------------------------ | --------------------------------- | --------- |
+| `text`      | anything                             | unchanged                         | left      |
+| `number`    | decimal number (`"42"`)              | unchanged                         | right     |
+| `duration`  | integer **seconds** (`"5400"`)       | `H:MM:SS` (via `format_duration`) | right     |
+| `datetime`  | RFC 3339 (`"2026-06-09T08:15:00Z"`)  | local time zone, `%Y-%m-%d %H:%M` | left      |
+| `path`      | `/`-separated segments (`"/a/b/c"`)  | joined with `separator:`, styled  | left      |
+| `elapsed`   | _no own value_ — reads another field | `now − field` as `H:MM:SS`, live  | right     |
+| `countdown` | _no own value_ — reads another field | `field − now`, coarse, live       | right     |
+| `bytes`     | a byte count (`"99999744"`)          | binary scale (`95.4 MiB`)         | right     |
 
-Three optional companion fields:
+Four optional companion fields:
 
 - **`format:`** — only for `datetime`: a strftime pattern replacing the
   default `%Y-%m-%d %H:%M` (e.g. `format: "%H:%M"`).
@@ -413,6 +417,30 @@ Three optional companion fields:
   how, for instance, the running time of an active tracking ticks live. An
   instant in the future (clock drift) is clamped to `00`, an empty field stays
   empty, and an unparsable value is shown unchanged.
+- **`countdown_to:`** — only for `kind: countdown`: the mirror of
+  `elapsed_from:`. The key of the `datetime` field to count **towards**; the
+  default is the column's own `key`, which is rarely what a countdown wants —
+  a countdown column usually has no value of its own. It renders
+  `<countdown_to> − now` and ticks on the same repaint pulse as `elapsed`.
+
+**The countdown scale.** A countdown is read at a glance, so it names the
+largest non-zero unit and the next one down, and nothing below that: `1w 2d`,
+`2d 13h`, `5h 24min`, `24min 13s`, `13s`. A zero remainder is dropped (`5h`,
+not `5h 0min`), and the span is **truncated, never rounded** — a countdown
+must not claim more time than is left. The ladder stops at weeks on purpose:
+every unit up to a week is a fixed span, while a month is not (`1mo` differs
+in February and in July), and at that distance the instant column beside it is
+the honest answer anyway. A target already in the past counts on downwards
+with a leading `-` (`-10min`) rather than clamping to zero — a calendar's
+countdown column spends half its life on events that have already begun, and
+`0s` hides exactly the thing one looks at it for.
+
+**The bytes scale.** `kind: bytes` divides by 1024 and names the unit (`B`,
+`KiB`, `MiB`, `GiB`, `TiB`, `PiB`). Below 100 it keeps one decimal (`1.2 GiB`,
+`95.4 MiB`), above it rounds to whole units (`512 MiB`); a raw byte count
+stays an integer (`512 B`). The point is that the **adapter keeps sending the
+number** — `[mem, gt, 104857600]` remains a comparison, which it would not be
+against a pre-formatted `"95.4 MiB"`.
 
 **Why it exists:** without `kind:` every adapter would have to pre-format
 duration/date/path for display itself — either as an unaligned raw string or
@@ -422,11 +450,13 @@ typed columns the **machine-readable** value stays the source of truth
 the separator styling of the taskpath column are a generic engine feature
 instead of copy-and-paste per adapter. The type deliberately lives in the view
 YAML and not on the adapters' `MetadataField`, so that remote adapters (Jira,
-Taiga, Postgres, Confluence, Stoat) need not change a line. `elapsed` is
-additionally the only **time-dependent** type: its value depends only on the
-display time, not on the loaded data — driven by the `Repaint` signal of the
-domain event bus, the engine re-renders the affected panes per tick without
-reloading.
+Taiga, Postgres, Confluence, Stoat) need not change a line. `elapsed` and
+`countdown` are additionally the only **time-dependent** types: their value
+depends only on the display time, not on the loaded data. A **repaint pulse**
+beats once a second in the app itself and re-renders only the visible panes
+that actually carry such a column — no refetch, and a clean frame when there
+is none. An adapter that knows a cadence of its own can push the same
+recompute as `Invalidation::Repaint`.
 
 #### `smooth_scroll:` — continuous line-wise scrolling
 
