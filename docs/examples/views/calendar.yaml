@@ -168,6 +168,16 @@ views:
         kind: datetime
         style: secondary
         sizing: max
+      # No value of its own: the table engine renders `start` − now and ticks
+      # it live, so the next meeting counts down in place instead of going
+      # stale between loads. An event that has already begun counts on with a
+      # leading "-", which is the honest answer for a row that is happening.
+      - key: starts_in
+        label: In
+        kind: countdown
+        countdown_to: start
+        style: tertiary
+        sizing: "fixed(10)"
       - key: account
         label: Account
         style: tertiary

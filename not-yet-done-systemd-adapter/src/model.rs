@@ -12,10 +12,11 @@
 //! rule, and it is what keeps a column sortable and filterable: `[mem, gt,
 //! 100000000]` means something, `[mem, gt, "95.4 MiB"]` does not.
 //!
-//! The one exception is a timer's `left`, which is a **countdown** —
-//! `field − now` — where the engine's `kind: elapsed` only computes `now −
-//! field`. Until that gap is closed (phase 5) the adapter formats the string
-//! itself, and `next` is the column that sorts.
+//! There is no exception any more. A timer's `left` used to be one: a
+//! **countdown** — `field − now` — where the engine only knew `kind: elapsed`,
+//! `now − field`. The engine now has `kind: countdown` with a `countdown_to:`
+//! source field, so `left` is not a cell at all: the view derives it from
+//! `next`, ticking live between loads, and `next` is what sorts.
 
 use std::collections::HashMap;
 
@@ -205,25 +206,6 @@ fn flag(value: bool) -> String {
     if value { "yes".into() } else { String::new() }
 }
 
-/// A countdown to `target`, rendered the way `systemctl list-timers` renders it.
-///
-/// Empty when there is no target; `0` once the target is in the past, because a
-/// timer whose elapse has passed is about to fire, not overdue by a negative
-/// amount.
-fn countdown(target: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
-    let Some(target) = target else {
-        return String::new();
-    };
-    let secs = (target - now).num_seconds().max(0);
-    let (d, h, m, s) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
-    match (d, h, m) {
-        (0, 0, 0) => format!("{s}s"),
-        (0, 0, _) => format!("{m}min {s}s"),
-        (0, _, _) => format!("{h}h {m}min"),
-        _ => format!("{d}d {h}h"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
@@ -378,7 +360,7 @@ impl TimerRow {
         }
     }
 
-    pub fn summary(&self, now: DateTime<Utc>) -> NodeSummary {
+    pub fn summary(&self) -> NodeSummary {
         NodeSummary {
             id: format!("{}{}", crate::TIMER_PREFIX, self.name),
             label: self.name.clone(),
@@ -391,7 +373,6 @@ impl TimerRow {
                     field("sub", "Sub", self.sub.clone()),
                     field("enabled", "Enabled", self.enabled.clone()),
                     field("next", "Next", instant(self.next)),
-                    field("left", "Left", countdown(self.next, now)),
                     field("last", "Last", instant(self.last)),
                     field("unit", "Unit", self.unit.clone()),
                     field("result", "Result", self.result.clone()),
@@ -411,9 +392,6 @@ pub fn timer_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("sub", "Sub"),
         ColumnSchema::new("enabled", "Enabled"),
         ColumnSchema::new("next", "Next").typed("datetime"),
-        // Formatted here (see the module doc), so sorting on it would sort
-        // text. `next` is the same order, correctly.
-        ColumnSchema::new("left", "Left").unsortable(),
         ColumnSchema::new("last", "Last").typed("datetime"),
         ColumnSchema::new("unit", "Unit"),
         ColumnSchema::new("result", "Result"),
@@ -520,12 +498,7 @@ pub struct PropertyRow {
 impl PropertyRow {
     pub fn summary(&self) -> NodeSummary {
         NodeSummary {
-            id: format!(
-                "{}{}:{}",
-                crate::PROPERTY_PREFIX,
-                self.unit,
-                self.name
-            ),
+            id: format!("{}{}:{}", crate::PROPERTY_PREFIX, self.unit, self.name),
             label: self.name.clone(),
             node_type: property_type(),
             metadata: Metadata {
@@ -607,11 +580,7 @@ fn render_value(value: &Value<'_>) -> String {
         Value::ObjectPath(p) => p.to_string(),
         Value::Signature(s) => s.to_string(),
         Value::Value(inner) => render_value(inner),
-        Value::Array(a) => a
-            .iter()
-            .map(render_value)
-            .collect::<Vec<_>>()
-            .join(", "),
+        Value::Array(a) => a.iter().map(render_value).collect::<Vec<_>>().join(", "),
         Value::Structure(s) => s
             .fields()
             .iter()
@@ -656,9 +625,9 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            check_rows(&timer_columns(), &[timer.summary(now())]).is_empty(),
+            check_rows(&timer_columns(), &[timer.summary()]).is_empty(),
             "timer row is missing declared columns: {:?}",
-            check_rows(&timer_columns(), &[timer.summary(now())])
+            check_rows(&timer_columns(), &[timer.summary()])
         );
 
         let file = UnitFileRow {
@@ -679,28 +648,14 @@ mod tests {
     }
 
     #[test]
-    fn countdown_reads_like_list_timers_and_never_goes_negative() {
-        let n = now();
-        assert_eq!(countdown(None, n), "");
-        assert_eq!(countdown(Some(n - chrono::TimeDelta::hours(2)), n), "0s");
-        assert_eq!(countdown(Some(n + chrono::TimeDelta::seconds(45)), n), "45s");
-        assert_eq!(
-            countdown(Some(n + chrono::TimeDelta::seconds(150)), n),
-            "2min 30s"
-        );
-        assert_eq!(
-            countdown(Some(n + chrono::TimeDelta::minutes(150)), n),
-            "2h 30min"
-        );
-        assert_eq!(countdown(Some(n + chrono::TimeDelta::hours(50)), n), "2d 2h");
-    }
-
-    #[test]
     fn origin_names_the_search_path() {
         assert_eq!(origin("/usr/lib/systemd/user/dbus.service"), "vendor");
         assert_eq!(origin("/etc/systemd/user/thing.service"), "admin");
         assert_eq!(origin("/run/systemd/user/gen.service"), "runtime");
-        assert_eq!(origin("/home/someone/.config/systemd/user/a.service"), "user");
+        assert_eq!(
+            origin("/home/someone/.config/systemd/user/a.service"),
+            "user"
+        );
     }
 
     #[test]

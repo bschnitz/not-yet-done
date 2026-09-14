@@ -59,7 +59,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use futures::StreamExt;
 use not_yet_done_content::{Invalidation, Result};
 use tokio::sync::broadcast;
@@ -292,7 +291,7 @@ async fn push_row(bus: Arc<Bus>, inv: broadcast::Sender<Invalidation>, path: Own
     let summary = if iface == SERVICE_IFACE {
         ServiceRow::build(&entry, &unit, &own).summary()
     } else {
-        TimerRow::build(&entry, &unit, &own, boot_instant()).summary(Utc::now())
+        TimerRow::build(&entry, &unit, &own, boot_instant()).summary()
     };
     let _ = inv.send(Invalidation::Row(summary));
 }

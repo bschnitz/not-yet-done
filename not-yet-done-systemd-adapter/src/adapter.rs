@@ -61,7 +61,6 @@ use std::sync::Arc;
 use tokio::sync::{OnceCell, broadcast};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures::stream::{self, StreamExt};
 
 use not_yet_done_content::*;
@@ -204,7 +203,7 @@ impl ContentAdapter for SystemdAdapter {
             let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
             let timer = self.bus().properties(&entry.path, TIMER_IFACE).await;
             let row = TimerRow::build(&entry, &unit, &timer, boot_instant());
-            return Ok(Box::new(self.node(row.summary(Utc::now()))));
+            return Ok(Box::new(self.node(row.summary())));
         }
         if let Some(name) = id.strip_prefix(crate::UNIT_FILE_PREFIX) {
             let entry = self
@@ -442,11 +441,10 @@ impl SystemdAdapter {
                 TimerRow::build(entry, unit, own, boot)
             })
             .await;
-        let now = Utc::now();
         Ok(finish(
             query::retain(rows, &query)
                 .iter()
-                .map(|r| r.summary(now))
+                .map(|r| r.summary())
                 .collect(),
             &params.sort,
             &timer_columns(),
@@ -574,10 +572,10 @@ impl SystemdAdapter {
             offset: 0,
             limit: journal::DEFAULT_LIMIT,
         });
-        let _busy = self
-            .shared
-            .status
-            .busy(&format!("Reading the journal of {unit}"), self.shared.timeout_secs);
+        let _busy = self.shared.status.busy(
+            &format!("Reading the journal of {unit}"),
+            self.shared.timeout_secs,
+        );
         let page = journal::page(
             self.bus().manager(),
             unit,

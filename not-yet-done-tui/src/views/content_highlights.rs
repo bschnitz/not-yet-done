@@ -597,8 +597,8 @@ fn column_types(columns: &[ColumnDef]) -> ColumnTypes {
         .iter()
         .map(|col| {
             let value_type = match col.kind {
-                ColumnKind::Number => "number",
-                ColumnKind::Duration | ColumnKind::Elapsed => "duration",
+                ColumnKind::Number | ColumnKind::Bytes => "number",
+                ColumnKind::Duration | ColumnKind::Elapsed | ColumnKind::Countdown => "duration",
                 ColumnKind::Datetime => "datetime",
                 ColumnKind::Text | ColumnKind::Path => "text",
             };

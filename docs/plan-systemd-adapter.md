@@ -224,15 +224,15 @@ of its path and answers the cheap half of the same question.
 "95.4 MiB" sorts as text (the sort compares cell strings) and cannot be
 compared in a query, so the column would look right and behave wrong. The
 adapter therefore emits the number and the display gap moves to the table
-engine, which has no `kind: bytes`. That is the same shape as the parked
-`kind: countdown` below, and the two are decided together in
+engine, which had no `kind: bytes`. That is the same shape as the parked
+`kind: countdown` below, and the two were decided together and built in
 [phase 5](#phase-5--live).
 
 `left` is a **countdown** — `field − now`, into the future — where the table
 engine's `kind: elapsed` computes `now − field`. In this phase the adapter
 formats the string itself; that is the throwaway variant, which is exactly
-why it is right here. Whether the engine gets a generic `kind: countdown` is
-decided in phase 5.
+why it is right here. Phase 5 gave the engine a generic `kind: countdown` and
+threw this one away.
 
 **Anonymisation** is a footnote, not work: the default `StandardAnonymizer`
 already covers the adapter. Unit names are harmless, but `FragmentPath` and
@@ -829,6 +829,50 @@ the order the adapter declares — `Requires`, `Requisite`, `BindsTo`,
 happens when the dependency fails. Cycles are cut the same way they are shown:
 a unit already present higher up its own branch gets a row marked `(cycle)`
 and is not followed; depth stops at ten regardless.
+
+### What it took, beyond the plan — the typed-column half
+
+**The countdown had to pick a scale, and the scale is an argument.** The rule
+is the largest non-zero unit plus the next one down, and nothing below:
+`1w 2d`, `2d 13h`, `5h 24min`, `24min 13s`, `13s`. It stops at weeks because
+every unit up to a week is a **fixed span** — a week is always seven days —
+while a month is not: `1mo` would mean something different in February than in
+July, and a column cannot carry that ambiguity silently. A yearly timer
+therefore reads `52w 3d`, which is clumsy, but the `next` column beside it
+already names the date, and the date is the honest answer at that distance.
+Two smaller decisions fell out of the same reasoning: a zero remainder is
+dropped (`5h`, not `5h 0min`), and the span is truncated rather than rounded,
+so a countdown never claims more time than is left.
+
+**A past target counts negative rather than clamping.** The adapter's
+throwaway `countdown()` clamped to `0s`, on the argument that a timer whose
+elapse has passed is about to fire rather than overdue. That is true of
+timers and false of everything else the kind now serves: a calendar's
+countdown column spends half its life on events that have already begun, and
+`0s` hides exactly the thing one looks at it for. `-10min` is both, so the
+generic kind counts on downwards.
+
+**The live half was never wired up, and the countdown is what exposed it.**
+The engine could already recompute a time-derived cell
+(`ContentView::repaint_live_columns`, gated on `has_live_column`) — what it
+lacked was anything to ask it to. The only driver was `DomainEvent::TrackingTick`,
+the task tracker's own ~1 Hz heartbeat, which beats **only while a tracking
+runs** and which nothing in the shipped binary emits at all. So `kind: elapsed`
+had been standing still since it was built, and the systemd `Ago` column proved
+it: it moved on a keypress and never on its own. A countdown that only counts
+when you touch it is not a countdown, so the app now beats its own pulse — one
+second, independent of every adapter, recomputing only the visible panes that
+really carry such a column and leaving the frame clean when none do. An adapter
+with a cadence of its own can still push `Invalidation::Repaint` into the same
+recompute.
+
+**Putting the kinds in the engine deleted adapter code rather than adding
+any.** The systemd adapter lost the `left` cell, its `ColumnSchema`, the
+`countdown()` helper, its test and the `now` parameter that only that helper
+needed — `TimerRow::summary()` takes no clock any more. The proof that this
+was the right seam is the calendar: it got a live "starts in" column from four
+lines of view YAML over its existing `start` field, without the calendar
+adapter changing at all.
 
 ## Phase 6 — Diagnostics
 

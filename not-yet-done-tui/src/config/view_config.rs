@@ -1493,6 +1493,15 @@ pub struct ColumnDef {
     /// Ignored by every other kind.
     #[serde(default)]
     pub elapsed_from: Option<String>,
+    /// Source field key for `kind: countdown` — the mirror of
+    /// [`elapsed_from`](ColumnDef::elapsed_from). The cell renders `<this
+    /// field's datetime> − now`, recomputed on each repaint tick. Defaults
+    /// to the column's own `key` when omitted, which is rarely what a
+    /// countdown wants: the column that counts down is usually a second
+    /// view of the instant column beside it (`left` over `next`, "starts
+    /// in" over `start`). Ignored by every other kind.
+    #[serde(default)]
+    pub countdown_to: Option<String>,
     /// Tree-fold aggregation declaration (M4). When set, this column can show
     /// either its own per-node value (the `key` field) or the adapter-computed
     /// subtree-cumulated value (the `cumulated_field`), toggled at runtime via
@@ -1568,6 +1577,19 @@ pub enum ColumnKind {
     /// duration, right-aligned, recomputed on every repaint tick driven by
     /// the domain-event bus. See [`ColumnDef::elapsed_from`].
     Elapsed,
+    /// A live countdown — the mirror of [`Elapsed`](ColumnKind::Elapsed).
+    /// The cell holds no value of its own; it renders `<countdown_to field>
+    /// − now` on a coarse two-unit scale (`1w 2d`, `2d 13h`, `5h 24min`,
+    /// `24min 13s`, `13s`), right-aligned, recomputed on every repaint
+    /// tick. A target already past renders with a leading `-`, so an event
+    /// that started ten minutes ago reads `-10min`. See
+    /// [`ColumnDef::countdown_to`].
+    Countdown,
+    /// A byte count. Canonical input: the number of bytes. Rendered on the
+    /// binary scale (`512 B`, `95.4 MiB`, `1.2 GiB`), right-aligned — the
+    /// value stays the number, so `[mem, gt, 100000000]` and sorting keep
+    /// working and only the display is the human form.
+    Bytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -3328,6 +3350,54 @@ views:
                 .unwrap_or_else(|| panic!("subtab `{}` binds the ordering drill", view.name));
             assert!(navigate.key_strings().iter().any(|k| k == "D"));
         }
+    }
+
+    /// The two derived columns are the engine's, not the adapter's.
+    ///
+    /// A timer's `left` and a service's `mem` were the two places where the
+    /// systemd adapter formatted a value for display — a countdown string that
+    /// could only sort lexically, and a byte count nobody reads. Both moved
+    /// into the view as typed columns, so the adapter sends the canonical
+    /// value and queries still compare it. If either reverts to a plain
+    /// column, the cell goes stale between loads or stops being a number.
+    #[test]
+    fn committed_systemd_example_derives_left_and_mem_in_the_engine() {
+        let yaml = include_str!("../../../docs/examples/views/systemd.yaml");
+        let (cfg, _) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+            .expect("committed systemd.yaml must parse");
+
+        let timers = cfg
+            .views
+            .iter()
+            .find(|v| v.node_type == "systemd:timer")
+            .expect("the Timers subtab");
+        let left = timers
+            .columns
+            .iter()
+            .find(|c| c.key == "left")
+            .expect("timers keep a `left` column");
+        assert_eq!(left.kind, ColumnKind::Countdown);
+        assert_eq!(
+            left.countdown_to.as_deref(),
+            Some("next"),
+            "`left` counts towards the elapse instant, not towards itself"
+        );
+
+        let mut seen_mem = 0;
+        for view in cfg
+            .views
+            .iter()
+            .filter(|v| v.node_type == "systemd:service")
+        {
+            // `Failed` trims the column list down to what a broken unit is
+            // looked at for, so it has no `mem` at all — but whoever does show
+            // it shows the number.
+            for mem in view.columns.iter().filter(|c| c.key == "mem") {
+                assert_eq!(mem.kind, ColumnKind::Bytes, "subtab `{}`", view.name);
+                seen_mem += 1;
+            }
+        }
+        assert!(seen_mem > 0, "some service level shows `mem`");
     }
 
     /// The comment drill-down is reached through a `navigate` action, never

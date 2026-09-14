@@ -7779,7 +7779,7 @@ Tasks tab. Pick a task with notes (`n` opens the file) whose parent has
 notes too, e.g. `/Alpha/Beta`.
 
 - [ ] Rename the parent to `Alphonse` with the CLI (`nyd-t task edit
-  --description`), which does not move directories, then `n` on
+--description`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
@@ -7802,7 +7802,7 @@ with dependencies, e.g. `pipewire.service`.
       unfolds that one a level deeper; `h` / collapse folds it back.
 - [ ] The header changes with the cursor: on a unit row the Services columns,
       on a dependency row `Unit / Relation / Active / Sub / Load /
-    Description`. Unit rows leave `Relation` blank rather than borrowing a
+Description`. Unit rows leave `Relation` blank rather than borrowing a
       neighbour's value.
 - [ ] A unit that appears twice in one branch (`enter` down until a name
       repeats) shows once with `(cycle)` in `Relation` and does not unfold
@@ -7824,6 +7824,41 @@ after]`), not the Services one.
 systemd:dep` and `… --type systemd:order` list the same rows, and
       `nyd adapter systemd 'dep:pipewire.service>basic.target' show` prints
       that one row.
+
+## Typed columns — `kind: countdown` and `kind: bytes`
+
+Both are view-only kinds: the adapter keeps sending the canonical value (an
+RFC 3339 instant, a byte count) and the table engine renders it. `countdown`
+is the mirror of `elapsed` and rides the same repaint pulse, so a countdown
+cell must move without a reload.
+
+- [ ] systemd Timers: the `Left` column counts **down** and the digits change
+      on their own, without pressing `r`. Watch a timer that is minutes away:
+      `24min 13s` → `24min 12s`.
+- [ ] The same pulse moves the neighbouring `Ago` column (`kind: elapsed`) and
+      a running tracking's duration in the Trackings tab — and it does so with
+      **no tracking running**, which is the thing that used to be missing.
+- [ ] It stays quiet where nothing ticks: park on a tab whose level has
+      neither kind (Tasks, Jira) and the screen must not repaint once a
+      second. Watch the CPU of the process, not the screen.
+- [ ] The scale is two units, largest first, and a zero remainder is dropped:
+      `1w 2d`, `2d 13h`, `5h 24min`, `13s` — never `5h 0min`, never `3s` worth
+      of trailing noise on a weekly timer.
+- [ ] A timer whose elapse has passed shows a **negative** countdown
+      (`-2min`), not `0s`. `systemctl --user list-timers` calls the same timer
+      overdue; the sign is how the column says it.
+- [ ] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
+      the order is the same. Check the sort menu (`c s`) offers `Next` and the
+      resulting order runs soonest-first.
+- [ ] Calendar: the `In` column counts down to the next appointment and ticks
+      live; an event happening right now shows a negative value. No calendar
+      adapter change was needed — if this works, the seam is in the right
+      place.
+- [ ] systemd Services: `Mem` reads `95.4 MiB` / `1.2 GiB`, right-aligned, and
+      a small unit reads a bare `512 B`.
+- [ ] The byte column is still a **number** underneath: a query
+      `[mem, gt, 104857600]` narrows the list to units over 100 MiB, and
+      sorting on `Mem` runs by size, not by the text of the rendered cell.
 
 ## Refinements / deferred tasks
 

@@ -805,6 +805,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: None,
             hidden: false,
         }

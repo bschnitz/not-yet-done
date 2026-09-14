@@ -64,7 +64,7 @@ use crate::config::view_config::{
 use crate::keymap::{KeyClaim, KeyMap, KeyScope, KeySource, PaneStateProfile, SearchJump, TabRef};
 use crate::ui::theme::Theme;
 use crate::views::column_format::{
-    column_kind_from_value_type, format_elapsed_since, format_typed_value,
+    column_kind_from_value_type, format_countdown_to, format_elapsed_since, format_typed_value,
     value_type_from_column_kind,
 };
 use crate::views::content_action_hints::{
@@ -2332,13 +2332,14 @@ impl ContentPane {
     // ── Current-level config (respects nav depth) ───────────────────
 
     /// Whether the active level has any live (time-derived) column whose
-    /// rendering changes between frames without a refetch — currently only
-    /// `kind: elapsed` (M5). The App's repaint handler uses this to rebuild
-    /// just the panes that actually tick, leaving the rest's cached rows be.
+    /// rendering changes between frames without a refetch —
+    /// `kind: elapsed` and `kind: countdown`. The App's repaint handler uses
+    /// this to rebuild just the panes that actually tick, leaving the rest's
+    /// cached rows be.
     fn has_live_column(&self, view_defs: &[ViewDef]) -> bool {
         self.current_columns(view_defs)
             .iter()
-            .any(|c| c.kind == ColumnKind::Elapsed)
+            .any(|c| matches!(c.kind, ColumnKind::Elapsed | ColumnKind::Countdown))
     }
 
     /// The `highlights:` rules of the level currently on screen.
@@ -2544,6 +2545,7 @@ impl ContentPane {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
             })
@@ -10695,16 +10697,23 @@ impl ContentView {
     /// unchanged. Driven by `Invalidation::Repaint` from the domain-event
     /// bus. The disjoint borrow (`&self.view_defs` + `&mut self.pane_trees`)
     /// avoids cloning the view defs on every tick.
-    pub fn repaint_live_columns(&mut self) {
+    ///
+    /// Returns whether any pane was actually rebuilt, so the caller can leave
+    /// the frame clean when this view has no live column at all — which is
+    /// the common case, and the reason a once-a-second pulse is affordable.
+    pub fn repaint_live_columns(&mut self) -> bool {
         let view_defs = &self.view_defs;
         let overlay = self.header_overlay.clone();
+        let mut repainted = false;
         for tree in self.pane_trees.iter_mut() {
             tree.root.for_each_leaf_mut(&mut |leaf| {
                 if leaf.pane.has_live_column(view_defs) {
                     leaf.pane.rebuild_table_with(view_defs, &overlay);
+                    repainted = true;
                 }
             });
         }
+        repainted
     }
 
     /// Re-fit the active subtab's tables whose column layout was built for a
@@ -12704,6 +12713,11 @@ fn cell_content_for(
         let (text, alignment) = format_elapsed_since(metadata_field_value(item, src_key), now);
         return CellContent::aligned(text, alignment);
     }
+    if col.kind == ColumnKind::Countdown {
+        let src_key = col.countdown_to.as_deref().unwrap_or(col.key.as_str());
+        let (text, alignment) = format_countdown_to(metadata_field_value(item, src_key), now);
+        return CellContent::aligned(text, alignment);
+    }
     typed_cell_content(column_value(item, col), col)
 }
 
@@ -14552,6 +14566,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -14568,6 +14583,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -14584,6 +14600,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -14666,6 +14683,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -14682,6 +14700,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -15036,6 +15055,7 @@ mod tests {
                         format: None,
                         separator: None,
                         elapsed_from: None,
+                        countdown_to: None,
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
@@ -15052,6 +15072,7 @@ mod tests {
                         format: None,
                         separator: None,
                         elapsed_from: None,
+                        countdown_to: None,
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
@@ -15118,6 +15139,7 @@ mod tests {
                         format: None,
                         separator: None,
                         elapsed_from: None,
+                        countdown_to: None,
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
@@ -15946,6 +15968,7 @@ mod tests {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -16145,6 +16168,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -16508,6 +16532,7 @@ mod tests {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -16534,6 +16559,7 @@ mod tests {
                         format: None,
                         separator: None,
                         elapsed_from: None,
+                        countdown_to: None,
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
@@ -16663,6 +16689,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: None,
             hidden: false,
         }
@@ -18097,6 +18124,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: Some(crate::config::view_config::TreeAggregate {
                 cumulated_field: "dur_cum".into(),
                 default,
@@ -19571,6 +19599,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
             }],
@@ -19678,6 +19707,7 @@ mod tests {
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
             }],
@@ -20221,6 +20251,7 @@ mod tests {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -20631,6 +20662,7 @@ mod tests {
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: None,
             hidden: false,
             collapsed_source: None,
@@ -22293,6 +22325,7 @@ mod tests {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -22319,6 +22352,7 @@ mod tests {
                         format: None,
                         separator: None,
                         elapsed_from: None,
+                        countdown_to: None,
                         tree_aggregate: None,
                         hidden: false,
                         collapsed_source: None,
@@ -23824,6 +23858,7 @@ views:
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -23850,6 +23885,7 @@ views:
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -24178,6 +24214,7 @@ views:
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -24194,6 +24231,7 @@ views:
                 format: None,
                 separator: None,
                 elapsed_from: None,
+                countdown_to: None,
                 tree_aggregate: None,
                 hidden: false,
                 collapsed_source: None,
@@ -24350,6 +24388,7 @@ views:
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: None,
             hidden: false,
             collapsed_source: None,
@@ -24980,6 +25019,7 @@ views:
             format: None,
             separator: None,
             elapsed_from: None,
+            countdown_to: None,
             tree_aggregate: None,
             hidden: false,
             collapsed_source: None,
@@ -25542,6 +25582,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -25558,6 +25599,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -25574,6 +25616,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -25590,6 +25633,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
@@ -25606,6 +25650,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     format: None,
                     separator: None,
                     elapsed_from: None,
+                    countdown_to: None,
                     tree_aggregate: None,
                     hidden: false,
                     collapsed_source: None,
