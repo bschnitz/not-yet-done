@@ -146,6 +146,69 @@ fn monotonic(
     Some(boot? + chrono::TimeDelta::microseconds(i64::try_from(usec).ok()?))
 }
 
+/// How long the unit's last activation took, in microseconds — the number
+/// `systemd-analyze blame` prints, computed from the unit's own properties.
+///
+/// # Why not run `systemd-analyze blame`
+///
+/// Because there is nothing to run. `blame` reads the same two timestamps
+/// this does, and both of them arrive in the property map the row is already
+/// built from (the adapter reads interfaces with `GetAll`), so the column
+/// costs no call, no subprocess and no parsing. `blame` also has no
+/// `--json=`: systemd names the verbs that do, and `blame` is not among
+/// them, so the alternative would have been parsing a human-formatted table.
+///
+/// # The two timestamps
+///
+/// Activation starts when the unit leaves `inactive`. It ends either when
+/// the unit becomes `active`, or — for a `Type=oneshot` without
+/// `RemainAfterExit=`, which runs to completion and goes straight back to
+/// `inactive` without ever being active — when it re-enters `inactive`.
+/// Taking only the first pair would leave exactly those units blank, which
+/// is how this was caught: measured against `systemd-analyze --user blame`
+/// over every loaded unit, the first rule matched 27 of 28 and the odd one
+/// out was the one oneshot.
+///
+/// `None` when the unit has not finished an activation — it never started,
+/// or it is activating right now and the end timestamp still belongs to the
+/// previous run. An empty cell is the honest answer there.
+///
+/// # Zero is a measurement
+///
+/// A `Type=simple` unit counts as active the instant its process is exec'd,
+/// so both timestamps are the same number and the span is a real, measured
+/// zero. That is why the end is accepted when it merely *equals* the start:
+/// on this machine more than half the running services are `Type=simple`,
+/// and requiring a strictly later end blanked every one of them. `blame`
+/// omits those units from its output entirely; the column has a row for them
+/// regardless, and `0` says "started instantly" where an empty cell would
+/// have said "never started".
+fn activation_usec(unit: &HashMap<String, OwnedValue>) -> Option<u64> {
+    let start = as_u64(unit, "InactiveExitTimestampMonotonic").filter(|n| *n > 0)?;
+    let end = [
+        "ActiveEnterTimestampMonotonic",
+        "InactiveEnterTimestampMonotonic",
+    ]
+    .iter()
+    .filter_map(|key| as_u64(unit, key))
+    .find(|end| *end >= start)?;
+    Some(end - start)
+}
+
+/// Microseconds as a `kind: duration` cell — seconds, with the fraction kept.
+///
+/// Seconds because that is the canonical unit of a duration column, and the
+/// fraction because these spans live below it: a service that took 15 ms
+/// would be `0` in whole seconds. Formatted from integer arithmetic rather
+/// than through a float, so the cell is exact and never picks up an
+/// exponent.
+fn secs_cell(usec: Option<u64>) -> String {
+    match usec {
+        Some(n) => format!("{}.{:06}", n / 1_000_000, n % 1_000_000),
+        None => String::new(),
+    }
+}
+
 /// A [`UnitEntry`] rebuilt from one unit's generic properties, the way
 /// `ListUnits` would have reported it.
 ///
@@ -241,9 +304,20 @@ pub struct ServiceRow {
     pub since: Option<DateTime<Utc>>,
     pub pid: Option<u64>,
     pub mem: Option<u64>,
+    /// The high-water mark of `mem` — what the service cost when it cost the
+    /// most, which is the number that explains an OOM kill or a chosen
+    /// `MemoryMax=`. Hidden by default in the shipped view: it is the same
+    /// question as `mem` asked about the past, and a row that already carries
+    /// eleven columns should not spend a twelfth on it unasked.
+    pub mem_peak: Option<u64>,
     pub tasks: Option<u64>,
     /// CPU time consumed, in whole seconds (`kind: duration`).
     pub cpu: Option<u64>,
+    /// How long the last activation took, in microseconds — see
+    /// [`activation_usec`]. Microseconds and not seconds because that is the
+    /// resolution systemd reports and the one these spans need; the cell is
+    /// seconds, with the fraction kept.
+    pub startup: Option<u64>,
     pub restarts: Option<u64>,
     pub needs_reload: bool,
     /// How many drop-in files modify this unit. A count rather than the paths:
@@ -283,8 +357,10 @@ impl ServiceRow {
             // A stopped service reports PID 0; that is "none", not a process.
             pid: as_u64(service, "MainPID").filter(|p| *p > 0),
             mem: as_u64(service, "MemoryCurrent"),
+            mem_peak: as_u64(service, "MemoryPeak"),
             tasks: as_u64(service, "TasksCurrent"),
             cpu: as_u64(service, "CPUUsageNSec").map(|ns| ns / 1_000_000_000),
+            startup: activation_usec(unit),
             restarts: as_u64(service, "NRestarts"),
             needs_reload: as_bool(unit, "NeedDaemonReload"),
             dropins: strings(unit, "DropInPaths").len(),
@@ -312,8 +388,10 @@ impl ServiceRow {
                     field("since", "Since", instant(self.since)),
                     field("pid", "PID", num(self.pid)),
                     field("mem", "Mem", num(self.mem)),
+                    field("mem_peak", "Mem peak", num(self.mem_peak)),
                     field("tasks", "Tasks", num(self.tasks)),
                     field("cpu", "CPU", num(self.cpu)),
+                    field("startup", "Startup", secs_cell(self.startup)),
                     field("restarts", "Restarts", num(self.restarts)),
                     field("needs_reload", "Reload?", flag(self.needs_reload)),
                     field("dropins", "Drop-ins", count(self.dropins)),
@@ -339,8 +417,14 @@ pub fn service_columns() -> Vec<ColumnSchema> {
         // Bytes. Raw, because a pre-formatted "95.4 MiB" sorts as text and
         // cannot be compared in a query; the view renders it with `kind: bytes`.
         ColumnSchema::new("mem", "Mem").typed("number"),
+        ColumnSchema::new("mem_peak", "Mem peak").typed("number"),
         ColumnSchema::new("tasks", "Tasks").typed("number"),
         ColumnSchema::new("cpu", "CPU").typed("duration"),
+        // Seconds, fraction kept — the span `systemd-analyze blame` reports,
+        // read straight off the unit. The view renders it with
+        // `format: precise`, without which a column of milliseconds would be
+        // a column of `00`. See [`activation_usec`].
+        ColumnSchema::new("startup", "Startup").typed("duration"),
         // Earns its place: a unit with `Restart=always` that crashes in a loop
         // reads as plain "active" everywhere else.
         ColumnSchema::new("restarts", "Restarts").typed("number"),
@@ -669,6 +753,86 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_800_000_000, 0).unwrap()
+    }
+
+    /// Build a `Unit` property map out of the three timestamps activation is
+    /// read from. `0` is systemd's "never", so it is the default.
+    fn timestamps(exit: u64, active_enter: u64, inactive_enter: u64) -> HashMap<String, OwnedValue> {
+        [
+            ("InactiveExitTimestampMonotonic", exit),
+            ("ActiveEnterTimestampMonotonic", active_enter),
+            ("InactiveEnterTimestampMonotonic", inactive_enter),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), OwnedValue::from(v)))
+        .collect()
+    }
+
+    /// The ordinary case: the unit left `inactive` and became `active`.
+    /// The numbers are a real reading — `systemd-analyze --user blame` said
+    /// `103ms` for the same unit at the same moment.
+    #[test]
+    fn activation_is_the_span_from_leaving_inactive_to_becoming_active() {
+        let unit = timestamps(136_670_234_541, 136_670_337_965, 0);
+        assert_eq!(activation_usec(&unit), Some(103_424));
+    }
+
+    /// A `Type=oneshot` without `RemainAfterExit=` never becomes active: it
+    /// runs and goes straight back to `inactive`. Reading only the active
+    /// timestamp would leave exactly those units blank — this is the one unit
+    /// of 28 that disagreed with the simpler rule when it was measured
+    /// against `blame`, which reported `15ms` for it.
+    #[test]
+    fn a_oneshot_that_never_became_active_is_measured_to_where_it_ended() {
+        let unit = timestamps(16_126_342, 0, 16_141_677);
+        assert_eq!(activation_usec(&unit), Some(15_335));
+    }
+
+    /// Becoming active wins over going back to inactive, so a unit that has
+    /// since been stopped still reports how long it took to *start*, not how
+    /// long it ran.
+    #[test]
+    fn a_unit_that_ran_and_stopped_still_reports_its_start() {
+        let unit = timestamps(1_000_000, 1_250_000, 9_000_000);
+        assert_eq!(activation_usec(&unit), Some(250_000));
+    }
+
+    /// A `Type=simple` unit is active the moment it is exec'd, so both
+    /// timestamps are the same instant and the span is a measured zero — not
+    /// a missing one. Requiring a strictly later end blanked every such unit,
+    /// which on a live user manager was most of the running services;
+    /// `pipewire.service` is the reading below.
+    #[test]
+    fn an_instant_activation_is_a_zero_and_not_a_blank() {
+        let unit = timestamps(16_401_924, 16_401_924, 0);
+        assert_eq!(activation_usec(&unit), Some(0));
+        assert_eq!(secs_cell(activation_usec(&unit)), "0.000000");
+    }
+
+    /// Nothing to report is an empty cell, never a zero: a unit that never
+    /// started and a unit that started instantly must not look the same. The
+    /// mid-activation case is the subtle one — the end timestamp is still the
+    /// previous run's and lies *before* the start, so there is no span yet.
+    #[test]
+    fn an_unfinished_activation_has_no_span() {
+        assert_eq!(activation_usec(&timestamps(0, 0, 0)), None);
+        assert_eq!(activation_usec(&timestamps(0, 5_000_000, 0)), None);
+        // Currently activating: started at 9s, last became active at 2s.
+        assert_eq!(activation_usec(&timestamps(9_000_000, 2_000_000, 0)), None);
+        assert_eq!(secs_cell(activation_usec(&timestamps(0, 0, 0))), "");
+    }
+
+    /// The cell is seconds with the fraction kept, because the column is a
+    /// `duration` and a duration's canonical unit is seconds — and because
+    /// whole seconds would render every one of these spans as zero.
+    #[test]
+    fn the_startup_cell_is_fractional_seconds() {
+        assert_eq!(secs_cell(Some(103_424)), "0.103424");
+        assert_eq!(secs_cell(Some(5_242_346)), "5.242346");
+        assert_eq!(secs_cell(Some(31)), "0.000031");
+        assert_eq!(secs_cell(Some(60_000_000)), "60.000000");
+        // Parses back as the number the sort and the query compare on.
+        assert_eq!(secs_cell(Some(103_424)).parse::<f64>().unwrap(), 0.103424);
     }
 
     /// The `in_rows` promise, per level: every declared column must be a field

@@ -7989,6 +7989,66 @@ writing half on a throwaway unit, not on something you depend on.
       level reads as it did at the start. The previous buffer versions are
       under `~/.local/share/not_yet_done/systemd-backups/<unit>/` either way.
 
+## systemd — startup time and the memory peak (phase 6c)
+
+The `Startup` column on the Services and Failed lists — what
+`systemd-analyze blame` reports, read off the unit's own timestamps — plus the
+hidden `Peak` column beside `Mem`. Needs the systemd tab. Read-only throughout;
+a terminal beside the TUI is the whole apparatus.
+
+- [ ] Services subtab (`t s`): every row carries a `Startup` cell, right
+      aligned, in units that fit the number — `103ms`, `5.24s`, `677us`,
+      `1min 3s`. Never `0.103424`, and never a bare `00`.
+- [ ] Cross-check against `systemd-analyze --user blame` in a terminal. Every
+      unit that command prints appears in the column with the same value, give
+      or take the rounding each display does. The command's own top row is the
+      easiest one to find: sort the column descending (`c s`, or click the
+      header) and look past the empty cells.
+- [ ] `blame` prints fewer rows than the column has values, and that is
+      correct. The extra ones read `0` — a `Type=simple` unit is active the
+      moment it execs, so its span really is zero and `blame` simply omits it.
+      `systemctl --user show -p Type <unit>` on one of them confirms the type.
+- [ ] A **blank** cell is a different statement from `0`. Find one
+      (`[startup, is, not null]` will not help — see below; just look) and check
+      it with `systemctl --user show -p InactiveExitTimestampMonotonic <unit>`:
+      it reads `0`, i.e. the unit has never been started in this boot. The
+      column says nothing rather than inventing a zero.
+- [ ] Sorting is numeric, not textual: `5.24s` sorts above `677us` and above
+      `1min 3s` in the right places. In particular `1min 3s` outranks `59.9s` —
+      if the column were sorting the rendered text it could not.
+- [ ] Descending sort opens with the blank rows. That is the app-wide rule for
+      absent values and is not specific to this column; the query below is the
+      way around it.
+- [ ] `q` → `[startup, gte, 0]` — only the units that have actually run. Paired
+      with a descending sort this is the "slowest first" list. `[startup, gt,
+    1]` narrows to the ones over a second, which on a user manager is
+      usually one or two.
+- [ ] `[startup, is, null]` and `[startup, is, not null]` both match **nothing**
+      — the same limitation phase 6b noted for empty strings. Not a regression
+      to chase here; `[startup, gte, 0]` is the idiom.
+- [ ] Failed subtab (`t f`): the column is there too, and it answers a
+      different question — a unit that dies on the first exec shows a span near
+      zero, one that hung until its timeout shows the timeout. If nothing has
+      failed, `systemd-run --user --unit=nyd-smoke-fail /bin/false` gives you a
+      row to look at, and `systemctl --user reset-failed nyd-smoke-fail`
+      removes it again.
+- [ ] `c c` on the Services level switches on `Peak` next to `Mem`. It is a
+      byte column like `Mem`, it is never smaller than `Mem` for a running
+      unit, and it keeps its value after the unit's memory has dropped again —
+      that is what makes it worth the column. Cross-check with
+      `systemctl --user show -p MemoryPeak <unit>`.
+- [ ] `Peak` is blank for units that are not running, just as `Mem` is. Neither
+      column invents a zero for a unit with no cgroup.
+- [ ] Timers subtab (`t t`) and Unit files subtab (`t u`) have **no** `Startup`
+      column, and `c c` offers none. Unit files come from the file system and
+      have no timestamps at all; the column belongs to the levels that read the
+      manager.
+- [ ] Nothing got slower. The listing loads in the same time it did before this
+      phase — both timestamps and `MemoryPeak` arrive in the property map the
+      row was already fetching, so there is no extra call to pay for.
+- [ ] `o` (details pane) on a Services row shows `Startup` and `Mem peak` among
+      the fields, with the same rendering as the column.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in

@@ -34,8 +34,10 @@ pub const SERVICE_COLUMNS: &[&str] = &[
     "since",
     "pid",
     "mem",
+    "mem_peak",
     "tasks",
     "cpu",
+    "startup",
     "restarts",
     "needs_reload",
     "dropins",
@@ -189,8 +191,17 @@ impl RowFields for ServiceRow {
             "since" => time_or_null(self.since),
             "pid" => num_or_null(self.pid),
             "mem" => num_or_null(self.mem),
+            "mem_peak" => num_or_null(self.mem_peak),
             "tasks" => num_or_null(self.tasks),
             "cpu" => num_or_null(self.cpu),
+            // Seconds, so that a query reads in the unit the column shows:
+            // `[startup, gt, 1]` is "took over a second", not "over a
+            // microsecond". The row keeps microseconds; only the comparison
+            // is scaled.
+            "startup" => match self.startup {
+                Some(usec) => Field::Number(usec as f64 / 1_000_000.0),
+                None => Field::Null,
+            },
             "restarts" => num_or_null(self.restarts),
             "needs_reload" => Field::Bool(self.needs_reload),
             "dropins" => Field::Number(self.dropins as f64),
@@ -344,6 +355,44 @@ mod tests {
         let q = "query:\n  [fragment, like, '%/.config/systemd/%']";
         assert!(matches(q, &mine));
         assert!(!matches(q, &theirs));
+    }
+
+    /// Every level states its columns twice: once as the schema the table is
+    /// built from, once as the set a query may name. They are one fact, and
+    /// nothing but this test holds them together — a column added to the
+    /// schema alone builds, lists and sorts perfectly well, and then refuses
+    /// the one query written to use it.
+    #[test]
+    fn every_level_allows_a_query_on_exactly_the_columns_it_declares() {
+        use crate::model;
+        let levels: [(&str, &[&str], Vec<not_yet_done_content::ColumnSchema>); 7] = [
+            ("service", SERVICE_COLUMNS, model::service_columns()),
+            ("timer", TIMER_COLUMNS, model::timer_columns()),
+            ("unit file", UNIT_FILE_COLUMNS, model::unit_file_columns()),
+            ("property", PROPERTY_COLUMNS, model::property_columns()),
+            ("log", LOG_COLUMNS, model::log_columns()),
+            ("security", SECURITY_COLUMNS, model::security_columns()),
+            ("dependency", DEP_COLUMNS, crate::deps::dep_columns()),
+        ];
+        for (level, queryable, schema) in levels {
+            let declared: Vec<&str> = schema.iter().map(|c| c.key.as_str()).collect();
+            let missing: Vec<&&str> = declared
+                .iter()
+                .filter(|k| !queryable.contains(k))
+                .collect();
+            let extra: Vec<&&str> = queryable
+                .iter()
+                .filter(|k| !declared.contains(k))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{level}: columns the table shows but no query may name: {missing:?}"
+            );
+            assert!(
+                extra.is_empty(),
+                "{level}: columns a query may name but the table does not have: {extra:?}"
+            );
+        }
     }
 
     #[test]

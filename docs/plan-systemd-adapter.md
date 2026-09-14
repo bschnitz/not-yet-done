@@ -886,11 +886,11 @@ worth, so it is cut into four, each of which is usable on the day it lands:
   with its exposure weight and status, sortable by weight — and `enter` on a
   row jumping into the drop-in edit with that directive prefilled. That turns
   an audit command into a workflow.
-- **6c — the clock and the meter**: `systemd-analyze blame` and
-  `critical-chain` under the manager, startup time per unit and sortable; plus
-  a resource view over `MemoryCurrent`, `CPUUsageNSec`, `TasksCurrent` and
-  `IOReadBytes` — a `top` over units, and nearly free, since
-  [phase 0](#phase-0--skeleton--reading) already reads those properties.
+- **6c — the clock and the meter**: startup time per unit, sortable — what
+  `systemd-analyze blame` reports, read straight off the unit's own timestamps
+  rather than out of that command, plus the memory high-water mark beside the
+  current one. `critical-chain` and `IOReadBytes` were measured and dropped;
+  the decisions are in [the phase](#phase-6c--the-clock-and-the-meter) below.
 - **6d — the ambient half**: a failed-units indicator through the existing
   Waybar CFFI module, and a `connected` hook that raises a notification when
   units are already failed at startup, so it lands in the notification centre
@@ -1128,6 +1128,121 @@ key, and the view-config test failed with both claimants and both scopes
 named. It is on `H` for hardening. That the shipped example is parsed and
 validated by a test rather than trusted is what turned a key collision into a
 build failure instead of a key that silently does the wrong thing.
+
+### Phase 6c — the clock and the meter
+
+**Delivers** how long each unit took to activate, as a sortable column on the
+Services and Failed lists, plus the memory high-water mark beside the current
+one. The startup column is what `systemd-analyze blame` reports, computed from
+the unit's own timestamps rather than by running that command.
+
+### The questions, decided
+
+**Startup time is a column, not a level.** `blame` is a single number per unit,
+and a level whose rows are one number each is a list with an extra keystroke in
+front of it. As a column it sorts against everything else the row already
+carries — the unit that is both slow and failed is one sort away, not two
+levels apart — and it costs nothing to fetch, because both timestamps it is
+made of are already in the property map the row is built from. There is no
+subprocess and no extra D-Bus round trip.
+
+**`critical-chain` moves to [phase 7](#phase-7--beyond-the-user-bus).** It is
+the other half of `systemd-analyze`'s startup story, and on the user bus it has
+nothing to say. The full chain here is six lines deep and contains no service
+at all — `default.target` → `basic.target` → `sockets.target` → `dbus.socket` →
+`app.slice` → `-.slice`, the whole thing inside 186 ms. That is not a defect in
+the tool; a user manager starts almost everything in parallel off socket
+activation, so there is no serialised chain to walk. The boot chain on the
+system manager is where the command earns a level, and that is phase 7's bus.
+
+**`IOReadBytes` was measured and dropped; `MemoryPeak` took its place.**
+`IOAccounting=` is off by default on both buses, and nothing on this machine
+turns it on: all 12 running user services and the system's `sshd` report
+`IOReadBytes=[not set]`. A column that is empty for every row is worse than no
+column, because it invites the reader to conclude there was no I/O.
+`MemoryAccounting=` on the other hand is on by default, and `MemoryPeak` is
+populated everywhere `MemoryCurrent` is — the high-water mark is the number
+that says whether a unit's limit is anywhere near being hit, which the current
+reading, sampled at whatever moment the list was loaded, cannot. It is hidden
+by default beside `mem`, for the reader who is asking that question. Turning
+I/O accounting on is a drop-in like any other and belongs with the other
+`a p`-style verbs, not with a column that would lie until it were used.
+
+### What it took, beyond the plan
+
+**`blame` has no `--json`, and did not need one.** The plan assumed the number
+would come out of the command. It cannot be parsed reliably —
+`systemd-analyze` says verbatim that "Option --json= is only supported for
+security, inspect-elf, dlopen-metadata, plot, fdstore, pcrs, nvpcrs,
+architectures, capability, exit-status right now" — and it does not have to be:
+the command's whole arithmetic is `ActiveEnterTimestampMonotonic` minus
+`InactiveExitTimestampMonotonic`, and `GetAll` already hands the row both.
+Reading the properties is both cheaper and more honest than scraping a table
+whose format is not a contract.
+
+**The second timestamp is not always `ActiveEnter`.** A `Type=oneshot` unit
+without `RemainAfterExit=` never becomes active, so `ActiveEnter` stays at the
+value from some previous run — or at zero — while the run that just happened is
+bounded by `InactiveEnterTimestampMonotonic`. The rule the adapter implements
+is: start at `InactiveExit` (which must be non-zero), end at the first of
+`ActiveEnter`, then `InactiveEnter`, that is not before the start. Checked
+against `systemd-analyze --user blame` row by row: 28 of 28 agree.
+
+**Zero is a measurement, and reading it as "unknown" blanked half the list.**
+The first cut required the end strictly after the start, on the reasoning that
+two equal timestamps mean nothing was recorded. They do not: a `Type=simple`
+unit is active the instant it execs, so both stamps are the same microsecond and
+the span is a true zero. `blame` omits such units entirely, which is why the
+discrepancy was not obvious — comparing the column against `blame` showed
+agreement on every row `blame` printed, and 18 running services (pipewire,
+gpg-agent, tidings-shell, …) blank. With `>=` the column reads `0` for them; an
+empty cell now means only "never started", which on this machine is exactly 5
+units, all `inactive` with a zero timestamp. The distinction is the point of the
+column: `0` is a fact about a fast unit, blank is a fact about an idle one.
+
+**`kind: duration` assumed whole seconds, and startup times live below one.**
+Rendering 103 ms as `00` would have made the column useless, and the obvious
+escape — declare it `kind: number` and put "ms" in the label — breaks the rule
+the adapter and the renderer both state: the cell carries the canonical value
+and `kind:` decides how it looks. So `duration` was widened instead. It now
+parses fractional seconds, which the sort and query layers already supported
+(`SortKind::Number`, `Field::Number(f64)`); only the renderer had narrowed it to
+`i64`. And it takes a `format:` — the field already existed on `ColumnDef` and
+was documented as being "for kinds that support one", used until now only by
+`datetime`. `clock` (the default) is the existing `H:MM:SS`, so every column
+that had a duration renders exactly as before; `precise` is the new one, which
+names the unit its magnitude asks for: `31.0us`, `677us`, `15.3ms`, `103ms`,
+`5.24s`, `1min 3s`, `5h 24min`, `1w 2d`. Three significant digits throughout,
+and `us` rather than `µs` because the terminal width of `µ` is font-dependent.
+Unknown format names are now a config error rather than a silent fallback, on
+both the view's own columns and its children's.
+
+**A number must never round onto the rung above it.** `59.99` rendered as
+`60.0s` — arithmetically right, and wrong on the page, because a reader who
+sees `60.0s` in a column that also prints `1min` will believe the two are
+different units. The ladder threshold is `59.95` with rounding rather than `60`
+with truncation, and the decimal bands are `99.95` and `9.995` so that nothing
+ever shows a fourth significant digit (`9.997` becomes `10.0s`, not `10.00s`).
+Both are regression tests now.
+
+**One column, two lists that had to agree.** The set of columns a query may
+name (`SERVICE_COLUMNS`) and the set the table declares (`service_columns()`)
+are two spellings of one fact in two files, and adding the column to one and not
+the other produced `unknown systemd column 'startup'` from the CLI while every
+test stayed green. The fix is not just the missing entry: a test now pairs all
+seven levels' constants against their schemas and fails in both directions.
+Deleting the entry again to watch it fail is what makes it a test rather than a
+hope.
+
+**Absent numbers sort to the front when sorting descending.** That is
+pre-existing, generic behaviour — an unparseable or empty cell goes to the end
+ascending, which is the same thing — and it means "slowest first" opens with the
+units that never ran. Changing it would touch every adapter and every tab, so it
+is a decision of its own and not one to make inside a column. The query template
+documents the working idiom instead: `[startup, gte, 0]` selects the units that
+have actually run (26 of 31 rows here). Worth noting for the same reason as in
+[phase 6b](#phase-6b--the-security-level): `[startup, is, null]` matches
+nothing, because `is null` does not reach an absent numeric field.
 
 ## Phase 7 — Beyond the user bus
 

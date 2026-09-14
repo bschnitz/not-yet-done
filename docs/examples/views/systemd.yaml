@@ -90,14 +90,15 @@ views:
     # Saved-query filter — the same mechanism the trackings and calendar tabs
     # use. The body is a `FilterExpr` evaluated against each loaded row.
     # Columns on this level: name, description, load, active, sub, enabled,
-    # since, pid, mem, tasks, cpu, restarts, needs_reload, dropins, fragment.
+    # since, pid, mem, mem_peak, tasks, cpu, startup, restarts, needs_reload,
+    # dropins, fragment, exposure.
     query:
       editable: true
       menu_key: q
       template: |
         # Filter the loaded services. Columns: name, description, load, active,
-        # sub, enabled, since, pid, mem, tasks, cpu, restarts, needs_reload,
-        # dropins, fragment.
+        # sub, enabled, since, pid, mem, mem_peak, tasks, cpu, startup,
+        # restarts, needs_reload, dropins, fragment, exposure.
         #
         #   query:
         #     [active, =, failed]              # what is broken right now
@@ -118,6 +119,19 @@ views:
         #     and:
         #       - [active, =, active]
         #       - [mem, gt, 104857600]         # over 100 MiB — bytes, not text
+        #
+        #   query:
+        #     [startup, gt, 1]                 # took over a second to start
+        #
+        #   query:
+        #     [startup, gte, 0]                # only units that have run
+        #
+        # `startup` is in **seconds**, fractions included, so `0.1` is 100 ms.
+        # The second query above is the one to pair with sorting by Startup:
+        # a unit that never started has no span at all, and an absent value
+        # sorts to the end ascending — which puts it first when the sort is
+        # descending, ahead of the slow units the sort was for. `[startup,
+        # gte, 0]` drops exactly those rows and leaves the ones that ran.
         #
         # `since` takes natural-language dates: [since, gte, "today"].
         #
@@ -156,6 +170,19 @@ views:
         label: Mem
         kind: bytes
         sizing: "fixed(11)"
+      # The high-water mark of the column above — what the service cost when
+      # it cost the most. The number that explains an OOM kill, or that tells
+      # you what to set MemoryMax= to. Hidden by default and switched on with
+      # `c c`: it is the same question as Mem asked about the past, and this
+      # row has enough columns already.
+      #
+      # Blank where the unit has no memory accounting; systemd turns that on
+      # per unit, and a blank cell says so rather than claiming zero.
+      - key: mem_peak
+        label: Peak
+        kind: bytes
+        sizing: "fixed(11)"
+        hidden: true
       - key: tasks
         label: Tasks
         kind: number
@@ -164,6 +191,27 @@ views:
         label: Restarts
         kind: number
         sizing: "fixed(8)"
+      # How long the unit's last activation took — the number
+      # `systemd-analyze blame` prints, without the detour through it. The
+      # adapter reads it off the unit's own timestamps, which arrive with the
+      # rest of the row, so the column costs no extra call; sorting the list
+      # by it *is* the blame report, and it stays a live list with every
+      # other column still on it.
+      #
+      # `format: precise` is what makes it legible. The default rendering of
+      # a duration is a clock face (`1:30:00`), which is right for a tracked
+      # time and useless here: these spans live below the second, and every
+      # row would read `00`. Precise names the unit the value actually has —
+      # `5.24s`, `103ms`, `31us` — and still sorts and filters as seconds.
+      #
+      # Blank means the unit never started. `0` means it started instantly,
+      # which is not the same thing and is the honest answer for a
+      # `Type=simple` unit: systemd counts it active the moment it execs.
+      - key: startup
+        label: Startup
+        kind: duration
+        format: precise
+        sizing: "fixed(9)"
       - key: since
         label: Since
         kind: datetime
@@ -854,6 +902,15 @@ views:
         label: Restarts
         kind: number
         sizing: "fixed(8)"
+      # How long it took — here, how long it took to fail. A unit that dies
+      # on its first syscall and one that hangs until a timeout kills it both
+      # end up on this subtab reading `failed`; this is the column that tells
+      # them apart. See the Services level for what `format: precise` is for.
+      - key: startup
+        label: Startup
+        kind: duration
+        format: precise
+        sizing: "fixed(9)"
       - key: since
         label: Since
         kind: datetime

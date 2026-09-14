@@ -248,6 +248,7 @@ impl ViewFileConfig {
                 &view.columns,
                 &mut errors,
             );
+            check_column_formats(view.name.as_str(), None, &view.columns, &mut errors);
             // `event_actions:` rules must point at a real action in this
             // view — a typo'd `run:` would silently never fire. Topics are
             // free-form (the adapter contract), but must be non-empty.
@@ -309,6 +310,7 @@ fn check_child(
         &child.columns,
         errors,
     );
+    check_column_formats(view, Some(child.name.as_str()), &child.columns, errors);
     for nested in &child.children {
         check_child(view, nested, editors, errors);
     }
@@ -350,6 +352,41 @@ fn check_row_layout(
                  row_layout line (found {} columns: {:?})",
                 line.columns.len(),
                 line.columns
+            ));
+        }
+    }
+}
+
+/// Validate every column's `format:` against its `kind:`.
+///
+/// Only `duration` takes a *named* format, and a name it does not know would
+/// otherwise fall back to the default rendering — a column silently showing
+/// `00` for every row instead of the milliseconds it was meant to show. A
+/// `datetime` format is a free strftime pattern and cannot be checked here;
+/// every other kind ignores the field entirely, which is worth saying out
+/// loud so a `format:` that does nothing does not read as one that does.
+fn check_column_formats(
+    view: &str,
+    child: Option<&str>,
+    columns: &[ColumnDef],
+    errors: &mut Vec<String>,
+) {
+    let scope = match child {
+        Some(c) => format!("views.{view}.children.{c}.columns"),
+        None => format!("views.{view}.columns"),
+    };
+    for col in columns {
+        let Some(format) = col.format.as_deref() else {
+            continue;
+        };
+        if col.kind == ColumnKind::Duration
+            && !crate::views::column_format::DURATION_FORMATS.contains(&format.trim())
+        {
+            errors.push(format!(
+                "{scope}: column '{}' has `format: {format}`, which is not a duration format \
+                 (expected one of {:?})",
+                col.key,
+                crate::views::column_format::DURATION_FORMATS
             ));
         }
     }
@@ -1478,9 +1515,17 @@ pub struct ColumnDef {
     /// is unaffected.
     #[serde(default)]
     pub kind: ColumnKind,
-    /// Optional format override for kinds that support one (e.g. a custom
-    /// strftime-style pattern for `datetime`). `None` = the kind's default
-    /// rendering.
+    /// Optional format override for the kinds that support one. `None` = the
+    /// kind's default rendering.
+    ///
+    /// - `datetime` → a custom strftime-style pattern (`"%Y-%m-%d"`).
+    /// - `duration` → one of
+    ///   [`DURATION_FORMATS`](crate::views::column_format::DURATION_FORMATS):
+    ///   `clock` (the default, `H:MM:SS`) or `precise` (`5.24s`, `103ms`),
+    ///   which is what a span living below the second needs. Validated, so a
+    ///   typo is reported at load rather than silently rendering as a clock.
+    ///
+    /// Every other kind ignores it.
     #[serde(default)]
     pub format: Option<String>,
     /// Segment separator for `kind: path` (default `/`). Ignored by other
@@ -5141,6 +5186,70 @@ views:
         .unwrap();
         assert_eq!(cfg.views[0].tree_label.as_deref(), Some("name"));
         assert_eq!(cfg.views[0].children[0].tree_label.as_deref(), Some("name"));
+    }
+
+    /// A misspelt duration format would otherwise render every cell as a
+    /// clock — `00` for a column of milliseconds — with nothing to say why.
+    /// It is rejected at load, on child levels as well as on the view.
+    #[test]
+    fn validate_rejects_an_unknown_duration_format() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns:
+      - { key: startup, kind: duration, format: presise }
+    children:
+      - name: c
+        node_type: t2
+        columns:
+          - { key: took, kind: duration, format: nonsense }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("views.v.columns") && e.contains("'startup'")),
+            "got: {errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("views.v.children.c.columns") && e.contains("'took'")),
+            "got: {errs:?}"
+        );
+    }
+
+    /// The formats that do exist pass, and so does a `format:` on the kinds
+    /// that read it differently (`datetime`, a free strftime pattern) or not
+    /// at all — the check must not turn an ignored field into an error.
+    #[test]
+    fn validate_accepts_known_duration_formats_and_leaves_other_kinds_alone() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    columns:
+      - { key: cpu, kind: duration, format: clock }
+      - { key: startup, kind: duration, format: precise }
+      - { key: plain, kind: duration }
+      - { key: since, kind: datetime, format: "%Y-%m-%d" }
+      - { key: name, format: whatever }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        )
+        .unwrap();
     }
 
     #[test]
