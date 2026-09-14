@@ -73,8 +73,10 @@ nyd adapter jira:issue PROJ-1 clear-cell --field column_key=estimate
 ```
 
 The address is `<instance>[:child…] [ID] <action>` — the child path picks the
-level, which matters because a column is defined per node type. Run
-`nyd adapter <instance> actions` to see the actions available at a level.
+level, which matters because a column is defined per node type. The same path
+is what every read verb works at, so `nyd adapter <instance>:<child> actions`
+lists the actions of that level and `… ls` lists its rows. `--type` names the
+same thing without walking to it; giving both is fine as long as they agree.
 
 Name the level and these writes need **no connection at all**: the type and the
 id are the whole address of a cell, and the value lands in the local store, so

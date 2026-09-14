@@ -833,6 +833,46 @@ async fn resolve_type_level(
     Ok((nt, child_path.is_empty()))
 }
 
+/// The level an invocation addresses through its path — the last segment of
+/// `<inst>:child:child…`, walked from the adapter root. `None` when the
+/// address names the instance alone, which is the root level.
+///
+/// The address is the documented way to name a level (`adapter
+/// jira:issue:comment help`), and every verb that works *at* a level has to
+/// read it, not just `help`: without this, `adapter systemd:unitfile ls`
+/// listed services — the root's first child type — and said nothing about it.
+async fn addressed_level(
+    adapter: &dyn ContentAdapter,
+    inv: &Invocation,
+) -> Result<Option<NodeType>> {
+    if inv.child_path.is_empty() {
+        return Ok(None);
+    }
+    let (nt, _) = resolve_type_level(adapter, &inv.child_path).await?;
+    Ok(Some(nt))
+}
+
+/// Reconcile the level named by the address with an explicit `--type`. They
+/// spell the same thing two ways, so either alone decides and both together
+/// must agree — silently letting one win would make the losing half of the
+/// command line a lie.
+fn reconcile_level<'a>(
+    addressed: Option<&'a NodeType>,
+    type_filter: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    match (addressed, type_filter) {
+        (None, filter) => Ok(filter),
+        (Some(nt), None) => Ok(Some(nt.type_id.as_str())),
+        (Some(nt), Some(t)) if t == nt.type_id || t == type_local_name(&nt.type_id) => {
+            Ok(Some(nt.type_id.as_str()))
+        }
+        (Some(nt), Some(t)) => Err(anyhow!(
+            "the address names level '{}' but --type says '{t}' — give one or the other",
+            nt.type_id
+        )),
+    }
+}
+
 /// Parse a `--sort col[:asc|desc],col2[:dir]` spec into [`SortKey`]s. An
 /// unspecified direction defaults to ascending.
 fn parse_sort(spec: &str) -> Vec<SortKey> {
@@ -910,7 +950,9 @@ async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
             parent.id()
         ));
     }
-    let node_type = pick_type(&child_types, inv.type_filter.as_deref())?;
+    let addressed = addressed_level(adapter, inv).await?;
+    let wanted = reconcile_level(addressed.as_ref(), inv.type_filter.as_deref())?;
+    let node_type = pick_type(&child_types, wanted)?;
 
     if inv.group_by.is_some() && !adapter.capabilities().group_by_via_adapter {
         eprintln!(
@@ -1043,14 +1085,17 @@ async fn cmd_actions(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<(
     // Route through the content layer's `level_actions*` seam so the built-in
     // `help` action shows up alongside the adapter's own actions on every
     // level, without the adapter declaring it.
+    let addressed = addressed_level(adapter, inv).await?;
     let actions: Vec<NodeAction> = if let Some(id) = inv.positionals.first() {
         let node = resolve_node(adapter, id).await?;
         not_yet_done_content::level_actions(adapter, node.as_ref())
-    } else if let Some(t) = &inv.type_filter {
+    } else if let Some(t) = reconcile_level(addressed.as_ref(), inv.type_filter.as_deref())? {
         let nt = find_node_type(adapter, t).await?;
         not_yet_done_content::level_actions_for_type(adapter, &nt)
     } else {
-        return Err(anyhow!("actions requires a node id or --type <type>"));
+        return Err(anyhow!(
+            "actions requires a level — address one (`<instance>:<child>`), name a node id, or pass --type <type>"
+        ));
     };
     output_actions(&actions, inv.output);
     Ok(())
@@ -2378,6 +2423,56 @@ mod tests {
         };
         let inv = inv_from(&["nyd", "adapter", "mail", "reply", "-m", "my answer"]);
         assert_eq!(edited_text(&prep, &inv).unwrap(), "my answer");
+    }
+
+    fn nt(type_id: &str) -> NodeType {
+        NodeType {
+            type_id: type_id.to_string(),
+            mime_type: "text/plain".into(),
+            syntax: None,
+            file_extension: ".txt".into(),
+            display_name: type_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_addressed_level_is_what_a_listing_lists() {
+        // `adapter systemd:unitfile ls` used to list the root's first child
+        // type — services — because only `help` read the address.
+        let level = nt("systemd:unitfile");
+        assert_eq!(
+            reconcile_level(Some(&level), None).unwrap(),
+            Some("systemd:unitfile")
+        );
+    }
+
+    #[test]
+    fn without_an_address_the_type_flag_still_decides() {
+        assert_eq!(
+            reconcile_level(None, Some("systemd:unitfile")).unwrap(),
+            Some("systemd:unitfile")
+        );
+        assert_eq!(reconcile_level(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn an_address_and_a_matching_type_flag_agree_in_either_spelling() {
+        let level = nt("systemd:unitfile");
+        for spelling in ["systemd:unitfile", "unitfile"] {
+            assert_eq!(
+                reconcile_level(Some(&level), Some(spelling)).unwrap(),
+                Some("systemd:unitfile")
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_and_a_contradicting_type_flag_are_refused() {
+        let level = nt("systemd:unitfile");
+        let err = reconcile_level(Some(&level), Some("systemd:service")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("systemd:unitfile"), "{msg}");
+        assert!(msg.contains("systemd:service"), "{msg}");
     }
 
     #[test]
