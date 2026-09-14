@@ -31,12 +31,21 @@
 //! query the user switches at runtime, not a setting they edit and restart.
 //! See decision D2 in `docs/plan-systemd-adapter.md`.
 //!
-//! Under a service and a timer hangs one further level:
+//! Under a service and a timer hang three further levels:
 //!
 //! * **property** (`systemd:property`, id `property:<unit>:<Name>`) — one row
 //!   per property the manager reports, from the generic `Unit` interface and
 //!   from the unit's own. Not under **unitfile**: a unit the manager has not
 //!   loaded has no D-Bus object, and therefore no properties to read.
+//! * **dep** (`systemd:dep`, id `dep:<unit>><unit>>…`) — what the unit needs,
+//!   as a tree: the level hangs under itself, so a row unfolds into its own
+//!   dependencies. The one level of this adapter that is a tree rather than a
+//!   table, which is why the unit levels above it carry a `tree_label`.
+//! * **order** (`systemd:order`, id `order:<unit>><unit>`) — what the unit is
+//!   ordered against, flat and one hop deep.
+//!
+//! Both dependency levels are [`crate::deps`], which explains why the first is
+//! recursive and the second is not.
 //!
 //! # Acting on a unit
 //!
@@ -63,6 +72,7 @@ use crate::bus::{Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFA
 use crate::config::SystemdConfig;
 use crate::control;
 use crate::create;
+use crate::deps::{self, Axis, DepRow};
 use crate::edit;
 use crate::journal;
 use crate::live;
@@ -215,6 +225,10 @@ impl ContentAdapter for SystemdAdapter {
             let row = journal::entry(self.bus().manager(), unit, cursor).await?;
             return Ok(Box::new(self.node(row.summary())));
         }
+        if deps::parse(id).is_some() {
+            let row = deps::row_by_id(self.bus(), id).await?;
+            return Ok(Box::new(self.node(row.summary())));
+        }
         if let Some(rest) = id.strip_prefix(crate::PROPERTY_PREFIX) {
             // A unit name may hold dots but never a colon, so the *last* colon
             // is the one that separates the unit from the property name.
@@ -244,9 +258,29 @@ impl ContentAdapter for SystemdAdapter {
         // a unit's log needs no D-Bus object, only a name, so a unit the
         // manager has never loaded still has a journal from the last time it
         // ran. Properties are the opposite and stay where the object is.
+        // A dependency row hangs under itself: that is what makes the needs
+        // level a tree. The ordering level does not — see [`crate::deps`].
+        if type_id == deps::dep_type().type_id {
+            let id = node.id();
+            return vec![Child {
+                node_type: deps::dep_type(),
+                columns: deps::dep_columns(),
+                list: Box::new(move |params| Box::pin(self.list_deps(id, Axis::Needs, params))),
+            }];
+        }
         if type_id == service_type().type_id || type_id == timer_type().type_id {
             let id = node.id();
             return vec![
+                Child {
+                    node_type: deps::dep_type(),
+                    columns: deps::dep_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_deps(id, Axis::Needs, params))),
+                },
+                Child {
+                    node_type: deps::order_type(),
+                    columns: deps::dep_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_deps(id, Axis::Order, params))),
+                },
                 Child {
                     node_type: property_type(),
                     columns: property_columns(),
@@ -481,6 +515,45 @@ impl SystemdAdapter {
                 .collect(),
             &params.sort,
             &property_columns(),
+        ))
+    }
+
+    /// One level of a unit's dependency graph — see [`crate::deps`] for the
+    /// shape and the cost.
+    ///
+    /// What it hangs under is either a unit row, where the chain starts, or
+    /// another dependency row, which already carries both its chain and its
+    /// axis in its id. `axis` is what the *level* asks for and settles only the
+    /// first case; an id that names an axis always wins, or a needs row would
+    /// unfold into ordering rows.
+    async fn list_deps(&self, node_id: &str, axis: Axis, params: ListParams) -> Result<ListResult> {
+        let query = compile(params.query.as_deref(), query::DEP_COLUMNS)?;
+        let (axis, chain) = match deps::parse(node_id) {
+            Some(found) => found,
+            None => {
+                let unit = node_id
+                    .strip_prefix(crate::SERVICE_PREFIX)
+                    .or_else(|| node_id.strip_prefix(crate::TIMER_PREFIX))
+                    .ok_or_else(|| {
+                        ContentError::NotFound(format!("{node_id} is not a loaded unit"))
+                    })?;
+                (axis, vec![unit.to_string()])
+            }
+        };
+        let of = chain.last().cloned().unwrap_or_default();
+        let what = match axis {
+            Axis::Needs => format!("Reading what {of} needs"),
+            Axis::Order => format!("Reading what {of} is ordered against"),
+        };
+        let _busy = self.status().busy(&what, self.shared.timeout_secs);
+        let rows = deps::level(self.bus(), axis, &chain).await?;
+        Ok(finish(
+            query::retain(rows, &query)
+                .iter()
+                .map(DepRow::summary)
+                .collect(),
+            &params.sort,
+            &deps::dep_columns(),
         ))
     }
 
@@ -794,11 +867,16 @@ impl UnitNode {
     /// `None` on a property row: a property is not something you can start, and
     /// answering with the unit name would let a verb through on a level that
     /// never offered it.
+    ///
+    /// A dependency row answers with the last unit of its chain — the whole
+    /// point of a row on that level is the unit it names, and the verbs act on
+    /// a name.
     fn unit(&self) -> Option<&str> {
         self.id
             .strip_prefix(crate::SERVICE_PREFIX)
             .or_else(|| self.id.strip_prefix(crate::TIMER_PREFIX))
             .or_else(|| self.id.strip_prefix(crate::UNIT_FILE_PREFIX))
+            .or_else(|| deps::unit_of(&self.id))
     }
 
     /// The checks every verb passes before it reaches the manager, in the order
@@ -1167,20 +1245,51 @@ mod tests {
         );
     }
 
-    /// The two child levels answer to two different questions about a unit,
-    /// and only one of them needs the manager to have loaded it.
+    /// The child levels answer four different questions about a unit, and only
+    /// the ones that read the manager's object need it to have loaded the unit.
     #[test]
     fn properties_need_a_loaded_unit_and_the_journal_does_not() {
         let a = adapter();
         // A service is loaded, so the manager holds an object that can be
-        // asked what it is — and it has a journal like anything else.
+        // asked what it needs, what it is ordered against and what it is — and
+        // it has a journal like anything else.
         let service = a.node(ServiceRow::default().summary());
         let under: Vec<String> = a
             .childs(&service)
             .into_iter()
             .map(|c| c.node_type.type_id)
             .collect();
-        assert_eq!(under, vec!["systemd:property", "systemd:log"]);
+        assert_eq!(
+            under,
+            vec![
+                "systemd:dep",
+                "systemd:order",
+                "systemd:property",
+                "systemd:log"
+            ]
+        );
+
+        // The needs level hangs under itself — that is the tree — while the
+        // ordering level is one hop and stops.
+        let dep = a.node(
+            DepRow {
+                chain: vec!["a.service".into(), "b.target".into()],
+                axis: Axis::Needs,
+                relation: "requires".into(),
+                active: String::new(),
+                sub: String::new(),
+                load: String::new(),
+                description: String::new(),
+                has_children: true,
+            }
+            .summary(),
+        );
+        let under: Vec<String> = a
+            .childs(&dep)
+            .into_iter()
+            .map(|c| c.node_type.type_id)
+            .collect();
+        assert_eq!(under, vec!["systemd:dep"]);
 
         // A unit file may never have been loaded — there is no object behind
         // it and therefore no properties. Its journal is still readable: that

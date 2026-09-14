@@ -774,6 +774,62 @@ produces **2** `Invalidation::Row` — one per settled state. That is the
 coalescing working, and it is what the ignored live test in `live.rs` asserts
 (`cargo test -p not-yet-done-systemd-adapter -- --ignored live`).
 
+### What it took, beyond the plan — the tree half
+
+**The transport was already paid for.** Every relation this level needs —
+`Requires`, `Requisite`, `BindsTo`, `PartOf`, `Upholds`, `Wants`, `After`,
+`Before` — is an ordinary property on the generic
+`org.freedesktop.systemd1.Unit` interface, so all of them arrive in the same
+`GetAll` a unit row already makes. The dependency tree needed no new call, no
+new interface and no second cache; what it needed was a decision about ids.
+
+**A row is addressed by its whole path, not by its unit name.** Measured on
+the user bus: `systemctl --user list-dependencies --all pipewire.service`
+prints **120 rows made of 27 distinct units** — a factor of four and a half. A
+unit name is therefore not an address in this tree: `dbus-broker.service`
+names four or five positions at once, and the frontend addresses rows _by id_
+for both the tree cache and the live row patching that phase 5a just built. So
+an id carries the chain it was reached through —
+`dep:pipewire.service>basic.target>sockets.target`. `>` is safe as the
+separator because systemd restricts unit names to alphanumerics plus
+`:-_.\@` and escapes everything else as `\xNN`.
+
+**The ordering level is flat, and had to be.** The plan says the two questions
+get two levels, which is right; what building it showed is that they cannot be
+two _tree_ levels. The frontend expands **all** tree-continuing children of a
+level together (`ExpandTreeNodeMulti`), so a second tree branch under a unit
+row would unfold "needs" and "comes after" into one mixed list — precisely the
+answer that is neither. `systemd:dep` is therefore the tree and
+`systemd:order` is one flat hop, reached with `D` because `enter` on a unit
+row belongs to the tree. That is also the honest shape for it: `After=` walked
+recursively from `basic.target` is the whole session start, and nobody reads
+that.
+
+**Which in turn made Services and Timers tree levels.** A `tree_label` child
+only continues from a tree-active parent, so the branch would have been
+silently inert on a flat level. Both unit levels now carry `tree_label: name`,
+and a unit row's expand arrow comes from `has_children`, which the row fills
+from the six "needs" properties it already holds — free, and exactly right: a
+unit that depends on nothing shows no arrow and `enter` still drills into
+Properties.
+
+**One lookahead read per child, deliberately.** `has_children` on a
+_dependency_ row cannot be answered from the parent's properties, only from
+the child's own — so each row in a level costs one extra `GetAll`, issued
+concurrently under the same in-flight cap as everything else. The trade is
+worth naming: a level is ten to twenty rows wide where the services level does
+the same thing four hundred times, and the alternative is an expand arrow that
+opens onto nothing, which is a lie a tree should not tell.
+
+**A unit named by two relations shows the stronger one.** `Requires=` and
+`Wants=` overlapping on the same unit is ordinary, and two rows for one unit
+would be two tree positions for one thing. The row keeps the first match in
+the order the adapter declares — `Requires`, `Requisite`, `BindsTo`,
+`PartOf`, `Upholds`, `Wants` — because that is the one that decides what
+happens when the dependency fails. Cycles are cut the same way they are shown:
+a unit already present higher up its own branch gets a row marked `(cycle)`
+and is not followed; depth stops at ten regardless.
+
 ## Phase 6 — Diagnostics
 
 **Delivers**, in an order to be decided, the commands that exist but that

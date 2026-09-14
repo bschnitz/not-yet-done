@@ -26,6 +26,8 @@
 //!   leaves behind.
 //! * [`create`] — making a unit that does not exist yet: the timer/service
 //!   pair from one form, and the empty file in the editor.
+//! * [`deps`] — the dependency graph as two levels: what a unit needs, as a
+//!   tree, and what it is ordered against, as one flat hop.
 //! * [`journal`] — a unit's log lines as rows, read from `journalctl
 //!   --output=json`, and the one key that opens the pager instead.
 //! * [`live`] — the manager's own signals, coalesced into the row and level
@@ -46,6 +48,7 @@ pub mod calendar;
 pub mod config;
 pub mod control;
 pub mod create;
+pub mod deps;
 pub mod edit;
 pub mod factory;
 pub mod journal;
@@ -64,6 +67,17 @@ pub const SERVICE_PREFIX: &str = "service:";
 pub const TIMER_PREFIX: &str = "timer:";
 /// Node-id prefix for a unit file on disk (`unitfile:<name>`).
 pub const UNIT_FILE_PREFIX: &str = "unitfile:";
+/// Node-id prefix for one node of a unit's dependency tree
+/// (`dep:<unit>><unit>>…`).
+///
+/// The id is the whole path the row was reached by, not just its unit — the
+/// same unit occupies many positions in one tree, and the frontend addresses a
+/// row by its id. See [`deps`] for the measurement behind that.
+pub const DEP_PREFIX: &str = "dep:";
+/// Node-id prefix for one unit another unit is ordered against
+/// (`order:<unit>><unit>`). Two elements, always: the ordering level does not
+/// recurse.
+pub const ORDER_PREFIX: &str = "order:";
 /// Node-id prefix for one property of one unit (`property:<unit>:<Name>`).
 ///
 /// Two segments because a property is only meaningful with the unit it belongs

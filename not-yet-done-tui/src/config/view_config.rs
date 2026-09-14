@@ -3097,7 +3097,10 @@ views:
         // *looks* right can be doing nothing — which is how the Properties
         // levels carried a `query:` block that no one ever saw. Nothing this
         // file writes may be inert.
-        assert!(unknown.is_empty(), "systemd.yaml has dead config: {unknown:?}");
+        assert!(
+            unknown.is_empty(),
+            "systemd.yaml has dead config: {unknown:?}"
+        );
         cfg.validate(&KeyBindingConfig::default(), &Default::default())
             .expect("committed systemd.yaml must validate");
 
@@ -3252,6 +3255,78 @@ views:
                 template.contains("[prio, lte, 3]"),
                 "the template teaches the severity filter: {template}"
             );
+        }
+    }
+
+    /// The two dependency axes, as the view file has to shape them.
+    ///
+    /// "What does this unit need?" is a tree, and a tree continuation only
+    /// continues from a tree-active parent — so the unit levels themselves
+    /// must carry `tree_label`, or the branch is silently inert. "What is it
+    /// ordered against?" is one flat hop, and it has to *stay* flat: all
+    /// tree-continuing siblings of a level unfold together, so a second tree
+    /// child would mix the two questions into one answer that is neither.
+    #[test]
+    fn committed_systemd_example_keeps_the_two_dependency_axes_apart() {
+        let yaml = include_str!("../../../docs/examples/views/systemd.yaml");
+        let (cfg, _) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+            .expect("committed systemd.yaml must parse");
+
+        for view in cfg
+            .views
+            .iter()
+            .filter(|v| v.node_type != "systemd:unitfile")
+        {
+            assert_eq!(
+                view.tree_label.as_deref(),
+                Some("name"),
+                "subtab `{}` has to be a tree level for the dependency branch to grow",
+                view.name
+            );
+
+            let deps = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "systemd:dep")
+                .unwrap_or_else(|| panic!("subtab `{}` grows a dependency tree", view.name));
+            assert_eq!(deps.tree_label.as_deref(), Some("name"));
+            assert!(deps.recursive, "what a unit needs needs things of its own");
+            assert!(
+                deps.columns.iter().any(|c| c.key == "relation"),
+                "the relation is the column that says *why* a row is here"
+            );
+
+            let order = view
+                .children
+                .iter()
+                .find(|c| c.node_type == "systemd:order")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "subtab `{}` lists what a unit is ordered against",
+                        view.name
+                    )
+                });
+            assert!(
+                order.tree_label.is_none() && !order.recursive,
+                "the ordering level is one hop, not a tree"
+            );
+
+            // Only one tree-continuing child per level — the whole point.
+            let branches = view
+                .children
+                .iter()
+                .filter(|c| c.tree_label.is_some())
+                .count();
+            assert_eq!(branches, 1, "subtab `{}` unfolds one question", view.name);
+
+            // `enter` on a unit row belongs to the tree, so the flat level
+            // needs a key of its own.
+            let navigate = view
+                .actions
+                .iter()
+                .find(|a| a.navigate_to.as_deref() == Some("systemd:order"))
+                .unwrap_or_else(|| panic!("subtab `{}` binds the ordering drill", view.name));
+            assert!(navigate.key_strings().iter().any(|k| k == "D"));
         }
     }
 

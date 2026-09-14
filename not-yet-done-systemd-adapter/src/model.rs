@@ -30,7 +30,7 @@ use crate::bus::{UnitEntry, UnitFileEntry};
 // ---------------------------------------------------------------------------
 
 /// Build one of this adapter's node types.
-fn node_type(type_id: &str, display_name: &str) -> NodeType {
+pub(crate) fn node_type(type_id: &str, display_name: &str) -> NodeType {
     NodeType {
         type_id: type_id.into(),
         mime_type: String::new(),
@@ -89,6 +89,23 @@ fn as_u64(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u64> {
         _ => return None,
     };
     (n != UNSET_U64).then_some(n)
+}
+
+/// A property that is an array of strings — the shape every dependency
+/// relation has (`Requires`, `After`, …). Anything else, including an absent
+/// key, is no strings at all rather than an error: a unit that names nothing
+/// and a unit that does not exist should both produce an empty level.
+pub fn strings(props: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
+    match props.get(key).map(|v| &**v) {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| match v {
+                Value::Str(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn as_bool(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
@@ -163,7 +180,7 @@ pub fn boot_instant() -> Option<DateTime<Utc>> {
 // Cells
 // ---------------------------------------------------------------------------
 
-fn field(key: &str, label: &str, value: impl Into<String>) -> MetadataField {
+pub(crate) fn field(key: &str, label: &str, value: impl Into<String>) -> MetadataField {
     MetadataField {
         key: key.into(),
         value: value.into(),
@@ -229,6 +246,10 @@ pub struct ServiceRow {
     pub restarts: Option<u64>,
     pub needs_reload: bool,
     pub fragment: String,
+    /// Whether the unit needs anything — what decides whether its row offers to
+    /// unfold into [the dependency tree](crate::deps). Read from the same
+    /// property map as the rest of the row, so it costs nothing.
+    pub has_deps: bool,
 }
 
 impl ServiceRow {
@@ -254,6 +275,7 @@ impl ServiceRow {
             restarts: as_u64(service, "NRestarts"),
             needs_reload: as_bool(unit, "NeedDaemonReload"),
             fragment: as_str(unit, "FragmentPath"),
+            has_deps: crate::deps::has_needs(unit),
         }
     }
 
@@ -280,7 +302,7 @@ impl ServiceRow {
                     field("fragment", "Fragment", self.fragment.clone()),
                 ],
             },
-            has_children: Some(false),
+            has_children: Some(self.has_deps),
         }
     }
 }
@@ -327,6 +349,8 @@ pub struct TimerRow {
     pub unit: String,
     pub result: String,
     pub persistent: bool,
+    /// Whether the timer needs anything — see [`ServiceRow::has_deps`].
+    pub has_deps: bool,
 }
 
 impl TimerRow {
@@ -350,6 +374,7 @@ impl TimerRow {
             unit: as_str(timer, "Unit"),
             result: as_str(timer, "Result"),
             persistent: as_bool(timer, "Persistent"),
+            has_deps: crate::deps::has_needs(unit),
         }
     }
 
@@ -373,7 +398,7 @@ impl TimerRow {
                     field("persistent", "Persistent", flag(self.persistent)),
                 ],
             },
-            has_children: Some(false),
+            has_children: Some(self.has_deps),
         }
     }
 }
