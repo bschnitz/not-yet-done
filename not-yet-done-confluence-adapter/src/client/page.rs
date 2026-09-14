@@ -379,19 +379,11 @@ impl ConfluenceClient {
         self.fetch_page_envelope(&url).await
     }
 
-    /// `GET /rest/api/content/{id}?expand=body.storage,version,ancestors,metadata.labels` —
-    /// fetches the full page detail. Used by the page node's lazy hydration
-    /// on `read()` / preview-toggle. The expand set is hard-coded because
-    /// CF-5+ unconditionally needs all four sub-objects:
-    /// - `body.storage` for the preview pane (and CF-9 edit buffer)
-    /// - `version` to stash for conflict detection on PUT (CF-9)
-    /// - `ancestors` so future breadcrumb rendering doesn't need a second call
-    /// - `metadata.labels` for the future labels column / search
+    /// `GET /rest/api/content/{id}` with [`PAGE_DETAIL_EXPAND`] — fetches
+    /// the full page detail. Used by the page node's lazy hydration on
+    /// `read()` / preview-toggle.
     pub async fn get_page(&self, id: &str) -> Result<PageDetail, String> {
-        let url = format!(
-            "{}/rest/api/content/{id}?expand=body.storage,version,ancestors,metadata.labels",
-            self.base_url()
-        );
+        let url = page_detail_url(&self.base_url(), id);
         let resp = self.send("GET", &url, self.inner_http().get(&url)).await?;
         let resp = self.check_status("GET", &url, resp).await?;
         let body = resp
@@ -488,7 +480,26 @@ impl ConfluenceClient {
             version: wire.version.map(|v| v.number).unwrap_or_default(),
         })
     }
+}
 
+/// Expand set for [`ConfluenceClient::get_page`]. It is hard-coded, and
+/// every entry backs a field of [`PageDetail`] — an omission here does
+/// not fail, it yields a silently empty field:
+/// - `body.storage` for the preview pane (and the CF-9 edit buffer)
+/// - `version` to stash for conflict detection on PUT (CF-9)
+/// - `ancestors` so breadcrumb rendering needs no second call
+/// - `metadata.labels` for the labels column / search
+/// - `space` for `create-child` and `clone`, which POST the new page
+///   into the space of the page they start from. Missing until
+///   2026-09-14, which made both actions fail on every page with
+///   "has no space.key".
+const PAGE_DETAIL_EXPAND: &str = "body.storage,version,ancestors,metadata.labels,space";
+
+fn page_detail_url(base_url: &str, id: &str) -> String {
+    format!("{base_url}/rest/api/content/{id}?expand={PAGE_DETAIL_EXPAND}")
+}
+
+impl ConfluenceClient {
     /// `POST /rest/api/content` — create a new page in `space_key`. When
     /// `parent_id` is `Some`, the page becomes a child of that page;
     /// when `None`, it's a top-level page of the space.
@@ -873,6 +884,31 @@ mod tests {
         let ancestors = json["ancestors"].as_array().expect("ancestors array");
         assert_eq!(ancestors.len(), 1);
         assert_eq!(ancestors[0]["id"], "42");
+    }
+
+    #[test]
+    fn page_detail_url_expands_every_field_page_detail_reads() {
+        let url = page_detail_url("https://wiki.example.invalid/confluence", "12345");
+        assert!(
+            url.starts_with(
+                "https://wiki.example.invalid/confluence/rest/api/content/12345?expand="
+            )
+        );
+        // Parsing the space key (below) is worth nothing while the
+        // request never asks for the object: `create-child` and `clone`
+        // then see an empty `space_key` and refuse on every page.
+        for field in [
+            "body.storage",
+            "version",
+            "ancestors",
+            "metadata.labels",
+            "space",
+        ] {
+            assert!(
+                PAGE_DETAIL_EXPAND.split(',').any(|x| x == field),
+                "expand set does not ask for `{field}`, so PageDetail cannot carry it"
+            );
+        }
     }
 
     #[test]
