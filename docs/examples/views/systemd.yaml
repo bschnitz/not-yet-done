@@ -196,6 +196,23 @@ views:
         kind: number
         sizing: "fixed(9)"
         hidden: true
+      # What `systemd-analyze security` makes of the unit as a whole: 0 is a
+      # unit that can reach nothing, 10 one that can reach everything. Hidden
+      # by default and switched on with `c c`, because it answers a question
+      # about the *list* ("which of my own units are wide open?") rather than
+      # one about the row — on a stock system almost every row says 9.4.
+      #
+      # It costs one call for the whole listing rather than one per row:
+      # `systemd-analyze --user security` scores every loaded service in a
+      # single run. That is also its limit — only *loaded* services have a
+      # score — which is why the Unit files subtab carries no such column, and
+      # why the Security level below is the way to score a unit the manager
+      # has never touched.
+      - key: exposure
+        label: Exposure
+        kind: number
+        sizing: "fixed(9)"
+        hidden: true
       - key: fragment
         label: Fragment
         kind: path
@@ -321,6 +338,13 @@ views:
       # `children:` below), which answers what this unit needs rather than
       # what it is sequenced against.
       - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
+      # What `systemd-analyze security` finds in this unit, one check per row
+      # — see the `Security` child below. `H` for hardening, and not the `S`
+      # the name asks for: capital S is the app-wide sort-mode key, and a
+      # level key has to be one nothing else has claimed. Which is not a
+      # thing to find out by pressing it — a colliding binding fails the
+      # config with both claimants named.
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit. `n` is the leader for making something that is not
       # there yet. It acts on the manager, not on the row under the cursor, so
@@ -498,6 +522,135 @@ views:
             style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
+
+      # `systemd-analyze security <unit>`, one check per row.
+      #
+      # systemd prints this as a table with a score under it, and the score is
+      # the part everyone quotes. It is also the least useful part: 9.4 UNSAFE
+      # is what nearly every user service on a stock system scores, so it
+      # neither sorts anything nor says what to do about it. The checks behind
+      # it do — which one is open, what it costs, and which directive closes it
+      # — so here the checks are the rows, and the score is the (hidden)
+      # `exposure` column on the list above.
+      #
+      # `status` is a word and not a boolean because systemd answers three
+      # things, not two: `ok` (the unit already does this), `exposed` (it does
+      # not) and `no-effect` (the check cannot apply to a user service at all —
+      # `RemoveIPC=` is the only one). A boolean would have to file the third
+      # under one of the other two, and either way it would read as a lie.
+      #
+      # `exposure` is empty rather than `0` where a check passes, which is what
+      # makes `[exposure, gte, 0.3]` mean "what is still open, worst first"
+      # without a second clause about the status.
+      #
+      # `fix` is the directive that settles the check — and it is deliberately
+      # not the same text as `check`. What systemd prints as the name of a
+      # check is a *label*: `CapabilityBoundingSet=~CAP_SET(UID|GID|PCAP)`
+      # names a group of capabilities and is not valid configuration. Written
+      # into a unit file it is ignored without a word of complaint, and the
+      # check stays exposed. So the fix column is a curated table with the
+      # groups expanded into the real capability names, and `e h` writes it.
+      #
+      # Under a unit file too, unlike Properties: an unloaded unit has no
+      # D-Bus object, but it has a file, and systemd-analyze reads the file.
+      # Units that are not services refuse — a socket has no sandbox to
+      # describe — and the refusal is in systemd's own words.
+      - &security
+        name: Security
+        node_type: "systemd:security"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the checks. Columns: check, status, exposure, description,
+            # fix, id.
+            #
+            #   query:
+            #     [status, =, exposed]           # what is still open
+            #     [exposure, gte, 0.3]           # only the ones that cost most
+            #     [check, has, Capability]       # one family of checks
+            #     [fix, has, Protect]            # what a Protect* line settles
+            #
+            #   query:
+            #     and:
+            #       - [status, =, exposed]
+            #       - [exposure, gte, 0.3]
+            #
+            # A check that passes carries no exposure at all, so a bound on
+            # `exposure` already excludes it: the two queries above select the
+            # same rows.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [check, has, ""]
+        columns:
+          - key: check
+            label: Check
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: status
+            label: Status
+            sizing: "fixed(10)"
+          - key: exposure
+            label: Exposure
+            kind: number
+            sizing: "fixed(9)"
+          - key: description
+            label: What it means
+            style: secondary
+            sizing: "flex(3)"
+          # Blank where there is no line to write: `RootDirectory=` versus
+          # `RootImage=` and `User=` versus `DynamicUser=` are a choice and
+          # not a directive, and `RemoveIPC=` has no effect on a user service
+          # at all. For those three `e h` writes a comment saying so rather
+          # than pretending there is something to copy.
+          - key: fix
+            label: Fix
+            sizing: "flex(3)"
+          # systemd's stable name for the check — which the label above, for
+          # the group checks, is not. Hidden because the label says the same
+          # thing in the form you would actually write.
+          - key: id
+            label: Id
+            style: tertiary
+            sizing: "flex(2)"
+            hidden: true
+        # Three states, three colours, so the shape of the level is readable
+        # before it is read: what is open, what is already covered, and what
+        # does not apply here at all.
+        highlights:
+          - when: { field: status, matches: '^exposed$' }
+            style: warning
+          - when: { field: status, matches: '^ok$' }
+            style: success
+          - when: { field: status, matches: '^no-effect$' }
+            style: text_dim
+        actions:
+          - { name: refresh, key: r, type: reload }
+          # `e h` prefills the unit's drop-in with the fix for the check under
+          # the cursor and opens it — the same buffer, the same
+          # `systemd-analyze verify` pass and the same backup as `e e` on the
+          # unit itself, which is why it sits under the editor leader and not
+          # under `a`. Nothing is written until you save, so it is also how to
+          # *read* what a fix would be.
+          #
+          # It appends rather than replaces: whatever drop-in the unit already
+          # has comes up as it is, with the new stanza and a comment naming the
+          # check at the bottom. Hardening a second check adds a second stanza
+          # to the same file. A repeated `[Service]` heading is fine — systemd
+          # merges the sections — so the stanza brings its own rather than
+          # hunting for yours. And as with `e e`, a unit that already lives in
+          # ~/.config/systemd/user has no vendor file left to layer over, so
+          # the fix is written into that file directly.
+          #
+          # Three checks have no line to write (see the `fix` column above),
+          # and one more cannot be closed at all while another is closed:
+          # `ProtectClock=yes` implies `DeviceAllow=char-rtc r`, so the
+          # `DeviceAllow=` check stays exposed whenever the clock is protected,
+          # in either order. That is systemd's own arithmetic, not a gap in the
+          # table.
+          - { name: harden, key: "e h", id: harden }
 
       # ------------------------------------ what a unit needs, and when
       #
@@ -825,6 +978,9 @@ views:
       # `children:` below), which answers what this unit needs rather than
       # what it is sequenced against.
       - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
+      # The security checks for this unit — the Services subtab above carries
+      # the explanation.
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -953,6 +1109,12 @@ views:
             style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
+
+      # And the security checks, aliased from Services. Worth having exactly
+      # here: a unit that started failing right after a hardening drop-in is
+      # usually failing *because* of it, and this level is where you can see
+      # what the drop-in took away.
+      - *security
 
       # The same two levels as under Services, aliased rather than copied: a
       # unit's dependencies do not change shape because the list above them
@@ -1151,6 +1313,9 @@ views:
       # `children:` below), which answers what this unit needs rather than
       # what it is sequenced against.
       - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
+      # The security checks — but for the service this timer triggers, not for
+      # the timer. See the `Security` child below.
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -1279,6 +1444,15 @@ views:
             style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
+
+      # The security checks, aliased from Services — but a timer is not a
+      # service unit, and `systemd-analyze security` refuses one outright. It
+      # is right to: a timer starts no processes of its own, so it has no
+      # sandbox to describe. What it does have is the service it triggers, and
+      # that is the unit this level analyses. The rows say so — each carries
+      # the unit it was measured on, and `e h` writes into *that* unit's
+      # drop-in, not into the timer's.
+      - *security
 
       # The same two levels as under Services. A timer needs and is ordered
       # against other units exactly as a service is — not least the service
@@ -1468,6 +1642,9 @@ views:
       # The unit's own journal — `J` opens it as a level, `a j` follows it in
       # a terminal. The Services subtab above carries the explanation.
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      # The security checks for this unit — the Services subtab above carries
+      # the explanation.
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -1555,3 +1732,9 @@ views:
             style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
+
+      # The security checks, aliased from Services. This is the one place they
+      # can be asked about a unit the manager has never loaded: the analysis
+      # reads the file, not a bus object. A unit file that is not a service
+      # refuses, in systemd's own words.
+      - *security

@@ -28,6 +28,9 @@
 //!   pair from one form, and the empty file in the editor.
 //! * [`deps`] — the dependency graph as two levels: what a unit needs, as a
 //!   tree, and what it is ordered against, as one flat hop.
+//! * [`security`] — what `systemd-analyze security` says about a unit, as a
+//!   level, plus the curated table of directives that answer one row of it.
+//!   The one place in this crate that keeps knowledge rather than reading it.
 //! * [`journal`] — a unit's log lines as rows, read from `journalctl
 //!   --output=json`, and the one key that opens the pager instead.
 //! * [`live`] — the manager's own signals, coalesced into the row and level
@@ -57,6 +60,7 @@ pub mod model;
 pub mod preset;
 pub mod protect;
 pub mod query;
+pub mod security;
 pub mod shadow;
 
 pub use adapter::SystemdAdapter;
@@ -93,3 +97,9 @@ pub const PROPERTY_PREFIX: &str = "property:";
 /// can (`dbus-:1.19-org.a11y.atspi.Registry@0.service`), so the *last* colon is
 /// the one that separates the pair.
 pub const LOG_PREFIX: &str = "log:";
+/// Node-id prefix for one security check of one unit
+/// (`security:<unit>:<json_field>`).
+///
+/// Two segments, split from the right like [`LOG_PREFIX`]: systemd's
+/// `json_field` never holds a colon, a unit name may.
+pub const SECURITY_PREFIX: &str = "security:";

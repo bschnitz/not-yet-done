@@ -67,6 +67,10 @@ pub fn log_type() -> NodeType {
     node_type("systemd:log", "Journal")
 }
 
+pub fn security_type() -> NodeType {
+    node_type("systemd:security", "Security")
+}
+
 // ---------------------------------------------------------------------------
 // Reading D-Bus property maps
 // ---------------------------------------------------------------------------
@@ -76,7 +80,10 @@ pub fn log_type() -> NodeType {
 /// with no realtime elapse.
 const UNSET_U64: u64 = u64::MAX;
 
-fn as_str(props: &HashMap<String, OwnedValue>, key: &str) -> String {
+/// One string property, or the empty string where the unit does not carry it.
+/// `pub(crate)` because the security level reads a single property of its own
+/// — the unit a timer triggers — without building a row around it.
+pub(crate) fn as_str(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     match props.get(key).map(|v| &**v) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
@@ -244,6 +251,14 @@ pub struct ServiceRow {
     /// paths themselves are one keystroke away on the property level.
     pub dropins: usize,
     pub fragment: String,
+    /// The unit's overall `systemd-analyze security` exposure, `0.0`..=`10.0`,
+    /// as the string systemd prints it.
+    ///
+    /// A string and not a number because it is one shared listing-wide read
+    /// that either happened or did not, and an absent score must leave the
+    /// cell blank rather than read as a perfect zero. The column is still
+    /// `typed("number")`, so it sorts and compares numerically.
+    pub exposure: String,
     /// Whether the unit needs anything — what decides whether its row offers to
     /// unfold into [the dependency tree](crate::deps). Read from the same
     /// property map as the rest of the row, so it costs nothing.
@@ -274,6 +289,9 @@ impl ServiceRow {
             needs_reload: as_bool(unit, "NeedDaemonReload"),
             dropins: strings(unit, "DropInPaths").len(),
             fragment: as_str(unit, "FragmentPath"),
+            // Filled in by the level, which reads every unit's score in one
+            // call — see [`crate::security::overview`].
+            exposure: String::new(),
             has_deps: crate::deps::has_needs(unit),
         }
     }
@@ -300,6 +318,7 @@ impl ServiceRow {
                     field("needs_reload", "Reload?", flag(self.needs_reload)),
                     field("dropins", "Drop-ins", count(self.dropins)),
                     field("fragment", "Fragment", self.fragment.clone()),
+                    field("exposure", "Exposure", self.exposure.clone()),
                 ],
             },
             has_children: Some(self.has_deps),
@@ -328,6 +347,10 @@ pub fn service_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("needs_reload", "Reload?"),
         ColumnSchema::new("dropins", "Drop-ins").typed("number"),
         ColumnSchema::new("fragment", "Fragment"),
+        // `systemd-analyze security`, 0 (locked down) to 10 (wide open). One
+        // call for the whole level; see [`crate::security`] for why the number
+        // alone says less than the level it opens onto.
+        ColumnSchema::new("exposure", "Exposure").typed("number"),
     ]
 }
 
@@ -844,4 +867,113 @@ fn level_word(prio: Option<u64>) -> String {
         _ => "",
     }
     .to_string()
+}
+
+/// One `systemd-analyze security` check of one unit — a row on the
+/// `systemd:security` level.
+///
+/// Built from `--json=short`, which is the only machine-readable form of the
+/// analysis; see [`crate::security`] for the two fields whose names mislead
+/// (`set` is tri-state, `exposure` is a string that is absent exactly when the
+/// check passes) and for why the fix is a curated table rather than the check's
+/// own name.
+#[derive(Clone, Debug, Default)]
+pub struct SecurityRow {
+    /// The unit the check was run against, carried so the row can address
+    /// itself and so the harden action knows which drop-in to open.
+    pub unit: String,
+    /// systemd's stable identifier for the check (`json_field`) — the row's id
+    /// and the key the fix table is looked up by.
+    pub id: String,
+    /// The check as systemd displays it (`CapabilityBoundingSet=~CAP_KILL`).
+    /// A **label**: for the group checks it is not a directive that can be
+    /// written anywhere.
+    pub check: String,
+    pub description: String,
+    /// `ok`, `exposed` or `no-effect` — the three states of `set`, spelled out.
+    /// A word rather than a boolean because the third state is the one a
+    /// boolean would lose.
+    pub status: String,
+    /// What this check contributes to the unit's overall exposure. Absent
+    /// exactly when the check passes.
+    pub exposure: Option<f64>,
+    /// The directives that would settle this check, as one cell — empty where
+    /// no single directive does.
+    pub fix: String,
+}
+
+impl SecurityRow {
+    /// One element of the `--json=short` array as a row. `None` for an element
+    /// that is missing the identifier the row is addressed by.
+    pub fn parse(unit: &str, item: &serde_json::Value) -> Option<Self> {
+        let id = item.get("json_field")?.as_str()?.to_string();
+        // Tri-state: absent or JSON null is "has no effect here", which is a
+        // different answer from "this unit fails the check".
+        let status = match item.get("set").and_then(serde_json::Value::as_bool) {
+            Some(true) => crate::security::OK,
+            Some(false) => crate::security::EXPOSED,
+            None => crate::security::NO_EFFECT,
+        };
+        Some(Self {
+            unit: unit.to_string(),
+            fix: crate::security::fix_cell(&id),
+            id,
+            check: item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            description: item
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            status: status.to_string(),
+            exposure: item
+                .get("exposure")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.trim().parse().ok()),
+        })
+    }
+
+    pub fn summary(&self) -> NodeSummary {
+        NodeSummary {
+            // The unit first and the check id last, for the same reason a
+            // journal id is built that way: a `json_field` never holds a
+            // colon, a unit name may.
+            id: format!("{}{}:{}", crate::SECURITY_PREFIX, self.unit, self.id),
+            label: self.check.clone(),
+            node_type: security_type(),
+            metadata: Metadata {
+                fields: vec![
+                    field("check", "Check", self.check.clone()),
+                    field("status", "Status", self.status.clone()),
+                    field("exposure", "Exposure", exposure(self.exposure)),
+                    field("description", "Description", self.description.clone()),
+                    field("fix", "Fix", self.fix.clone()),
+                    field("id", "Id", self.id.clone()),
+                ],
+            },
+            has_children: Some(false),
+        }
+    }
+}
+
+pub fn security_columns() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema::new("check", "Check"),
+        ColumnSchema::new("status", "Status"),
+        // Empty on a check that passes — which is what makes
+        // `[exposure, gt, 0]` the same query as "what is still open".
+        ColumnSchema::new("exposure", "Exposure").typed("number"),
+        ColumnSchema::new("description", "Description"),
+        ColumnSchema::new("fix", "Fix"),
+        ColumnSchema::new("id", "Id"),
+    ]
+}
+
+/// An exposure as a cell: one decimal, the way systemd prints it, and empty
+/// rather than `0.0` when there is none.
+fn exposure(value: Option<f64>) -> String {
+    value.map(|n| format!("{n:.1}")).unwrap_or_default()
 }
