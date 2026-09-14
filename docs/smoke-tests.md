@@ -7860,11 +7860,73 @@ cell must move without a reload.
       `[mem, gt, 104857600]` narrows the list to units over 100 MiB, and
       sorting on `Mem` runs by size, not by the text of the rendered cell.
 
+## systemd — the audit columns (phase 6a)
+
+Four columns systemd does not hand over: `preset` and `drift` are read out of
+the preset policy on disk, `shadows` out of the unit search path, `dropins` off
+a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
+
+- [ ] `Preset` reads `enabled` / `disabled` / `ignored` on ordinary unit files
+      and is **empty** where a preset cannot apply: pick a `static` row (no
+      `[Install]` section), a `generated` one, a `transient` one — all blank,
+      and `Drift` blank with them.
+- [ ] Cross-check the parser against the machine: query
+      `[drift, =, should-enable]` in the `q` menu and compare the row count
+      with
+      `systemctl --user list-unit-files | awk '$2=="disabled" && $3=="enabled"' | wc -l`.
+      The two numbers must be equal. Repeat with `should-disable` against
+      `$2=="enabled" && $3=="disabled"`.
+- [ ] The count is allowed to be large. A distribution that ships no
+      default-off preset leaves most units unmatched, and systemd's default
+      for an unmatched unit is `enable` — so a long `should-enable` list is
+      the policy's answer, not a bug. Confirm with
+      `grep -r . /usr/lib/systemd/user-preset/` that there really is no
+      `disable *` line.
+- [ ] `a p` on a row whose `Drift` is **empty** and which is enabled from the
+      user's own directory answers "already matches its preset" — not
+      "0 changes", and nothing in the row moves. Check with
+      `find ~/.config/systemd/user -name '<unit>'` that the enable symlink is
+      really there first.
+- [ ] The counter-case, and it is not a bug: a unit enabled from
+      `/etc/systemd/user/<target>.wants/` also reads `enabled` with an empty
+      `Drift`, and `a p` on it still reports a change — it writes a second
+      symlink under `~/.config/systemd/user`, because user-level preset can
+      only enable at user level. `systemctl --user preset <unit>` does the
+      same. Undo with `rm` of the new symlink and its `.wants` directory, then
+      `systemctl --user daemon-reload`; `is-enabled` still says `enabled`
+      afterwards, from `/etc`.
+- [ ] `a p` on a row reading `should-enable` asks for confirmation naming the
+      unit, then reports the symlinks written; after the reload the row's
+      `State` is `enabled` and `Drift` is empty. Undo with
+      `systemctl --user disable <unit>` if the unit was off on purpose.
+- [ ] `Shadows` is empty for nearly every row — that is the normal state. To
+      see it work, copy an inert vendor unit into the user directory:
+      `cp /usr/lib/systemd/user/<inert>.service ~/.config/systemd/user/` and
+      `systemctl --user daemon-reload`. The row's `Origin` flips to `user` and
+      `Shadows` names the `/usr/lib` path it now hides. Remove the copy and
+      reload; the column goes quiet again.
+- [ ] Query `[shadows, has, /usr]` finds exactly that row while the copy is in
+      place, and nothing once it is gone.
+- [ ] Services tab: `Drop-ins` is off by default — switch it on with `c c`.
+      It is blank rather than `0` where nothing amends the unit, and a unit
+      with a `<unit>.service.d/*.conf` drop-in shows the count.
+      `[dropins, gt, 0]` narrows to those units without the column being
+      visible at all; the paths themselves are on the Properties level
+      (`DropInPaths`).
+- [ ] Both `q` menus offer the audit queries as commented examples in the
+      template, and `★` on one keeps it as a saved query — the audit is kept
+      by the user, not declared in the YAML.
+
 ## Refinements / deferred tasks
 
 Points that came up during smoke tests but do not belong to the refactor in
 question. They are addressed in sessions of their own.
 
+- The action bar drops the `a Action ...` group on the systemd Unit files
+  level while showing it on Services, although both levels declare `a` actions
+  and the which-key popup on `a` lists them correctly. Predates the audit
+  columns; the bar has room, so it is not truncation. Worth a look when the
+  bar is next touched.
 - The validator (keymap.rs) does not know about the auto-numbering digits yet;
   in constellation mode, fixed `tab_*` bindings could show up as a phantom
   collision, or a view digit binding is not tracked as globally claimed. Low

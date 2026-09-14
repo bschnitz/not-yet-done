@@ -4717,6 +4717,7 @@ dependencies = [
  "dirs",
  "fieldsmith",
  "futures",
+ "globset",
  "natural-date",
  "not-yet-done-content",
  "not-yet-done-filter",

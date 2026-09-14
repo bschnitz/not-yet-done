@@ -25,6 +25,8 @@ use not_yet_done_content::{ColumnSchema, Metadata, MetadataField, NodeSummary, N
 use zbus_systemd::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::bus::{UnitEntry, UnitFileEntry};
+use crate::preset::Policy;
+use crate::shadow::SearchPath;
 
 // ---------------------------------------------------------------------------
 // Node types
@@ -206,6 +208,16 @@ fn flag(value: bool) -> String {
     if value { "yes".into() } else { String::new() }
 }
 
+/// A count whose zero is "nothing to say" rather than a number worth reading.
+/// Keeps a column that is empty on almost every row actually empty.
+fn count(value: usize) -> String {
+    if value == 0 {
+        String::new()
+    } else {
+        value.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
@@ -227,6 +239,10 @@ pub struct ServiceRow {
     pub cpu: Option<u64>,
     pub restarts: Option<u64>,
     pub needs_reload: bool,
+    /// How many drop-in files modify this unit. A count rather than the paths:
+    /// the column sorts and filters (`[dropins, gt, 0]` is the audit), and the
+    /// paths themselves are one keystroke away on the property level.
+    pub dropins: usize,
     pub fragment: String,
     /// Whether the unit needs anything — what decides whether its row offers to
     /// unfold into [the dependency tree](crate::deps). Read from the same
@@ -256,6 +272,7 @@ impl ServiceRow {
             cpu: as_u64(service, "CPUUsageNSec").map(|ns| ns / 1_000_000_000),
             restarts: as_u64(service, "NRestarts"),
             needs_reload: as_bool(unit, "NeedDaemonReload"),
+            dropins: strings(unit, "DropInPaths").len(),
             fragment: as_str(unit, "FragmentPath"),
             has_deps: crate::deps::has_needs(unit),
         }
@@ -281,6 +298,7 @@ impl ServiceRow {
                     field("cpu", "CPU", num(self.cpu)),
                     field("restarts", "Restarts", num(self.restarts)),
                     field("needs_reload", "Reload?", flag(self.needs_reload)),
+                    field("dropins", "Drop-ins", count(self.dropins)),
                     field("fragment", "Fragment", self.fragment.clone()),
                 ],
             },
@@ -300,8 +318,7 @@ pub fn service_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("since", "Since").typed("datetime"),
         ColumnSchema::new("pid", "PID").typed("number"),
         // Bytes. Raw, because a pre-formatted "95.4 MiB" sorts as text and
-        // cannot be compared in a query. The display side is a table-engine
-        // gap (there is no `kind: bytes`), not an adapter one.
+        // cannot be compared in a query; the view renders it with `kind: bytes`.
         ColumnSchema::new("mem", "Mem").typed("number"),
         ColumnSchema::new("tasks", "Tasks").typed("number"),
         ColumnSchema::new("cpu", "CPU").typed("duration"),
@@ -309,6 +326,7 @@ pub fn service_columns() -> Vec<ColumnSchema> {
         // reads as plain "active" everywhere else.
         ColumnSchema::new("restarts", "Restarts").typed("number"),
         ColumnSchema::new("needs_reload", "Reload?"),
+        ColumnSchema::new("dropins", "Drop-ins").typed("number"),
         ColumnSchema::new("fragment", "Fragment"),
     ]
 }
@@ -412,21 +430,40 @@ pub struct UnitFileRow {
     pub path: String,
     /// Where the file comes from — see [`origin`].
     pub vendor: String,
+    /// What the distribution's policy wants this unit's enablement to be —
+    /// see [`crate::preset`]. Empty where a preset cannot apply.
+    pub preset: String,
+    /// How `state` disagrees with `preset`, named as the fix. Empty when they
+    /// agree, which is the common case and the point of the column.
+    pub drift: String,
+    /// The unit file this one hides, if any — see [`crate::shadow`].
+    pub shadows: String,
 }
 
 impl UnitFileRow {
-    pub fn build(entry: &UnitFileEntry) -> Self {
+    /// Assemble a row from the listing entry plus the two things systemd does
+    /// not report: what the preset policy says, and what the file hides.
+    pub fn build(entry: &UnitFileEntry, policy: &Policy, paths: &SearchPath) -> Self {
         let name = entry
             .path
             .rsplit('/')
             .next()
             .unwrap_or(&entry.path)
             .to_string();
+        let (preset, drift) = if crate::preset::preset_applies(&entry.state) {
+            let p = policy.query(&name);
+            (p.word().to_string(), crate::preset::drift(&entry.state, p))
+        } else {
+            (String::new(), "")
+        };
         Self {
+            shadows: paths.shadowed(&name, &entry.path),
             name,
             state: entry.state.clone(),
             path: entry.path.clone(),
             vendor: origin(&entry.path).into(),
+            preset,
+            drift: drift.into(),
         }
     }
 
@@ -441,6 +478,9 @@ impl UnitFileRow {
                     field("state", "State", self.state.clone()),
                     field("path", "Path", self.path.clone()),
                     field("vendor", "Origin", self.vendor.clone()),
+                    field("preset", "Preset", self.preset.clone()),
+                    field("drift", "Drift", self.drift.clone()),
+                    field("shadows", "Shadows", self.shadows.clone()),
                 ],
             },
             has_children: Some(false),
@@ -468,6 +508,9 @@ pub fn unit_file_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("state", "State"),
         ColumnSchema::new("path", "Path"),
         ColumnSchema::new("vendor", "Origin"),
+        ColumnSchema::new("preset", "Preset"),
+        ColumnSchema::new("drift", "Drift"),
+        ColumnSchema::new("shadows", "Shadows"),
     ]
 }
 
@@ -658,14 +701,48 @@ mod tests {
         );
     }
 
+    fn unit_file(path: &str, state: &str, policy: &str) -> UnitFileRow {
+        UnitFileRow::build(
+            &UnitFileEntry {
+                path: path.into(),
+                state: state.into(),
+            },
+            &Policy::parse([policy.to_string()]),
+            &SearchPath::default(),
+        )
+    }
+
     #[test]
     fn a_unit_file_row_takes_its_name_from_the_basename() {
-        let row = UnitFileRow::build(&UnitFileEntry {
-            path: "/usr/lib/systemd/user/backup-photos.timer".into(),
-            state: "static".into(),
-        });
+        let row = unit_file("/usr/lib/systemd/user/backup-photos.timer", "static", "");
         assert_eq!(row.name, "backup-photos.timer");
         assert_eq!(row.vendor, "vendor");
+    }
+
+    /// A state with no `[Install]` section has nothing a preset could apply to,
+    /// and an empty cell says that more quietly than a word would.
+    #[test]
+    fn a_static_unit_shows_no_preset_and_no_drift() {
+        let row = unit_file("/usr/lib/systemd/user/dbus.socket", "static", "disable *\n");
+        assert_eq!(row.preset, "");
+        assert_eq!(row.drift, "");
+    }
+
+    #[test]
+    fn drift_names_the_fix_and_is_empty_when_the_unit_agrees() {
+        let off = unit_file("/usr/lib/systemd/user/a.service", "disabled", "disable *\n");
+        assert_eq!(off.preset, "disabled");
+        assert_eq!(off.drift, "", "disabled and meant to be: no drift");
+
+        let on = unit_file("/usr/lib/systemd/user/a.service", "enabled", "disable *\n");
+        assert_eq!(on.drift, "should-disable");
+
+        // No matching rule at all means `enable` — systemd's own default, and
+        // the reason a distribution without a default-off preset shows a long
+        // list here.
+        let unclaimed = unit_file("/usr/lib/systemd/user/b.service", "disabled", "");
+        assert_eq!(unclaimed.preset, "enabled");
+        assert_eq!(unclaimed.drift, "should-enable");
     }
 }
 

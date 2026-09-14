@@ -212,6 +212,22 @@ pub static VERBS: &[Verb] = &[
         takes_value: false,
     },
     Verb {
+        id: "preset",
+        label: "Apply preset",
+        scope: Scope::Any,
+        op: Op::Files(FileChange::Preset),
+        // The one verb whose outcome is not in its name — it enables or
+        // disables depending on a policy file. The question therefore names the
+        // policy's answer, which the row is already showing in its `preset`
+        // column, so the confirmation and the table agree.
+        confirm: Some(
+            "Apply the preset policy to {unit}? It is enabled or disabled to match what the \
+             distribution ships — the Preset column says which. (y/n)",
+        ),
+        disruptive: false,
+        takes_value: false,
+    },
+    Verb {
         id: "unmask",
         label: "Unmask",
         scope: Scope::Any,
@@ -450,13 +466,24 @@ async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
              something else, not at login"
         ));
     }
+    let count = result.changes.len();
     let done = match change {
         FileChange::Enable => "Enabled",
         FileChange::Disable => "Disabled",
         FileChange::Mask => "Masked",
         FileChange::Unmask => "Unmasked",
+        // The preset has no past participle of its own — it enabled or it
+        // disabled, and which one was the policy's decision, not the user's.
+        // What is worth reporting is whether anything moved at all: nothing
+        // moving is the good news, because the unit already matches.
+        FileChange::Preset => {
+            return Ok(match count {
+                0 => format!("{unit} already matches its preset"),
+                1 => format!("Applied the preset to {unit}"),
+                n => format!("Applied the preset to {unit} ({n} symlinks)"),
+            });
+        }
     };
-    let count = result.changes.len();
     Ok(match count {
         0 => format!("{unit} was already {}", done.to_lowercase()),
         1 => format!("{done} {unit}"),
