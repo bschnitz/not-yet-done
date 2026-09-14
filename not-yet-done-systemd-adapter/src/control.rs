@@ -44,8 +44,9 @@ use crate::bus::{Bus, FileChange, JobEnd, JobKind, Props, SERVICE_IFACE, UNIT_IF
 /// The levels a verb is offered on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// Every level, including unit files — the verb takes a unit *name* and
-    /// does not care whether the manager has it loaded.
+    /// Every level that stands for a unit, including unit files and the two
+    /// dependency levels — the verb takes a unit *name* and does not care
+    /// whether the manager has it loaded.
     Any,
     /// Loaded units only (services and timers): the verb acts on runtime state
     /// that a unit file on disk does not have.
@@ -64,9 +65,16 @@ impl Scope {
     /// them `stop`.
     fn covers(self, type_id: &str) -> bool {
         match self {
+            // A dependency row is a unit of *any* kind — a `.target`, a
+            // `.slice`, a `.mount` — so it gets the verbs that work by name
+            // and none of the ones that assume a service or a loaded unit.
             Scope::Any => matches!(
                 type_id,
-                "systemd:service" | "systemd:timer" | "systemd:unitfile"
+                "systemd:service"
+                    | "systemd:timer"
+                    | "systemd:unitfile"
+                    | "systemd:dep"
+                    | "systemd:order"
             ),
             Scope::Loaded => matches!(type_id, "systemd:service" | "systemd:timer"),
             Scope::Processes => type_id == "systemd:service",

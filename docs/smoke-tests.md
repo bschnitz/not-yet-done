@@ -7779,7 +7779,7 @@ Tasks tab. Pick a task with notes (`n` opens the file) whose parent has
 notes too, e.g. `/Alpha/Beta`.
 
 - [ ] Rename the parent to `Alphonse` with the CLI (`nyd-t task edit
-    --description`), which does not move directories, then `n` on
+  --description`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
@@ -7787,6 +7787,43 @@ notes too, e.g. `/Alpha/Beta`.
 - [ ] Leave both `<sid>_alpha` and `<sid>_alphonse` on disk → the one
       matching the current name wins; a `<sid>_alpha_deleted_at_…`
       directory is never picked.
+
+## systemd — what a unit needs, and what it is ordered against
+
+Needs the systemd tab (`docs/examples/views/systemd.yaml`) and a user unit
+with dependencies, e.g. `pipewire.service`.
+
+- [ ] Services tab: the rows now carry an expand marker — but only the ones
+      that need something. A unit with no `Requires=`/`Wants=` of its own
+      shows none, and `enter` on it still drills into Properties.
+- [ ] `enter` on `pipewire.service` unfolds it in place: `dbus-broker.service`,
+      `pipewire.socket`, `session.slice`, `basic.target` as `requires`,
+      `wireplumber.service` as `wants`. `enter` again on `basic.target`
+      unfolds that one a level deeper; `h` / collapse folds it back.
+- [ ] The header changes with the cursor: on a unit row the Services columns,
+      on a dependency row `Unit / Relation / Active / Sub / Load /
+    Description`. Unit rows leave `Relation` blank rather than borrowing a
+      neighbour's value.
+- [ ] A unit that appears twice in one branch (`enter` down until a name
+      repeats) shows once with `(cycle)` in `Relation` and does not unfold
+      further.
+- [ ] `D` on a unit row opens the ordering level instead: `after` rows are
+      what it waits for, `before` rows what waits for it. It does not unfold
+      — one hop is all there is — and `h` walks back up.
+- [ ] `q` on the ordering level offers its own template (`[relation, =,
+after]`), not the Services one.
+- [ ] `a s` / `a x` on a dependency row act on _that_ unit, whatever kind it
+      is — start a `.socket` from under the service that needs it and the row
+      changes state in place. `a k` (kill) and `a l` (reload) are not offered
+      there at all.
+- [ ] Timers tab: the same two levels, and the first row of a timer's tree is
+      usually the service it triggers.
+- [ ] Failed tab: expanding a failed unit is the fast way to the unit
+      underneath that actually broke.
+- [ ] CLI parity: `nyd adapter systemd 'service:pipewire.service' ls --type
+systemd:dep` and `… --type systemd:order` list the same rows, and
+      `nyd adapter systemd 'dep:pipewire.service>basic.target' show` prints
+      that one row.
 
 ## Refinements / deferred tasks
 

@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use not_yet_done_filter::eval::{self, Field, RowFields};
 use not_yet_done_filter::{FilterExpr, query_filter};
 
+use crate::deps::DepRow;
 use crate::model::{LogRow, PropertyRow, ServiceRow, TimerRow, UnitFileRow};
 
 /// Columns a Services query may reference.
@@ -68,6 +69,12 @@ pub const PROPERTY_COLUMNS: &[&str] = &["name", "value", "interface"];
 /// (`[level, =, err]`). Both are queryable because a person writing the query
 /// by hand reaches for whichever is on their screen.
 pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
+
+/// Columns either dependency query may reference.
+///
+/// One set for both levels: "what it needs" and "what it is ordered against"
+/// are the same shape of answer, and only the word in `relation` differs.
+pub const DEP_COLUMNS: &[&str] = &["name", "relation", "active", "sub", "load", "description"];
 
 /// Columns a Unit files query may reference.
 pub const UNIT_FILE_COLUMNS: &[&str] = &["name", "state", "path", "vendor"];
@@ -210,6 +217,20 @@ impl RowFields for LogRow {
             "prio" => num_or_null(self.prio),
             "pid" => num_or_null(self.pid),
             "message" => text_or_null(&self.message),
+            _ => Field::Null,
+        }
+    }
+}
+
+impl RowFields for DepRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "name" => Field::Text(Cow::Borrowed(self.name())),
+            "relation" => text_or_null(&self.relation),
+            "active" => text_or_null(&self.active),
+            "sub" => text_or_null(&self.sub),
+            "load" => text_or_null(&self.load),
+            "description" => text_or_null(&self.description),
             _ => Field::Null,
         }
     }

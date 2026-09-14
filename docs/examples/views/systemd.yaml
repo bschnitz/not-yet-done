@@ -81,6 +81,11 @@ views:
     key: "t s"
     default: true
     node_type: "systemd:service"
+    # Every row can unfold into what it needs — see the `dependencies`
+    # child below. A tree continuation only continues from a tree-active
+    # parent, so this level has to be a tree level itself; `name` is the
+    # column the indent and the expand marker are drawn into.
+    tree_label: name
 
     # Saved-query filter — the same mechanism the trackings and calendar tabs
     # use. The body is a `FilterExpr` evaluated against each loaded row.
@@ -290,6 +295,11 @@ views:
       # disagree about whether the command comes after `-e`, after `--`, or
       # bare, so it is a command line and not a program name.
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      # `After=` / `Before=` for this unit, as their own level. `enter`
+      # is taken: on a unit row it unfolds the dependency TREE (see
+      # `children:` below), which answers what this unit needs rather than
+      # what it is sequenced against.
+      - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit. `n` is the leader for making something that is not
       # there yet. It acts on the manager, not on the row under the cursor, so
@@ -468,6 +478,164 @@ views:
         actions:
           - { name: refresh, key: r, type: reload }
 
+      # ------------------------------------ what a unit needs, and when
+      #
+      # Two questions, and deliberately two levels.
+      #
+      # "What does this unit need in order to run?" is `Requires=`,
+      # `Requisite=`, `BindsTo=`, `PartOf=`, `Upholds=` and `Wants=` — the
+      # set `systemctl list-dependencies` walks. That one is a tree: what a
+      # unit needs needs things of its own.
+      #
+      # "What does this unit run after?" is `After=` / `Before=`, and it is a
+      # different question with a different shape. Ordering says nothing
+      # about whether a unit is pulled in at all, only about the sequence of
+      # two units that both happen to run. A tree that answers both at once
+      # answers neither, so the ordering relations get their own flat level
+      # below, exactly one hop deep — `After=basic.target` unfolded
+      # recursively is the whole session start, which is not something
+      # anyone reads.
+      #
+      # Neither level costs a round trip of its own: all of these are
+      # ordinary properties on the generic `Unit` interface, so they arrive
+      # in the same read the unit row already makes.
+      - &dependencies
+        name: dependencies
+        node_type: "systemd:dep"
+        # The tree hangs straight off the unit row: `enter` on a service
+        # unfolds what it needs, `enter` again unfolds what *that* needs.
+        # Which is why the level above carries `tree_label: name` as well —
+        # a tree continuation only continues from a tree-active parent, so a
+        # flat Services level could not grow this branch at all.
+        tree_label: name
+        # One ChildDef for every depth: a dependency is a unit, and a unit
+        # has dependencies. The walk stops at ten levels, at a unit the
+        # manager never loaded (there is nothing to ask), and at a unit that
+        # is already somewhere above it in this branch — a cycle is shown
+        # once, marked in the `relation` column, and not followed.
+        recursive: true
+        # No `query:` block here, and none is missing: a tree pane runs the
+        # query of its ROOT level, so the editor on the Services level above
+        # is the one that opens. That query narrows which units the tree
+        # grows *from*; it does not reach into the branches, so what hangs
+        # under a unit is everything that hangs under it.
+        #
+        # A row is addressed by its whole path rather than by its unit name
+        # — `dep:foo.service>bar.target>baz.socket`. `systemctl
+        # list-dependencies --all` on one ordinary service prints 120 rows
+        # made of 27 distinct units: a name on its own would name four or
+        # five tree positions at once, and both the tree cache and the live
+        # row updates need an id that means exactly one row.
+        columns:
+          - key: name
+            label: Unit
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          # Which of the six relations put this unit here. A unit named by
+          # more than one shows the strongest — `Requires` over `Wants`, and
+          # so on down the order the adapter declares — because that is the
+          # one that decides what happens when it fails. A value ending in
+          # `(cycle)` is a unit already present higher up this branch.
+          - key: relation
+            label: Relation
+            style: secondary
+            sizing: "fixed(16)"
+          - key: active
+            label: Active
+            sizing: "fixed(10)"
+          - key: sub
+            label: Sub
+            style: tertiary
+            sizing: "fixed(12)"
+          # `not-found` is what makes this column worth its width here: a
+          # unit that is required but has no file is a broken dependency,
+          # and nothing else on the row says so.
+          - key: load
+            label: Load
+            style: tertiary
+            sizing: "fixed(10)"
+          - key: description
+            label: Description
+            sizing: "flex(3)"
+        # The verbs reach these rows too. What they act on is whatever the
+        # row happens to be — a `.target`, a `.slice`, a `.mount`, not just a
+        # service — so only the verbs that work by name are bound here; the
+        # ones that assume a process (`reload`, `kill`, `freeze`) or a loaded
+        # unit (`reset-failed`) are not offered, and the adapter would refuse
+        # them anyway.
+        actions:
+          - { name: refresh, key: r, type: reload }
+          - { name: start, key: "a s", id: start }
+          - { name: stop, key: "a x", id: stop }
+          - { name: restart, key: "a r", id: restart }
+          - { name: enable, key: "a e", id: enable }
+          - { name: enable and start, key: "a E", id: enable-now }
+          - { name: disable, key: "a d", id: disable }
+          - { name: disable and stop, key: "a D", id: disable-now }
+          - { name: mask, key: "a m", id: mask }
+          - { name: unmask, key: "a u", id: unmask }
+
+      # `After=` and `Before=` for the unit under the cursor, as one flat
+      # list. Reached with `D` and not with `enter`, because `enter` on a
+      # unit row belongs to the dependency tree above.
+      #
+      # Read a row as a sentence: `after` is something this unit waits for,
+      # `before` is something that waits for this unit. Being listed here
+      # pulls nothing in — which is the whole reason this is not part of the
+      # tree.
+      - &ordering
+        name: ordering
+        node_type: "systemd:order"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the ordering. Columns: name, relation, active, sub,
+            # load, description.
+            #
+            #   query:
+            #     [relation, =, after]         # only what this unit waits for
+            #     [active, =, inactive]        # ordered against, never ran
+            #     [load, =, not-found]         # ordered against nothing
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Unit
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: relation
+            label: Relation
+            style: secondary
+            sizing: "fixed(10)"
+          - key: active
+            label: Active
+            sizing: "fixed(10)"
+          - key: sub
+            label: Sub
+            style: tertiary
+            sizing: "fixed(12)"
+          - key: load
+            label: Load
+            style: tertiary
+            sizing: "fixed(10)"
+          - key: description
+            label: Description
+            sizing: "flex(3)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+          - { name: start, key: "a s", id: start }
+          - { name: stop, key: "a x", id: stop }
+          - { name: restart, key: "a r", id: restart }
+          - { name: enable, key: "a e", id: enable }
+          - { name: disable, key: "a d", id: disable }
+          - { name: mask, key: "a m", id: mask }
+          - { name: unmask, key: "a u", id: unmask }
+
   # ------------------------------------------------------------------ failed
   # The same level as Services, narrowed by a default query. A view, not a
   # fourth node type — which is also its one limitation: a failed *timer* does
@@ -475,6 +643,11 @@ views:
   - name: Failed
     key: "t f"
     node_type: "systemd:service"
+    # Every row can unfold into what it needs — see the `dependencies`
+    # child below. A tree continuation only continues from a tree-active
+    # parent, so this level has to be a tree level itself; `name` is the
+    # column the indent and the expand marker are drawn into.
+    tree_label: name
     query:
       editable: true
       menu_key: q
@@ -614,6 +787,11 @@ views:
       # The unit's own journal — `J` opens it as a level, `a j` follows it in
       # a terminal. The Services subtab above carries the explanation.
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      # `After=` / `Before=` for this unit, as their own level. `enter`
+      # is taken: on a unit row it unfolds the dependency TREE (see
+      # `children:` below), which answers what this unit needs rather than
+      # what it is sequenced against.
+      - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -743,10 +921,22 @@ views:
         actions:
           - { name: refresh, key: r, type: reload }
 
+      # The same two levels as under Services, aliased rather than copied: a
+      # unit's dependencies do not change shape because the list above them
+      # is narrowed to what is broken. Handy exactly here, in fact — a failed
+      # unit often failed because something underneath it did.
+      - *dependencies
+      - *ordering
+
   # ------------------------------------------------------------------ timers
   - name: Timers
     key: "t t"
     node_type: "systemd:timer"
+    # Every row can unfold into what it needs — see the `dependencies`
+    # child below. A tree continuation only continues from a tree-active
+    # parent, so this level has to be a tree level itself; `name` is the
+    # column the indent and the expand marker are drawn into.
+    tree_label: name
 
     # Columns on this level: name, description, active, sub, enabled, next,
     # left, last, unit, result, persistent.
@@ -913,6 +1103,11 @@ views:
       # The unit's own journal — `J` opens it as a level, `a j` follows it in
       # a terminal. The Services subtab above carries the explanation.
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      # `After=` / `Before=` for this unit, as their own level. `enter`
+      # is taken: on a unit row it unfolds the dependency TREE (see
+      # `children:` below), which answers what this unit needs rather than
+      # what it is sequenced against.
+      - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -1041,6 +1236,12 @@ views:
             style: text_dim
         actions:
           - { name: refresh, key: r, type: reload }
+
+      # The same two levels as under Services. A timer needs and is ordered
+      # against other units exactly as a service is — not least the service
+      # it triggers, which is usually the first row of the tree.
+      - *dependencies
+      - *ordering
 
   # -------------------------------------------------------------- unit files
   - name: Unit files
