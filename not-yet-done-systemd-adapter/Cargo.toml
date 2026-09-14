@@ -14,6 +14,8 @@ chrono      = { workspace = true }
 dirs        = { workspace = true }
 fieldsmith  = { workspace = true }
 futures     = { workspace = true }
+# Preset files match unit names with shell-style wildcards — see `preset`.
+globset     = { workspace = true }
 serde       = { workspace = true }
 # `journalctl --output=json` is the journal's only machine-readable interface —
 # there is no D-Bus one. See `journal`.

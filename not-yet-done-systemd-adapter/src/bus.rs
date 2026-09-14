@@ -218,19 +218,13 @@ impl Bus {
     /// A unit that vanished between the listing and this read (a transient unit
     /// that finished) yields an empty map rather than failing the whole level —
     /// its row then simply carries no runtime values.
-    pub async fn properties(
-        &self,
-        path: &OwnedObjectPath,
-        interface: &str,
-    ) -> Props {
-        self.try_properties(path, interface).await.unwrap_or_default()
+    pub async fn properties(&self, path: &OwnedObjectPath, interface: &str) -> Props {
+        self.try_properties(path, interface)
+            .await
+            .unwrap_or_default()
     }
 
-    async fn try_properties(
-        &self,
-        path: &OwnedObjectPath,
-        interface: &str,
-    ) -> Result<Props> {
+    async fn try_properties(&self, path: &OwnedObjectPath, interface: &str) -> Result<Props> {
         let conn = self.connection().await?;
         let iface = InterfaceName::try_from(interface)
             .map_err(|e| ContentError::Other(format!("bad interface name: {e}").into()))?;
@@ -308,6 +302,10 @@ pub enum FileChange {
     Disable,
     Mask,
     Unmask,
+    /// Enable or disable, whichever the preset policy says — the one operation
+    /// whose outcome the row itself tells you, now that the `preset` column
+    /// shows what the policy wants. See [`crate::preset`].
+    Preset,
 }
 
 /// What a unit-file operation did.
@@ -350,9 +348,10 @@ impl Bus {
     pub async fn run_job(&self, kind: JobKind, unit: &str) -> Result<JobEnd> {
         let proxy = self.manager_proxy().await?;
         self.enable_signals(&proxy).await;
-        let mut removed = proxy.receive_job_removed().await.map_err(|e| {
-            ContentError::Other(format!("watching jobs: {e}").into())
-        })?;
+        let mut removed = proxy
+            .receive_job_removed()
+            .await
+            .map_err(|e| ContentError::Other(format!("watching jobs: {e}").into()))?;
 
         let name = unit.to_string();
         let mode = "replace".to_string();
@@ -432,8 +431,21 @@ impl Bus {
                     .deadline(&what, proxy.unmask_unit_files(files, false))
                     .await?,
             },
+            // Same shape as enable, and for the same reason: a unit with no
+            // `[Install]` section cannot be enabled, so the preset may decide
+            // to enable it and still make no symlinks.
+            FileChange::Preset => {
+                let (install, changes) = self
+                    .deadline(&what, proxy.preset_unit_files(files, false, false))
+                    .await?;
+                FileResult {
+                    carries_install_info: install,
+                    changes,
+                }
+            }
         };
-        self.deadline("reloading the manager", proxy.reload()).await?;
+        self.deadline("reloading the manager", proxy.reload())
+            .await?;
         Ok(result)
     }
 
@@ -507,6 +519,7 @@ impl FileChange {
             FileChange::Disable => "disabling",
             FileChange::Mask => "masking",
             FileChange::Unmask => "unmasking",
+            FileChange::Preset => "presetting",
         }
     }
 }

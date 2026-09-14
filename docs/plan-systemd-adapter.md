@@ -876,28 +876,135 @@ adapter changing at all.
 
 ## Phase 6 — Diagnostics
 
-**Delivers**, in an order to be decided, the commands that exist but that
-nobody runs:
+The commands that exist but that nobody runs. That is more than one phase's
+worth, so it is cut into four, each of which is usable on the day it lands:
 
-- **`systemd-analyze security <unit>`** as a level: one row per setting, with
-  its exposure weight and status, sortable by weight — and `enter` on a row
-  jumping into the drop-in edit with that directive prefilled. That turns an
-  audit command into a workflow.
-- **`systemd-analyze blame` / `critical-chain`** under the manager: startup
-  time per unit, sortable.
-- **Drift audit** as saved queries: `is-enabled` vs. preset, units needing a
-  daemon-reload, units with drop-ins, units in `~/.config` shadowing
-  `/usr/lib`, and a vendor diff for the last of those — the question one
-  actually has after a package update. This is also where the `preset` and
-  `drift` columns that fell out of [phase 0](#phase-0--skeleton--reading)
-  return: they need a parser for the preset files, and so does this audit, so
-  one parser serves both.
-- **Resource view**: `MemoryCurrent`, `CPUUsageNSec`, `TasksCurrent`,
-  `IOReadBytes` as sortable columns — a `top` over units, free, because the
-  properties are already being read.
-- **Waybar**: a failed-units indicator through the existing CFFI module.
-- **A `connected` hook** that raises a notification when units are failed at
-  startup, so it lands in the notification centre without anyone looking.
+- **6a — the audit** (below): what the distribution's policy wants, how each
+  unit disagrees with it, which file hides which, and what a drop-in amends —
+  four columns and one verb.
+- **6b — `systemd-analyze security <unit>`** as a level: one row per setting,
+  with its exposure weight and status, sortable by weight — and `enter` on a
+  row jumping into the drop-in edit with that directive prefilled. That turns
+  an audit command into a workflow.
+- **6c — the clock and the meter**: `systemd-analyze blame` and
+  `critical-chain` under the manager, startup time per unit and sortable; plus
+  a resource view over `MemoryCurrent`, `CPUUsageNSec`, `TasksCurrent` and
+  `IOReadBytes` — a `top` over units, and nearly free, since
+  [phase 0](#phase-0--skeleton--reading) already reads those properties.
+- **6d — the ambient half**: a failed-units indicator through the existing
+  Waybar CFFI module, and a `connected` hook that raises a notification when
+  units are already failed at startup, so it lands in the notification centre
+  without anyone going to look.
+
+### Phase 6a — the audit
+
+**Delivers** the four questions a unit listing raises and cannot answer: what
+the distribution's preset policy wants this unit's enablement to be
+(`preset`), how the unit currently disagrees with it (`drift`), which unit
+file this one hides (`shadows`), and how many drop-ins amend a running service
+(`dropins`). Plus the `preset` verb, which
+[phase 1](#phase-1--control) deliberately left out, and the audit queries in
+both levels' `template` blocks.
+
+This is where the `preset` column that fell out of phase 0 returns, and it
+comes back for the reason it was dropped: it needs a parser, and now something
+else needs the same parser.
+
+### The questions, decided
+
+**The preset has to be parsed, not read — there is no property to ask for.**
+The manager interface has no `GetUnitFilePreset`; `UnitFilePreset` exists only
+on an already-**loaded** unit, which is exactly the population the unit-files
+level is there to see past. A unit file nobody has started has no object to
+carry the property. So the adapter walks
+[`systemd.preset(5)`](https://www.freedesktop.org/software/systemd/man/systemd.preset.html)
+itself, the way `systemctl` does: four user directories in priority order, a
+same-named file in a higher one **replacing** the lower rather than merging
+with it, all survivors then sorted by **filename across directories**, first
+matching line wins, `/dev/null` symlink switches a vendor file off — and a
+unit no line matches is `enable`, systemd's own default. Ten tests pin those
+rules, because the rules are the feature.
+
+**`drift` is named as the fix, not as the complaint.** The column could have
+said `mismatch` or `off-policy`; it says `should-enable` and `should-disable`,
+which is literally what `a p` on that row would do. A column that names the
+remedy is one a user can act on without looking anything up, and the verb
+beside it is then obviously the same thought. It is empty wherever the unit
+agrees with its policy, and empty wherever a preset cannot apply at all — a
+`static` unit has no `[Install]` section to enable, a `generated` or
+`transient` one has no file anybody wrote — so on a machine in line with its
+distribution the column is quiet, and sorting by it is the audit.
+
+**The audit ships as templates, not as declared saved queries.** There is no
+YAML-declared saved query in this app: `QueryConfig` carries `default`,
+`template`, `editable`, `menu_key` and `inherit_default`, and saved queries are
+made by the user at runtime with `★` in the `q` menu, stored in `nyd.db`. So
+the four audit queries live as commented examples in the `template:` block of
+each level, one keystroke from being kept. That is the seam the app already
+has; inventing a second one for four queries would be the wrong trade.
+
+**Drop-ins are a count, not a list of paths.** A number sorts and filters —
+`[dropins, gt, 0]` _is_ the audit — and the paths themselves are already one
+keystroke away on the property level. A column of paths would be wide, mostly
+empty and unsortable.
+
+**The vendor diff waits.** "Show me how my copy differs from the one the
+package ships" is the natural next question after `shadows` answers "your copy
+hides one", but it is a second surface — a diff view, not a column — and
+`shadows` is useful the moment it exists. Deferred, not dropped.
+
+### What it took, beyond the plan
+
+**The search path is per boot, not a constant.** `ListUnitFiles` reports one
+file per unit name: the winner. The loser is the interesting half — a
+`~/.config` copy silently overriding a newer `/usr/lib` file after a package
+update is precisely the failure that goes unnoticed — so the adapter walks the
+search path itself. Hardcoding the path would have been wrong: this machine
+reports eighteen directories from `systemd-analyze --user unit-paths`, several
+of them under `/run/user/<uid>` and two of them **generator output for this
+boot**. So the adapter asks. That it shells out at all is not a new seam —
+`verify`, `calendar` and the journal level already do — and a failed call
+simply yields an empty path, which costs the `shadows` column and nothing else.
+
+**`should-enable` is loud here, and that is the policy's answer.** On this
+machine 31 user units report `should-enable`, because the only user preset
+file installed is systemd's own `90-systemd.preset` — two `enable` lines, no
+default-off rule anywhere — and systemd's default for an unmatched unit is
+`enable`. `systemctl preset-all` really would switch
+all 31 on. The column is not misreading the policy; the policy is simply
+permissive, and seeing that is itself worth the column. The count was checked
+against `systemctl --user list-unit-files` twice — 31 against 31 for
+`should-enable`, 0 against 0 for `should-disable`.
+
+**The `preset` verb needed its own sentences, because its good outcome is
+nothing happening.** Every other file verb reports symlinks changed; `preset`
+on a unit already in line with its policy changes none, and "0 changes" reads
+like a failure. So the arm returns before the generic counting and says
+"already matches its preset", which is the actual news.
+
+**An empty `drift` does not promise that `a p` changes nothing, and the smoke
+test found that out the hard way.** A user unit can be enabled from
+`/etc/systemd/user/<target>.wants/` — the system administrator's answer for
+every user on the machine — and `ListUnitFiles` reports it as plainly
+`enabled`, because effectively it is. `systemctl --user preset` on such a unit
+nonetheless writes a _second_, redundant symlink into `~/.config/systemd/user`,
+since enabling at user level is the only thing it can do. So the verb reported
+"Applied the preset" on a row whose `drift` was empty, which looks like a
+contradiction and is not one: the columns describe the effective state, the
+verb acts at one specific level. The adapter does exactly what `systemctl`
+does here and should not second-guess it — but the case belongs in the smoke
+test, and it is why the "already matches" message is worth having at all: it
+is the reliable way to tell the two apart, and it appears exactly when the
+unit is already enabled in the user's own directory.
+
+**Both new columns were proved against the live machine and then unproved.**
+No unit name is duplicated across the search path here, so `shadows` had
+nothing to show until a copy of an inert `fluidsynth.service` was laid into
+`~/.config/systemd/user`; the row then named the `/usr/lib` file it hid.
+`dropins` got a throwaway oneshot with a comment-only drop-in — and needed
+`RemainAfterExit=yes`, since a oneshot that exits is unloaded and `ListUnits`
+never sees it. Both probes were removed and `~/.config/systemd/user` compared
+by hash against its pre-state: identical.
 
 ## Phase 7 — Beyond the user bus
 

@@ -213,7 +213,10 @@ impl ContentAdapter for SystemdAdapter {
                 .into_iter()
                 .find(|e| e.path.rsplit('/').next().unwrap_or(&e.path) == name)
                 .ok_or_else(|| ContentError::NotFound(format!("no unit file {name}")))?;
-            return Ok(Box::new(self.node(UnitFileRow::build(&entry).summary())));
+            let policy = crate::preset::Policy::load_user();
+            let paths = crate::shadow::SearchPath::load_user().await;
+            let row = UnitFileRow::build(&entry, &policy, &paths);
+            return Ok(Box::new(self.node(row.summary())));
         }
         if let Some(rest) = id.strip_prefix(crate::LOG_PREFIX) {
             // A cursor never holds a colon, a unit name may — so split from the
@@ -456,12 +459,18 @@ impl SystemdAdapter {
         let _busy = self
             .status()
             .busy("Reading unit files", self.shared.timeout_secs);
+        // The two answers systemd does not give: what the preset policy wants,
+        // and which file each one hides. Both are read once per listing and
+        // shared across every row — the policy is the same document for all of
+        // them, and the search path is the same walk.
+        let policy = crate::preset::Policy::load_user();
+        let paths = crate::shadow::SearchPath::load_user().await;
         let rows: Vec<UnitFileRow> = self
             .bus()
             .list_unit_files()
             .await?
             .iter()
-            .map(UnitFileRow::build)
+            .map(|e| UnitFileRow::build(e, &policy, &paths))
             .collect();
         Ok(finish(
             query::retain(rows, &query)

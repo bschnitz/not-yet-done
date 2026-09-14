@@ -90,14 +90,14 @@ views:
     # Saved-query filter — the same mechanism the trackings and calendar tabs
     # use. The body is a `FilterExpr` evaluated against each loaded row.
     # Columns on this level: name, description, load, active, sub, enabled,
-    # since, pid, mem, tasks, cpu, restarts, needs_reload, fragment.
+    # since, pid, mem, tasks, cpu, restarts, needs_reload, dropins, fragment.
     query:
       editable: true
       menu_key: q
       template: |
         # Filter the loaded services. Columns: name, description, load, active,
         # sub, enabled, since, pid, mem, tasks, cpu, restarts, needs_reload,
-        # fragment.
+        # dropins, fragment.
         #
         #   query:
         #     [active, =, failed]              # what is broken right now
@@ -107,6 +107,12 @@ views:
         #
         #   query:
         #     [fragment, like, '%/.config/systemd/%']   # units I wrote myself
+        #
+        #   query:
+        #     [needs_reload, =, true]          # the file on disk moved on
+        #
+        #   query:
+        #     [dropins, gt, 0]                 # something amends these
         #
         #   query:
         #     and:
@@ -180,6 +186,16 @@ views:
         label: Reload?
         sizing: "fixed(8)"
         hidden: true
+      # How many drop-ins amend this unit. Blank rather than `0` where
+      # nothing does, which is most units — so it is off by default and
+      # switched on with `c c` when the question comes up. The count is
+      # what sorts and filters (`[dropins, gt, 0]`); the paths themselves
+      # are on the Properties level as `DropInPaths`.
+      - key: dropins
+        label: Drop-ins
+        kind: number
+        sizing: "fixed(9)"
+        hidden: true
       - key: fragment
         label: Fragment
         kind: path
@@ -225,6 +241,10 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # What the distribution meant this unit to be. `a p` enables or
+      # disables it to match the preset policy — the Preset column on the
+      # Unit files subtab is where you can see which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
       # Editing the unit's configuration. `e` is the editor leader everywhere
       # else in the app and it means the same here: a buffer opens, you save
       # it, the adapter writes the file.
@@ -576,6 +596,10 @@ views:
           - { name: disable and stop, key: "a D", id: disable-now }
           - { name: mask, key: "a m", id: mask }
           - { name: unmask, key: "a u", id: unmask }
+          # What the distribution meant this unit to be. `a p` enables or
+          # disables it to match the preset policy — the Preset column on the
+          # Unit files subtab is where you can see which way it will go.
+          - { name: apply preset, key: "a p", id: preset }
 
       # `After=` and `Before=` for the unit under the cursor, as one flat
       # list. Reached with `D` and not with `enter`, because `enter` on a
@@ -636,6 +660,10 @@ views:
           - { name: disable, key: "a d", id: disable }
           - { name: mask, key: "a m", id: mask }
           - { name: unmask, key: "a u", id: unmask }
+          # What the distribution meant this unit to be. `a p` enables or
+          # disables it to match the preset policy — the Preset column on the
+          # Unit files subtab is where you can see which way it will go.
+          - { name: apply preset, key: "a p", id: preset }
 
   # ------------------------------------------------------------------ failed
   # The same level as Services, narrowed by a default query. A view, not a
@@ -727,6 +755,10 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # What the distribution meant this unit to be. `a p` enables or
+      # disables it to match the preset policy — the Preset column on the
+      # Unit files subtab is where you can see which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
       # Editing the unit's configuration. `e` is the editor leader everywhere
       # else in the app and it means the same here: a buffer opens, you save
       # it, the adapter writes the file.
@@ -1057,6 +1089,10 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # What the distribution meant this unit to be. `a p` enables or
+      # disables it to match the preset policy — the Preset column on the
+      # Unit files subtab is where you can see which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
       # Editing the unit's configuration. `e` is the editor leader everywhere
       # else in the app and it means the same here: a buffer opens, you save
       # it, the adapter writes the file.
@@ -1255,22 +1291,37 @@ views:
     key: "t u"
     node_type: "systemd:unitfile"
 
-    # Columns on this level: name, state, path, vendor. Deliberately no
-    # `preset`/`drift`: systemd offers no D-Bus route to a unit file's preset
-    # (systemctl computes it locally from the preset files), so it would be a
-    # parser of its own rather than a free column. `vendor` is the next best
-    # thing — where the file comes from, read off its path.
+    # Columns on this level: name, state, path, vendor, preset, drift,
+    # shadows. The last three are not things systemd hands over — there is no
+    # D-Bus route to a unit file's preset, and `ListUnitFiles` reports only the
+    # file that won — so the adapter reads the preset policy and walks the
+    # search path itself, exactly as systemctl does.
     query:
       editable: true
       menu_key: q
       template: |
-        # Filter the unit files on disk. Columns: name, state, path, vendor.
+        # Filter the unit files on disk. Columns: name, state, path, vendor,
+        # preset, drift, shadows.
+        #
+        #   query:
+        #     [drift, has, should]             # every unit off its policy
+        #
+        #   query:
+        #     [drift, =, should-disable]       # on, and the policy says off
+        #
+        #   query:
+        #     [shadows, has, /usr]             # my copy hides the packaged one
         #
         #   query:
         #     [vendor, =, user]                # units I wrote myself
         #
         #   query:
         #     [state, =, masked]               # what is masked off
+        #
+        # The first three are the audit, and each one is worth keeping with
+        # `★` in this menu: `drift` is empty for every unit that agrees with
+        # its preset, `shadows` for every file that is alone under its name.
+        # A row that answers one of them is a row to look at.
         #
         # The line below matches everything — replace it with your filter:
         query:
@@ -1289,6 +1340,44 @@ views:
         label: Origin
         style: tertiary
         sizing: "fixed(9)"
+      # What the distribution's policy wants this unit's enablement to be,
+      # read against `state` next to it. Empty where a preset cannot apply at
+      # all — a `static` unit has no [Install] section to enable, a
+      # `generated` or `transient` one has no file anybody wrote.
+      - key: preset
+        label: Preset
+        style: tertiary
+        sizing: "fixed(9)"
+      # How the unit disagrees with the policy, named as the fix:
+      # `should-enable` or `should-disable` is what `a p` would do to this row.
+      # Empty when the two agree, which is why the column is quiet on a
+      # machine in line with its distribution — and why sorting by it is the
+      # audit.
+      #
+      # `should-enable` is loud on a distribution that ships no default-off
+      # preset (on a plain Arch-family install the only user preset file is
+      # systemd's own 90-systemd.preset, with two `enable` lines): systemd's
+      # default for an unmatched unit is `enable`, so `systemctl preset-all`
+      # really would switch all of those on. That is the policy's answer, not
+      # a wrong reading of it.
+      #
+      # An empty cell says the unit agrees with its policy, not that `a p`
+      # would do nothing: a unit enabled from /etc/systemd/user reads
+      # `enabled` here, and a user-level preset can still write its own
+      # symlink beside it. `a p` says which of the two happened.
+      - key: drift
+        label: Drift
+        sizing: "fixed(14)"
+      # The unit file this one hides. A file in ~/.config with the same name
+      # as one in /usr/lib means the distribution's version is not being read
+      # — the unit works, it is simply not the unit the package ships, which
+      # is how an update goes unnoticed. Empty for every file that is alone
+      # under its name, which is nearly all of them.
+      - key: shadows
+        label: Shadows
+        kind: path
+        style: secondary
+        sizing: "flex(2)"
       - key: path
         label: Path
         kind: path
@@ -1329,6 +1418,10 @@ views:
       # which is why `unmask` sits right next to it.
       - { name: mask, key: "a m", id: mask }
       - { name: unmask, key: "a u", id: unmask }
+      # What the distribution meant this unit to be. `a p` enables or
+      # disables it to match the preset policy — the Preset column on the
+      # Unit files subtab is where you can see which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
       # Editing the unit's configuration. `e` is the editor leader everywhere
       # else in the app and it means the same here: a buffer opens, you save
       # it, the adapter writes the file.

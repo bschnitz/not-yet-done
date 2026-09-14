@@ -38,6 +38,7 @@ pub const SERVICE_COLUMNS: &[&str] = &[
     "cpu",
     "restarts",
     "needs_reload",
+    "dropins",
     "fragment",
 ];
 
@@ -77,7 +78,9 @@ pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
 pub const DEP_COLUMNS: &[&str] = &["name", "relation", "active", "sub", "load", "description"];
 
 /// Columns a Unit files query may reference.
-pub const UNIT_FILE_COLUMNS: &[&str] = &["name", "state", "path", "vendor"];
+pub const UNIT_FILE_COLUMNS: &[&str] = &[
+    "name", "state", "path", "vendor", "preset", "drift", "shadows",
+];
 
 /// The columns compared as instants. A comparison against one of these needs a
 /// right-hand side that resolved to a real date, or the query would silently
@@ -173,6 +176,7 @@ impl RowFields for ServiceRow {
             "cpu" => num_or_null(self.cpu),
             "restarts" => num_or_null(self.restarts),
             "needs_reload" => Field::Bool(self.needs_reload),
+            "dropins" => Field::Number(self.dropins as f64),
             "fragment" => text_or_null(&self.fragment),
             // Unreachable: parse() validated the column set up front.
             _ => Field::Null,
@@ -243,6 +247,9 @@ impl RowFields for UnitFileRow {
             "state" => text_or_null(&self.state),
             "path" => text_or_null(&self.path),
             "vendor" => text_or_null(&self.vendor),
+            "preset" => text_or_null(&self.preset),
+            "drift" => text_or_null(&self.drift),
+            "shadows" => text_or_null(&self.shadows),
             _ => Field::Null,
         }
     }
@@ -263,9 +270,7 @@ mod tests {
     }
 
     fn matches(raw: &str, row: &ServiceRow) -> bool {
-        UnitQuery::parse(raw, SERVICE_COLUMNS)
-            .unwrap()
-            .matches(row)
+        UnitQuery::parse(raw, SERVICE_COLUMNS).unwrap().matches(row)
     }
 
     #[test]

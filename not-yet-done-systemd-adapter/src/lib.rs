@@ -54,8 +54,10 @@ pub mod factory;
 pub mod journal;
 pub mod live;
 pub mod model;
+pub mod preset;
 pub mod protect;
 pub mod query;
+pub mod shadow;
 
 pub use adapter::SystemdAdapter;
 pub use config::{Manager, SystemdConfig};
