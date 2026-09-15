@@ -1,0 +1,513 @@
+# Example: systemd view configuration — the SYSTEM manager
+#
+# Place in: ~/.config/not_yet_done/views/systemd-system.yaml
+#
+# Two more lines are needed to reach it, and neither is in this file:
+#
+#   * `adapter.id: systemd-system` — an instance id is derived from the adapter
+#     type when it is not given, and systemd.yaml already claims `systemd`. Two
+#     files of the same type without an explicit id is a config error
+#     ("duplicate adapter instance id"), not a silent second instance.
+#   * `system` in `tabs.order` in tui.yaml — that list is an allowlist, not just
+#     an order. A tab missing from it is loaded and keeps its keys, but it is
+#     not shown and nothing switches to it.
+#
+# The companion of systemd.yaml, pointed at the other manager. Everything the
+# tab can do and why is explained there; this file only says what is different
+# here, because two managers hold two different sets of units and there is no
+# view that shows both.
+#
+# Why a second file rather than a subtab: `adapter:` is declared per tab, so one
+# tab is one adapter instance is one manager. Making one instance serve both
+# would mean every node id carrying which manager it came from — `sshd.service`
+# exists on both — and that reaches into the live watcher, the journal calls and
+# the protection list. A second tab costs one tab key and nothing else.
+#
+# ---------------------------------------------------------------------------
+# READ-ONLY, and the reason is not caution
+#
+# Reading the system manager needs no privileges at all: listing its units, its
+# journal (for a user in `systemd-journal` or `wheel`) and `systemd-analyze`
+# work exactly as they do for the user manager. Writing does not. Every write
+# is a polkit action, and the manager answers an unauthorised one with
+#
+#   Access denied as the requested operation requires interactive
+#   authentication. However, interactive authentication has not been enabled
+#   by the calling program.
+#
+# which is an invitation, not a refusal — but one the adapter does not yet
+# accept. So against the system manager it offers no verbs at all: the keys
+# below are the ones that work, and a binding for `a s` would be a key that
+# always fails. The editing and creating keys are absent for a second reason
+# that will outlast the first: they write files on disk, where there is no
+# polkit to ask.
+#
+# When that changes, the verb keys from systemd.yaml can be copied across
+# unchanged — the ids are the same.
+# ---------------------------------------------------------------------------
+
+tab:
+  name: system
+  order: 14
+  icon: "󰒓"
+
+adapter:
+  type: systemd
+  config_inline: |
+    # The system manager on the system bus — plain `systemctl`, no --user.
+    manager: system
+    timeout_secs: 10
+  # Local and never logs in, so it loads at startup like the other local tabs.
+  manual_connect: false
+
+views:
+  # ---------------------------------------------------------------- services
+  - name: Services
+    key: "t s"
+    default: true
+    node_type: "systemd:service"
+    tree_label: name
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the loaded services. Columns: name, description, load, active,
+        # sub, enabled, since, pid, mem, mem_peak, tasks, cpu, startup,
+        # restarts, needs_reload, dropins, fragment, exposure.
+        #
+        #   query:
+        #     [active, =, failed]            # what is broken
+        #     [fragment, like, "/etc/%"]     # what this machine was given
+        #     [startup, gte, 1]              # what cost a second or more
+        #     [mem, gt, 104857600]           # what holds over 100 MiB
+        #
+        # `[fragment, like, "/etc/%"]` is the system manager's version of "what
+        # did I write myself": /usr/lib is the distribution's, /etc is the
+        # administrator's.
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+    columns:
+      - key: name
+        label: Unit
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: active
+        label: Active
+        sizing: "fixed(10)"
+      - key: sub
+        label: Sub
+        style: secondary
+        sizing: "fixed(10)"
+      - key: enabled
+        label: Enabled
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: cpu
+        label: CPU
+        kind: duration
+        sizing: "fixed(9)"
+      - key: mem
+        label: Mem
+        kind: bytes
+        sizing: "fixed(11)"
+      - key: mem_peak
+        label: Peak
+        kind: bytes
+        sizing: "fixed(11)"
+        hidden: true
+      - key: tasks
+        label: Tasks
+        kind: number
+        sizing: "fixed(6)"
+      - key: restarts
+        label: Restarts
+        kind: number
+        sizing: "fixed(8)"
+      - key: startup
+        label: Startup
+        kind: duration
+        format: precise
+        sizing: "fixed(9)"
+      - key: since
+        label: Since
+        kind: datetime
+        style: secondary
+        sizing: max
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+      - key: load
+        label: Load
+        sizing: "fixed(9)"
+        hidden: true
+      - key: pid
+        label: PID
+        kind: number
+        sizing: "fixed(8)"
+        hidden: true
+      - key: dropins
+        label: Drop-ins
+        kind: number
+        sizing: "fixed(9)"
+        hidden: true
+      - key: exposure
+        label: Exposure
+        kind: number
+        sizing: "fixed(9)"
+        hidden: true
+      - key: fragment
+        label: Fragment
+        kind: path
+        sizing: "flex(2)"
+        hidden: true
+    highlights:
+      - when: { field: active, matches: '^failed$' }
+        style: warning
+    actions:
+      - { name: refresh, key: r, type: reload }
+      # The reading keys, and no others — see the header.
+      - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      # Following the journal opens a terminal and reads; no privilege in it.
+      - { name: follow in a terminal, key: "a j", id: follow }
+    children:
+      - &properties
+        name: Properties
+        node_type: "systemd:property"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the properties. Columns: name, value, interface.
+            #
+            #   query:
+            #     [name, like, Timeout]        # every timeout at once
+            #     [interface, =, Service]      # drop the generic Unit half
+            #     [value, like, /etc]          # what points into the system config
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Property
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: value
+            label: Value
+            sizing: "flex(5)"
+          - key: interface
+            label: Interface
+            style: tertiary
+            sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+      - &journal
+        name: Journal
+        node_type: "systemd:log"
+        pagination: { mode: server, page_size: 200 }
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the journal. Columns: time, level, prio, pid, message.
+            #
+            #   query:
+            #     [prio, lte, 3]                 # errors and worse
+            #     [message, has, timeout]        # what mentions a timeout
+            #     [time, gte, "today"]           # since midnight
+            #
+            # This is the system journal, so it is also where the boot lives:
+            # [time, gte, "today"] with [prio, lte, 3] is the short version of
+            # "what went wrong since this machine came up".
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [message, has, ""]
+        columns:
+          - key: time
+            label: Time
+            kind: datetime
+            sizing: "fixed(20)"
+          - key: level
+            label: Level
+            sizing: "fixed(9)"
+          - key: message
+            label: Message
+            source: label
+            sizing: "flex(6)"
+          - key: pid
+            label: PID
+            kind: number
+            style: tertiary
+            sizing: "fixed(8)"
+            hidden: true
+        highlights:
+          - when: { field: prio, matches: '^[0-3]$' }
+            style: warning
+        actions:
+          - { name: refresh, key: r, type: reload }
+      - &security
+        name: Security
+        node_type: "systemd:security"
+        # Readable here, and more interesting here: a system service runs as root
+        # unless something stops it, so the checks that are academic for a user
+        # unit are the whole question for this one. `e h` is absent — the drop-in
+        # it writes would go under /etc, which is the privilege question again.
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the checks. Columns: check, status, exposure, description,
+            # fix, id.
+            #
+            #   query:
+            #     [status, =, exposed]           # what is still open
+            #     [exposure, gte, 0.3]           # only the ones that cost most
+            #     [check, has, Capability]       # one family of checks
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [check, has, ""]
+        columns:
+          - key: check
+            label: Check
+            source: label
+            style: text_high
+            sizing: "flex(2)"
+          - key: status
+            label: Status
+            sizing: "fixed(10)"
+          - key: exposure
+            label: Exposure
+            kind: number
+            sizing: "fixed(9)"
+          - key: description
+            label: What it means
+            style: secondary
+            sizing: "flex(3)"
+          - key: fix
+            label: Fix
+            sizing: "flex(3)"
+          - key: id
+            label: Id
+            style: tertiary
+            sizing: "flex(2)"
+            hidden: true
+        highlights:
+          - when: { field: status, matches: '^exposed$' }
+            style: warning
+          - when: { field: status, matches: '^ok$' }
+            style: success
+          - when: { field: status, matches: '^no-effect$' }
+            style: text_dim
+        actions:
+          - { name: refresh, key: r, type: reload }
+      - &ordering
+        name: Ordering
+        node_type: "systemd:order"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the ordering relations. Columns: name, relation.
+            #
+            #   query:
+            #     [relation, =, After]
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [name, has, ""]
+        columns:
+          - key: name
+            label: Unit
+            source: label
+            style: text_high
+            sizing: "flex(3)"
+          - key: relation
+            label: Relation
+            sizing: "fixed(10)"
+        actions:
+          - { name: refresh, key: r, type: reload }
+
+  # ------------------------------------------------------------------ failed
+  - name: Failed
+    key: "t f"
+    node_type: "systemd:service"
+    tree_label: name
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # The same level as Services, with a query on it. Nothing here is a
+        # separate node type.
+        query:
+          [active, =, failed]
+    columns:
+      - key: name
+        label: Unit
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: sub
+        label: Sub
+        style: secondary
+        sizing: "fixed(10)"
+      - key: since
+        label: Since
+        kind: datetime
+        style: secondary
+        sizing: "fixed(20)"
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+      - key: fragment
+        label: Fragment
+        kind: path
+        sizing: "flex(2)"
+    actions:
+      - { name: refresh, key: r, type: reload }
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
+    children:
+      - *properties
+      - *journal
+
+  # ------------------------------------------------------------------ timers
+  - name: Timers
+    key: "t t"
+    node_type: "systemd:timer"
+    tree_label: name
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the timers. Columns: name, description, load, active, sub,
+        # enabled, next, left, last, triggers, fragment.
+        #
+        #   query:
+        #     [left, lte, 3600]              # what fires within the hour
+        #     [triggers, has, backup]        # what drives a given service
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+    columns:
+      - key: name
+        label: Unit
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: active
+        label: Active
+        sizing: "fixed(10)"
+      - key: enabled
+        label: Enabled
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: next
+        label: Next
+        kind: datetime
+        sizing: "fixed(20)"
+      # Counts down on its own — see the note on `kind: countdown` in
+      # systemd.yaml.
+      - key: left
+        label: Left
+        kind: countdown
+        sizing: "fixed(10)"
+      - key: last
+        label: Last
+        kind: datetime
+        style: secondary
+        sizing: "fixed(20)"
+      - key: triggers
+        label: Triggers
+        style: secondary
+        sizing: "flex(2)"
+      - key: description
+        label: Description
+        style: secondary
+        sizing: "flex(3)"
+      - key: fragment
+        label: Fragment
+        kind: path
+        sizing: "flex(2)"
+        hidden: true
+    actions:
+      - { name: refresh, key: r, type: reload }
+      - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: follow in a terminal, key: "a j", id: follow }
+    children:
+      - *properties
+      - *journal
+      - *ordering
+
+  # -------------------------------------------------------------- unit files
+  - name: Unit files
+    key: "t u"
+    node_type: "systemd:unitfile"
+    query:
+      editable: true
+      menu_key: q
+      template: |
+        # Filter the unit files on disk. Columns: name, state, preset, drift,
+        # origin, shadows, path.
+        #
+        #   query:
+        #     [drift, =, should-enable]      # what the preset wants switched on
+        #     [shadows, has, /usr]           # what /etc hides from /usr/lib
+        #     [origin, =, system]            # what this machine was given
+        #
+        # The line below matches everything — replace it with your filter:
+        query:
+          [name, has, ""]
+    columns:
+      - key: name
+        label: Unit file
+        source: label
+        style: text_high
+        sizing: "flex(2)"
+      - key: state
+        label: State
+        sizing: "fixed(12)"
+      - key: preset
+        label: Preset
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: drift
+        label: Drift
+        sizing: "fixed(14)"
+      - key: origin
+        label: Origin
+        style: tertiary
+        sizing: "fixed(9)"
+      - key: shadows
+        label: Shadows
+        kind: path
+        sizing: "flex(2)"
+        hidden: true
+      - key: path
+        label: Path
+        kind: path
+        sizing: "flex(3)"
+    highlights:
+      - when: { field: drift, matches: '^should-' }
+        style: warning
+    actions:
+      - { name: refresh, key: r, type: reload }
+      # No Properties here: a unit file the manager has never loaded has no
+      # D-Bus object to read. The journal is reachable, because a journal is
+      # read by unit name.
+      - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
+      - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      - { name: follow in a terminal, key: "a j", id: follow }
+    children:
+      - *journal
+      - *security

@@ -1272,15 +1272,78 @@ nothing, because `is null` does not reach an absent numeric field.
 **Delivers** the system manager, and possibly remote hosts (`-H`) and
 containers (`-M`).
 
-The hard part is not reading — unprivileged reads on the system bus are
-allowed — but writing, which goes through polkit and therefore needs an
-agent, or `pkexec`, or the `SUDO_ASKPASS` route. That is its own decision and
-deliberately sits behind a finished user-level tab.
+Reading is free — unprivileged reads on the system bus are allowed, and that
+includes the journal for a user in `systemd-journal` or `wheel`, and
+`systemd-analyze`. Writing is not: every write is a polkit action. So the phase
+splits into four stages, each of which builds, installs and is usable on its
+own:
 
-The second question here is shape: several managers as subtabs of one
-instance pinned by `query: "manager:<id>"`, the way the mail adapter holds
-six IMAP accounts (with `subscribe_status_for` per subtab), or simply one
-instance per manager. D1's `manager:` config field keeps both open.
+1. the read side plus a manager-aware `control.rs`, so the tab is honestly
+   read-only rather than decorated with keys that always fail;
+2. the polkit flag for the runtime verbs, and the system-specific protection
+   defaults that come with them;
+3. the unit-file verbs (`enable`, `disable`, `mask`, `unmask`, `preset`), which
+   go over the same bus and through the same flag;
+4. `critical-chain` as a level under a unit — deferred here from
+   [phase 6c](#phase-6c--the-clock-and-the-meter) because the system manager is
+   where the command earns a level.
+
+### The questions, decided
+
+**Shape: one instance per manager, and therefore one view file per manager.**
+The alternative was several managers as subtabs of one instance pinned by
+`query: "manager:<id>"`, the way the mail adapter holds six IMAP accounts.
+It was rejected on what it would cost the rest of the adapter: `adapter:` is
+declared per tab, so a single instance serving both managers means every node
+id has to carry which manager it came from — `sshd.service` exists on both —
+and that reaches into the live watcher, the journal calls and the protection
+list. A second tab costs one tab key. The price is paid in config instead: a
+second file of the same adapter type needs an explicit `adapter.id:`, and its
+tab name has to be listed in `tabs.order`.
+
+**Privilege: the polkit flag, not `pkexec` and not `sudo`.** The manager
+answers an unauthorised write with
+
+> Access denied as the requested operation requires interactive
+> authentication. However, interactive authentication has not been enabled by
+> the calling program.
+
+which is an invitation, not a refusal — the caller simply never said it was
+willing to be asked. zbus can say it:
+`Proxy::call_with_flags(method, MethodFlags::AllowInteractiveAuth.into(), body)`
+reaches the typed proxy's inner `Proxy`, so the desktop's polkit agent does the
+asking and the adapter never re-execs, never spawns a privileged child and
+never holds a password. Measured before designing: a non-interactive `busctl`
+write drew exactly that message, which is what proves the authority exists and
+is merely unasked.
+
+That flag covers the bus, and only the bus. The editing and creating keys (`e`,
+`n`) write files on disk, where there is no polkit to ask — they stay absent on
+the system tab for a reason that outlasts stage 2.
+
+### What it took, beyond the plan — stage 1
+
+**One of the four action roads did not know which manager it was on.** A verb
+reaches the user by four routes — the action list a frontend renders, the
+apply-choice road, `invoke_action`, and the picker — and `control::actions_for`
+was the only one that took no manager. A system tab built on that would have
+offered `a s`, `a m` and `a p` and let every one of them run into polkit's
+refusal. So the manager became part of the verb question itself:
+`Verb::available_on(manager)` answers it once, `control::verb_on(manager, id)`
+is the single chokepoint, and all four routes go through it. That shuts the
+second road as well as the first — a caller naming a verb id outright, which
+the CLI does, never asks what the level offers.
+
+**The view file is smaller because the keys are fewer, not because it is a
+stub.** `systemd-system.yaml` carries the same four levels (Services, Failed,
+Timers, Unit files) and the same four children (Properties, Journal, Security,
+Ordering), defined once as YAML anchors inside the first level and aliased into
+the other three — 514 lines against 1797. The anchors have to live _inside_ a
+known key: a top-level `_shared:` would be reported as an unknown view-config
+key, which is to say as dead config. A test parses the committed file, asserts
+it validates with no unknown keys, and asserts that not one of the twelve write
+verb ids appears anywhere in it — so the read-only promise is checked by the
+build rather than by reading.
 
 ---
 

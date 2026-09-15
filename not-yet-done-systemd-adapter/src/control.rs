@@ -40,6 +40,7 @@
 use not_yet_done_content::{ContentError, InputSpec, NodeAction, Result, ValueOption};
 
 use crate::bus::{Bus, FileChange, JobEnd, JobKind, Props, SERVICE_IFACE, UNIT_IFACE};
+use crate::config::Manager;
 
 /// The levels a verb is offered on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,15 +267,43 @@ pub static VERBS: &[Verb] = &[
 ];
 
 /// The verb with this id, if it is one of ours.
+///
+/// Says nothing about whether it may run here — [`verb_on`] is the question
+/// with the manager in it, and every dispatch path asks that one.
 pub fn verb(id: &str) -> Option<&'static Verb> {
     VERBS.iter().find(|v| v.id == id)
 }
 
+/// The verb with this id **if this manager offers it at all**.
+///
+/// The one chokepoint for the manager question, because a verb is reached by
+/// two roads: the action list a frontend renders, and an id a caller names
+/// outright — the CLI can invoke `stop` without ever having asked what the
+/// level offers. Gating only the list would leave the second road open, and a
+/// verb the tab refuses to show is not one the CLI may fire.
+pub fn verb_on(manager: Manager, id: &str) -> Option<&'static Verb> {
+    verb(id).filter(|v| v.available_on(manager))
+}
+
+impl Verb {
+    /// Whether this verb may run against that manager.
+    ///
+    /// Every write against the **system** manager is a privileged call: the
+    /// manager answers it with polkit's "requires interactive authentication",
+    /// and until the adapter asks for that authorisation the honest thing is
+    /// to offer nothing rather than a key that always fails. Reading — the
+    /// levels themselves, the journal, `systemd-analyze` — needs no privilege
+    /// and is not affected.
+    pub fn available_on(&self, manager: Manager) -> bool {
+        manager == Manager::User
+    }
+}
+
 /// The verbs offered on a level, as declared actions.
-pub fn actions_for(type_id: &str) -> Vec<NodeAction> {
+pub fn actions_for(type_id: &str, manager: Manager) -> Vec<NodeAction> {
     VERBS
         .iter()
-        .filter(|v| v.scope.covers(type_id))
+        .filter(|v| v.available_on(manager) && v.scope.covers(type_id))
         .map(|v| {
             // `kill` is the only verb that needs an answer before it acts, and
             // the answer is *which signal* — so it declares a picker and the
@@ -606,14 +635,14 @@ mod tests {
 
     #[test]
     fn the_verb_that_needs_a_signal_declares_a_picker() {
-        let kill = actions_for("systemd:service")
+        let kill = actions_for("systemd:service", Manager::User)
             .into_iter()
             .find(|a| a.id == "kill")
             .expect("services can be killed");
         assert!(matches!(kill.input, InputSpec::Picker));
         // And nothing else asks for input — the rest act on the row alone.
         assert!(
-            actions_for("systemd:service")
+            actions_for("systemd:service", Manager::User)
                 .iter()
                 .filter(|a| a.id != "kill")
                 .all(|a| matches!(a.input, InputSpec::None))
@@ -624,13 +653,13 @@ mod tests {
     fn a_level_that_is_not_a_unit_is_offered_nothing() {
         // The manager root and a property row are levels of this adapter too,
         // and neither is something you can stop.
-        assert!(actions_for("systemd:manager").is_empty());
-        assert!(actions_for("systemd:property").is_empty());
+        assert!(actions_for("systemd:manager", Manager::User).is_empty());
+        assert!(actions_for("systemd:property", Manager::User).is_empty());
     }
 
     #[test]
     fn a_timer_is_not_offered_the_process_verbs() {
-        let ids: Vec<&str> = actions_for("systemd:timer")
+        let ids: Vec<&str> = actions_for("systemd:timer", Manager::User)
             .iter()
             .map(|a| a.id.clone().leak() as &str)
             .collect();
@@ -642,7 +671,7 @@ mod tests {
 
     #[test]
     fn a_unit_file_is_offered_only_what_works_without_being_loaded() {
-        let ids: Vec<String> = actions_for("systemd:unitfile")
+        let ids: Vec<String> = actions_for("systemd:unitfile", Manager::User)
             .iter()
             .map(|a| a.id.clone())
             .collect();
@@ -746,5 +775,21 @@ mod tests {
             lines[3],
             "! /units/probe.service — it is masked, so no symlink was written"
         );
+    }
+
+    #[test]
+    fn the_system_manager_is_offered_no_verb_it_cannot_carry_out() {
+        // Every write against the system manager needs an authorisation the
+        // adapter does not yet ask for, so the honest answer is an empty list
+        // rather than a key that always fails.
+        assert!(actions_for("systemd:service", Manager::System).is_empty());
+        assert!(actions_for("systemd:unitfile", Manager::System).is_empty());
+        // And the second road is shut with it: naming the verb outright — what
+        // the CLI does — finds nothing either.
+        assert!(verb_on(Manager::System, "stop").is_none());
+        assert!(verb_on(Manager::User, "stop").is_some());
+        // `verb` itself still knows the table; it is the lookup without the
+        // manager question in it.
+        assert!(verb("stop").is_some());
     }
 }
