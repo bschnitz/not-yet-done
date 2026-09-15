@@ -7895,9 +7895,10 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       same. Undo with `rm` of the new symlink and its `.wants` directory, then
       `systemctl --user daemon-reload`; `is-enabled` still says `enabled`
       afterwards, from `/etc`.
-- [ ] `a p` on a row reading `should-enable` asks for confirmation naming the
-      unit, then reports the symlinks written; after the reload the row's
-      `State` is `enabled` and `Drift` is empty. Undo with
+- [x] `a p` on a row reading `should-enable` asks for confirmation naming the
+      unit, then answers `Enabled <unit> — the preset wants it on` with the
+      written symlink on the line below it; after the reload the row's `State`
+      is `enabled` and `Drift` is empty. Undo with
       `systemctl --user disable <unit>` if the unit was off on purpose.
 - [x] `Shadows` is empty for nearly every row — that is the normal state. To
       see it work, copy an inert vendor unit into the user directory:
@@ -7916,6 +7917,40 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
 - [ ] Both `q` menus offer the audit queries as commented examples in the
       template, and `★` on one keeps it as a saved query — the audit is kept
       by the user, not declared in the YAML.
+
+## systemd — what a unit-file verb wrote, and where
+
+All five file verbs report the paths the manager touched, not a count of them:
+a headline, then one line per symlink — `+` written, `-` removed, `!` for
+something systemd refused to do. Only the first line reaches the notification
+bar; the rest appears on `f10` with the entry expanded. Needs the systemd tab,
+Unit files subtab (`t u`), and a throwaway unit — put one in
+`~/.config/systemd/user/` with an `[Install]` section and
+`systemctl --user daemon-reload`.
+
+- [ ] `a e` on the throwaway answers `Enabled <unit>` and names the symlink it
+      wrote under `~/.config/systemd/user/<target>.wants/` on the next line.
+      `a d` answers `Disabled <unit>` and names the same path with a `-`.
+      `ls` on that directory agrees both times.
+- [ ] Pressing the same verb twice keeps its old sentence: the second `a d`
+      says `<unit> was already disabled` with no path lines under it, because
+      nothing moved.
+- [ ] The direction of `a p` is in the headline, and it is the half the user
+      cannot know in advance: on a `should-enable` row it reads
+      `Enabled <unit> — the preset wants it on`, on a `should-disable` row
+      `Disabled <unit> — the preset wants it off`. A unit already in line still
+      answers `already matches its preset`, with nothing under it.
+- [ ] A refusal is never reported as the verb. Mask an inert vendor unit
+      (`a m` on, say, a synth or a torrent daemon you do not run — it writes a
+      `/dev/null` link into `~/.config/systemd/user`), then press `a p` on it:
+      the answer is `The preset changed nothing for <unit>` with
+      `! … — it is masked, so no symlink was written` under it, **not** an
+      enable it never performed. `a e` on the same row is refused outright by
+      the manager (`UnitMasked`), which is also the truth. Undo with `a u`,
+      which answers `Unmasked <unit>` and names the link it removed.
+- [ ] A unit with no `[Install]` section keeps its own sentence: `a e` on a
+      `static` row says there is nothing to enable because it is started by
+      something else — no path lines, because none were written.
 
 ## systemd — the security level (phase 6b)
 
