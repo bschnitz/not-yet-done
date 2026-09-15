@@ -381,11 +381,7 @@ fn scalar(value: &Value) -> String {
                 .collect();
             clean(&String::from_utf8_lossy(&bytes))
         }
-        Value::Array(items) => items
-            .iter()
-            .map(scalar)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Value::Array(items) => items.iter().map(scalar).collect::<Vec<_>>().join("\n"),
         Value::Null => String::new(),
         other => other.to_string(),
     }
@@ -472,10 +468,7 @@ mod tests {
     fn a_message_of_bytes_reads_as_the_line_it_is() {
         let raw = "\u{1b}[2m2026-09-12T18:04:25Z\u{1b}[0m \u{1b}[33m WARN\u{1b}[0m feed stalled";
         let bytes: Vec<String> = raw.bytes().map(|b| b.to_string()).collect();
-        let line = format!(
-            r#"{{"MESSAGE":[{}],"PRIORITY":"4"}}"#,
-            bytes.join(",")
-        );
+        let line = format!(r#"{{"MESSAGE":[{}],"PRIORITY":"4"}}"#, bytes.join(","));
         let fields = decode(&line).unwrap();
         assert_eq!(fields["MESSAGE"], "2026-09-12T18:04:25Z  WARN feed stalled");
         assert_eq!(fields["PRIORITY"], "4");
@@ -560,7 +553,10 @@ mod tests {
         let page = cut(rows(100), 50, 100);
         assert_eq!(page.rows.len(), 50);
         assert_eq!(page.rows[0].cursor, "s=cursor-50");
-        assert!(page.has_more, "a window journalctl filled has more behind it");
+        assert!(
+            page.has_more,
+            "a window journalctl filled has more behind it"
+        );
 
         // The journal ran out inside the window — the page is short and it is
         // the last one.

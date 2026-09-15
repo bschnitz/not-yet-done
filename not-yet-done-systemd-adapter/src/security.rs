@@ -130,8 +130,9 @@ pub fn actions_for(type_id: &str, manager: Manager) -> Vec<NodeAction> {
 /// who wants another sorts the column.
 pub async fn checks(manager: Manager, unit: &str) -> Result<Vec<SecurityRow>> {
     let out = run(&[flag(manager), "security", "--json=short", unit]).await?;
-    let Value::Array(items) = serde_json::from_str(&out)
-        .map_err(|e| ContentError::Other(format!("systemd-analyze said something unexpected: {e}").into()))?
+    let Value::Array(items) = serde_json::from_str(&out).map_err(|e| {
+        ContentError::Other(format!("systemd-analyze said something unexpected: {e}").into())
+    })?
     else {
         return Ok(Vec::new());
     };
@@ -380,7 +381,9 @@ mod tests {
     #[test]
     fn no_fix_is_a_display_label_in_disguise() {
         for (field, fix) in FIXES {
-            let Fix::Directives(lines) = fix else { continue };
+            let Fix::Directives(lines) = fix else {
+                continue;
+            };
             for line in *lines {
                 assert!(
                     !line.contains('*')
@@ -401,7 +404,10 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(before, seen.len(), "a json_field is in the table twice");
-        assert_eq!(before, 81, "the table should cover every check this systemd has");
+        assert_eq!(
+            before, 81,
+            "the table should cover every check this systemd has"
+        );
     }
 
     #[test]

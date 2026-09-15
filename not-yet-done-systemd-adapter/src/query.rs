@@ -81,14 +81,7 @@ pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
 /// `[exposure, gte, 0.3]` is "what is open and actually costs something". `id`
 /// is systemd's own stable name for the check, which is what a query about a
 /// family of checks reaches for (`[id, like, 'Capability%']`).
-pub const SECURITY_COLUMNS: &[&str] = &[
-    "check",
-    "status",
-    "exposure",
-    "description",
-    "fix",
-    "id",
-];
+pub const SECURITY_COLUMNS: &[&str] = &["check", "status", "exposure", "description", "fix", "id"];
 
 /// Columns either dependency query may reference.
 ///
@@ -376,14 +369,8 @@ mod tests {
         ];
         for (level, queryable, schema) in levels {
             let declared: Vec<&str> = schema.iter().map(|c| c.key.as_str()).collect();
-            let missing: Vec<&&str> = declared
-                .iter()
-                .filter(|k| !queryable.contains(k))
-                .collect();
-            let extra: Vec<&&str> = queryable
-                .iter()
-                .filter(|k| !declared.contains(k))
-                .collect();
+            let missing: Vec<&&str> = declared.iter().filter(|k| !queryable.contains(k)).collect();
+            let extra: Vec<&&str> = queryable.iter().filter(|k| !declared.contains(k)).collect();
             assert!(
                 missing.is_empty(),
                 "{level}: columns the table shows but no query may name: {missing:?}"

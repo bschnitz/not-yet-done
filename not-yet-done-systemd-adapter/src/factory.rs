@@ -9,7 +9,9 @@
 //! there is a pane to show the message — not while the tab is still being
 //! assembled and nothing is on screen.
 
-use not_yet_done_content::{ContentAdapter, ContentError, HostContext, Result, TypedAdapterFactory};
+use not_yet_done_content::{
+    ContentAdapter, ContentError, HostContext, Result, TypedAdapterFactory,
+};
 
 use crate::adapter::SystemdAdapter;
 use crate::config::SystemdConfig;
