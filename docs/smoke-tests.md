@@ -8115,8 +8115,9 @@ example file names in its header: `adapter.id: systemd-system`, and the tab
 name in `tabs.order` in `tui.yaml`. Give it a key (`key: [", x"]` here) —
 thirteenth in the order, so no autonumber digit is left for it.
 
-Everything below reads. Nothing here needs a password, and nothing here should
-offer a key that would ask for one.
+The first seven boxes read only; none of them needs a password. The stage-2
+boxes after them write, and are the ones that may put a polkit dialog on the
+screen.
 
 - [ ] The tab is reachable: `, x` switches to it, and it appears in the tab bar
       with its own name. `not-yet-done-tui --keymap , x` prints the
@@ -8129,10 +8130,11 @@ offer a key that would ask for one.
 - [ ] The typed columns are populated here too, from the system bus: `startup`,
       `mem`, `mem_peak`, `exposure`, and `fragment` paths under
       `/usr/lib/systemd/system/` rather than `~/.config/systemd/user/`.
-- [ ] `a` on a service offers **no** systemd verb — no start, stop, restart,
-      enable, mask, preset. Only `follow` and whatever the host contributes.
-      Compare side by side with `a` on the `, y` tab, which offers all of them.
-      The same holds on Timers and on Unit files.
+- [ ] `a` on a service offers the **runtime** verbs (start, stop, restart,
+      reload, reset-failed, kill, freeze) and **no** unit-file verb — no
+      enable, disable, mask, unmask, preset, and no `e`-keys either. Compare
+      side by side with `a` on the `, y` tab, which offers all of them. The
+      same split holds on Timers and on Unit files.
 - [ ] The read keys all work: `P` properties, `J` journal, `H` security, `D`
       ordering, `r` refresh, `a j` follow the journal in a terminal. The
       journal needs membership in `systemd-journal` or `wheel`; without it the
@@ -8145,3 +8147,41 @@ offer a key that would ask for one.
       repeatedly, refresh each, and confirm neither list leaks a unit from the
       other manager. A name that exists on both (`dbus.socket`) is the sharpest
       test — it must show the manager's own state on each tab.
+
+### The writes (phase 7, stage 2)
+
+A polkit dialog for `org.freedesktop.systemd1.manage-units` is
+`auth_admin_keep` for an active session: expect to be asked **once**, and not
+again for a while. So test the dialog first, before the cache is warm — after
+that a verb running without a prompt is correct, not a skipped check.
+
+- [ ] `a r` on a harmless system timer (`man-db.timer`, `logrotate.timer`)
+      restarts it and the notification reports the outcome — "Restarting
+      man-db.timer — done", not "sent". `systemctl status man-db.timer`
+      confirms the new start timestamp.
+- [ ] The dialog appears on the first write of a fresh session, and the verb
+      runs after it is answered. To get a fresh one, log out and back in (or
+      revoke the cached authorisation) rather than waiting.
+- [ ] **Dismissing** the dialog is reported as an ordinary sentence, not as a
+      red adapter error: the notification says the write was not authorised and
+      nothing happened. The unit's row is unchanged.
+- [ ] A protected system unit refuses _before_ any dialog: `a x` on
+      `systemd-journald.service` says it is on the protection list and that it
+      holds up **the machine** — the user tab's wording says "the session".
+      No password can override that; `unprotect:` in the adapter config can.
+- [ ] `sshd.service` and `NetworkManager.service` are deliberately **not**
+      protected. Confirm `a` offers the disruptive verbs on them — and then do
+      not press it over SSH.
+- [ ] The CLI agrees with the tab on both roads:
+      `nyd adapter systemd-system:service <id> start` works, and
+      `nyd adapter systemd-system:service <id> enable` reports no such action.
+      `nyd adapter systemd-system:service help` lists the eight runtime verbs
+      and no file verb.
+- [ ] The flag is what carries it: run the same call through `gdbus`, which
+      does not set it, and watch it come back
+      `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired` while the
+      adapter's own call succeeds.
+- [ ] A write that waits does not trip the read deadline. With a dialog on
+      screen, leave it unanswered for more than ten seconds before answering:
+      the verb must still run. Leaving it for five minutes is the other end —
+      the adapter gives the pane back and says the wait was never answered.

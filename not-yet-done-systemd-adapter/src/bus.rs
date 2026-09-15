@@ -19,6 +19,11 @@
 //! fails the load after `timeout_secs` instead of hanging the pane forever.
 //! Local D-Bus traffic is a matter of milliseconds; a deadline that trips is
 //! evidence of something wrong, not of a slow link.
+//!
+//! A *privileged* write is the one exception, and it gets its own budget. See
+//! [`Bus::write`]: when polkit is asking a human for a password, silence is
+//! the expected state, not a fault, and the read deadline would cut the dialog
+//! off mid-typing.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -27,7 +32,7 @@ use futures::StreamExt;
 use not_yet_done_content::{ContentError, Result};
 use tokio::sync::OnceCell;
 use zbus_systemd::systemd1::ManagerProxy;
-use zbus_systemd::zbus::{self, fdo::PropertiesProxy, names::InterfaceName};
+use zbus_systemd::zbus::{self, fdo::PropertiesProxy, names::InterfaceName, proxy::MethodFlags};
 use zbus_systemd::zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::config::Manager;
@@ -86,16 +91,23 @@ pub struct UnitFileEntry {
 pub struct Bus {
     manager: Manager,
     timeout: Option<Duration>,
+    /// The deadline privileged writes run under — see [`Bus::write`].
+    auth_timeout: Option<Duration>,
     conn: OnceCell<zbus::Connection>,
     /// Latches once `Subscribe` has been sent — see [`Bus::enable_signals`].
     subscribed: OnceCell<()>,
 }
 
 impl Bus {
-    pub fn new(manager: Manager, timeout: Option<Duration>) -> Self {
+    pub fn new(
+        manager: Manager,
+        timeout: Option<Duration>,
+        auth_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             manager,
             timeout,
+            auth_timeout,
             conn: OnceCell::new(),
             subscribed: OnceCell::new(),
         }
@@ -170,6 +182,73 @@ impl Bus {
         let conn = self.connection().await?;
         self.deadline("opening the manager proxy", ManagerProxy::new(conn))
             .await
+    }
+
+    /// Make one manager call that may have to be *authorised* before it runs.
+    ///
+    /// Two things separate this from [`Bus::deadline`], and both are about the
+    /// same fact: on the system manager, every write is a polkit action.
+    ///
+    /// **The flag.** D-Bus lets a caller say whether it is willing to wait
+    /// while the human at the keyboard is asked. A caller that does not say so
+    /// is refused outright with
+    /// `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired` — the
+    /// manager will not start a dialog behind a client's back. The generated
+    /// [`ManagerProxy`] methods carry no flags, so the call goes out through
+    /// the untyped [`zbus::Proxy`] underneath, which is the only reason this
+    /// helper names its method as a string. Sending it on the *user* manager
+    /// too costs nothing: with no policy to check, nobody is asked.
+    ///
+    /// **The deadline.** [`Bus::deadline`] exists to catch a manager that
+    /// stopped answering. A call waiting on a password dialog is silent for
+    /// the opposite reason — it is working exactly as intended — so it runs
+    /// under `auth_timeout` instead, which is minutes rather than seconds.
+    ///
+    /// A refusal comes back as [`ContentError::PermissionDenied`], not as
+    /// `Other`: declining a password is a decision the user made, and
+    /// [`crate::control::run`] turns it back into a plain sentence rather than
+    /// an adapter error.
+    async fn write<B, R>(
+        &self,
+        proxy: &ManagerProxy<'_>,
+        what: &str,
+        method: &'static str,
+        body: &B,
+    ) -> Result<R>
+    where
+        B: serde::Serialize + zbus_systemd::zvariant::DynamicType,
+        R: for<'d> zbus_systemd::zvariant::DynamicDeserialize<'d>,
+    {
+        let call =
+            proxy
+                .inner()
+                .call_with_flags(method, MethodFlags::AllowInteractiveAuth.into(), body);
+        let replied = match self.auth_timeout {
+            None => call.await,
+            Some(limit) => match tokio::time::timeout(limit, call).await {
+                Ok(replied) => replied,
+                Err(_) => {
+                    return Err(ContentError::Other(
+                        format!(
+                            "{what} timed out after {}s — if an authentication dialog is open, \
+                             it was never answered",
+                            limit.as_secs()
+                        )
+                        .into(),
+                    ));
+                }
+            },
+        };
+        match replied {
+            Ok(Some(value)) => Ok(value),
+            // Only reachable with `NoReplyExpected`, which this never sets —
+            // but claiming success for a call whose outcome we never saw is
+            // the one thing this whole module exists not to do.
+            Ok(None) => Err(ContentError::Other(
+                format!("{what}: the manager sent no reply").into(),
+            )),
+            Err(e) => Err(write_error(what, e)),
+        }
     }
 
     /// Every unit the manager currently has loaded.
@@ -283,6 +362,21 @@ impl JobKind {
             JobKind::ReloadOrRestart => "Reloading or restarting",
         }
     }
+
+    /// The manager method this job is enqueued with.
+    ///
+    /// A string, not a generated proxy method, because the call goes out
+    /// through [`Bus::write`] — see there for why the typed methods cannot be
+    /// used for anything that may need authorising.
+    pub fn method(self) -> &'static str {
+        match self {
+            JobKind::Start => "StartUnit",
+            JobKind::Stop => "StopUnit",
+            JobKind::Restart => "RestartUnit",
+            JobKind::Reload => "ReloadUnit",
+            JobKind::ReloadOrRestart => "ReloadOrRestartUnit",
+        }
+    }
 }
 
 /// How a job ended.
@@ -353,19 +447,14 @@ impl Bus {
             .await
             .map_err(|e| ContentError::Other(format!("watching jobs: {e}").into()))?;
 
-        let name = unit.to_string();
-        let mode = "replace".to_string();
-        let enqueue = async {
-            match kind {
-                JobKind::Start => proxy.start_unit(name, mode).await,
-                JobKind::Stop => proxy.stop_unit(name, mode).await,
-                JobKind::Restart => proxy.restart_unit(name, mode).await,
-                JobKind::Reload => proxy.reload_unit(name, mode).await,
-                JobKind::ReloadOrRestart => proxy.reload_or_restart_unit(name, mode).await,
-            }
-        };
-        let job = self
-            .deadline(&format!("{} {unit}", kind.gerund().to_lowercase()), enqueue)
+        let body = (unit.to_string(), "replace".to_string());
+        let job: OwnedObjectPath = self
+            .write(
+                &proxy,
+                &format!("{} {unit}", kind.gerund().to_lowercase()),
+                kind.method(),
+                &body,
+            )
             .await?;
 
         let watch = async {
@@ -453,11 +542,9 @@ impl Bus {
     /// `main`, `control` or `all`.
     pub async fn kill(&self, unit: &str, whom: &str, signal: i32) -> Result<()> {
         let proxy = self.manager_proxy().await?;
-        self.deadline(
-            &format!("killing {unit}"),
-            proxy.kill_unit(unit.to_string(), whom.to_string(), signal),
-        )
-        .await
+        let body = (unit.to_string(), whom.to_string(), signal);
+        self.write(&proxy, &format!("killing {unit}"), "KillUnit", &body)
+            .await
     }
 
     /// Have the manager re-read every unit file on disk.
@@ -474,9 +561,12 @@ impl Bus {
     /// Clear a unit's `failed` state so it can be started again.
     pub async fn reset_failed(&self, unit: &str) -> Result<()> {
         let proxy = self.manager_proxy().await?;
-        self.deadline(
+        let body = (unit.to_string(),);
+        self.write(
+            &proxy,
             &format!("resetting {unit}"),
-            proxy.reset_failed_unit(unit.to_string()),
+            "ResetFailedUnit",
+            &body,
         )
         .await
     }
@@ -484,14 +574,13 @@ impl Bus {
     /// Suspend (`freeze`) or resume (`thaw`) every process in the unit's cgroup.
     pub async fn freeze(&self, unit: &str, frozen: bool) -> Result<()> {
         let proxy = self.manager_proxy().await?;
-        let name = unit.to_string();
-        if frozen {
-            self.deadline(&format!("freezing {unit}"), proxy.freeze_unit(name))
-                .await
+        let body = (unit.to_string(),);
+        let (what, method) = if frozen {
+            (format!("freezing {unit}"), "FreezeUnit")
         } else {
-            self.deadline(&format!("thawing {unit}"), proxy.thaw_unit(name))
-                .await
-        }
+            (format!("thawing {unit}"), "ThawUnit")
+        };
+        self.write(&proxy, &what, method, &body).await
     }
 
     /// Ask the manager to emit unit and job signals, once per connection.
@@ -508,6 +597,43 @@ impl Bus {
                 let _ = proxy.subscribe().await;
             })
             .await;
+    }
+}
+
+/// Say what a failed privileged call means, in the user's terms.
+///
+/// The two names below are polkit's answer arriving as a D-Bus error, and they
+/// are the only ones that are not a fault:
+///
+///   * `InteractiveAuthorizationRequired` — the call was refused *before*
+///     anyone was asked. On this code path that should not happen, since every
+///     write carries the flag; it is kept because a policy set to
+///     `auth_admin` with no agent running (a bare tty, a session without a
+///     polkit agent) produces exactly this, and "no agent" is worth saying.
+///   * `AccessDenied` — the request reached a human and did not come back
+///     authorised. systemd sends the same name whether the dialog was
+///     dismissed, the password was wrong, or the policy says no outright, so
+///     the sentence covers all three rather than guessing which one it was.
+///
+/// Anything else is a real error and stays one.
+fn write_error(what: &str, err: zbus::Error) -> ContentError {
+    let zbus::Error::MethodError(name, detail, _) = &err else {
+        return ContentError::Other(format!("{what}: {err}").into());
+    };
+    match name.as_str() {
+        "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired" => {
+            ContentError::PermissionDenied(format!(
+                "{what} needs authorisation and nothing could ask for it — \
+                 no polkit agent is running for this session"
+            ))
+        }
+        "org.freedesktop.DBus.Error.AccessDenied" => ContentError::PermissionDenied(format!(
+            "{what} was not authorised — the request was dismissed or refused"
+        )),
+        _ => match detail {
+            Some(said) => ContentError::Other(format!("{what}: {said}").into()),
+            None => ContentError::Other(format!("{what}: {name}").into()),
+        },
     }
 }
 

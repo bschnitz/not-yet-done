@@ -126,7 +126,7 @@ pub struct SystemdAdapter {
 impl SystemdAdapter {
     pub fn new(instance_id: String, cfg: &SystemdConfig) -> Self {
         let manager = cfg.manager();
-        let bus = Bus::new(manager, cfg.timeout());
+        let bus = Bus::new(manager, cfg.timeout(), cfg.auth_timeout());
         let queries_root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("not_yet_done")

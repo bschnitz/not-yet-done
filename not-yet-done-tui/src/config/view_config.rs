@@ -3150,11 +3150,14 @@ views:
     }
 
     /// The system-manager companion, held to the same standard — and to one
-    /// more: it must offer no verb, because every write against the system
-    /// manager needs an authorisation the adapter does not yet ask for. A
-    /// binding here for a key that always fails would be worse than no tab.
+    /// more: it must bind no verb that writes a *unit file*. Those are
+    /// withheld on the system manager (enabling or masking changes what the
+    /// machine does at the next boot, for everyone on it), and the adapter
+    /// refuses them there whatever this file says — so a binding for one would
+    /// be a key that silently does nothing. The runtime verbs are expected
+    /// here: polkit authorises them and they are bound on purpose.
     #[test]
-    fn committed_systemd_system_example_parses_and_offers_no_verb() {
+    fn committed_systemd_system_example_binds_runtime_verbs_but_no_file_verbs() {
         let yaml = include_str!("../../../docs/examples/views/systemd-system.yaml");
         let (cfg, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
             .expect("committed systemd-system.yaml must parse");
@@ -3171,22 +3174,16 @@ views:
                 .is_some_and(|c| c.contains("manager: system")),
             "the file exists to point at the other manager"
         );
-        // `follow` reads the journal in a terminal and needs no privilege; the
-        // verbs that change something must not appear anywhere in the file.
-        let verbs = [
-            "start",
-            "stop",
-            "restart",
-            "reload-or-restart",
+        let file_verbs = [
             "enable",
+            "enable-now",
             "disable",
+            "disable-now",
             "mask",
             "unmask",
             "preset",
-            "kill",
-            "freeze",
-            "reset-failed",
         ];
+        let mut bound: Vec<&str> = Vec::new();
         for view in &cfg.views {
             for action in view
                 .actions
@@ -3195,11 +3192,20 @@ views:
             {
                 if let Some(id) = action.id.as_deref() {
                     assert!(
-                        !verbs.contains(&id),
-                        "{id} is a write against the system manager"
+                        !file_verbs.contains(&id),
+                        "{id} writes a unit file and is not offered on the system manager"
                     );
+                    bound.push(id);
                 }
             }
+        }
+        // And the other half of the claim: the runtime verbs really are bound,
+        // so this test fails if the file ever quietly loses them again.
+        for expected in ["start", "stop", "restart", "reload", "kill", "freeze"] {
+            assert!(
+                bound.contains(&expected),
+                "{expected} should be bound on the system tab"
+            );
         }
     }
 

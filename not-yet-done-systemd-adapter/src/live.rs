@@ -364,7 +364,11 @@ mod tests {
     #[ignore = "needs a running --user manager; starts a transient unit"]
     async fn a_transient_unit_pushes_its_row_without_anyone_asking() {
         let unit = "nyd-live-smoke.service";
-        let bus = Arc::new(Bus::new(Manager::User, Some(Duration::from_secs(10))));
+        let bus = Arc::new(Bus::new(
+            Manager::User,
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(300)),
+        ));
         let (tx, mut rx) = broadcast::channel(64);
         spawn(bus, tx);
         // Let the watcher get its match rule registered before the unit runs;
