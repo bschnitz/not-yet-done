@@ -7866,23 +7866,23 @@ Four columns systemd does not hand over: `preset` and `drift` are read out of
 the preset policy on disk, `shadows` out of the unit search path, `dropins` off
 a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
 
-- [ ] `Preset` reads `enabled` / `disabled` / `ignored` on ordinary unit files
+- [x] `Preset` reads `enabled` / `disabled` / `ignored` on ordinary unit files
       and is **empty** where a preset cannot apply: pick a `static` row (no
       `[Install]` section), a `generated` one, a `transient` one — all blank,
       and `Drift` blank with them.
-- [ ] Cross-check the parser against the machine: query
+- [x] Cross-check the parser against the machine: query
       `[drift, =, should-enable]` in the `q` menu and compare the row count
       with
       `systemctl --user list-unit-files | awk '$2=="disabled" && $3=="enabled"' | wc -l`.
       The two numbers must be equal. Repeat with `should-disable` against
       `$2=="enabled" && $3=="disabled"`.
-- [ ] The count is allowed to be large. A distribution that ships no
+- [x] The count is allowed to be large. A distribution that ships no
       default-off preset leaves most units unmatched, and systemd's default
       for an unmatched unit is `enable` — so a long `should-enable` list is
       the policy's answer, not a bug. Confirm with
       `grep -r . /usr/lib/systemd/user-preset/` that there really is no
       `disable *` line.
-- [ ] `a p` on a row whose `Drift` is **empty** and which is enabled from the
+- [x] `a p` on a row whose `Drift` is **empty** and which is enabled from the
       user's own directory answers "already matches its preset" — not
       "0 changes", and nothing in the row moves. Check with
       `find ~/.config/systemd/user -name '<unit>'` that the enable symlink is
@@ -7899,13 +7899,13 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       unit, then reports the symlinks written; after the reload the row's
       `State` is `enabled` and `Drift` is empty. Undo with
       `systemctl --user disable <unit>` if the unit was off on purpose.
-- [ ] `Shadows` is empty for nearly every row — that is the normal state. To
+- [x] `Shadows` is empty for nearly every row — that is the normal state. To
       see it work, copy an inert vendor unit into the user directory:
       `cp /usr/lib/systemd/user/<inert>.service ~/.config/systemd/user/` and
       `systemctl --user daemon-reload`. The row's `Origin` flips to `user` and
       `Shadows` names the `/usr/lib` path it now hides. Remove the copy and
       reload; the column goes quiet again.
-- [ ] Query `[shadows, has, /usr]` finds exactly that row while the copy is in
+- [x] Query `[shadows, has, /usr]` finds exactly that row while the copy is in
       place, and nothing once it is gone.
 - [ ] Services tab: `Drop-ins` is off by default — switch it on with `c c`.
       It is blank rather than `0` where nothing amends the unit, and a unit
@@ -8021,7 +8021,7 @@ a terminal beside the TUI is the whole apparatus.
       way around it.
 - [ ] `q` → `[startup, gte, 0]` — only the units that have actually run. Paired
       with a descending sort this is the "slowest first" list. `[startup, gt,
-  1]` narrows to the ones over a second, which on a user manager is
+1]` narrows to the ones over a second, which on a user manager is
       usually one or two.
 - [ ] `[startup, is, null]` and `[startup, is, not null]` both match **nothing**
       — the same limitation phase 6b noted for empty strings. Not a regression
