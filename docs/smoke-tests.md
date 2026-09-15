@@ -8105,3 +8105,43 @@ question. They are addressed in sessions of their own.
 
 - Content actions plan: [`plan-content-actions-unification.md`](plan-content-actions-unification.md)
 - EditSession refactor plan: [`plan-edit-session-refactor.md`](plan-edit-session-refactor.md)
+
+## systemd — the system manager as a read-only tab (phase 7, stage 1)
+
+The second systemd tab, pointed at the system bus. Needs
+`docs/examples/views/systemd-system.yaml` installed as
+`~/.config/not_yet_done/views/systemd-system.yaml` with two additions the
+example file names in its header: `adapter.id: systemd-system`, and the tab
+name in `tabs.order` in `tui.yaml`. Give it a key (`key: [", x"]` here) —
+thirteenth in the order, so no autonumber digit is left for it.
+
+Everything below reads. Nothing here needs a password, and nothing here should
+offer a key that would ask for one.
+
+- [ ] The tab is reachable: `, x` switches to it, and it appears in the tab bar
+      with its own name. `not-yet-done-tui --keymap , x` prints the
+      `Switch to system` row. Leaving the tab out of `tabs.order` is the way to
+      break exactly this while everything else keeps working — worth doing once
+      to see the failure mode.
+- [ ] Services (`t s`) lists the **system** units, not the user ones: `sshd`,
+      `NetworkManager`, `systemd-logind` — names that do not exist on the `, y`
+      tab. Cross-check the count against `systemctl list-units --type=service`.
+- [ ] The typed columns are populated here too, from the system bus: `startup`,
+      `mem`, `mem_peak`, `exposure`, and `fragment` paths under
+      `/usr/lib/systemd/system/` rather than `~/.config/systemd/user/`.
+- [ ] `a` on a service offers **no** systemd verb — no start, stop, restart,
+      enable, mask, preset. Only `follow` and whatever the host contributes.
+      Compare side by side with `a` on the `, y` tab, which offers all of them.
+      The same holds on Timers and on Unit files.
+- [ ] The read keys all work: `P` properties, `J` journal, `H` security, `D`
+      ordering, `r` refresh, `a j` follow the journal in a terminal. The
+      journal needs membership in `systemd-journal` or `wheel`; without it the
+      level is empty rather than broken.
+- [ ] The failed list (`t f`) and the timers list (`t t`) hold the system's
+      own — `systemctl --failed` and `systemctl list-timers` are the
+      cross-checks. Unlike the user manager, this machine does have system
+      timers, so `t t` is the place to walk the timer columns.
+- [ ] Both tabs are live at once and do not interfere: switch `, y` ↔ `, x`
+      repeatedly, refresh each, and confirm neither list leaks a unit from the
+      other manager. A name that exists on both (`dbus.socket`) is the sharpest
+      test — it must show the manager's own state on each tab.

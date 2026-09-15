@@ -371,7 +371,7 @@ impl ContentAdapter for SystemdAdapter {
     /// (see [`crate::create::actions_for`]).
     fn actions_for_type(&self, node_type: &NodeType) -> Vec<NodeAction> {
         let manager = self.shared.bus.manager();
-        let mut actions = control::actions_for(&node_type.type_id);
+        let mut actions = control::actions_for(&node_type.type_id, manager);
         actions.extend(edit::actions_for(&node_type.type_id, manager));
         actions.extend(create::actions_for(&node_type.type_id, manager));
         actions.extend(journal::actions_for(&node_type.type_id));
@@ -1167,7 +1167,7 @@ impl UnitNode {
                 )),
             });
         }
-        let verb = control::verb(&choice).ok_or_else(|| {
+        let verb = control::verb_on(self.shared.bus.manager(), &choice).ok_or_else(|| {
             ContentError::NotSupported(format!("{choice} is not one of the apply choices"))
         })?;
         if verb.disruptive && self.shared.protect.covers(unit) {
@@ -1187,7 +1187,10 @@ impl UnitNode {
 
     /// The phase-1 road: a verb that takes a value, now that it has one.
     async fn run_verb(&self, action_id: &str, input: ActionInput) -> Result<ActionOutcome> {
-        let (Some(verb), Some(unit)) = (control::verb(action_id), self.unit()) else {
+        let (Some(verb), Some(unit)) = (
+            control::verb_on(self.shared.bus.manager(), action_id),
+            self.unit(),
+        ) else {
             return Err(ContentError::NotSupported(format!(
                 "systemd has no action {action_id} here"
             )));
@@ -1246,7 +1249,10 @@ impl Node for UnitNode {
             };
             return Ok(ActionDispatch::Done { message });
         }
-        let (Some(verb), Some(unit)) = (control::verb(name), self.unit()) else {
+        let (Some(verb), Some(unit)) = (
+            control::verb_on(self.shared.bus.manager(), name),
+            self.unit(),
+        ) else {
             return Ok(ActionDispatch::Noop);
         };
         // `kill` needs a signal, so it travels the picker road instead; landing
@@ -1303,7 +1309,7 @@ impl Node for UnitNode {
         if action_id == edit::APPLY {
             return Ok(edit::apply_options());
         }
-        if control::verb(action_id).is_none_or(|v| !v.takes_value) {
+        if control::verb_on(self.shared.bus.manager(), action_id).is_none_or(|v| !v.takes_value) {
             return Ok(Vec::new());
         }
         Ok(control::signal_options()

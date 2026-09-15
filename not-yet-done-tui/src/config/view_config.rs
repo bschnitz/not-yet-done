@@ -3149,6 +3149,60 @@ views:
         }
     }
 
+    /// The system-manager companion, held to the same standard — and to one
+    /// more: it must offer no verb, because every write against the system
+    /// manager needs an authorisation the adapter does not yet ask for. A
+    /// binding here for a key that always fails would be worse than no tab.
+    #[test]
+    fn committed_systemd_system_example_parses_and_offers_no_verb() {
+        let yaml = include_str!("../../../docs/examples/views/systemd-system.yaml");
+        let (cfg, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+            .expect("committed systemd-system.yaml must parse");
+        assert!(
+            unknown.is_empty(),
+            "systemd-system.yaml has dead config: {unknown:?}"
+        );
+        cfg.validate(&KeyBindingConfig::default(), &Default::default())
+            .expect("committed systemd-system.yaml must validate");
+        assert!(
+            cfg.adapter
+                .config_inline
+                .as_deref()
+                .is_some_and(|c| c.contains("manager: system")),
+            "the file exists to point at the other manager"
+        );
+        // `follow` reads the journal in a terminal and needs no privilege; the
+        // verbs that change something must not appear anywhere in the file.
+        let verbs = [
+            "start",
+            "stop",
+            "restart",
+            "reload-or-restart",
+            "enable",
+            "disable",
+            "mask",
+            "unmask",
+            "preset",
+            "kill",
+            "freeze",
+            "reset-failed",
+        ];
+        for view in &cfg.views {
+            for action in view
+                .actions
+                .iter()
+                .chain(view.children.iter().flat_map(|c| c.actions.iter()))
+            {
+                if let Some(id) = action.id.as_deref() {
+                    assert!(
+                        !verbs.contains(&id),
+                        "{id} is a write against the system manager"
+                    );
+                }
+            }
+        }
+    }
+
     /// The shipped `systemd.yaml` is what a user copies, so a typo or schema
     /// drift in it must fail here rather than in their terminal. Parse and
     /// fully validate the real file, then pin the thing it exists to show: two
