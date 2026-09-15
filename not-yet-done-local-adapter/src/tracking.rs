@@ -1555,15 +1555,22 @@ struct PasteSlot {
 /// day and all preserving the marked interval's duration `d`:
 ///
 /// * `after` — directly after the target (`target_end`), up to the next
-///   interval that starts on or after it (or the day's end).
+///   interval that is still running there (or the day's end).
 /// * `end` — directly after the day's last interval, up to midnight.
 /// * `before` — directly before the day's first interval, back to midnight
 ///   (so it *ends* where the first one starts).
 ///
-/// Occupied intervals are the day's non-deleted, completed trackings *except*
-/// the marked one (it is being relocated, so its current slot counts as free).
-/// The target row is included, so "after the target" and "the day's end"
-/// coincide when the target is the day's last interval.
+/// Occupied intervals are the non-deleted, completed trackings that *overlap*
+/// this local day — an interval that started the day before and reaches into
+/// it occupies the morning just as much as one that starts here, so the day is
+/// selected by overlap, not by the start's date. The marked interval is left
+/// out (it is being relocated, so its current slot counts as free). The target
+/// row is included, so "after the target" and "the day's end" coincide when
+/// the target is the day's last interval.
+///
+/// A slot that reaches outside the day — `before` when something spills in
+/// from the previous day, `end` when something spills into the next one —
+/// comes back as `fits: false` rather than as a negative gap.
 fn paste_slots(
     snapshot: &TrackingSnapshot,
     tz: chrono::FixedOffset,
@@ -1580,8 +1587,8 @@ fn paste_slots(
         .with_timezone(&chrono::Utc);
     let day_end = day_start + chrono::Duration::days(1);
 
-    // Occupied [start, end] intervals on this local day, excluding the marked
-    // interval, sorted by start.
+    // Occupied [start, end) intervals overlapping this local day, excluding
+    // the marked interval, sorted by start.
     let mut occupied: Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
         snapshot
             .order
@@ -1589,15 +1596,19 @@ fn paste_slots(
             .filter_map(|id| snapshot.by_id.get(id))
             .filter(|r| !r.tracking.deleted && r.tracking.id != marked)
             .filter_map(|r| r.tracking.ended_at.map(|e| (r.tracking.started_at, e)))
-            .filter(|(s, _)| s.with_timezone(&tz).date_naive() == day)
+            .filter(|(s, e)| *s < day_end && *e > day_start)
             .collect();
     occupied.sort_by_key(|(s, _)| *s);
 
-    // After the target: gap up to the next interval starting at/after it.
+    // After the target: gap up to the next interval that is still occupied at
+    // `target_end`. An interval straddling `target_end` (it started before the
+    // target ended and runs past it) closes the gap right there, so it counts
+    // with its own end as the boundary — clamping to `target_end` yields a
+    // zero-length gap instead of being skipped for starting too early.
     let next_after = occupied
         .iter()
-        .filter(|(s, _)| *s >= target_end)
-        .map(|(s, _)| *s)
+        .filter(|(_, e)| *e > target_end)
+        .map(|(s, _)| (*s).max(target_end))
         .min()
         .unwrap_or(day_end);
     let after = PasteSlot {
@@ -3487,6 +3498,97 @@ mod tests {
         );
         assert!(after.fits);
         assert_eq!(after.start, at(11, 0));
+    }
+
+    #[test]
+    fn paste_slots_see_an_interval_spilling_in_from_the_previous_day() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let at = |h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 1, 15, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let prev = |h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 1, 14, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+
+        // A tracking left running the evening before ends at 07:00 on the
+        // target day, so the morning up to 07:00 is *not* free — even though
+        // the interval's start date is the previous day.
+        let spill = Uuid::from_u128(20);
+        let t = Uuid::from_u128(11); // target 10:00–11:00
+        let marked = Uuid::from_u128(99);
+        let snap = snapshot_from(vec![
+            (
+                spill,
+                row(
+                    fixed_tracking(spill, prev(13, 0), at(7, 0)),
+                    "spill",
+                    vec!["spill"],
+                ),
+            ),
+            (
+                t,
+                row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"]),
+            ),
+        ]);
+
+        let (_after, _end, before) = paste_slots(
+            &snap,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(1),
+        );
+        // Before the day's first interval there is no room left: that first
+        // interval now starts *before* midnight.
+        assert!(!before.fits);
+    }
+
+    #[test]
+    fn paste_slots_close_the_gap_when_an_interval_straddles_the_target_end() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(0).unwrap();
+        let at = |h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 1, 15, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+
+        // `straddle` runs 10:30–12:00, i.e. it started before the target ended
+        // and keeps running past it. The gap after the target is zero, not the
+        // two hours to the next interval that *starts* after 11:00.
+        let t = Uuid::from_u128(11); // target 10:00–11:00
+        let straddle = Uuid::from_u128(21);
+        let marked = Uuid::from_u128(99);
+        let snap = snapshot_from(vec![
+            (
+                t,
+                row(fixed_tracking(t, at(10, 0), at(11, 0)), "t", vec!["t"]),
+            ),
+            (
+                straddle,
+                row(
+                    fixed_tracking(straddle, at(10, 30), at(12, 0)),
+                    "s",
+                    vec!["s"],
+                ),
+            ),
+        ]);
+
+        let (after, _end, _before) = paste_slots(
+            &snap,
+            tz,
+            marked,
+            at(10, 0),
+            at(11, 0),
+            chrono::Duration::hours(1),
+        );
+        assert!(!after.fits);
     }
 
     #[test]
