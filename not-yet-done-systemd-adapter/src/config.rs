@@ -14,6 +14,7 @@
 //!   config:
 //!     manager: user       # user | system
 //!     timeout_secs: 10    # deadline per D-Bus call
+//!     auth_timeout_secs: 300  # deadline for a call polkit may be asking about
 //!     protect:            # refuse disruptive verbs on these, too
 //!       - ssh-agent.service
 //!     unprotect:          # lift one built-in entry, spelled exactly
@@ -26,6 +27,18 @@ use serde::Deserialize;
 
 /// Default deadline for a single D-Bus call, in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// Default deadline for a write that polkit may be asking a human about.
+///
+/// A separate budget, and two orders of magnitude larger, because it bounds
+/// something else. [`DEFAULT_TIMEOUT_SECS`] exists to catch a manager that
+/// stopped answering — on a local bus, ten seconds of silence is evidence of a
+/// fault. A privileged write is not silent for the same reason: the manager is
+/// waiting on a password dialog, deliberately and correctly, and killing that
+/// after ten seconds would make every system verb fail while the user is still
+/// typing. Not unbounded, though: a dialog nobody ever answers has to give the
+/// pane back eventually.
+pub const DEFAULT_AUTH_TIMEOUT_SECS: u64 = 300;
 
 /// The terminal the journal-follow key falls back to when nothing is
 /// configured and `$TERMINAL` is unset.
@@ -42,8 +55,9 @@ pub enum Manager {
     /// The per-user manager on the session bus — `systemctl --user`.
     #[default]
     User,
-    /// The system manager on the system bus — `systemctl`. Read-only until the
-    /// privilege question is answered (phase 7); listing needs no privileges.
+    /// The system manager on the system bus — `systemctl`. Reading needs no
+    /// privileges; every write is a polkit action that the adapter asks for
+    /// interactively — see [`crate::bus::Bus::write`].
     System,
 }
 
@@ -87,6 +101,13 @@ pub struct SystemdConfig {
     /// [`DEFAULT_TIMEOUT_SECS`]. `0` disables the deadline.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Deadline for a write polkit may be asking about, in seconds. Defaults
+    /// to [`DEFAULT_AUTH_TIMEOUT_SECS`]. `0` disables it.
+    ///
+    /// Only writes against the system manager ever reach polkit, so on a user
+    /// instance this field changes nothing.
+    #[serde(default)]
+    pub auth_timeout_secs: Option<u64>,
     /// Units to protect **in addition to** the built-in list — a unit name or a
     /// `*.<suffix>`. A disruptive verb (stop, restart, kill, mask, freeze)
     /// refuses to touch them.
@@ -96,7 +117,9 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub protect: Vec<String>,
     /// Entries to drop from the built-in list, spelled exactly as
-    /// [`DEFAULT_PROTECTED`](crate::protect::DEFAULT_PROTECTED) spells them.
+    /// [`defaults_for`](crate::protect::defaults_for) spells them. Which list
+    /// that is depends on `manager:` — the two managers hold up different
+    /// things.
     ///
     /// The escape hatch, and deliberately an explicit one: lifting protection
     /// should read like a decision in the config, not like an omission.
@@ -138,7 +161,7 @@ impl SystemdConfig {
         // misspelling, and the consequence of a misspelling here is that the
         // protection the user meant to lift is still in place — which they only
         // find out at the moment they wanted the verb to work.
-        let known: Vec<&str> = crate::protect::DEFAULT_PROTECTED
+        let known: Vec<&str> = crate::protect::defaults_for(self.manager())
             .iter()
             .copied()
             .chain(self.protect.iter().map(String::as_str))
@@ -172,12 +195,20 @@ impl SystemdConfig {
 
     /// The protection list this instance runs with.
     pub fn protection(&self) -> crate::protect::Protection {
-        crate::protect::Protection::new(&self.protect, &self.unprotect)
+        crate::protect::Protection::new(self.manager(), &self.protect, &self.unprotect)
     }
 
     /// The configured per-call deadline, or the default. `None` = no deadline.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         match self.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS) {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs)),
+        }
+    }
+
+    /// The deadline a privileged write runs under. `None` = no deadline.
+    pub fn auth_timeout(&self) -> Option<std::time::Duration> {
+        match self.auth_timeout_secs.unwrap_or(DEFAULT_AUTH_TIMEOUT_SECS) {
             0 => None,
             secs => Some(std::time::Duration::from_secs(secs)),
         }

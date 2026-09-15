@@ -1283,7 +1283,9 @@ own:
 2. the polkit flag for the runtime verbs, and the system-specific protection
    defaults that come with them;
 3. the unit-file verbs (`enable`, `disable`, `mask`, `unmask`, `preset`), which
-   go over the same bus and through the same flag;
+   go over the same bus and through the same flag — but are a separate stage
+   because whether they belong on the system tab at all is a question stage 2
+   answered with "not yet" (see below);
 4. `critical-chain` as a level under a unit — deferred here from
    [phase 6c](#phase-6c--the-clock-and-the-meter) because the system manager is
    where the command earns a level.
@@ -1341,9 +1343,77 @@ Ordering), defined once as YAML anchors inside the first level and aliased into
 the other three — 514 lines against 1797. The anchors have to live _inside_ a
 known key: a top-level `_shared:` would be reported as an unknown view-config
 key, which is to say as dead config. A test parses the committed file, asserts
-it validates with no unknown keys, and asserts that not one of the twelve write
-verb ids appears anywhere in it — so the read-only promise is checked by the
-build rather than by reading.
+it validates with no unknown keys, and asserts which verb ids appear in it — so
+the promise about what the tab offers is checked by the build rather than by
+reading. (Stage 1 asserted that _no_ write verb appeared; stage 2 turned that
+into the runtime/unit-file split the test pins today.)
+
+### What it took, beyond the plan — stage 2
+
+**The flag cannot go through the typed proxy.** `zbus_systemd`'s generated
+`ManagerProxy` methods take their arguments and nothing else; there is no way
+to attach a message flag to `start_unit(name, mode)`. So the writes go out
+through the untyped `Proxy` underneath — `proxy.inner().call_with_flags(…)` —
+which means naming the D-Bus method as a string (`"StartUnit"`) and spelling
+the body as a tuple. That is one helper, `Bus::write`, and the eight runtime
+verbs are the only callers; everything that reads still goes through the typed
+methods. `JobKind::method()` exists for the same reason and says so.
+
+**A privileged write needs its own deadline, not no deadline.** The read
+deadline is ten seconds, and it is there to catch a manager that stopped
+answering: on a local bus, silence is evidence of a fault. A call waiting on a
+password dialog is silent for the opposite reason — it is working exactly as
+intended — and cutting it off after ten seconds would make every system verb
+fail while the user is still typing. So `auth_timeout_secs` is a second budget,
+five minutes by default, and the timeout message says what the wait was for.
+Not unbounded: a dialog nobody ever answers has to give the pane back.
+
+**Declining is an answer, so it is not an error.** A refused write comes back
+as `ContentError::PermissionDenied`, and `control::run` turns that one variant
+back into a plain sentence — the notification bar says what did not happen,
+without the red of an adapter failure. There is nothing else this could
+swallow: the protection list refuses _before_ any call is made, so a
+`PermissionDenied` arising inside the dispatch can only have come from the bus.
+
+Two D-Bus error names arrive there, and only two are not faults:
+`InteractiveAuthorizationRequired` (nothing could ask — no polkit agent is
+running for this session) and `AccessDenied`. systemd sends the second one
+whether the dialog was dismissed, the password was wrong, or the policy says no
+outright, so the sentence covers all three rather than guessing. This was
+measured, not assumed: an attempt to provoke the refusal path with
+`sudo -u nobody` failed because polkit resolves the subject through the
+_session_, not the uid, and `auth_admin_keep` had already cached the earlier
+authentication.
+
+**A second protection list, and what is deliberately not on it.** The user list
+protects what holds up a session; the system list is the same question asked of
+a machine, not the same list with additions — `systemd-journald.service` and
+`.socket`, `systemd-logind.service`, and the target chain `sysinit` → `basic` →
+`multi-user` → `graphical` → `default`. What is absent carries as much weight:
+`sshd.service` and `NetworkManager.service` can cut the very session a remote
+user is holding, and they are still not protected, because a tab that refuses
+the thing the user came to do is a tab they work around. The refusal sentence
+had to learn the manager too — a protected system unit does not hold up _a
+session_, it holds up the machine.
+
+**The unit-file verbs are withheld on purpose, not pending.** polkit would
+authorise `EnableUnitFiles` the same way it authorises `StartUnit`. The reason
+they are not offered is what they mean: enabling or masking a system unit
+changes what the machine does at the _next boot_, for everyone on it, and it is
+invisible in the running state. A runtime verb is answered by looking at the
+same row again; a symlink under `/etc/systemd/system` is not. That is the split
+`Op::writes_files()` draws and `Verb::available_on` enforces — on both roads, so
+the CLI cannot reach what the tab will not show.
+
+**Measured, at the end.** The same call, in the same second, against the same
+unit: through the adapter it ran and reported `done`; through `gdbus`, which
+does not set the flag, it came back
+`org.freedesktop.DBus.Error.InteractiveAuthorizationRequired`. That is the
+proof that the flag is what carries the write, rather than some ambient
+privilege. No dialog appeared during the test, and that is correct rather than
+skipped: the policy for `org.freedesktop.systemd1.manage-units` is
+`auth_admin_keep` for an active session, so a session is asked once and
+remembered.
 
 ---
 

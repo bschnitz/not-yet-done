@@ -101,6 +101,19 @@ pub enum Op {
     FreezeToggle,
 }
 
+impl Op {
+    /// Whether this touches unit files on disk rather than only the manager's
+    /// runtime state.
+    ///
+    /// The line [`Verb::available_on`] draws on the system manager. A job, a
+    /// signal, a freeze — those are manager calls polkit can authorise and
+    /// undo; a symlink under `/etc/systemd/system` outlives the session and is
+    /// not what this tab is for.
+    pub fn writes_files(self) -> bool {
+        matches!(self, Op::Files(_) | Op::FilesThenJob(..))
+    }
+}
+
 /// One thing the tab can do to a unit.
 pub struct Verb {
     /// Stable id — what the view YAML binds a key to.
@@ -288,14 +301,24 @@ pub fn verb_on(manager: Manager, id: &str) -> Option<&'static Verb> {
 impl Verb {
     /// Whether this verb may run against that manager.
     ///
-    /// Every write against the **system** manager is a privileged call: the
-    /// manager answers it with polkit's "requires interactive authentication",
-    /// and until the adapter asks for that authorisation the honest thing is
-    /// to offer nothing rather than a key that always fails. Reading — the
-    /// levels themselves, the journal, `systemd-analyze` — needs no privilege
-    /// and is not affected.
+    /// Every write against the **system** manager is a privileged call, and
+    /// the adapter now asks for that authorisation properly — see
+    /// [`crate::bus::Bus::write`]. So the runtime verbs are offered there:
+    /// start, stop, restart, reload, kill, reset-failed, freeze. What is still
+    /// withheld is everything that [writes unit files](Op::writes_files).
+    ///
+    /// The reason is not that polkit would refuse it. It is that enabling or
+    /// masking a system unit changes what the machine does at the *next boot*,
+    /// for every user on it, and that decision deserves the tool whose whole
+    /// job it is — `systemctl` — rather than a key press in a list. Runtime
+    /// verbs are reversible by looking at the same row again; a symlink under
+    /// `/etc` is not. Reading is unaffected either way: the levels, the
+    /// journal and `systemd-analyze` need no privilege at all.
     pub fn available_on(&self, manager: Manager) -> bool {
-        manager == Manager::User
+        match manager {
+            Manager::User => true,
+            Manager::System => !self.op.writes_files(),
+        }
     }
 }
 
@@ -376,7 +399,21 @@ fn signal_number(value: Option<&str>) -> Result<i32> {
 /// point of the phase is that it reports the *outcome*, not the fact that a
 /// message was sent. A verb that did not achieve what it was asked comes back
 /// as an error, not as a cheerful message.
+///
+/// With one exception, and it is deliberate: a write the user **declined to
+/// authorise** is reported as an ordinary sentence, not as an error. Dismissing
+/// a password dialog is an answer, and answering "no" to a question the tab
+/// itself asked is not a fault worth colouring red. The only refusals that
+/// reach here come from the bus — the protection list refuses earlier, before
+/// a call is ever made — so there is nothing else this could swallow.
 pub async fn run(bus: &Bus, verb: &Verb, unit: &str, value: Option<&str>) -> Result<String> {
+    match dispatch(bus, verb, unit, value).await {
+        Err(ContentError::PermissionDenied(said)) => Ok(said),
+        other => other,
+    }
+}
+
+async fn dispatch(bus: &Bus, verb: &Verb, unit: &str, value: Option<&str>) -> Result<String> {
     match verb.op {
         Op::Job(kind) => job(bus, kind, unit).await,
         Op::Files(change) => files(bus, change, unit).await,
@@ -778,18 +815,44 @@ mod tests {
     }
 
     #[test]
-    fn the_system_manager_is_offered_no_verb_it_cannot_carry_out() {
-        // Every write against the system manager needs an authorisation the
-        // adapter does not yet ask for, so the honest answer is an empty list
-        // rather than a key that always fails.
-        assert!(actions_for("systemd:service", Manager::System).is_empty());
-        assert!(actions_for("systemd:unitfile", Manager::System).is_empty());
-        // And the second road is shut with it: naming the verb outright — what
-        // the CLI does — finds nothing either.
-        assert!(verb_on(Manager::System, "stop").is_none());
-        assert!(verb_on(Manager::User, "stop").is_some());
-        // `verb` itself still knows the table; it is the lookup without the
-        // manager question in it.
-        assert!(verb("stop").is_some());
+    fn the_system_manager_runs_jobs_but_writes_no_unit_files() {
+        let ids = |type_id| -> Vec<String> {
+            actions_for(type_id, Manager::System)
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        };
+        // The runtime verbs are there: polkit can authorise them, and what
+        // they change lasts only as long as the machine is up.
+        let on_a_service = ids("systemd:service");
+        for offered in ["start", "stop", "restart", "reload", "kill", "freeze"] {
+            assert!(
+                on_a_service.contains(&offered.to_string()),
+                "{offered} should be offered on the system manager"
+            );
+        }
+        // The file verbs are not, on either level that carries them — see
+        // `Verb::available_on` for why that is a decision, not a limitation.
+        for withheld in ["enable", "enable-now", "disable", "mask", "preset"] {
+            assert!(
+                !on_a_service.contains(&withheld.to_string()),
+                "{withheld} should be withheld on the system manager"
+            );
+        }
+        // The Unit files level keeps the same split rather than becoming a
+        // read-only island: a unit file can be started by name, which is a
+        // runtime job like any other — it just cannot be enabled from here.
+        let on_a_file = ids("systemd:unitfile");
+        assert!(on_a_file.contains(&"start".to_string()));
+        assert!(!on_a_file.contains(&"enable".to_string()));
+        assert!(!on_a_file.contains(&"unmask".to_string()));
+        // Both roads ask the same question: naming the verb outright — what
+        // the CLI does — agrees with what the list shows.
+        assert!(verb_on(Manager::System, "stop").is_some());
+        assert!(verb_on(Manager::System, "enable").is_none());
+        assert!(verb_on(Manager::User, "enable").is_some());
+        // `verb` itself still knows the whole table; it is the lookup without
+        // the manager question in it.
+        assert!(verb("enable").is_some());
     }
 }

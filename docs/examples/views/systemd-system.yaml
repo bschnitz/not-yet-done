@@ -24,26 +24,36 @@
 # the protection list. A second tab costs one tab key and nothing else.
 #
 # ---------------------------------------------------------------------------
-# READ-ONLY, and the reason is not caution
+# What this tab does, and where it stops
 #
 # Reading the system manager needs no privileges at all: listing its units, its
 # journal (for a user in `systemd-journal` or `wheel`) and `systemd-analyze`
-# work exactly as they do for the user manager. Writing does not. Every write
-# is a polkit action, and the manager answers an unauthorised one with
+# work exactly as they do for the user manager.
+#
+# Writing is a polkit action, every time. The manager answers an unauthorised
+# call with
 #
 #   Access denied as the requested operation requires interactive
 #   authentication. However, interactive authentication has not been enabled
 #   by the calling program.
 #
-# which is an invitation, not a refusal — but one the adapter does not yet
-# accept. So against the system manager it offers no verbs at all: the keys
-# below are the ones that work, and a binding for `a s` would be a key that
-# always fails. The editing and creating keys are absent for a second reason
-# that will outlast the first: they write files on disk, where there is no
-# polkit to ask.
+# which is an invitation rather than a refusal, and the adapter accepts it: it
+# marks its writes as willing to wait for a human, so polkit asks — usually
+# once per session, since the policy for `manage-units` is `auth_admin_keep`.
+# Answer the dialog and the verb runs; dismiss it and the tab says so in a
+# plain sentence, because declining is an answer, not an error.
 #
-# When that changes, the verb keys from systemd.yaml can be copied across
-# unchanged — the ids are the same.
+# So the **runtime** verbs are here and work: start, stop, restart, reload,
+# kill, reset-failed, freeze. What they change lasts as long as the machine is
+# up, and the same row shows you the result.
+#
+# The **unit-file** verbs are not here — enable, disable, mask, preset — and
+# neither are the editing and creating keys. Not because polkit would refuse
+# them, but because they change what this machine does at the next boot, for
+# everyone on it. That belongs to `systemctl`, deliberately typed out, rather
+# than to a key in a list. The adapter enforces this itself: those verbs are
+# not offered on the system manager at all, by the CLI either, so a binding
+# for `a e` here would simply be inert.
 # ---------------------------------------------------------------------------
 
 tab:
@@ -57,6 +67,21 @@ adapter:
     # The system manager on the system bus — plain `systemctl`, no --user.
     manager: system
     timeout_secs: 10
+    # Deadline for a write polkit is asking a human about, in seconds.
+    # 0 = no deadline. Separate from `timeout_secs` and far larger, because
+    # it bounds something else: ten seconds of silence on a local bus means a
+    # fault, while a call waiting on a password dialog is silent on purpose.
+    # Not unbounded either — a dialog nobody answers has to give the pane
+    # back eventually.
+    auth_timeout_secs: 300
+    # The built-in protection list here is the *system* one: it covers
+    # *.slice, *.scope, the dbus trio, systemd-journald.service and .socket,
+    # systemd-logind.service, and the target chain sysinit → basic →
+    # multi-user → graphical → default. sshd.service and
+    # NetworkManager.service are deliberately not on it — they can cut a
+    # remote session, but a tab that refuses what you came to do is a tab you
+    # work around. `protect:` and `unprotect:` adjust it exactly as in
+    # systemd.yaml.
   # Local and never logs in, so it loads at startup like the other local tabs.
   manual_connect: false
 
@@ -169,13 +194,44 @@ views:
         style: warning
     actions:
       - { name: refresh, key: r, type: reload }
-      # The reading keys, and no others — see the header.
+      # The reading keys.
       - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
       - { name: ordering, key: D, type: navigate, navigate_to: "systemd:order" }
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       # Following the journal opens a terminal and reads; no privilege in it.
       - { name: follow in a terminal, key: "a j", id: follow }
+      # The runtime verbs. Every one of them is a polkit action on this bus,
+      # so the first press of the session opens a password dialog and the ones
+      # after it usually do not — `auth_admin_keep` remembers. Dismissing the
+      # dialog is not an error: the tab says the write was not authorised and
+      # nothing happened.
+      #
+      # The disruptive ones still ask their own question first, before polkit
+      # sees anything. Two prompts for one stop is not one too many here: the
+      # adapter's asks whether you meant *this unit* — only it knows what
+      # depends on it — and polkit's asks whether you may touch the machine at
+      # all. And `protect:` refuses some units outright rather than asking,
+      # which no password can override.
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      # `reload` asks the unit to re-read its config without dropping what it
+      # is doing; `reload-or-restart` falls back to a restart when it cannot.
+      - { name: reload, key: "a l", id: reload }
+      - { name: reload or restart, key: "a L", id: reload-or-restart }
+      # Clears the failed state so the unit can be started again — and so it
+      # stops showing up in the Failed subtab.
+      - { name: reset failed, key: "a f", id: reset-failed }
+      # `a k` opens a menu rather than sending anything: picking SIGTERM or
+      # SIGKILL out of a list is what takes the place of a y/n here.
+      - { name: kill, key: "a k", id: kill }
+      # Freeze suspends every process in the unit's cgroup without killing it;
+      # pressing it again thaws.
+      - { name: freeze or thaw, key: "a z", id: freeze }
+      #
+      # No `a e` / `a d` / `a m` / `a p` and no `e`-keys: the unit-file verbs
+      # are not offered on the system manager — see the header.
     children:
       - &properties
         name: Properties
@@ -375,6 +431,15 @@ views:
       - { name: refresh, key: r, type: reload }
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
       - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
+      # The runtime verbs, as on the Services subtab — see there for what the
+      # two prompts are. `a f` is the one that matters most here: it clears the
+      # failed state, which is what takes the row off this list.
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      - { name: reset failed, key: "a f", id: reset-failed }
+      - { name: kill, key: "a k", id: kill }
+      - { name: freeze or thaw, key: "a z", id: freeze }
     children:
       - *properties
       - *journal
@@ -444,6 +509,12 @@ views:
       - { name: properties, key: P, type: navigate, navigate_to: "systemd:property" }
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
       - { name: follow in a terminal, key: "a j", id: follow }
+      # A timer has no processes, so no `reload`, `kill` or `freeze` — the
+      # verbs it does carry work the same way as on the Services subtab.
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
+      - { name: reset failed, key: "a f", id: reset-failed }
     children:
       - *properties
       - *journal
@@ -508,6 +579,13 @@ views:
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
+      # A unit file can be started by name whether or not the manager has it
+      # loaded, so the three jobs are here. What is *not* here is the reason
+      # this level exists on the user tab — enable, mask, preset. Those write
+      # to disk and are withheld on the system manager; see the header.
+      - { name: start, key: "a s", id: start }
+      - { name: stop, key: "a x", id: stop }
+      - { name: restart, key: "a r", id: restart }
     children:
       - *journal
       - *security

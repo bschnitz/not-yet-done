@@ -48,8 +48,19 @@ adapter:
     # job the adapter waits for separately (and reports as "still running"
     # rather than failed if it outlasts two minutes).
     timeout_secs: 10
-    # Units the disruptive verbs refuse to touch. The built-in list already
-    # covers the session plumbing — *.slice, *.scope, dbus.socket,
+    # Deadline for a write polkit may be asking a human about, in seconds.
+    # 0 = no deadline. A separate budget from `timeout_secs`, and two orders
+    # of magnitude larger, because it bounds something else: ten seconds of
+    # silence on a local bus is evidence of a fault, but a call waiting on a
+    # password dialog is silent on purpose. Only writes on the *system*
+    # manager are ever authorised this way, so on `manager: user` this value
+    # is never reached.
+    auth_timeout_secs: 300
+    # Units the disruptive verbs refuse to touch. There are two built-in
+    # lists and `manager:` picks one — this is the `user` one; the `system`
+    # one protects what holds up the machine instead (see
+    # systemd-system.yaml). This list already covers the session plumbing —
+    # *.slice, *.scope, dbus.socket,
     # dbus.service, dbus-broker.service, default.target, basic.target,
     # sockets.target,
     # timers.target, paths.target, graphical-session.target,
