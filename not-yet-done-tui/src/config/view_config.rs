@@ -3150,14 +3150,17 @@ views:
     }
 
     /// The system-manager companion, held to the same standard — and to one
-    /// more: it must bind no verb that writes a *unit file*. Those are
-    /// withheld on the system manager (enabling or masking changes what the
-    /// machine does at the next boot, for everyone on it), and the adapter
-    /// refuses them there whatever this file says — so a binding for one would
-    /// be a key that silently does nothing. The runtime verbs are expected
-    /// here: polkit authorises them and they are bound on purpose.
+    /// more: it must bind no verb the adapter refuses on that manager, because
+    /// such a binding is a key that silently does nothing.
+    ///
+    /// That is exactly one pair. `mask` and `unmask` are withheld on the system
+    /// manager, not for being powerful but for being invisible: a masked unit
+    /// reads `inactive` in every runtime column, like one nobody started.
+    /// Everything else — the runtime verbs and the file verbs that switch a
+    /// unit on or off — is bound here on purpose, and this test fails if the
+    /// file ever quietly loses them.
     #[test]
-    fn committed_systemd_system_example_binds_runtime_verbs_but_no_file_verbs() {
+    fn committed_systemd_system_example_binds_every_verb_but_masking() {
         let yaml = include_str!("../../../docs/examples/views/systemd-system.yaml");
         let (cfg, unknown) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
             .expect("committed systemd-system.yaml must parse");
@@ -3174,15 +3177,7 @@ views:
                 .is_some_and(|c| c.contains("manager: system")),
             "the file exists to point at the other manager"
         );
-        let file_verbs = [
-            "enable",
-            "enable-now",
-            "disable",
-            "disable-now",
-            "mask",
-            "unmask",
-            "preset",
-        ];
+        let withheld = ["mask", "unmask"];
         let mut bound: Vec<&str> = Vec::new();
         for view in &cfg.views {
             for action in view
@@ -3192,16 +3187,28 @@ views:
             {
                 if let Some(id) = action.id.as_deref() {
                     assert!(
-                        !file_verbs.contains(&id),
-                        "{id} writes a unit file and is not offered on the system manager"
+                        !withheld.contains(&id),
+                        "{id} is not offered on the system manager"
                     );
                     bound.push(id);
                 }
             }
         }
-        // And the other half of the claim: the runtime verbs really are bound,
-        // so this test fails if the file ever quietly loses them again.
-        for expected in ["start", "stop", "restart", "reload", "kill", "freeze"] {
+        // And the other half of the claim: everything else really is bound,
+        // so this test fails if the file ever quietly loses it again.
+        for expected in [
+            "start",
+            "stop",
+            "restart",
+            "reload",
+            "kill",
+            "freeze",
+            "enable",
+            "enable-now",
+            "disable",
+            "disable-now",
+            "preset",
+        ] {
             assert!(
                 bound.contains(&expected),
                 "{expected} should be bound on the system tab"

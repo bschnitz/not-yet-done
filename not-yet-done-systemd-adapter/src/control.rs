@@ -26,10 +26,16 @@
 //!   something running or switches it off for good; not asked for what is
 //!   cheap and reversible. The adapter phrases it, because only the adapter
 //!   knows what the verb will do. See [`ActionDispatch::Confirm`].
-//! * **[`Verb::disruptive`]** — whether [`crate::protect`] refuses it outright.
+//! * **[`Verb::protected`]** — whether [`crate::protect`] refuses it outright.
 //!   Confirmation and protection are different instruments for different
 //!   problems: one is for "did you mean it", the other for "this would take the
 //!   session down with it", and a prompt is no answer to the second.
+//!
+//! Both policies read the manager. The same verb is a different act on the
+//! system bus — `disable` there is a decision about the next boot of the whole
+//! machine — so [`Verb::confirm_on`] has a sharper sentence for it, and
+//! [`Verb::available_on`] withholds the one verb whose effect the runtime
+//! columns cannot show.
 //!
 //! # Keys
 //!
@@ -102,15 +108,32 @@ pub enum Op {
 }
 
 impl Op {
-    /// Whether this touches unit files on disk rather than only the manager's
-    /// runtime state.
+    /// Whether this masks or unmasks — the one file change [`Verb::available_on`]
+    /// withholds from the system manager.
     ///
-    /// The line [`Verb::available_on`] draws on the system manager. A job, a
-    /// signal, a freeze — those are manager calls polkit can authorise and
-    /// undo; a symlink under `/etc/systemd/system` outlives the session and is
-    /// not what this tab is for.
-    pub fn writes_files(self) -> bool {
-        matches!(self, Op::Files(_) | Op::FilesThenJob(..))
+    /// Not because it is the most powerful. Because it is the one that *hides
+    /// itself*: a masked unit looks, in every runtime column, exactly like a
+    /// unit nobody happened to start. `active: inactive`, no failure, no
+    /// journal line — and the reason is a symlink to `/dev/null` that only the
+    /// Unit files level would show. Disabling is at least legible in the row
+    /// that did it; masking is where hours go.
+    pub fn masks_a_unit(self) -> bool {
+        matches!(self, Op::Files(FileChange::Mask | FileChange::Unmask))
+    }
+
+    /// Whether this leaves the unit switched **off for the next boot**.
+    ///
+    /// The second shape of harm the protection list answers to. `disruptive`
+    /// covers the immediate one — the unit stops now, and the session notices
+    /// within the second. This one is quiet until the next login or reboot,
+    /// and by then nothing on screen connects the missing unit to the key that
+    /// was pressed. Both are refusals, not questions: see [`Verb::protected`].
+    pub fn switches_off(self) -> bool {
+        matches!(
+            self,
+            Op::Files(FileChange::Disable | FileChange::Mask)
+                | Op::FilesThenJob(FileChange::Disable | FileChange::Mask, _)
+        )
     }
 }
 
@@ -124,6 +147,20 @@ pub struct Verb {
     /// The question to ask before doing it, with `{unit}` standing in for the
     /// unit's name. `None` means it just happens.
     pub confirm: Option<&'static str>,
+    /// The question to ask instead when the verb runs against the **system**
+    /// manager. `None` falls back to [`Verb::confirm`].
+    ///
+    /// Only the file verbs set it, and the difference is not emphasis. On the
+    /// user manager "it will not come back on the next login" is the whole
+    /// truth; on the system manager the same key press decides what the
+    /// machine does at the next boot, for every account on it. A prompt that
+    /// says the first while doing the second is worse than no prompt, because
+    /// it was read and believed.
+    ///
+    /// Why this sentence rather than polkit's: the password dialog knows only
+    /// that *something* wants `manage-unit-files`. It cannot name the unit.
+    /// This is the only question in the chain that can.
+    pub confirm_system: Option<&'static str>,
     /// Whether this interrupts a running unit — see [`crate::protect`].
     pub disruptive: bool,
     /// Whether the verb consumes a value (today: `kill`'s signal).
@@ -138,6 +175,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Job(JobKind::Start),
         confirm: None,
+        confirm_system: None,
         disruptive: false,
         takes_value: false,
     },
@@ -147,6 +185,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Job(JobKind::Stop),
         confirm: Some("Stop {unit}? Whatever depends on it stops too. (y/n)"),
+        confirm_system: None,
         disruptive: true,
         takes_value: false,
     },
@@ -156,6 +195,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Job(JobKind::Restart),
         confirm: None,
+        confirm_system: None,
         disruptive: true,
         takes_value: false,
     },
@@ -165,6 +205,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Processes,
         op: Op::Job(JobKind::Reload),
         confirm: None,
+        confirm_system: None,
         disruptive: false,
         takes_value: false,
     },
@@ -174,6 +215,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Processes,
         op: Op::Job(JobKind::ReloadOrRestart),
         confirm: None,
+        confirm_system: None,
         disruptive: true,
         takes_value: false,
     },
@@ -183,6 +225,10 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Files(FileChange::Enable),
         confirm: None,
+        confirm_system: Some(
+            "Enable {unit} on this machine? It starts on every boot from now on, for everyone \
+             who uses it. (y/n)",
+        ),
         disruptive: false,
         takes_value: false,
     },
@@ -192,6 +238,10 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::FilesThenJob(FileChange::Enable, JobKind::Start),
         confirm: None,
+        confirm_system: Some(
+            "Enable and start {unit} on this machine? It starts now and on every boot from now \
+             on, for everyone who uses it. (y/n)",
+        ),
         disruptive: false,
         takes_value: false,
     },
@@ -201,6 +251,10 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Files(FileChange::Disable),
         confirm: Some("Disable {unit}? It will not come back on the next login. (y/n)"),
+        confirm_system: Some(
+            "Disable {unit} on this machine? It will not start at the next boot — for anyone, \
+             not only for you. (y/n)",
+        ),
         disruptive: false,
         takes_value: false,
     },
@@ -210,6 +264,10 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::FilesThenJob(FileChange::Disable, JobKind::Stop),
         confirm: Some("Disable and stop {unit}? It stops now and stays off. (y/n)"),
+        confirm_system: Some(
+            "Disable and stop {unit} on this machine? It stops now and will not start at the \
+             next boot, for anyone. (y/n)",
+        ),
         disruptive: true,
         takes_value: false,
     },
@@ -222,6 +280,7 @@ pub static VERBS: &[Verb] = &[
             "Mask {unit}? Nothing can start it again — not a dependency, not you — until it is \
              unmasked. (y/n)",
         ),
+        confirm_system: None,
         disruptive: true,
         takes_value: false,
     },
@@ -238,6 +297,11 @@ pub static VERBS: &[Verb] = &[
             "Apply the preset policy to {unit}? It is enabled or disabled to match what the \
              distribution ships — the Preset column says which. (y/n)",
         ),
+        confirm_system: Some(
+            "Apply the preset policy to {unit} on this machine? It is enabled or disabled to \
+             match what the distribution ships — the Preset column says which — and that holds \
+             from the next boot, for everyone. (y/n)",
+        ),
         disruptive: false,
         takes_value: false,
     },
@@ -247,6 +311,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Any,
         op: Op::Files(FileChange::Unmask),
         confirm: None,
+        confirm_system: None,
         disruptive: false,
         takes_value: false,
     },
@@ -256,6 +321,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Loaded,
         op: Op::ResetFailed,
         confirm: None,
+        confirm_system: None,
         disruptive: false,
         takes_value: false,
     },
@@ -265,6 +331,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Processes,
         op: Op::Kill,
         confirm: Some("Send the signal to {unit}? Its processes get no chance to clean up. (y/n)"),
+        confirm_system: None,
         disruptive: true,
         takes_value: true,
     },
@@ -274,6 +341,7 @@ pub static VERBS: &[Verb] = &[
         scope: Scope::Processes,
         op: Op::FreezeToggle,
         confirm: None,
+        confirm_system: None,
         disruptive: true,
         takes_value: false,
     },
@@ -301,24 +369,47 @@ pub fn verb_on(manager: Manager, id: &str) -> Option<&'static Verb> {
 impl Verb {
     /// Whether this verb may run against that manager.
     ///
-    /// Every write against the **system** manager is a privileged call, and
-    /// the adapter now asks for that authorisation properly — see
-    /// [`crate::bus::Bus::write`]. So the runtime verbs are offered there:
-    /// start, stop, restart, reload, kill, reset-failed, freeze. What is still
-    /// withheld is everything that [writes unit files](Op::writes_files).
+    /// Every write against the **system** manager is a privileged call, and the
+    /// adapter asks for that authorisation properly — see
+    /// [`crate::bus::Bus::write`]. So the runtime verbs are offered there, and
+    /// so are the file verbs that switch a unit on or off: `enable`, `disable`,
+    /// their `--now` pair, and `preset`. What each of them does is written in
+    /// the row afterwards — the `enabled` column changes, the `drift` column
+    /// clears — so the tab can be believed about its own effect.
     ///
-    /// The reason is not that polkit would refuse it. It is that enabling or
-    /// masking a system unit changes what the machine does at the *next boot*,
-    /// for every user on it, and that decision deserves the tool whose whole
-    /// job it is — `systemctl` — rather than a key press in a list. Runtime
-    /// verbs are reversible by looking at the same row again; a symlink under
-    /// `/etc` is not. Reading is unaffected either way: the levels, the
-    /// journal and `systemd-analyze` need no privilege at all.
+    /// **Except masking**, which is withheld on the system manager for a reason
+    /// that is not about power: see [`Op::masks_a_unit`]. It is the one write
+    /// whose result the runtime columns cannot show.
+    ///
+    /// Reading is unaffected either way: the levels, the journal and
+    /// `systemd-analyze` need no privilege at all.
     pub fn available_on(&self, manager: Manager) -> bool {
         match manager {
             Manager::User => true,
-            Manager::System => !self.op.writes_files(),
+            Manager::System => !self.op.masks_a_unit(),
         }
+    }
+
+    /// The question to ask before this verb runs on that manager, or `None`
+    /// when it just happens. `{unit}` is still to be substituted.
+    pub fn confirm_on(&self, manager: Manager) -> Option<&'static str> {
+        match manager {
+            Manager::System => self.confirm_system.or(self.confirm),
+            Manager::User => self.confirm,
+        }
+    }
+
+    /// Whether [`crate::protect`] refuses this verb outright on a unit its list
+    /// covers.
+    ///
+    /// One question, two shapes of harm, because the protection list answers to
+    /// both: [`Verb::disruptive`] is the unit going down *now*, and
+    /// [`Op::switches_off`] is the unit not coming back *next time*. Neither is
+    /// something a y/n prompt helps with — the hand that pressed the key
+    /// presses `y` as well — which is why this is a refusal and not a
+    /// confirmation.
+    pub fn protected(&self) -> bool {
+        self.disruptive || self.op.switches_off()
     }
 }
 
@@ -534,9 +625,17 @@ async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
     if !result.carries_install_info {
         // Not an error — systemd did exactly what was asked and it amounted to
         // nothing. Saying "enabled" here would be the lie.
+        //
+        // "at login" and "at boot" are not decoration: the sentence explains
+        // what enabling *would* have meant, and on the system manager that is
+        // the machine coming up, not this session.
+        let moment = match bus.manager() {
+            Manager::User => "at login",
+            Manager::System => "at boot",
+        };
         return Ok(format!(
             "{unit} has no [Install] section, so there is nothing to enable — it is started by \
-             something else, not at login"
+             something else, not {moment}"
         ));
     }
     let made = count(&result.changes, Moved::Made);
@@ -815,44 +914,118 @@ mod tests {
     }
 
     #[test]
-    fn the_system_manager_runs_jobs_but_writes_no_unit_files() {
+    fn the_system_manager_is_offered_everything_but_masking() {
         let ids = |type_id| -> Vec<String> {
             actions_for(type_id, Manager::System)
                 .into_iter()
                 .map(|a| a.id)
                 .collect()
         };
-        // The runtime verbs are there: polkit can authorise them, and what
-        // they change lasts only as long as the machine is up.
         let on_a_service = ids("systemd:service");
-        for offered in ["start", "stop", "restart", "reload", "kill", "freeze"] {
+        // The runtime verbs, and the file verbs whose effect the row itself
+        // reports back — polkit can authorise every one of them.
+        for offered in [
+            "start",
+            "stop",
+            "restart",
+            "reload",
+            "kill",
+            "freeze",
+            "enable",
+            "enable-now",
+            "disable",
+            "disable-now",
+            "preset",
+        ] {
             assert!(
                 on_a_service.contains(&offered.to_string()),
                 "{offered} should be offered on the system manager"
             );
         }
-        // The file verbs are not, on either level that carries them — see
-        // `Verb::available_on` for why that is a decision, not a limitation.
-        for withheld in ["enable", "enable-now", "disable", "mask", "preset"] {
+        // Masking is the exception, in both directions: a machine-wide mask is
+        // invisible in the runtime columns, and an unmask offered without it
+        // would be a key for undoing something this tab cannot do.
+        for withheld in ["mask", "unmask"] {
             assert!(
                 !on_a_service.contains(&withheld.to_string()),
                 "{withheld} should be withheld on the system manager"
             );
         }
-        // The Unit files level keeps the same split rather than becoming a
-        // read-only island: a unit file can be started by name, which is a
-        // runtime job like any other — it just cannot be enabled from here.
+        // The Unit files level draws the same line, and it is the level where
+        // the file verbs earn their place: a disabled unit is only visible here.
         let on_a_file = ids("systemd:unitfile");
         assert!(on_a_file.contains(&"start".to_string()));
-        assert!(!on_a_file.contains(&"enable".to_string()));
-        assert!(!on_a_file.contains(&"unmask".to_string()));
+        assert!(on_a_file.contains(&"enable".to_string()));
+        assert!(!on_a_file.contains(&"mask".to_string()));
         // Both roads ask the same question: naming the verb outright — what
         // the CLI does — agrees with what the list shows.
-        assert!(verb_on(Manager::System, "stop").is_some());
-        assert!(verb_on(Manager::System, "enable").is_none());
-        assert!(verb_on(Manager::User, "enable").is_some());
+        assert!(verb_on(Manager::System, "enable").is_some());
+        assert!(verb_on(Manager::System, "mask").is_none());
+        assert!(verb_on(Manager::User, "mask").is_some());
         // `verb` itself still knows the whole table; it is the lookup without
         // the manager question in it.
-        assert!(verb("enable").is_some());
+        assert!(verb("mask").is_some());
+    }
+
+    #[test]
+    fn a_file_verb_says_something_different_about_the_machine_than_about_the_session() {
+        // The point of the second sentence: on the user manager `disable` is a
+        // statement about the next login, on the system manager about the next
+        // boot — and about everyone, not only about the person pressing the key.
+        let disable = verb("disable").unwrap();
+        let session = disable.confirm_on(Manager::User).unwrap();
+        let machine = disable.confirm_on(Manager::System).unwrap();
+        assert_ne!(session, machine);
+        assert!(session.contains("login"));
+        assert!(machine.contains("boot"));
+        // `enable` does not ask at all on the user manager — it is cheap and
+        // the row shows the result — but on the machine it is a decision.
+        let enable = verb("enable").unwrap();
+        assert!(enable.confirm_on(Manager::User).is_none());
+        assert!(enable.confirm_on(Manager::System).is_some());
+        // Every prompt still names the unit, on either manager.
+        for v in VERBS {
+            for manager in [Manager::User, Manager::System] {
+                if let Some(prompt) = v.confirm_on(manager) {
+                    assert!(
+                        prompt.contains("{unit}"),
+                        "{} on the {} manager: the prompt must name the unit",
+                        v.id,
+                        manager.as_str()
+                    );
+                }
+            }
+        }
+        // A runtime verb has one sentence for both, because it means the same
+        // thing on both: this unit stops now.
+        let stop = verb("stop").unwrap();
+        assert_eq!(stop.confirm_on(Manager::User), stop.confirm_on(Manager::System));
+    }
+
+    #[test]
+    fn the_protection_list_answers_to_what_ends_a_unit_now_and_to_what_ends_it_next_time() {
+        let protected: Vec<&str> = VERBS.iter().filter(|v| v.protected()).map(|v| v.id).collect();
+        assert_eq!(
+            protected,
+            vec![
+                "stop",
+                "restart",
+                "reload-or-restart",
+                "disable",
+                "disable-now",
+                "mask",
+                "kill",
+                "freeze",
+            ]
+        );
+        // The one that is easy to miss: plain `disable` takes nothing down
+        // now, so it is not disruptive — and it still must not be aimed at
+        // `dbus.socket`, because the session that notices is the next one.
+        assert!(!verb("disable").unwrap().disruptive);
+        assert!(verb("disable").unwrap().protected());
+        // Enabling and unmasking are the reversals; nothing is protected from
+        // being switched back on.
+        assert!(!verb("enable").unwrap().protected());
+        assert!(!verb("unmask").unwrap().protected());
     }
 }

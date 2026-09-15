@@ -988,18 +988,23 @@ impl UnitNode {
     /// Protection comes first and is a refusal, not a question. A prompt asks
     /// "did you mean it", which is no answer to "this would take the session
     /// down" — the muscle memory that pressed the key presses `y` too.
+    ///
+    /// Both questions are asked *of this manager*. A verb that only warns about
+    /// the next login on the user bus warns about the next boot of the machine
+    /// on the system bus, and the same list of units means something different
+    /// there too — see [`control::Verb::confirm_on`] and [`crate::protect`].
     fn gate(
         &self,
         verb: &control::Verb,
         unit: &str,
         ctx: &ActionContext,
     ) -> Result<Option<String>> {
-        if verb.disruptive && self.shared.protect.covers(unit) {
+        if verb.protected() && self.shared.protect.covers(unit) {
             return Err(ContentError::PermissionDenied(
                 self.shared.protect.refusal(unit, verb.label),
             ));
         }
-        if let Some(prompt) = verb.confirm
+        if let Some(prompt) = verb.confirm_on(self.shared.bus.manager())
             && !ctx.confirmed
         {
             return Ok(Some(prompt.replace("{unit}", unit)));
