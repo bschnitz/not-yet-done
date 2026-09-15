@@ -455,7 +455,14 @@ async fn failure_detail(bus: &Bus, unit: &str) -> String {
     }
 }
 
-/// Change the unit's symlinks and report what moved.
+/// Change the unit's symlinks and report what moved — and where.
+///
+/// The manager answers with one `(operation, filename, destination)` per entry,
+/// and the message hands all of it on: a headline that says what happened, then
+/// one line per path. The first line is what the notification bar shows; the
+/// rest appears when the entry is expanded, so naming every symlink costs
+/// nothing on screen and saves the user the trip to `ls` that a bare count
+/// would have forced.
 async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
     let result = bus.change_unit_file(change, unit).await?;
     if !result.carries_install_info {
@@ -466,29 +473,113 @@ async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
              something else, not at login"
         ));
     }
-    let count = result.changes.len();
-    let done = match change {
-        FileChange::Enable => "Enabled",
-        FileChange::Disable => "Disabled",
-        FileChange::Mask => "Masked",
-        FileChange::Unmask => "Unmasked",
+    let made = count(&result.changes, Moved::Made);
+    let removed = count(&result.changes, Moved::Removed);
+    let notes = count(&result.changes, Moved::Note);
+    Ok(with_paths(
+        headline(change, unit, made, removed, notes),
+        &result.changes,
+    ))
+}
+
+/// Count the entries of one kind.
+fn count(changes: &[(String, String, String)], kind: Moved) -> usize {
+    changes.iter().filter(|c| moved(&c.0) == kind).count()
+}
+
+/// The one line the notification bar shows: what the operation did.
+///
+/// Split out from [`files`] because it is the part with the judgement in it and
+/// the part worth testing — everything else is a bus round trip.
+fn headline(change: FileChange, unit: &str, made: usize, removed: usize, notes: usize) -> String {
+    let links = made + removed;
+    match change {
         // The preset has no past participle of its own — it enabled or it
         // disabled, and which one was the policy's decision, not the user's.
-        // What is worth reporting is whether anything moved at all: nothing
-        // moving is the good news, because the unit already matches.
-        FileChange::Preset => {
-            return Ok(match count {
-                0 => format!("{unit} already matches its preset"),
-                1 => format!("Applied the preset to {unit}"),
-                n => format!("Applied the preset to {unit} ({n} symlinks)"),
-            });
+        // That decision is the one thing the user cannot know beforehand, which
+        // is why it belongs in the headline; the manager spells it out in the
+        // operations, a written link meaning on and a removed one meaning off.
+        FileChange::Preset => match (links, removed, made) {
+            (0, _, _) if notes == 0 => format!("{unit} already matches its preset"),
+            (0, _, _) => format!("The preset changed nothing for {unit}"),
+            (_, 0, _) => format!("Enabled {unit} — the preset wants it on"),
+            (_, _, 0) => format!("Disabled {unit} — the preset wants it off"),
+            // Both directions at once: an alias moved, or an old link was
+            // replaced. Neither verb would be the whole truth, so neither is
+            // claimed and the paths below tell the story.
+            _ => format!("Applied the preset to {unit}"),
+        },
+        _ => {
+            let done = match change {
+                FileChange::Enable => "Enabled",
+                FileChange::Disable => "Disabled",
+                FileChange::Mask => "Masked",
+                FileChange::Unmask => "Unmasked",
+                FileChange::Preset => unreachable!("handled above"),
+            };
+            match links {
+                0 if notes == 0 => format!("{unit} was already {}", done.to_lowercase()),
+                // Nothing moved, but systemd had something to say — a masked
+                // unit refuses to be enabled through this very channel. The
+                // note below is the reason; claiming the verb here would be the
+                // second lie this function exists to avoid.
+                0 => format!("Nothing changed for {unit}"),
+                1 => format!("{done} {unit}"),
+                n => format!("{done} {unit} ({n} symlinks)"),
+            }
         }
-    };
-    Ok(match count {
-        0 => format!("{unit} was already {}", done.to_lowercase()),
-        1 => format!("{done} {unit}"),
-        n => format!("{done} {unit} ({n} symlinks)"),
-    })
+    }
+}
+
+/// What one entry of the manager's change list actually says.
+///
+/// The list is not only symlinks: systemd reports its refusals through the same
+/// array — `masked` when the unit is masked, `dangling` when the link points at
+/// nothing — and counting those as work done is how a message ends up claiming
+/// an enable that never happened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Moved {
+    /// A link was written. `copy` is the same event for the rare unit systemd
+    /// copies instead of linking.
+    Made,
+    /// A link was taken away.
+    Removed,
+    /// Not a change at all: something systemd wants said about the unit.
+    Note,
+}
+
+fn moved(op: &str) -> Moved {
+    match op {
+        "symlink" | "copy" => Moved::Made,
+        "unlink" => Moved::Removed,
+        _ => Moved::Note,
+    }
+}
+
+/// The headline, then one line per path the manager touched.
+fn with_paths(headline: String, changes: &[(String, String, String)]) -> String {
+    let mut out = headline;
+    for (op, file, _destination) in changes {
+        // The destination is left out on purpose: for a written link it is the
+        // unit file the row already names, and for everything else it is empty.
+        match moved(op) {
+            Moved::Made => out.push_str(&format!("\n+ {file}")),
+            Moved::Removed => out.push_str(&format!("\n- {file}")),
+            Moved::Note => out.push_str(&format!("\n! {file} — {}", note(op))),
+        }
+    }
+    out
+}
+
+/// What systemd means by a change type that moved no symlink.
+fn note(op: &str) -> String {
+    match op {
+        "masked" => "it is masked, so no symlink was written".into(),
+        "dangling" => "the symlink points at a unit that is not there".into(),
+        "dst-not-present" => "the unit file it would point at is missing".into(),
+        "auxiliary-failed" => "a unit it also asked for could not be changed".into(),
+        other => format!("systemd reported {other}"),
+    }
 }
 
 pub(crate) fn prop_str(props: &Props, key: &str) -> String {
@@ -591,5 +682,69 @@ mod tests {
         assert_eq!(signal_number(Some("1")).unwrap(), 1);
         assert!(signal_number(Some("SIGNOPE")).is_err());
         assert!(signal_number(Some("99")).is_err());
+    }
+
+    fn change(op: &str, file: &str) -> (String, String, String) {
+        (op.into(), file.into(), String::new())
+    }
+
+    #[test]
+    fn the_preset_headline_names_the_direction_it_chose() {
+        // The whole point of `a p` is that the policy decides, so the decision
+        // is the one thing the user still has to be told.
+        assert_eq!(
+            headline(FileChange::Preset, "probe.service", 1, 0, 0),
+            "Enabled probe.service — the preset wants it on"
+        );
+        assert_eq!(
+            headline(FileChange::Preset, "probe.service", 0, 1, 0),
+            "Disabled probe.service — the preset wants it off"
+        );
+        // Both directions at once claims neither.
+        assert_eq!(
+            headline(FileChange::Preset, "probe.service", 1, 1, 0),
+            "Applied the preset to probe.service"
+        );
+        assert_eq!(
+            headline(FileChange::Preset, "probe.service", 0, 0, 0),
+            "probe.service already matches its preset"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_never_reported_as_the_verb() {
+        // systemd sends its refusals through the same array as its symlinks.
+        // Counting them as work is how a masked unit gets reported as enabled.
+        assert_eq!(
+            headline(FileChange::Enable, "probe.service", 0, 0, 1),
+            "Nothing changed for probe.service"
+        );
+        // No entries at all is the other story, and keeps its own sentence.
+        assert_eq!(
+            headline(FileChange::Enable, "probe.service", 0, 0, 0),
+            "probe.service was already enabled"
+        );
+    }
+
+    #[test]
+    fn every_path_the_manager_touched_reaches_the_message() {
+        let text = with_paths(
+            "Enabled probe.service — the preset wants it on".into(),
+            &[
+                change("symlink", "/wants/probe.service"),
+                change("unlink", "/wants/old.service"),
+                change("masked", "/units/probe.service"),
+            ],
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        // The headline stays the first line: it is all the notification bar
+        // shows, and the rest only appears when the entry is expanded.
+        assert_eq!(lines[0], "Enabled probe.service — the preset wants it on");
+        assert_eq!(lines[1], "+ /wants/probe.service");
+        assert_eq!(lines[2], "- /wants/old.service");
+        assert_eq!(
+            lines[3],
+            "! /units/probe.service — it is masked, so no symlink was written"
+        );
     }
 }

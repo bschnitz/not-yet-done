@@ -979,8 +979,31 @@ against `systemctl --user list-unit-files` twice — 31 against 31 for
 **The `preset` verb needed its own sentences, because its good outcome is
 nothing happening.** Every other file verb reports symlinks changed; `preset`
 on a unit already in line with its policy changes none, and "0 changes" reads
-like a failure. So the arm returns before the generic counting and says
-"already matches its preset", which is the actual news.
+like a failure. So its arm says "already matches its preset", which is the
+actual news.
+
+**Then the message learned to say which way it went, and where.** A count is
+the one thing `preset` cannot usefully report: the user pressed `a p` precisely
+to let the policy decide, so the decision is what they still do not know, and
+"Applied the preset (1 symlink)" withholds it. The manager hands the answer
+over for free — it replies with one `(operation, filename, destination)` per
+entry, and a written link means on while a removed one means off. So the
+headline names the direction (`Enabled <unit> — the preset wants it on`) and
+the paths follow, one per line. All five file verbs share the shape, because
+`enable` and `mask` were equally quiet about _where_ they wrote; only their
+headline differs, since their direction is already in the verb. The first line
+is what the notification bar shows and the rest appears when the entry is
+expanded, so naming every path costs nothing on screen and saves the trip to
+`ls` that a count forces.
+
+**The change list is not only symlinks, and the old count did not know that.**
+systemd reports its refusals through the same array — `masked` when the unit is
+masked, `dangling` when the link points at nothing — so counting entries
+counted refusals as work done. `a p` on a masked unit now says "The preset
+changed nothing" and prints the reason under it, where before it would have
+claimed a symlink it never wrote. This is the second lie the message shape
+exists to prevent; the first was "enabled" on a unit with no `[Install]`
+section.
 
 **An empty `drift` does not promise that `a p` changes nothing, and the smoke
 test found that out the hard way.** A user unit can be enabled from
