@@ -485,6 +485,18 @@ impl Bus {
     /// user is looking at would still say `disabled` after a successful enable.
     /// It is what `systemctl` does too, for the same reason.
     ///
+    /// It is also not skipped when the change list comes back empty, tempting
+    /// as that is on the system manager where it would save a second password
+    /// dialog. An empty list is not the same as "nothing happened": since the
+    /// drop-in and preset work it has meant, more than once, that the symlinks
+    /// were already as asked while the *manager's* picture was not. The
+    /// dialog is the cheaper of the two mistakes.
+    ///
+    /// Every call here goes through [`Bus::write`] — both the file operation
+    /// and the reload. On the system manager they are two separate polkit
+    /// actions (`manage-unit-files` and `reload-daemon`), each `auth_admin_keep`,
+    /// so a cold session is asked twice for one verb and then not again.
+    ///
     /// `runtime` is always `false` — everything this adapter writes is meant to
     /// survive a reboot. A `/run` variant is a phase-2 question, together with
     /// the rest of the write scope.
@@ -493,48 +505,41 @@ impl Bus {
         let files = vec![unit.to_string()];
         let what = format!("{} {unit}", change.verb());
         let result = match change {
-            FileChange::Enable => {
-                let (install, changes) = self
-                    .deadline(&what, proxy.enable_unit_files(files, false, false))
-                    .await?;
+            // Enable and preset share a shape as well as a signature: both may
+            // decide to enable a unit that has no `[Install]` section, make no
+            // symlinks at all, and have to say so.
+            FileChange::Enable | FileChange::Preset => {
+                let method = match change {
+                    FileChange::Enable => "EnableUnitFiles",
+                    _ => "PresetUnitFiles",
+                };
+                let (carries_install_info, changes) =
+                    self.write(&proxy, &what, method, &(files, false, false)).await?;
                 FileResult {
-                    carries_install_info: install,
+                    carries_install_info,
                     changes,
                 }
             }
             FileChange::Disable => FileResult {
                 carries_install_info: true,
                 changes: self
-                    .deadline(&what, proxy.disable_unit_files(files, false))
+                    .write(&proxy, &what, "DisableUnitFiles", &(files, false))
                     .await?,
             },
             FileChange::Mask => FileResult {
                 carries_install_info: true,
                 changes: self
-                    .deadline(&what, proxy.mask_unit_files(files, false, false))
+                    .write(&proxy, &what, "MaskUnitFiles", &(files, false, false))
                     .await?,
             },
             FileChange::Unmask => FileResult {
                 carries_install_info: true,
                 changes: self
-                    .deadline(&what, proxy.unmask_unit_files(files, false))
+                    .write(&proxy, &what, "UnmaskUnitFiles", &(files, false))
                     .await?,
             },
-            // Same shape as enable, and for the same reason: a unit with no
-            // `[Install]` section cannot be enabled, so the preset may decide
-            // to enable it and still make no symlinks.
-            FileChange::Preset => {
-                let (install, changes) = self
-                    .deadline(&what, proxy.preset_unit_files(files, false, false))
-                    .await?;
-                FileResult {
-                    carries_install_info: install,
-                    changes,
-                }
-            }
         };
-        self.deadline("reloading the manager", proxy.reload())
-            .await?;
+        self.daemon_reload().await?;
         Ok(result)
     }
 
@@ -555,7 +560,8 @@ impl Bus {
     /// afterwards rather than answering for the user.
     pub async fn daemon_reload(&self) -> Result<()> {
         let proxy = self.manager_proxy().await?;
-        self.deadline("reloading the manager", proxy.reload()).await
+        self.write(&proxy, "reloading the manager", "Reload", &())
+            .await
     }
 
     /// Clear a unit's `failed` state so it can be started again.

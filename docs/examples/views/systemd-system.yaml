@@ -47,13 +47,33 @@
 # kill, reset-failed, freeze. What they change lasts as long as the machine is
 # up, and the same row shows you the result.
 #
-# The **unit-file** verbs are not here — enable, disable, mask, preset — and
-# neither are the editing and creating keys. Not because polkit would refuse
-# them, but because they change what this machine does at the next boot, for
-# everyone on it. That belongs to `systemctl`, deliberately typed out, rather
-# than to a key in a list. The adapter enforces this itself: those verbs are
-# not offered on the system manager at all, by the CLI either, so a binding
-# for `a e` here would simply be inert.
+# The **unit-file** verbs are here too — enable, disable, their `--now` pair,
+# and preset — and they carry a second question the user tab does not need. On
+# the user manager, disabling something decides what your next login does. Here
+# the same key decides what the machine does at its next boot, for every
+# account on it. Only the adapter can say that sentence, because only the
+# adapter knows which unit is meant: polkit's dialog knows only that something
+# wants `manage-unit-files`. So the prompt is sharper here, and it comes first,
+# before any password is asked for.
+#
+# Expect **two dialogs** for one file verb on a cold session, not one. Writing
+# the symlinks is `manage-unit-files` and making the manager notice them is
+# `reload-daemon` — separate polkit actions, each remembered separately. The
+# reload could be skipped when the change list comes back empty, which would
+# hide the second dialog most of the time; it is not, because an empty list has
+# meant "the symlinks were already right, the manager's picture was not" often
+# enough to make that a bad trade.
+#
+# **Masking is the exception**, and it is not withheld because it is dangerous.
+# It is withheld because it is invisible: a masked unit shows `inactive` with
+# no failure and no journal line, exactly like a unit nobody started, and the
+# symlink to `/dev/null` that explains it is not in any runtime column. That is
+# where hours go. `mask` and `unmask` therefore stay with `systemctl`, and the
+# adapter enforces it rather than trusting this file — the CLI refuses them on
+# this manager too, so a binding for `a m` here would simply be inert.
+#
+# Editing and creating unit files are still absent for the same reason as in
+# phase 7 stage 1: a system unit file is not this tab's to write.
 # ---------------------------------------------------------------------------
 
 tab:
@@ -229,9 +249,21 @@ views:
       # Freeze suspends every process in the unit's cgroup without killing it;
       # pressing it again thaws.
       - { name: freeze or thaw, key: "a z", id: freeze }
+      # The unit-file verbs. Each asks its own question first — a sharper one
+      # than on the user tab, because here the answer holds for the next boot
+      # and for everyone — and then polkit asks twice on a cold session: once
+      # for the symlinks, once for the reload that makes them count.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # `a p` hands the decision to the distribution's preset policy; the
+      # Preset column already says which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
       #
-      # No `a e` / `a d` / `a m` / `a p` and no `e`-keys: the unit-file verbs
-      # are not offered on the system manager — see the header.
+      # No `a m` / `a u`: masking is not offered on this manager — see the
+      # header. No `e`-keys either; a system unit file is not this tab's to
+      # write.
     children:
       - &properties
         name: Properties
@@ -440,6 +472,21 @@ views:
       - { name: reset failed, key: "a f", id: reset-failed }
       - { name: kill, key: "a k", id: kill }
       - { name: freeze or thaw, key: "a z", id: freeze }
+      # The unit-file verbs. Each asks its own question first — a sharper one
+      # than on the user tab, because here the answer holds for the next boot
+      # and for everyone — and then polkit asks twice on a cold session: once
+      # for the symlinks, once for the reload that makes them count.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      # `a p` hands the decision to the distribution's preset policy; the
+      # Preset column already says which way it will go.
+      - { name: apply preset, key: "a p", id: preset }
+      #
+      # No `a m` / `a u`: masking is not offered on this manager — see the
+      # header. No `e`-keys either; a system unit file is not this tab's to
+      # write.
     children:
       - *properties
       - *journal
@@ -515,6 +562,15 @@ views:
       - { name: stop, key: "a x", id: stop }
       - { name: restart, key: "a r", id: restart }
       - { name: reset failed, key: "a f", id: reset-failed }
+      # The unit-file verbs, as on the Services subtab. On a timer they are the
+      # ones that matter: a timer that is enabled fires at the next boot
+      # whether or not anyone is looking, which is exactly the decision the
+      # sharper prompt here is about.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      - { name: apply preset, key: "a p", id: preset }
     children:
       - *properties
       - *journal
@@ -580,12 +636,21 @@ views:
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # A unit file can be started by name whether or not the manager has it
-      # loaded, so the three jobs are here. What is *not* here is the reason
-      # this level exists on the user tab — enable, mask, preset. Those write
-      # to disk and are withheld on the system manager; see the header.
+      # loaded, so the three jobs are here.
       - { name: start, key: "a s", id: start }
       - { name: stop, key: "a x", id: stop }
       - { name: restart, key: "a r", id: restart }
+      # And this is the level the file verbs exist for: a disabled unit has no
+      # runtime state, so it appears on no other subtab. `a p` reads best next
+      # to the Preset and Drift columns — they say what the policy wants and
+      # how far this file is from it, and `a p` is the key that closes the gap.
+      - { name: enable, key: "a e", id: enable }
+      - { name: enable and start, key: "a E", id: enable-now }
+      - { name: disable, key: "a d", id: disable }
+      - { name: disable and stop, key: "a D", id: disable-now }
+      - { name: apply preset, key: "a p", id: preset }
+      # Still no `a m` / `a u`: the Shadows column would show you a mask, but
+      # the subtab you would look at next would not — see the header.
     children:
       - *journal
       - *security

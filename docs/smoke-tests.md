@@ -8140,11 +8140,12 @@ screen.
       vendor unit in `/etc/systemd/system/`, refresh, and confirm the column
       names the `/usr/lib` file it hides — then remove it again. An empty column
       proves nothing here: the wrong scope is silently empty, not wrong.
-- [ ] `a` on a service offers the **runtime** verbs (start, stop, restart,
-      reload, reset-failed, kill, freeze) and **no** unit-file verb — no
-      enable, disable, mask, unmask, preset, and no `e`-keys either. Compare
-      side by side with `a` on the `, y` tab, which offers all of them. The
-      same split holds on Timers and on Unit files.
+- [ ] `a` on a service offers the runtime verbs (start, stop, restart, reload,
+      reset-failed, kill, freeze) and the file verbs that switch a unit on or
+      off (enable, enable-now, disable, disable-now, preset) — but **no** mask
+      or unmask, and no `e`-keys either. Compare side by side with `a` on the
+      `, y` tab, which offers all of them. The same split holds on Timers and
+      on Unit files.
 - [ ] The read keys all work: `P` properties, `J` journal, `H` security, `D`
       ordering, `r` refresh, `a j` follow the journal in a terminal. The
       journal needs membership in `systemd-journal` or `wheel`; without it the
@@ -8184,9 +8185,9 @@ that a verb running without a prompt is correct, not a skipped check.
       not press it over SSH.
 - [ ] The CLI agrees with the tab on both roads:
       `nyd adapter systemd-system:service <id> start` works, and
-      `nyd adapter systemd-system:service <id> enable` reports no such action.
-      `nyd adapter systemd-system:service help` lists the eight runtime verbs
-      and no file verb.
+      `nyd adapter systemd-system:service <id> mask` reports no such action.
+      `nyd adapter systemd-system:service help --full` lists the runtime verbs
+      and the file verbs, and neither `mask` nor `unmask`.
 - [ ] The flag is what carries it: run the same call through `gdbus`, which
       does not set it, and watch it come back
       `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired` while the
@@ -8195,3 +8196,44 @@ that a verb running without a prompt is correct, not a skipped check.
       screen, leave it unanswered for more than ten seconds before answering:
       the verb must still run. Leaving it for five minutes is the other end —
       the adapter gives the pane back and says the wait was never answered.
+
+### The unit-file verbs on the system manager (phase 7, stage 3)
+
+These change what the machine does at the **next boot**, so every box here is
+worth a `systemctl is-enabled <unit>` before and after. Pick something inert —
+`avahi-dnsconfd.service` is disabled and its preset agrees, which makes every
+verb below a no-op that still exercises the whole path.
+
+- [ ] `a e` / `a d` / `a p` are offered on Services, Failed, Timers and Unit
+      files of the system tab, and `a m` / `a u` are not — the action list shows
+      no Mask entry there, while the user tab still has one.
+- [ ] The prompt is the system one, not the session one. `a d` on the system tab
+      names **the next boot** and says "for anyone"; the same verb on the user
+      tab names the next login. Both name the unit.
+- [ ] `a e` asks on the system tab and does **not** ask on the user tab. That is
+      the same verb, deliberately: enabling for yourself is cheap and legible,
+      enabling for the machine is a decision.
+- [ ] Two dialogs, not one, on a cold session: the first for the symlinks
+      (`manage-unit-files`), the second for the reload (`reload-daemon`). Answer
+      both and the verb completes. This needs a session where nothing has been
+      cached yet — log out and back in first.
+- [ ] Dismissing **either** dialog is an ordinary sentence, not a red error, and
+      the row is unchanged.
+- [ ] A verb whose work was already done still reports honestly:
+      `a e` on an already-enabled unit says it was already enabled rather than
+      claiming to have changed something.
+- [ ] A unit with no `[Install]` section (`dbus.service`) says so, and on the
+      system tab the sentence ends "not at **boot**" — the user tab says "not at
+      login".
+- [ ] `a p` on a unit the Preset column marks `should-disable` disables it, the
+      Drift column clears on the next `r`, and `systemctl is-enabled` agrees.
+      Put it back with `a e` afterwards.
+- [ ] The protection list covers the file verbs too, and refuses before any
+      dialog: `a d` on `dbus.socket` (system tab) says it holds up the machine.
+      The same now holds on the **user** tab for `dbus.socket` there — that is
+      new in this stage, and it is the one behaviour change outside the system
+      tab.
+- [ ] The flag carries the file verbs as well: run
+      `gdbus call --system --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.EnableUnitFiles '["<unit>"]' false false`
+      and watch it refuse with `InteractiveAuthorizationRequired` while the same
+      verb through the adapter succeeds.

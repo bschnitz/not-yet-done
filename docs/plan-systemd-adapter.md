@@ -1282,10 +1282,10 @@ own:
    read-only rather than decorated with keys that always fail;
 2. the polkit flag for the runtime verbs, and the system-specific protection
    defaults that come with them;
-3. the unit-file verbs (`enable`, `disable`, `mask`, `unmask`, `preset`), which
-   go over the same bus and through the same flag — but are a separate stage
-   because whether they belong on the system tab at all is a question stage 2
-   answered with "not yet" (see below);
+3. the unit-file verbs, which go over the same bus and through the same flag —
+   but are a separate stage because whether they belong on the system tab at
+   all is a question stage 2 answered with "not yet". Stage 3 answers it with
+   "all but masking" (see below);
 4. `critical-chain` as a level under a unit — deferred here from
    [phase 6c](#phase-6c--the-clock-and-the-meter) because the system manager is
    where the command earns a level.
@@ -1398,12 +1398,14 @@ session_, it holds up the machine.
 
 **The unit-file verbs are withheld on purpose, not pending.** polkit would
 authorise `EnableUnitFiles` the same way it authorises `StartUnit`. The reason
-they are not offered is what they mean: enabling or masking a system unit
-changes what the machine does at the _next boot_, for everyone on it, and it is
-invisible in the running state. A runtime verb is answered by looking at the
-same row again; a symlink under `/etc/systemd/system` is not. That is the split
-`Op::writes_files()` draws and `Verb::available_on` enforces — on both roads, so
-the CLI cannot reach what the tab will not show.
+they are not offered _in this stage_ is what they mean: enabling or masking a
+system unit changes what the machine does at the _next boot_, for everyone on
+it. A runtime verb is answered by looking at the same row again; a symlink
+under `/etc/systemd/system` needs a reason of its own to be reachable from a
+key. `Op::writes_files()` draws that line and `Verb::available_on` enforces it
+— on both roads, so the CLI cannot reach what the tab will not show. Stage 3
+moves the line rather than removing it: see
+[stage 3](#what-it-took-beyond-the-plan--stage-3).
 
 **Measured, at the end.** The same call, in the same second, against the same
 unit: through the adapter it ran and reported `done`; through `gdbus`, which
@@ -1449,13 +1451,74 @@ the trap [phase 6a](#phase-6a--what-the-preset-wants) was built to close.
 
 ---
 
+### What it took, beyond the plan — stage 3
+
+**The line is masking, not file-writing.** Stage 2 withheld every verb that
+touched a symlink; stage 3 keeps exactly two of them back, and the criterion
+changed with the reasoning. `enable`, `disable`, their `--now` pair and
+`preset` all change something the row itself then reports — the `enabled`
+column, the `drift` column — so the tab can be believed about its own effect.
+Masking cannot be checked that way: a masked unit reads `inactive` in every
+runtime column, with no failure and no journal line, exactly like a unit nobody
+started, and the symlink to `/dev/null` that explains it appears on one level
+only. It is withheld for being invisible, not for being powerful, and
+`Op::masks_a_unit` says so where `Op::writes_files` used to.
+
+**A prompt that is right on one manager is wrong on the other.** `disable` on
+the user bus says "it will not come back on the next login", which is the whole
+truth there and a misleading half of it on the system bus, where the same key
+decides what the machine does at the next boot for every account on it. So
+`Verb` grew a second sentence — `confirm_system`, chosen by `Verb::confirm_on(manager)`
+— and `enable`, which asks nothing at all on the user manager because it is
+cheap and legible, asks on the system manager because it is neither.
+
+The reason this sentence has to exist at all, rather than leaving the question
+to polkit: the password dialog knows only that _something_ wants
+`manage-unit-files`. It cannot name the unit. The adapter's own question is the
+only one in the chain that can, which is why it comes first, before any
+password is asked for.
+
+**Two dialogs per file verb on a cold session, accepted rather than optimised
+away.** Writing the symlinks is `manage-unit-files`; making the manager notice
+them is `reload-daemon`. Separate polkit actions, each `auth_admin_keep`, so
+each is asked once and then remembered. The obvious saving is to skip the
+`daemon-reload` when the manager's change list comes back empty — which would
+hide the second dialog most of the time, because most file verbs are
+idempotent. It is not taken. Since [phase 6a](#phase-6a--what-the-preset-wants)
+that list has carried refusals as well as changes (`! …` entries for a masked
+unit), and an empty list has meant "the symlinks were already right, the
+manager's picture was not" often enough that trading a correct row for one
+fewer dialog is the wrong way round.
+
+**Opening `disable` on the system manager opened a hole in the protection
+list, and closing it changed what protection means.** The list used to answer
+to `Verb::disruptive` alone — the unit going down _now_. That was complete
+while no file verb existed on the system manager; the moment `disable` did,
+`disable dbus.socket` became a key press away and was not disruptive by that
+definition, because nothing stops when you press it. It stops at the next boot,
+by which time nothing on screen connects the missing unit to the key.
+
+So protection now answers to two shapes of harm through one question,
+`Verb::protected()`: `disruptive` for the immediate one and `Op::switches_off`
+for the deferred one. Plain `disable` and plain `mask` join the list that was
+already there by being disruptive. This tightens the **user** manager too,
+where `disable dbus.socket` had the same shape and the same consequence one
+login later — it was simply never noticed, because that hole was open from
+phase 1 rather than opened by this stage.
+
+---
+
 ## Safety net
 
 This adapter writes into the running session, which none of the others do.
 The obligations, distributed over the phases that introduce the risk:
 
-- **Protection list** (phase 1) — stop/mask on `init.scope`, `*.slice`,
-  `dbus.socket`, `graphical-session.target` is refused, not confirmed.
+- **Protection list** (phase 1, widened in phase 7) — on `init.scope`,
+  `*.slice`, `dbus.socket`, `graphical-session.target` and the system list's
+  own entries, a verb that takes the unit down is refused, not confirmed. Since
+  phase 7 stage 3 that covers two shapes of harm rather than one: stopping it
+  now (`Verb::disruptive`) and switching it off for the next boot
+  (`Op::switches_off`, which is plain `disable` as well as `mask`).
 - **`confirm: true`** (phase 1) on stop, disable, mask, delete; mask with an
   explicit warning about what masking means.
 - **Backup before every unit-file write** (phase 2), adapter-side, to
