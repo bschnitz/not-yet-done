@@ -143,11 +143,7 @@ impl SystemdConfig {
             .copied()
             .chain(self.protect.iter().map(String::as_str))
             .collect();
-        if let Some(stray) = self
-            .unprotect
-            .iter()
-            .find(|u| !known.contains(&u.trim()))
-        {
+        if let Some(stray) = self.unprotect.iter().find(|u| !known.contains(&u.trim())) {
             return Err(format!(
                 "unprotect: {stray:?} is not on the protection list — it must be spelled exactly \
                  as the entry it lifts"

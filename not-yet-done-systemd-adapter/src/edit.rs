@@ -408,7 +408,9 @@ pub async fn verify(target: &Target, text: &str) -> Result<Findings> {
         Err(e) => {
             return Ok(Findings {
                 fatal: false,
-                lines: vec![format!("systemd-analyze could not be run ({e}) — not checked")],
+                lines: vec![format!(
+                    "systemd-analyze could not be run ({e}) — not checked"
+                )],
             });
         }
     };

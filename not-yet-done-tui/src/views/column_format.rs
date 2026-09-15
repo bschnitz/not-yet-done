@@ -572,7 +572,10 @@ mod tests {
             DurationFormat::parse(Some("precise")),
             DurationFormat::Precise
         );
-        assert_eq!(DurationFormat::parse(Some("presise")), DurationFormat::Clock);
+        assert_eq!(
+            DurationFormat::parse(Some("presise")),
+            DurationFormat::Clock
+        );
 
         let (text, align) =
             format_typed_value("0.103424", ColumnKind::Duration, Some("precise"), "/");

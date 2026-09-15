@@ -757,7 +757,11 @@ mod tests {
 
     /// Build a `Unit` property map out of the three timestamps activation is
     /// read from. `0` is systemd's "never", so it is the default.
-    fn timestamps(exit: u64, active_enter: u64, inactive_enter: u64) -> HashMap<String, OwnedValue> {
+    fn timestamps(
+        exit: u64,
+        active_enter: u64,
+        inactive_enter: u64,
+    ) -> HashMap<String, OwnedValue> {
         [
             ("InactiveExitTimestampMonotonic", exit),
             ("ActiveEnterTimestampMonotonic", active_enter),
