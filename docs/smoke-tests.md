@@ -7793,21 +7793,21 @@ notes too, e.g. `/Alpha/Beta`.
 Needs the systemd tab (`docs/examples/views/systemd.yaml`) and a user unit
 with dependencies, e.g. `pipewire.service`.
 
-- [ ] Services tab: the rows now carry an expand marker — but only the ones
+- [x] Services tab: the rows now carry an expand marker — but only the ones
       that need something. A unit with no `Requires=`/`Wants=` of its own
       shows none, and `enter` on it still drills into Properties.
-- [ ] `enter` on `pipewire.service` unfolds it in place: `dbus-broker.service`,
+- [x] `enter` on `pipewire.service` unfolds it in place: `dbus-broker.service`,
       `pipewire.socket`, `session.slice`, `basic.target` as `requires`,
       `wireplumber.service` as `wants`. `enter` again on `basic.target`
       unfolds that one a level deeper; `h` / collapse folds it back.
-- [ ] The header changes with the cursor: on a unit row the Services columns,
+- [x] The header changes with the cursor: on a unit row the Services columns,
       on a dependency row `Unit / Relation / Active / Sub / Load /
 Description`. Unit rows leave `Relation` blank rather than borrowing a
       neighbour's value.
-- [ ] A unit that appears twice in one branch (`enter` down until a name
+- [x] A unit that appears twice in one branch (`enter` down until a name
       repeats) shows once with `(cycle)` in `Relation` and does not unfold
       further.
-- [ ] `D` on a unit row opens the ordering level instead: `after` rows are
+- [x] `D` on a unit row opens the ordering level instead: `after` rows are
       what it waits for, `before` rows what waits for it. It does not unfold
       — one hop is all there is — and `h` walks back up.
 - [ ] `q` on the ordering level offers its own template (`[relation, =,
@@ -7820,7 +7820,7 @@ after]`), not the Services one.
       usually the service it triggers.
 - [ ] Failed tab: expanding a failed unit is the fast way to the unit
       underneath that actually broke.
-- [ ] CLI parity: `nyd adapter systemd 'service:pipewire.service' ls --type
+- [x] CLI parity: `nyd adapter systemd 'service:pipewire.service' ls --type
 systemd:dep` and `… --type systemd:order` list the same rows, and
       `nyd adapter systemd 'dep:pipewire.service>basic.target' show` prints
       that one row.
@@ -7835,10 +7835,10 @@ cell must move without a reload.
 - [ ] systemd Timers: the `Left` column counts **down** and the digits change
       on their own, without pressing `r`. Watch a timer that is minutes away:
       `24min 13s` → `24min 12s`.
-- [ ] The same pulse moves the neighbouring `Ago` column (`kind: elapsed`) and
+- [x] The same pulse moves the neighbouring `Ago` column (`kind: elapsed`) and
       a running tracking's duration in the Trackings tab — and it does so with
       **no tracking running**, which is the thing that used to be missing.
-- [ ] It stays quiet where nothing ticks: park on a tab whose level has
+- [x] It stays quiet where nothing ticks: park on a tab whose level has
       neither kind (Tasks, Jira) and the screen must not repaint once a
       second. Watch the CPU of the process, not the screen.
 - [ ] The scale is two units, largest first, and a zero remainder is dropped:
@@ -7850,11 +7850,11 @@ cell must move without a reload.
 - [ ] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
       the order is the same. Check the sort menu (`c s`) offers `Next` and the
       resulting order runs soonest-first.
-- [ ] Calendar: the `In` column counts down to the next appointment and ticks
+- [x] Calendar: the `In` column counts down to the next appointment and ticks
       live; an event happening right now shows a negative value. No calendar
       adapter change was needed — if this works, the seam is in the right
       place.
-- [ ] systemd Services: `Mem` reads `95.4 MiB` / `1.2 GiB`, right-aligned, and
+- [x] systemd Services: `Mem` reads `95.4 MiB` / `1.2 GiB`, right-aligned, and
       a small unit reads a bare `512 B`.
 - [ ] The byte column is still a **number** underneath: a query
       `[mem, gt, 104857600]` narrows the list to units over 100 MiB, and
@@ -7923,10 +7923,10 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
 on the list above it, and `e h` to write a fix. Needs the systemd tab. Do the
 writing half on a throwaway unit, not on something you depend on.
 
-- [ ] Services subtab (`t s`), any row, `H` — the Security level opens with one
+- [x] Services subtab (`t s`), any row, `H` — the Security level opens with one
       row per check (81 on systemd 261) and a `Status` of `ok`, `exposed` or
       `no-effect`, coloured green / amber / dim. The breadcrumb names the unit.
-- [ ] `Exposure` is **blank** on every `ok` row and carries a number on the
+- [x] `Exposure` is **blank** on every `ok` row and carries a number on the
       exposed ones. Sort by it (`c s`): the column sorts numerically, not as
       text — `0.5` above `0.2`, and the blanks together at one end.
 - [ ] `q` → `[status, =, exposed]` narrows to what is still open;
@@ -7937,25 +7937,25 @@ writing half on a throwaway unit, not on something you depend on.
 - [ ] `[exposure, gte, 0.3]` returns only exposed rows without a word about the
       status. A passing check has no exposure rather than an exposure of zero,
       which is what makes the short query correct.
-- [ ] The `Fix` column is not a copy of `Check`. Find a group check —
+- [x] The `Fix` column is not a copy of `Check`. Find a group check —
       `CapabilityBoundingSet=~CAP_SET(UID|GID|PCAP)` or one of the `CAP_MAC_*`
       rows — and read its `Fix`: the capabilities are spelled out
       individually. That difference is the whole point of the column; the name
       in `Check` is a label systemd prints, and writing it into a unit file
       does nothing at all.
-- [ ] Services subtab: `c c` switches on the hidden `Exposure` column. Every
+- [x] Services subtab: `c c` switches on the hidden `Exposure` column. Every
       loaded service has a score, most of them the same one. Cross-check a few
       against `systemd-analyze --user security` in a terminal — same units,
       same numbers — and note that the whole listing is no slower to load: the
       scores arrive from one call, not one per row.
 - [ ] `[exposure, lt, 9.0]` on the Services level returns exactly the units
       that are hardened at all. On a stock system that is a handful.
-- [ ] Unit files subtab (`t u`), a `.service` row the manager has **never
+- [x] Unit files subtab (`t u`), a `.service` row the manager has **never
       loaded** (`Origin` says where it lives; `systemctl --user is-active` says
       `inactive`), `H` — the level opens anyway. This is the one level that can
       ask the question about a unit with no D-Bus object, because the analysis
       reads the file.
-- [ ] Same subtab, a `.socket` or `.target` row, `H` — it refuses, in systemd's
+- [x] Same subtab, a `.socket` or `.target` row, `H` — it refuses, in systemd's
       own words ("Unit … is not a service unit, refusing."). An empty table
       would have read as "nothing to find" instead of "wrong question".
 - [ ] Timers subtab (`t t`), any row, `H` — the level opens on the service the
@@ -7996,32 +7996,32 @@ The `Startup` column on the Services and Failed lists — what
 hidden `Peak` column beside `Mem`. Needs the systemd tab. Read-only throughout;
 a terminal beside the TUI is the whole apparatus.
 
-- [ ] Services subtab (`t s`): every row carries a `Startup` cell, right
+- [x] Services subtab (`t s`): every row carries a `Startup` cell, right
       aligned, in units that fit the number — `103ms`, `5.24s`, `677us`,
       `1min 3s`. Never `0.103424`, and never a bare `00`.
-- [ ] Cross-check against `systemd-analyze --user blame` in a terminal. Every
+- [x] Cross-check against `systemd-analyze --user blame` in a terminal. Every
       unit that command prints appears in the column with the same value, give
       or take the rounding each display does. The command's own top row is the
       easiest one to find: sort the column descending (`c s`, or click the
       header) and look past the empty cells.
-- [ ] `blame` prints fewer rows than the column has values, and that is
+- [x] `blame` prints fewer rows than the column has values, and that is
       correct. The extra ones read `0` — a `Type=simple` unit is active the
       moment it execs, so its span really is zero and `blame` simply omits it.
       `systemctl --user show -p Type <unit>` on one of them confirms the type.
-- [ ] A **blank** cell is a different statement from `0`. Find one
+- [x] A **blank** cell is a different statement from `0`. Find one
       (`[startup, is, not null]` will not help — see below; just look) and check
       it with `systemctl --user show -p InactiveExitTimestampMonotonic <unit>`:
       it reads `0`, i.e. the unit has never been started in this boot. The
       column says nothing rather than inventing a zero.
-- [ ] Sorting is numeric, not textual: `5.24s` sorts above `677us` and above
+- [x] Sorting is numeric, not textual: `5.24s` sorts above `677us` and above
       `1min 3s` in the right places. In particular `1min 3s` outranks `59.9s` —
       if the column were sorting the rendered text it could not.
-- [ ] Descending sort opens with the blank rows. That is the app-wide rule for
+- [x] Descending sort opens with the blank rows. That is the app-wide rule for
       absent values and is not specific to this column; the query below is the
       way around it.
 - [ ] `q` → `[startup, gte, 0]` — only the units that have actually run. Paired
       with a descending sort this is the "slowest first" list. `[startup, gt,
-    1]` narrows to the ones over a second, which on a user manager is
+  1]` narrows to the ones over a second, which on a user manager is
       usually one or two.
 - [ ] `[startup, is, null]` and `[startup, is, not null]` both match **nothing**
       — the same limitation phase 6b noted for empty strings. Not a regression
@@ -8032,21 +8032,21 @@ a terminal beside the TUI is the whole apparatus.
       failed, `systemd-run --user --unit=nyd-smoke-fail /bin/false` gives you a
       row to look at, and `systemctl --user reset-failed nyd-smoke-fail`
       removes it again.
-- [ ] `c c` on the Services level switches on `Peak` next to `Mem`. It is a
+- [x] `c c` on the Services level switches on `Peak` next to `Mem`. It is a
       byte column like `Mem`, it is never smaller than `Mem` for a running
       unit, and it keeps its value after the unit's memory has dropped again —
       that is what makes it worth the column. Cross-check with
       `systemctl --user show -p MemoryPeak <unit>`.
-- [ ] `Peak` is blank for units that are not running, just as `Mem` is. Neither
+- [x] `Peak` is blank for units that are not running, just as `Mem` is. Neither
       column invents a zero for a unit with no cgroup.
-- [ ] Timers subtab (`t t`) and Unit files subtab (`t u`) have **no** `Startup`
+- [x] Timers subtab (`t t`) and Unit files subtab (`t u`) have **no** `Startup`
       column, and `c c` offers none. Unit files come from the file system and
       have no timestamps at all; the column belongs to the levels that read the
       manager.
-- [ ] Nothing got slower. The listing loads in the same time it did before this
+- [x] Nothing got slower. The listing loads in the same time it did before this
       phase — both timestamps and `MemoryPeak` arrive in the property map the
       row was already fetching, so there is no extra call to pay for.
-- [ ] `o` (details pane) on a Services row shows `Startup` and `Mem peak` among
+- [x] `o` (details pane) on a Services row shows `Startup` and `Mem peak` among
       the fields, with the same rendering as the column.
 
 ## Refinements / deferred tasks
