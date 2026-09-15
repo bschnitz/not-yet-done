@@ -11,14 +11,21 @@
 //! under each name. Two files with the same name mean one is shadowing the
 //! other, and the `shadows` column names the file that lost.
 //!
-//! The search path comes from `systemd-analyze --user unit-paths` rather than a
+//! The search path comes from `systemd-analyze unit-paths` rather than a
 //! constant: it is eighteen directories on a normal login, several of them
 //! under `/run/user/<uid>`, and two of them are generator output that exists
 //! only for this boot. Hard-coding that list would mean maintaining systemd's
 //! lookup order in a second place, and getting it wrong silently.
+//!
+//! Which scope is asked matters as much as asking: `--user` and `--system`
+//! return two disjoint sets of directories, and running the user question
+//! against system units does not produce a wrong shadow — it produces *no*
+//! shadow, ever, which is the failure mode this module exists to catch.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use crate::config::Manager;
 
 /// Every unit file in the search path, grouped by name, in priority order.
 #[derive(Default)]
@@ -27,14 +34,14 @@ pub struct SearchPath {
 }
 
 impl SearchPath {
-    /// Walk this user's unit search path.
+    /// Walk this manager's unit search path.
     ///
     /// Rebuilt per listing rather than cached: it is eighteen `readdir` calls
     /// and the answer changes whenever the user writes a unit — which, in this
     /// tab, they do.
-    pub async fn load_user() -> Self {
+    pub async fn load_for(manager: Manager) -> Self {
         let mut by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        for dir in unit_paths().await {
+        for dir in unit_paths(manager).await {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -80,9 +87,13 @@ impl SearchPath {
 /// A failure here costs the `shadows` column and nothing else: no search path
 /// means no file is known to shadow another, which reads as "nothing to report"
 /// rather than as a wrong answer.
-async fn unit_paths() -> Vec<PathBuf> {
+async fn unit_paths(manager: Manager) -> Vec<PathBuf> {
+    let scope = match manager {
+        Manager::User => "--user",
+        Manager::System => "--system",
+    };
     let out = tokio::process::Command::new("systemd-analyze")
-        .args(["--user", "unit-paths"])
+        .args([scope, "unit-paths"])
         .output()
         .await;
     let Ok(out) = out else { return Vec::new() };
