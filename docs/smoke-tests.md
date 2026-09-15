@@ -8130,6 +8130,16 @@ screen.
 - [ ] The typed columns are populated here too, from the system bus: `startup`,
       `mem`, `mem_peak`, `exposure`, and `fragment` paths under
       `/usr/lib/systemd/system/` rather than `~/.config/systemd/user/`.
+- [ ] `t u` reads the **system** preset policy, not the user one. Spot-check
+      three rows against `systemctl is-enabled`: a `should-disable` row must be
+      `enabled` on a machine whose `99-default.preset` says `disable *`, and a
+      `should-enable` row must be named in `90-systemd.preset`. The failure this
+      catches is the loud one — reading the wrong scope finds no policy at all,
+      and no policy means "enable everything", so every disabled unit drifts.
+- [ ] The `shadows` column is answering the system question. Put a copy of a
+      vendor unit in `/etc/systemd/system/`, refresh, and confirm the column
+      names the `/usr/lib` file it hides — then remove it again. An empty column
+      proves nothing here: the wrong scope is silently empty, not wrong.
 - [ ] `a` on a service offers the **runtime** verbs (start, stop, restart,
       reload, reset-failed, kill, freeze) and **no** unit-file verb — no
       enable, disable, mask, unmask, preset, and no `e`-keys either. Compare

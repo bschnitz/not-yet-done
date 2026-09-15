@@ -215,8 +215,8 @@ impl ContentAdapter for SystemdAdapter {
                 .into_iter()
                 .find(|e| e.path.rsplit('/').next().unwrap_or(&e.path) == name)
                 .ok_or_else(|| ContentError::NotFound(format!("no unit file {name}")))?;
-            let policy = crate::preset::Policy::load_user();
-            let paths = crate::shadow::SearchPath::load_user().await;
+            let policy = crate::preset::Policy::load_for(self.bus().manager());
+            let paths = crate::shadow::SearchPath::load_for(self.bus().manager()).await;
             let row = UnitFileRow::build(&entry, &policy, &paths);
             return Ok(Box::new(self.node(row.summary())));
         }
@@ -497,8 +497,8 @@ impl SystemdAdapter {
         // and which file each one hides. Both are read once per listing and
         // shared across every row — the policy is the same document for all of
         // them, and the search path is the same walk.
-        let policy = crate::preset::Policy::load_user();
-        let paths = crate::shadow::SearchPath::load_user().await;
+        let policy = crate::preset::Policy::load_for(self.bus().manager());
+        let paths = crate::shadow::SearchPath::load_for(self.bus().manager()).await;
         let rows: Vec<UnitFileRow> = self
             .bus()
             .list_unit_files()

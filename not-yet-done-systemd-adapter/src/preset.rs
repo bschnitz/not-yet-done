@@ -37,15 +37,28 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobMatcher};
 
+use crate::config::Manager;
+
 /// The preset directories for *user* units, highest priority first.
-///
-/// The system-scope equivalents are the same paths with `system-preset`; they
-/// belong to phase 7, together with the rest of the system manager.
 const USER_PRESET_DIRS: &[&str] = &[
     "/etc/systemd/user-preset",
     "/run/systemd/user-preset",
     "/usr/local/lib/systemd/user-preset",
     "/usr/lib/systemd/user-preset",
+];
+
+/// The same four directories for *system* units.
+///
+/// Not a detail: the two policies routinely disagree by default. A
+/// distribution that ships `disable *` for system units — most do — while
+/// leaving no user-preset file at all means reading the wrong one turns every
+/// disabled system unit into a unit that "should be enabled". An empty policy
+/// is not a neutral fallback here; it is the opposite answer.
+const SYSTEM_PRESET_DIRS: &[&str] = &[
+    "/etc/systemd/system-preset",
+    "/run/systemd/system-preset",
+    "/usr/local/lib/systemd/system-preset",
+    "/usr/lib/systemd/system-preset",
 ];
 
 /// What the preset policy says about a unit.
@@ -105,13 +118,19 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Read the user preset policy off this machine.
+    /// Read this manager's preset policy off this machine.
     ///
     /// A missing directory is not an error — most machines have one preset file
     /// in `/usr/lib` and nothing else. No policy at all means every unit's
-    /// preset is `enable`, which is what systemd would do too.
-    pub fn load_user() -> Self {
-        Self::load_from(&USER_PRESET_DIRS.iter().map(Path::new).collect::<Vec<_>>())
+    /// preset is `enable`, which is what systemd would do too; which is exactly
+    /// why the manager has to pick the right directories rather than default to
+    /// one of them. See [`SYSTEM_PRESET_DIRS`].
+    pub fn load_for(manager: Manager) -> Self {
+        let dirs = match manager {
+            Manager::User => USER_PRESET_DIRS,
+            Manager::System => SYSTEM_PRESET_DIRS,
+        };
+        Self::load_from(&dirs.iter().map(Path::new).collect::<Vec<_>>())
     }
 
     /// The same, from an explicit list of directories — highest priority first.
@@ -256,6 +275,61 @@ pub fn drift(state: &str, preset: Preset) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two scopes must not be able to collapse into one another.
+    ///
+    /// This is the shape of a bug that shipped: the system tab read the *user*
+    /// preset directories, found nothing there, and an empty policy means
+    /// "enable everything" — so 177 units the distribution wants off were
+    /// reported as drifting towards on. An empty policy is not a neutral
+    /// answer, which is why the directories are picked by manager and not
+    /// defaulted to.
+    #[test]
+    fn each_manager_reads_its_own_preset_directories() {
+        let dirs_for = |m| match m {
+            Manager::User => USER_PRESET_DIRS,
+            Manager::System => SYSTEM_PRESET_DIRS,
+        };
+        assert!(
+            dirs_for(Manager::User)
+                .iter()
+                .all(|d| d.ends_with("user-preset"))
+        );
+        assert!(
+            dirs_for(Manager::System)
+                .iter()
+                .all(|d| d.ends_with("system-preset"))
+        );
+        // Same four locations, same priority order, different last segment.
+        assert_eq!(
+            dirs_for(Manager::User).len(),
+            dirs_for(Manager::System).len()
+        );
+        for (u, s) in dirs_for(Manager::User)
+            .iter()
+            .zip(dirs_for(Manager::System))
+        {
+            assert_eq!(
+                u.trim_end_matches("user-preset"),
+                s.trim_end_matches("system-preset")
+            );
+        }
+    }
+
+    /// What the system policy of a typical distribution actually says, and what
+    /// it must produce: `disable *` plus a named exception list.
+    #[test]
+    fn a_disable_star_policy_leaves_a_disabled_unit_undrifted() {
+        let policy = Policy::parse([
+            "enable getty@.service\nenable remote-fs.target\n".to_string(),
+            "disable *\n".to_string(),
+        ]);
+        assert_eq!(policy.query("accounts-daemon.service"), Preset::Disable);
+        assert_eq!(drift("disabled", Preset::Disable), "");
+        // And the exception still wins, because it is read first.
+        assert_eq!(policy.query("getty@.service"), Preset::Enable);
+        assert_eq!(drift("disabled", Preset::Enable), "should-enable");
+    }
 
     fn policy(text: &str) -> Policy {
         Policy::parse([text.to_string()])

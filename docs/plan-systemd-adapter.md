@@ -1417,6 +1417,38 @@ remembered.
 
 ---
 
+### What it took, beyond the plan — stage 2b
+
+**Two read-side columns were lying on the system tab, and had been since stage 1.** `preset.rs` held one hard-coded list of directories (`…/user-preset`) and
+`shadow.rs` asked one hard-coded question (`systemd-analyze --user
+unit-paths`); both call sites in `adapter.rs` used them whatever manager the
+instance pointed at.
+
+The preset case is the sharper one, because an empty policy is not a neutral
+answer. This machine has no `/usr/lib/systemd/user-preset` file at all, so the
+system tab read _nothing_, and "no policy" means `enable` — which is what
+systemd itself would do. Result: 177 system units reported `should-enable`
+while the real policy, `/usr/lib/systemd/system-preset/99-default.preset`, says
+`disable *`. After the fix the same listing shows 51 real drifts (30
+`should-disable`, 21 `should-enable`), and each one cross-checks against
+`systemctl is-enabled`: `avahi-daemon.service` is enabled against a
+`disable *` policy, `machines.target` is disabled while `90-systemd.preset`
+names it.
+
+The shadow case fails the other way and is therefore easier to miss: the two
+scopes return disjoint directory lists, so asking the user question about
+system units yields no shadow _ever_ rather than a wrong one. On a machine
+with no `/etc` override of a vendor unit — this one — the column looks right
+while being blind.
+
+Both are now `load_for(manager)`. This was found while opening the stage 3
+gate, and it had to be fixed first: `preset` the verb is the one those two
+columns exist to make predictable, and releasing it while the column proposed
+enabling 177 units against the distribution's policy would have been exactly
+the trap [phase 6a](#phase-6a--what-the-preset-wants) was built to close.
+
+---
+
 ## Safety net
 
 This adapter writes into the running session, which none of the others do.
