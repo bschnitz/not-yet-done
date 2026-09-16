@@ -736,12 +736,12 @@ views:
       menu_key: q
       template: |
         # Filter the unit files on disk. Columns: name, state, preset, drift,
-        # origin, shadows, path.
+        # vendor, shadows, path.
         #
         #   query:
         #     [drift, =, should-enable]      # what the preset wants switched on
         #     [shadows, has, /usr]           # what /etc hides from /usr/lib
-        #     [origin, =, system]            # what this machine was given
+        #     [vendor, =, admin]             # what this machine was given
         #
         # The line below matches everything — replace it with your filter:
         query:
@@ -762,7 +762,7 @@ views:
       - key: drift
         label: Drift
         sizing: "fixed(14)"
-      - key: origin
+      - key: vendor
         label: Origin
         style: tertiary
         sizing: "fixed(9)"
