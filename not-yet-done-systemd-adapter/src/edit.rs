@@ -83,6 +83,19 @@ pub fn actions_for(type_id: &str, manager: Manager) -> Vec<NodeAction> {
     if manager != Manager::User {
         return Vec::new();
     }
+    // The security level writes too — `harden` opens a drop-in for the unit the
+    // check is about — so it leaves the same question behind: the file has
+    // changed, the running process has not. Without `apply` here the follow-up
+    // picker the harden write opens cannot be answered at all, and the level
+    // says `Action 'apply' not exposed by node` instead of asking. It gets only
+    // that one: a check row is not a place to open a unit file from.
+    if type_id == "systemd:security" {
+        return vec![NodeAction::new(
+            APPLY,
+            "Apply to the running unit",
+            InputSpec::Picker,
+        )];
+    }
     if !matches!(
         type_id,
         "systemd:service" | "systemd:timer" | "systemd:unitfile"
