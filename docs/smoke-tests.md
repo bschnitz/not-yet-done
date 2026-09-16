@@ -8035,7 +8035,7 @@ come back on the next login. (y/n)` — the confirmation sits on the verb
       for one throwaway unit and nothing else. **This found a bug, and it was
       the whole point of staging the half that looked redundant:** the
       `should-disable` press answered `<unit> has no [Install] section, so
-  there is nothing to enable` — on a unit whose `[Install]` section is
+there is nothing to enable` — on a unit whose `[Install]` section is
       right there, after removing its symlink correctly. `PresetUnitFiles`
       returns `carries_install_info = false` whenever the policy decided to
       **disable**, and `files()` read that flag as "no [Install] section" for
@@ -8152,15 +8152,20 @@ systemd view while the adapter offered all three the whole time.
       unit's overall score on the Services level has dropped by that check's
       exposure (measured on a bare `sleep` unit: 9.4 → 9.2 for
       `KeyringMode=`).
-- [ ] **Blocked — accepting the prepared buffer verbatim reads as a discard.**
-      The editor treats a buffer that comes back byte-identical to the one it
-      handed out as `:q!` (`process_editor_content`, the guard that breaks
-      reopen loops), and that is exactly what a correct `e h` save looks like:
-      the fix line is already typed, so there is nothing to change. The level
-      says `Edit cancelled` and writes nothing. Everything below was measured
-      with one blank line appended to the buffer, which is the workaround —
-      but the action cannot be used as designed until the save of a prepared
-      buffer is told apart from the abandonment of one.
+- [x] **Fixed — accepting the prepared buffer verbatim used to read as a
+      discard.** The editor recognised "the user walked away" by the buffer
+      coming back byte-identical to the one it handed out, and that is exactly
+      what a correct `e h` save looks like: the fix line is already typed, so
+      there is nothing to change. The level said `Edit cancelled` and wrote
+      nothing. The comparison was only ever a stand-in for a question we
+      cannot ask a child process — but the builtin pane reports `:wq` and
+      `:q!` as two different outcomes, so for it the answer was known and
+      thrown away a moment later. It is now believed (`CommitIntent::Saved`),
+      and the comparison is left to the editors that really do leave us
+      guessing. Measured both ways on a throwaway `sleep` unit: `e h`, then
+      `:wq` on the untouched buffer writes the drop-in and opens the apply
+      picker; `e h`, then `:q!` still says `Edit cancelled` and leaves the
+      file exactly as it was.
 - [x] **Fixed and walked live.** The write landed, and then the picker that
       asks what to do about the running unit failed with
       `Action 'apply' not exposed by node`: `apply` was offered on
@@ -8354,7 +8359,7 @@ screen.
       `vendor`. A column key nothing answers renders as an empty column and
       says nothing — while the same name in a query is refused out loud
       (`unknown systemd column 'origin' — valid columns: name, state, path,
-  vendor, preset, drift, shadows`), which is how the typo was finally
+vendor, preset, drift, shadows`), which is how the typo was finally
       caught. The query template on this level named `origin` too. Both fixed.
       Diff a copied level against its original field by field; four of the
       seven differences this file had were silent.
