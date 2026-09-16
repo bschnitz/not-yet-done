@@ -779,17 +779,6 @@ fn print_action_params(a: &NodeAction) {
     }
 }
 
-/// The input shape in one word, for a message that has to name it.
-fn input_shape_name(input: &InputSpec) -> &'static str {
-    match input {
-        InputSpec::None => "no input",
-        InputSpec::Editor => "an editor",
-        InputSpec::Picker => "a picker",
-        InputSpec::FilePicker { .. } => "a file picker",
-        InputSpec::Form { .. } | InputSpec::ColumnForm => "a form",
-    }
-}
-
 /// The CLI flag that feeds an action's input, keyed by its [`InputSpec`]. Shown
 /// per action in [`print_level_usage`] so the user knows how to supply input.
 fn action_flag_hint(a: &NodeAction) -> &'static str {

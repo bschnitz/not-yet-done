@@ -6433,6 +6433,29 @@ impl App {
         all
     }
 
+    /// Names of the tabs that are loaded but left out of the visible layout.
+    ///
+    /// `tabs.order` is an allowlist: a view whose tab is not named there is
+    /// still built, still owns a keymap, and still contributes rows to
+    /// [`Self::all_shortcut_rows`] — but no key switches to it, so none of
+    /// those bindings can be reached. The `--keymap` dump says so per scope
+    /// instead of advertising them like any other tab.
+    pub fn hidden_tab_names(&self) -> Vec<String> {
+        let visible: std::collections::HashSet<usize> = self
+            .tab_layout
+            .tabs()
+            .iter()
+            .map(|&tab| {
+                let Tab::Content(idx) = tab;
+                idx
+            })
+            .collect();
+        self.content_views_indexed()
+            .filter(|(idx, _)| !visible.contains(idx))
+            .map(|(_, cv)| cv.tab_name.to_string())
+            .collect()
+    }
+
     /// The shortcuts that would fire right now: the generic per-tab switch
     /// rows plus the focused content view's live keymap (its keyless actions
     /// included). Shared by the shortcut menu's context scope and by the
@@ -9183,12 +9206,23 @@ impl App {
             // Fold collapsing which-key groups last, so the global frame, the
             // view's hints and the sort entry are all candidates — the group
             // takes the place of whichever of them it swallows first.
-            let hints = crate::key_groups::collapse(
+            let mut hints = crate::key_groups::collapse(
                 self.config.which_key.collapsing_groups(),
                 hints,
                 |(k, _): &(String, String)| k.as_str(),
                 |g| (g.prefix.clone(), crate::key_groups::group_label(g)),
             );
+            // A group whose members all sit in the action bar folds nothing
+            // here, so the fold above never names it — yet the status bar is
+            // where every group entry belongs. The view hands over what it
+            // folded away, and a group already placed is not added twice.
+            if let Some(cv) = self.content_view(idx) {
+                for (prefix, label) in cv.folded_bar_groups() {
+                    if !hints.iter().any(|(k, _)| *k == prefix) {
+                        hints.push((prefix, label));
+                    }
+                }
+            }
             self.status_bar.set_custom_hints(hints);
         }
 

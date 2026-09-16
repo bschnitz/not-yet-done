@@ -8174,49 +8174,22 @@ impl ContentView {
         // Snapshot every pane-derived value into locals before touching
         // `self.action_bar` so the borrow on `self.pane_trees[..]` ends
         // before the mutable borrow on `action_bar` begins.
-        let mut hints = self.action_bar_hints();
+        let hints = self.action_bar_hints();
         let active_filter_name = self.active_pane().active_query_name.clone();
-        let favs: Vec<(String, String)> = self
-            .db_saved_queries
-            .iter()
-            .filter_map(|sq| sq.shortcut.as_ref().map(|s| (sq.name.clone(), s.clone())))
-            .collect();
-        // Script shortcuts (`:script`-menu chords and, on Postgres, per-table
-        // script chords) already dispatch via the claims registered in
-        // `build_view_claims`, but — unlike saved-query favorites — never had
-        // a bar entry. Surface them as their own bar group (rendered with a
-        // separator only when non-empty) so a bound script chord is
-        // discoverable, not just its underlying menu key. Same scopes as the
-        // claim registration so what shows is exactly what dispatches.
-        let mut script_favs: Vec<(String, String)> = Vec::new();
-        if let Some(scope) = self.focused_script_scope() {
-            if let Some(entries) = self.script_shortcuts.get(&scope) {
-                script_favs.extend(entries.iter().cloned());
-            }
-        }
-        if let Some(node_id) = self.target_node_script_node_id() {
-            if let Some(entries) = self.node_script_shortcuts.get(&node_id) {
-                script_favs.extend(entries.iter().cloned());
-            }
-        }
-        // A collapsing which-key group folds these two groups as well, but
-        // its own entry belongs with the hints — one `o Open …` in the bar,
-        // not one per section. `action_bar_hints` already folded the hints,
-        // so a group that only ever showed up as a favorite is appended here.
-        let (favs, hit_favs) =
-            crate::key_groups::strip(&self.key_groups, favs, |f: &(String, String)| f.1.as_str());
-        let (script_favs, hit_scripts) =
-            crate::key_groups::strip(&self.key_groups, script_favs, |f: &(String, String)| {
-                f.1.as_str()
-            });
-        for g in hit_favs.into_iter().chain(hit_scripts) {
-            if !hints.iter().any(|h| h.key == g.prefix) {
-                hints.push(ActionHint::new(
-                    g.prefix.clone(),
-                    crate::key_groups::group_label(g),
-                ));
-            }
-        }
+        // A collapsing which-key group folds these two sections as well, and
+        // its own entry goes to the status bar with every other folded group
+        // (see `folded_bar_groups`) — so here the grouped entries are simply
+        // dropped.
+        let (favs, _) = crate::key_groups::strip(
+            &self.key_groups,
+            self.query_favorites(),
+            |f: &(String, String)| f.1.as_str(),
+        );
+        let (script_favs, _) = crate::key_groups::strip(
+            &self.key_groups,
+            self.script_favorites(),
+            |f: &(String, String)| f.1.as_str(),
+        );
         let (fuzzy_active, fuzzy_query, fuzzy_cursor) = {
             let p = self.active_pane();
             (
@@ -12088,7 +12061,99 @@ impl ContentView {
         self.sync_action_bar_hints();
     }
 
+    /// Saved queries that carry a favorite chord, as `(name, key)`.
+    fn query_favorites(&self) -> Vec<(String, String)> {
+        self.db_saved_queries
+            .iter()
+            .filter_map(|sq| sq.shortcut.as_ref().map(|s| (sq.name.clone(), s.clone())))
+            .collect()
+    }
+
+    /// Script shortcuts (`:script`-menu chords and, on Postgres, per-table
+    /// script chords) already dispatch via the claims registered in
+    /// `build_view_claims`, but — unlike saved-query favorites — never had a
+    /// bar entry. Surfaced as their own bar section so a bound script chord is
+    /// discoverable, not just its underlying menu key. Same scopes as the
+    /// claim registration, so what shows is exactly what dispatches.
+    fn script_favorites(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        if let Some(scope) = self.focused_script_scope() {
+            if let Some(entries) = self.script_shortcuts.get(&scope) {
+                out.extend(entries.iter().cloned());
+            }
+        }
+        if let Some(node_id) = self.target_node_script_node_id() {
+            if let Some(entries) = self.node_script_shortcuts.get(&node_id) {
+                out.extend(entries.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// The collapsing which-key groups that fold something away from the
+    /// action bar on this level, as `(prefix, label)` in config order.
+    ///
+    /// The group entry itself belongs in the *status* bar, wherever its
+    /// members happen to live. A folded group can never light up — it is a
+    /// chord prefix, not an action, and [`ActionHint::new`] gives it
+    /// `active: false` — so the action bar, whose whole job is the active
+    /// state, has nothing to do with it. Keeping it there also made its bar
+    /// depend on an accident of the level: the systemd `a` verbs are
+    /// fire-and-forget on a unit file and so folded in the status bar, while
+    /// on a service `kill` opens a signal picker, which put the very same
+    /// `a Action …` in the action bar instead — and, next to the other verbs,
+    /// in both at once. Now it has one place on every level.
+    pub fn folded_bar_groups(&self) -> Vec<(String, String)> {
+        if self.window_pending.is_some() {
+            return Vec::new();
+        }
+        let mut hit: Vec<&crate::config::tui_config::WhichKeyGroup> = Vec::new();
+        let (_, from_hints) = crate::key_groups::strip(
+            &self.key_groups,
+            self.action_bar_hints_ungrouped(),
+            |h: &ActionHint| h.key.as_str(),
+        );
+        let (_, from_favs) = crate::key_groups::strip(
+            &self.key_groups,
+            self.query_favorites(),
+            |f: &(String, String)| f.1.as_str(),
+        );
+        let (_, from_scripts) = crate::key_groups::strip(
+            &self.key_groups,
+            self.script_favorites(),
+            |f: &(String, String)| f.1.as_str(),
+        );
+        for g in from_hints.into_iter().chain(from_favs).chain(from_scripts) {
+            if !hit.iter().any(|h| h.prefix == g.prefix) {
+                hit.push(g);
+            }
+        }
+        hit.into_iter()
+            .map(|g| (g.prefix.clone(), crate::key_groups::group_label(g)))
+            .collect()
+    }
+
+    /// The hints the action bar shows: everything activatable on this level,
+    /// minus whatever a collapsing which-key group folds away. The group's own
+    /// entry is not put back here — it goes to the status bar, see
+    /// [`Self::folded_bar_groups`].
     pub fn action_bar_hints(&self) -> Vec<ActionHint> {
+        if self.window_pending.is_some() {
+            return self.window_mode_hints();
+        }
+        let (kept, _) = crate::key_groups::strip(
+            &self.key_groups,
+            self.action_bar_hints_ungrouped(),
+            |h: &ActionHint| h.key.as_str(),
+        );
+        kept
+    }
+
+    /// Every action-bar hint of this level with its `active` flag resolved,
+    /// before any which-key group folds a chord away. The folding itself is
+    /// [`Self::action_bar_hints`]'s last step, and which groups it removed is
+    /// [`Self::folded_bar_groups`]'s answer — both read this.
+    fn action_bar_hints_ungrouped(&self) -> Vec<ActionHint> {
         if self.window_pending.is_some() {
             return self.window_mode_hints();
         }
@@ -12176,14 +12241,7 @@ impl ContentView {
             }
             resolved.push(gh.clone());
         }
-        // Last step, once every hint (view, App-global, resolved) is in: a
-        // collapsing which-key group trades its chords for a single entry.
-        crate::key_groups::collapse(
-            &self.key_groups,
-            resolved,
-            |h: &ActionHint| h.key.as_str(),
-            |g| ActionHint::new(g.prefix.clone(), crate::key_groups::group_label(g)),
-        )
+        resolved
     }
 
     /// Resolve whether an action-bar hint with the given [`ActiveSurface`] is
@@ -21526,6 +21584,47 @@ mod tests {
         assert!(
             hints.iter().any(|h| h.key == "x" && h.desc == "script"),
             "expected [x] script in action bar, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn a_collapsing_group_folds_out_of_the_action_bar_into_the_status_bar() {
+        // A folded group is a chord prefix, not an action — it can never
+        // light up, so it does not belong in the bar whose job is the active
+        // state. Which bar it landed in used to depend on an accident of the
+        // level: systemd showed `a Action …` in the action bar on Services,
+        // where `kill` asks for a signal, and nowhere near it on Unit files,
+        // where every verb fires and forgets.
+        let mut config = test_config_with_children();
+        config.views[0].actions.push(
+            serde_yaml::from_str("{ name: edit drop-in, key: \"a h\", type: edit }")
+                .expect("action parses"),
+        );
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        // Without a group the chord stands in the action bar on its own.
+        assert!(
+            view.action_bar_hints().iter().any(|h| h.key == "a h"),
+            "expected [a h] in the action bar, got: {:?}",
+            view.action_bar_hints()
+        );
+        assert!(view.folded_bar_groups().is_empty());
+
+        view.set_key_groups(&[crate::config::tui_config::WhichKeyGroup {
+            prefix: "a".into(),
+            title: Some("Action …".into()),
+            collapse_in_bars: true,
+        }]);
+        let hints = view.action_bar_hints();
+        assert!(
+            !hints.iter().any(|h| h.key == "a h" || h.key == "a"),
+            "the group folds the chord away and puts nothing back: {hints:?}"
+        );
+        assert_eq!(
+            view.folded_bar_groups(),
+            vec![("a".to_string(), "Action …".to_string())],
+            "and hands the group to the status bar instead"
         );
     }
 

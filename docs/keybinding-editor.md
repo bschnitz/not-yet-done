@@ -138,6 +138,14 @@ optional argument narrows every column at once (key, action, scope, path).
 The flag prints and exits: no adapter connects, nothing is loaded, nothing
 is written, so it is safe to run while the TUI is up.
 
+**A tab left out of `tabs.order` is marked, not dropped.** The order is an
+allowlist: a view whose tab is not named there is still built and still owns
+its keymap, so its bindings show up here — but no key switches to the tab, and
+none of them can be reached. Such scopes carry
+`(not in tabs.order — unreachable)` next to their heading, and the summary
+line at the top names the tabs. Dropping them instead would hide the very
+config mistake the dump is read to find.
+
 **What it does not list:** the shortcuts you bound at runtime — saved
 queries and `:script`-menu scripts, whose keys live in the adapter database
 and attach to one drilldown level. Those exist only in the menu's context

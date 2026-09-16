@@ -186,7 +186,11 @@ async fn main() -> Result<()> {
     if cli.keymap {
         print!(
             "{}",
-            keymap_dump::render(&app.all_shortcut_rows(), cli.filter.as_deref())
+            keymap_dump::render(
+                &app.all_shortcut_rows(),
+                cli.filter.as_deref(),
+                &app.hidden_tab_names(),
+            )
         );
         return Ok(());
     }
