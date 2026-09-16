@@ -74,6 +74,35 @@ pub enum EditorRequest {
     None,
 }
 
+/// What the editor told us about the user's intent when it closed.
+///
+/// The builtin pane reports `:wq` and `:q!` as two different outcomes, so
+/// for it the answer is known. An external editor hands back nothing but the
+/// file, and a `:q!` leaves that file exactly as we wrote it — there the
+/// buffer is the only signal there is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitIntent {
+    /// The editor said the user saved. Take it at its word.
+    Saved,
+    /// Nothing but the buffer to go on.
+    Unknown,
+}
+
+/// Whether a closed editor's buffer should be read as "the user walked away".
+///
+/// The byte comparison stands in for an answer we do not have; it is not a
+/// rule about what an unchanged buffer means. A *prepared* buffer — `e h` on
+/// the systemd security level types the fix line for you — comes back
+/// identical precisely when the user agreed with it, so guessing there turns
+/// the designed happy path into `Edit cancelled` and writes nothing. Where
+/// the editor knows the answer, that answer wins.
+fn reads_as_discard(intent: CommitIntent, last_buffer: Option<&str>, content: &str) -> bool {
+    match intent {
+        CommitIntent::Saved => false,
+        CommitIntent::Unknown => last_buffer == Some(content),
+    }
+}
+
 impl EditorRequest {
     /// Whether dispatching this request hands the terminal to a child
     /// process. The main loop must tear its `EventStream` reader down
@@ -321,9 +350,11 @@ impl App {
             Outcome::Save(content) => EditorRequest::BuiltinLiveApply { content },
             Outcome::SaveAndClose(content) => {
                 self.builtin_editor = None;
-                // Same background commit as a closing external editor —
-                // including its cancel detection for an unchanged buffer.
-                self.spawn_session_commit(&content);
+                // Same background commit as a closing external editor, but
+                // not its guesswork: this pane reports `:q!` as `Cancel`
+                // below, so a `SaveAndClose` is a save even when the buffer
+                // is untouched.
+                self.spawn_session_commit(&content, CommitIntent::Saved);
                 EditorRequest::None
             }
             Outcome::Cancel => {
@@ -774,11 +805,11 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub async fn process_editor_content(&mut self, content: &str) -> Option<String> {
-        // Cancel detection: if the buffer comes back byte-identical to what
-        // we last wrote, the user closed without saving (`:q` / `:q!`).
+        // Cancel detection: this is the blocking in-terminal editor, another
+        // child process we learn nothing from, so the buffer is all we have.
         // Critical for breaking out of validation-error reopen loops where
         // the disk content stays the same on `:q!`.
-        if self.last_editor_buffer.as_deref() == Some(content) {
+        if reads_as_discard(CommitIntent::Unknown, self.last_editor_buffer.as_deref(), content) {
             self.cancel_pending_edit();
             return None;
         }
@@ -1010,16 +1041,18 @@ impl App {
         let Some(content) = self.poll_detached_editor() else {
             return false;
         };
-        self.spawn_session_commit(&content);
+        // A closed child process leaves no trace of which command closed it.
+        self.spawn_session_commit(&content, CommitIntent::Unknown);
         true
     }
 
     /// Spawn the active session's `commit` on a background tokio task.
     /// Sets `commit_in_flight = true` until the result is drained from
-    /// `commit_rx`. Cancel detection (`:q!` returns the same buffer)
-    /// happens here, before any work is dispatched.
-    pub fn spawn_session_commit(&mut self, content: &str) {
-        if self.last_editor_buffer.as_deref() == Some(content) {
+    /// `commit_rx`. Cancel detection happens here, before any work is
+    /// dispatched — but only for an `intent` that leaves us guessing; see
+    /// [`reads_as_discard`].
+    pub fn spawn_session_commit(&mut self, content: &str, intent: CommitIntent) {
+        if reads_as_discard(intent, self.last_editor_buffer.as_deref(), content) {
             self.cancel_pending_edit();
             return;
         }
@@ -1084,6 +1117,52 @@ impl App {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod commit_intent_tests {
+    use super::*;
+
+    #[test]
+    fn an_untouched_buffer_from_a_silent_editor_is_a_discard() {
+        // The external case the guard was written for: nvim closed, the file
+        // on disk is byte-for-byte what we wrote, and `:q!` is the only
+        // reading that does not loop on a validation error.
+        assert!(reads_as_discard(
+            CommitIntent::Unknown,
+            Some("template"),
+            "template"
+        ));
+    }
+
+    #[test]
+    fn an_untouched_buffer_from_the_builtin_pane_is_a_save() {
+        // The pane already told us `:wq`. `e h` prepares a buffer that is
+        // correct as handed out, so agreeing with it changes nothing — and
+        // that must still write.
+        assert!(!reads_as_discard(
+            CommitIntent::Saved,
+            Some("template"),
+            "template"
+        ));
+    }
+
+    #[test]
+    fn an_edited_buffer_is_a_save_either_way() {
+        for intent in [CommitIntent::Saved, CommitIntent::Unknown] {
+            assert!(
+                !reads_as_discard(intent, Some("template"), "template\nmore"),
+                "{intent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_handed_out_is_never_a_discard() {
+        // No snapshot means no editor of ours is pending; there is nothing
+        // the content could be identical *to*.
+        assert!(!reads_as_discard(CommitIntent::Unknown, None, ""));
     }
 }
 
