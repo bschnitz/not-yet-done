@@ -7816,7 +7816,7 @@ notes too, e.g. `/Alpha/Beta`.
 
 - [ ] Rename the parent to `Alphonse` past the adapter
       (`cargo run -p not-yet-done-task-cli -- task edit <id> --description
-  Alphonse`), which does not move directories, then `n` on
+Alphonse`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
@@ -8346,3 +8346,61 @@ beside the TUI is the whole apparatus.
 - [ ] Device rows render: a chain that reaches a disk ends in a
       `dev-disk-by\x2duuid-….device` row with the backslash escapes intact,
       and the column does not wrap or truncate them into nonsense.
+
+## systemd — failed units: the level and the startup report (phase 6d)
+
+The `systemd:failed` level, which covers every unit type rather than only
+services, and the `connected` hook that reports the failed set once when an
+instance connects. The level is declared by the adapter and by no view, so it is
+addressed from the CLI; the hook is what the TUI shows. The apparatus is one
+throwaway unit that fails on purpose:
+
+```sh
+systemd-run --user --unit=nyd-hook-probe.service /bin/false   # make one fail
+systemctl --user reset-failed nyd-hook-probe.service          # clean up
+```
+
+- [x] With the probe failing, `nyd adapter systemd ls` prints
+      `systemd: 1 user unit failed: nyd-hook-probe.service` — and prints it on
+      **stderr**. Redirect the two streams into separate files to check it: the
+      table is alone on stdout, the hook line is on stderr beside the progress
+      line. A caller that pipes `ls` must not get the remark in its data.
+- [x] `nyd adapter systemd ls -t systemd:failed` lists the probe with all six
+      columns. `kind` says `service`, `load` says `loaded`, `sub` says `failed`,
+      and `since` is when the unit entered that state — not when it last came
+      up. Cross-check with
+      `systemctl --user show -p StateChangeTimestamp nyd-hook-probe.service`.
+- [x] `nyd adapter systemd:failed 'failed:nyd-hook-probe.service' reset-failed`
+      answers `Cleared the failed state of nyd-hook-probe.service`. The control
+      verbs act on a unit name, and the `failed:` id carries the whole name, so
+      they work on this level with nothing of their own. The level is empty
+      afterwards and `systemctl --user --failed` prints nothing.
+- [x] With nothing failing, the hook says **nothing at all** — no "all good"
+      line on either stream. A startup notice that speaks every day is one its
+      reader learns to dismiss.
+- [x] The system instance answers for its own manager only: with a failed
+      _user_ unit present, `nyd adapter systemd-system ls` stays silent and
+      `-t systemd:failed` there reports `(no rows)`.
+- [ ] A failed **non-service** unit is the whole reason the level exists. Break
+      a mount or a socket (a `.mount` unit pointing at a device that is not
+      there will do) and check that it appears on the level with its `kind`, and
+      that it is named in the startup report. It will _not_ appear on the
+      `Failed` subtab of the systemd tab — that subtab is still the Services
+      level with a query, which is the limitation recorded in
+      [the plan](plan-systemd-adapter.md#phase-6d--the-ambient-half).
+- [ ] TUI, with something failing before launch: the report lands in the
+      notification centre (`f10`) as a normal notice, newest first, and the
+      notification bar shows it on the way in. Before this phase the hook could
+      only reach stderr, which is behind the alternate screen — so a hook that
+      spoke said nothing.
+- [ ] TUI, both managers failing at once: two notices, one per instance, each
+      naming its own manager (`1 user unit failed` / `1 system unit failed`).
+      That is the point of the wording, not a duplicate.
+- [ ] Past five names the rest is counted, not printed: with six or more units
+      failing the line reads `… and N more`. Six probes
+      (`nyd-hook-probe-1` … `-6`) are the cheapest way to see it.
+- [ ] A binding that cannot run reports as an **error** notice naming the
+      instance, the hook and the action — point a `connected` binding at an
+      action id that does not exist and check the wording. A throttled or
+      skipped binding stays quiet by contrast; only a failure is worth a
+      colour.

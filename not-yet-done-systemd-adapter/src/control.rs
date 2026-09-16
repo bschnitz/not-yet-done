@@ -86,8 +86,17 @@ impl Scope {
                     // and the level is where a slow start is found, so it is
                     // also where restarting the culprit belongs.
                     | "systemd:chain"
+                    // A failed row is a unit of any kind too, and the level
+                    // exists to be acted on: restart it, or clear the failed
+                    // state so it can be started again.
+                    | "systemd:failed"
             ),
-            Scope::Loaded => matches!(type_id, "systemd:service" | "systemd:timer"),
+            // `reset-failed` is the one verb this level is really for, and it
+            // needs a loaded unit — which every row here is, by definition.
+            Scope::Loaded => matches!(
+                type_id,
+                "systemd:service" | "systemd:timer" | "systemd:failed"
+            ),
             Scope::Processes => type_id == "systemd:service",
         }
     }

@@ -265,7 +265,16 @@ fn run_adapter(args: &[String]) -> Result<()> {
         // No-op unless this instance's view file configures one; throttled via
         // the host state file, so e.g. an auto-backup runs at most once a day
         // however often the CLI is invoked. Best-effort — never blocks the verb.
-        not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected").await;
+        // What a hook had to say goes to stderr, not stdout: it is out of band
+        // with respect to the verb, and stdout is what a caller pipes. A
+        // failing binding already prints itself from the host.
+        for report in not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected")
+            .await
+        {
+            if let not_yet_done_host::HookOutcome::Fired(Some(message)) = report.outcome {
+                eprintln!("{}: {message}", report.instance);
+            }
+        }
 
         // Event hooks (e.g. `tracking_started`): the adapter publishes them on
         // the bus while the verb runs; subscribe now, fire them once the verb
