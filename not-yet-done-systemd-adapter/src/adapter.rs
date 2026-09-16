@@ -67,6 +67,7 @@ use not_yet_done_content::*;
 
 use std::collections::HashMap;
 
+use crate::chain::{ChainRow, chain_columns, chain_type};
 use crate::bus::{Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry};
 use crate::config::SystemdConfig;
 use crate::control;
@@ -233,6 +234,16 @@ impl ContentAdapter for SystemdAdapter {
             let row = security::check(self.bus().manager(), unit, field).await?;
             return Ok(Box::new(self.node(row.summary())));
         }
+        if let Some((root, unit)) = crate::chain::parse(id) {
+            let row = crate::chain::level(self.bus(), root)
+                .await?
+                .into_iter()
+                .find(|r| r.unit == unit)
+                .ok_or_else(|| {
+                    ContentError::NotFound(format!("{unit} is not on the critical chain of {root}"))
+                })?;
+            return Ok(Box::new(self.node(row.summary())));
+        }
         if deps::parse(id).is_some() {
             let row = deps::row_by_id(self.bus(), id).await?;
             return Ok(Box::new(self.node(row.summary())));
@@ -271,6 +282,9 @@ impl ContentAdapter for SystemdAdapter {
         // a unit the manager never loaded still answers. Under a timer it
         // answers about the service the timer triggers — see
         // [`SystemdAdapter::triggered_unit`].
+        // The critical chain hangs off the loaded units only, and not off a
+        // unit file: a chain is a fact about a startup that happened, and a
+        // unit the manager has never loaded had none.
         // A dependency row hangs under itself: that is what makes the needs
         // level a tree. The ordering level does not — see [`crate::deps`].
         if type_id == deps::dep_type().type_id {
@@ -308,6 +322,11 @@ impl ContentAdapter for SystemdAdapter {
                     node_type: security_type(),
                     columns: security_columns(),
                     list: Box::new(move |params| Box::pin(self.list_security(id, params))),
+                },
+                Child {
+                    node_type: chain_type(),
+                    columns: chain_columns(),
+                    list: Box::new(move |params| Box::pin(self.list_chain(id, params))),
                 },
             ];
         }
@@ -668,6 +687,35 @@ impl SystemdAdapter {
         ))
     }
 
+    /// What the unit the user drilled into actually waited for, as a flat
+    /// list in chain order.
+    ///
+    /// Computed rather than parsed out of `systemd-analyze critical-chain` —
+    /// see [`crate::chain`] for the rule, for what the text output leaves out,
+    /// and for why the level is a list with a `depth` column instead of a
+    /// tree.
+    async fn list_chain(&self, node_id: &str, params: ListParams) -> Result<ListResult> {
+        let query = compile(params.query.as_deref(), query::CHAIN_COLUMNS)?;
+        let unit = node_id
+            .strip_prefix(crate::SERVICE_PREFIX)
+            .or_else(|| node_id.strip_prefix(crate::TIMER_PREFIX))
+            .ok_or_else(|| ContentError::NotFound(format!("{node_id} is not a unit")))?;
+        let _busy = self.shared.status.busy(
+            &format!("Walking back from {unit}"),
+            self.shared.timeout_secs,
+        );
+        let rows = crate::chain::level(self.bus(), unit).await?;
+        Ok(finish_by(
+            query::retain(rows, &query)
+                .iter()
+                .map(ChainRow::summary)
+                .collect(),
+            &params.sort,
+            &chain_columns(),
+            "depth",
+        ))
+    }
+
     /// The unit a timer triggers — what a timer's security level is about.
     ///
     /// `systemd-analyze security` refuses a `.timer` outright ("is not a
@@ -743,10 +791,25 @@ fn compile(raw: Option<&str>, columns: &[&str]) -> Result<Option<UnitQuery>> {
 /// Without a requested sort the rows arrive in whatever order the concurrent
 /// property reads finished, which would reshuffle the table on every load; by
 /// name is the order the unit lists have everywhere else.
-fn finish(mut items: Vec<NodeSummary>, sort: &[SortKey], columns: &[ColumnSchema]) -> ListResult {
+fn finish(items: Vec<NodeSummary>, sort: &[SortKey], columns: &[ColumnSchema]) -> ListResult {
+    finish_by(items, sort, columns, "name")
+}
+
+/// The same, for a level whose own order is not alphabetical.
+///
+/// The critical chain is the one so far: its rows are a path, and the path is
+/// the answer. `depth` is that order as a column, so the level opens in chain
+/// order and a user who wants the biggest `+` first sorts by `took` and gets
+/// the chain back by sorting on `depth` again.
+fn finish_by(
+    mut items: Vec<NodeSummary>,
+    sort: &[SortKey],
+    columns: &[ColumnSchema],
+    default: &str,
+) -> ListResult {
     let requested: Vec<SortKey> = if sort.is_empty() {
         vec![SortKey {
-            column: "name".into(),
+            column: default.into(),
             direction: SortDirection::Asc,
         }]
     } else {
@@ -980,6 +1043,9 @@ impl UnitNode {
             // A security row is about one unit too, and the drop-in the harden
             // action opens is that unit's.
             .or_else(|| security::unit_of(&self.id))
+            // And a chain row is the unit it names, not the one the chain was
+            // opened on — the verbs act on the culprit the level found.
+            .or_else(|| crate::chain::unit_of(&self.id))
     }
 
     /// The checks every verb passes before it reaches the manager, in the order
@@ -1376,14 +1442,16 @@ mod tests {
         );
     }
 
-    /// The child levels answer five different questions about a unit, and only
-    /// the ones that read the manager's object need it to have loaded the unit.
+    /// The child levels answer six different questions about a unit, and only
+    /// the ones that read the manager's object need it to have loaded the
+    /// unit. The critical chain needs more than an object: it needs a startup
+    /// that happened, which is why it is not under a unit file either.
     #[test]
     fn properties_need_a_loaded_unit_and_the_journal_does_not() {
         let a = adapter();
         // A service is loaded, so the manager holds an object that can be
         // asked what it needs, what it is ordered against and what it is — and
-        // it has a journal, and an analysis, like anything else.
+        // it has a journal, an analysis, and a chain of what it waited for.
         let service = a.node(ServiceRow::default().summary());
         let under: Vec<String> = a
             .childs(&service)
@@ -1397,7 +1465,8 @@ mod tests {
                 "systemd:order",
                 "systemd:property",
                 "systemd:log",
-                "systemd:security"
+                "systemd:security",
+                "systemd:chain"
             ]
         );
 

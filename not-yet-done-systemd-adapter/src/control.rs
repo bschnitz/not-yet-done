@@ -82,6 +82,10 @@ impl Scope {
                     | "systemd:unitfile"
                     | "systemd:dep"
                     | "systemd:order"
+                    // A row on the critical chain is a unit like any other —
+                    // and the level is where a slow start is found, so it is
+                    // also where restarting the culprit belongs.
+                    | "systemd:chain"
             ),
             Scope::Loaded => matches!(type_id, "systemd:service" | "systemd:timer"),
             Scope::Processes => type_id == "systemd:service",

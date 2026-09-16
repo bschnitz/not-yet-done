@@ -48,6 +48,7 @@
 pub mod adapter;
 pub mod bus;
 pub mod calendar;
+pub mod chain;
 pub mod config;
 pub mod control;
 pub mod create;
@@ -103,3 +104,10 @@ pub const LOG_PREFIX: &str = "log:";
 /// Two segments, split from the right like [`LOG_PREFIX`]: systemd's
 /// `json_field` never holds a colon, a unit name may.
 pub const SECURITY_PREFIX: &str = "security:";
+/// Node-id prefix for one unit on the critical chain of another
+/// (`chain:<root>><unit>`).
+///
+/// The unit the chain was opened on travels with the row because the same unit
+/// sits on many chains, and a row is addressed by its id. Split on `>` like a
+/// dependency id: a unit name may hold a colon, never a `>`.
+pub const CHAIN_PREFIX: &str = "chain:";

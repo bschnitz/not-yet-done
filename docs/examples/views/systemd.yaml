@@ -404,6 +404,10 @@ views:
       # thing to find out by pressing it — a colliding binding fails the
       # config with both claimants named.
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      # What the start of the unit under the cursor actually waited for,
+      # one hop per row — see the `Chain` child below. `C` for chain; the
+      # lowercase `c` is the column leader and not available.
+      - { name: chain, key: C, type: navigate, navigate_to: "systemd:chain" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit. `n` is the leader for making something that is not
       # there yet. It acts on the manager, not on the row under the cursor, so
@@ -710,6 +714,130 @@ views:
           # in either order. That is systemd's own arithmetic, not a gap in the
           # table.
           - { name: harden, key: "e h", id: harden }
+
+      # ------------------------------------ what the start waited for
+      #
+      # `systemd-analyze critical-chain <unit>` answers the question a slow
+      # start raises. It walks backwards from the unit through what it is
+      # ordered `After=`, one hop at a time, always to the dependency that
+      # became active last before it, and draws the walk as a tree.
+      #
+      # The adapter computes the same walk instead of parsing that tree.
+      # There is no `--json=` for critical-chain the way there is for
+      # `security`, its only output is box drawing with systemd-escaped unit
+      # names (`dev-disk-by\x2duuid-….device`), and a parser for it would
+      # break on the first unit whose own name holds a `└`. Computing it
+      # costs the properties the adapter already knows how to read, and it
+      # buys cells with types rather than `+4.525s` in a string.
+      #
+      # A flat list rather than a tree, on purpose. The level exists to find
+      # the biggest `+`, and finding it is a sort — while a tree stops being
+      # the chain the moment it is sorted. So the indentation is a column
+      # instead: `depth` 0 is the unit you asked about, `depth` 1 is what it
+      # waited for. Sort by `took` and the culprit is the first row, with
+      # `depth` still saying where in the chain it sat; sort by `depth` and
+      # the chain is back.
+      #
+      # On this manager the chains are short, and that is the answer rather
+      # than a defect. A user manager's whole startup is a fraction of the
+      # system manager's — a couple of hundred milliseconds, a handful of
+      # slices, sockets and targets, and not one service on the critical
+      # path, because the services of a session are started by what happens
+      # in the session, not by the manager coming up. A chain of half a
+      # dozen rows ending at `-.slice` is the honest shape of that. Where
+      # the system view answers "what made the boot take this long", this
+      # one answers "what had to be in place before this unit could start",
+      # and the usual answer is that almost nothing was in the way.
+      - &chain
+        name: Chain
+        node_type: "systemd:chain"
+        query:
+          editable: true
+          menu_key: q
+          template: |
+            # Filter the chain. Columns: unit, depth, at, took, origin,
+            # description.
+            #
+            #   query:
+            #     [took, gt, 1]              # the hops that cost over a second
+            #     [origin, =, after]         # what is not from this startup
+            #     [unit, has, .mount]        # only the mounts on the way
+            #
+            # `at` and `took` compare in seconds, so `[took, gt, 1]` is "over
+            # a second" — the rows themselves keep their microseconds.
+            #
+            # The line below matches everything — replace it with your filter:
+            query:
+              [depth, gte, 0]
+        columns:
+          - key: unit
+            label: Unit
+            style: text_high
+            sizing: "flex(3)"
+          # The indentation of systemd's tree, as a number. It is also the
+          # level's default sort, which is what makes it open as a chain
+          # rather than as an alphabetical list of units.
+          - key: depth
+            label: Depth
+            kind: number
+            sizing: "fixed(6)"
+          # The number the tree prints after `@`: an offset from the
+          # manager's own userspace timestamp, which is the same zero
+          # `systemd-analyze time` counts from. `at + took` is the moment the
+          # unit became active.
+          #
+          # `format: precise` for the same reason the Startup column has it —
+          # a clock face would render every one of these as `00`.
+          - key: at
+            label: At
+            kind: duration
+            format: precise
+            sizing: "fixed(9)"
+          # The number after `+`, and the one to sort by: this is how long
+          # the hop itself cost. Blank where the unit never started, `0`
+          # where it started instantly — a `Type=simple` unit counts as
+          # active the moment it execs, and that is a measurement, not a gap.
+          - key: took
+            label: Took
+            kind: duration
+            format: precise
+            sizing: "fixed(9)"
+          # Which startup the timestamps on this row belong to — the column
+          # systemd's tree has no equivalent of, and the reason it is worth
+          # having one here.
+          #
+          #   startup   the row is part of the manager's startup, as printed
+          #   after     it became active after the manager had finished
+          #   before    it was already up when userspace began (the initrd)
+          #   (blank)   it never became active at all
+          #
+          # `systemd-analyze` says none of this. A unit restarted hours into
+          # the uptime appears in a boot tree with a `+` like any other line,
+          # and a chain that leaves the startup window is quietly rerouted
+          # through whatever was still inside it. Here the row says which it
+          # is, and it says so per row, so it survives sorting and can be
+          # filtered on.
+          - key: origin
+            label: Origin
+            sizing: "fixed(8)"
+          - key: description
+            label: Description
+            style: secondary
+            sizing: "flex(3)"
+        # Dim rather than warn — see the note on `origin` above. On the user
+        # manager `after` is the normal case, not an alarm: this manager
+        # finishes its startup in under 200 ms, so a service you start from
+        # the session, or one D-Bus activates on demand, is legitimately
+        # outside the window. Colouring that yellow would cry wolf on nearly
+        # every chain here. The system view uses `warning` for the same
+        # value, where it means what it sounds like.
+        highlights:
+          - when: { field: origin, matches: '^(after|before)$' }
+            style: text_dim
+          - when: { field: origin, matches: '^$' }
+            style: text_dim
+        actions:
+          - { name: refresh, key: r, type: reload }
 
       # ------------------------------------ what a unit needs, and when
       #
@@ -1049,6 +1177,10 @@ views:
       # The security checks for this unit — the Services subtab above carries
       # the explanation.
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      # What the start of the unit under the cursor actually waited for,
+      # one hop per row — see the `Chain` child below. `C` for chain; the
+      # lowercase `c` is the column leader and not available.
+      - { name: chain, key: C, type: navigate, navigate_to: "systemd:chain" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -1183,6 +1315,12 @@ views:
       # usually failing *because* of it, and this level is where you can see
       # what the drop-in took away.
       - *security
+
+      # And the chain, aliased from Services. A unit that failed on a timeout
+      # failed waiting for something, and this is the level that names it —
+      # the chain is built from the timestamps of the last start, so it
+      # survives the unit having gone on to fail.
+      - *chain
 
       # The same two levels as under Services, aliased rather than copied: a
       # unit's dependencies do not change shape because the list above them
@@ -1384,6 +1522,10 @@ views:
       # The security checks — but for the service this timer triggers, not for
       # the timer. See the `Security` child below.
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      # What the start of the unit under the cursor actually waited for,
+      # one hop per row — see the `Chain` child below. `C` for chain; the
+      # lowercase `c` is the column leader and not available.
+      - { name: chain, key: C, type: navigate, navigate_to: "systemd:chain" }
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than
@@ -1521,6 +1663,14 @@ views:
       # the unit it was measured on, and `e h` writes into *that* unit's
       # drop-in, not into the timer's.
       - *security
+
+      # The chain, aliased from Services — and note that it does *not* do
+      # what the level above it does. Security redirects to the service the
+      # timer triggers, because a timer has no sandbox of its own. A timer
+      # does have a start of its own, so the chain is the timer's: what the
+      # manager had to bring up before this timer could begin waiting. For
+      # the chain of the run it triggers, open the service.
+      - *chain
 
       # The same two levels as under Services. A timer needs and is ordered
       # against other units exactly as a service is — not least the service
@@ -1713,6 +1863,10 @@ views:
       # The security checks for this unit — the Services subtab above carries
       # the explanation.
       - { name: security, key: H, type: navigate, navigate_to: "systemd:security" }
+      # No chain binding here, deliberately. A critical chain is made of
+      # timestamps, and a unit the manager has never loaded has none: it
+      # has a file and nothing else. The adapter does not offer the level
+      # under a unit file at all, so there is nothing to navigate to.
       - { name: follow in a terminal, key: "a j", id: follow }
       # Creating a unit — `n s` a service, `n t` a timer with its service,
       # `n f` an empty file in `$EDITOR`. These act on the manager rather than

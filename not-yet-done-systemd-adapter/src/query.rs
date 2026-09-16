@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use not_yet_done_filter::eval::{self, Field, RowFields};
 use not_yet_done_filter::{FilterExpr, query_filter};
 
+use crate::chain::ChainRow;
 use crate::deps::DepRow;
 use crate::model::{LogRow, PropertyRow, SecurityRow, ServiceRow, TimerRow, UnitFileRow};
 
@@ -82,6 +83,9 @@ pub const LOG_COLUMNS: &[&str] = &["time", "level", "prio", "pid", "message"];
 /// is systemd's own stable name for the check, which is what a query about a
 /// family of checks reaches for (`[id, like, 'Capability%']`).
 pub const SECURITY_COLUMNS: &[&str] = &["check", "status", "exposure", "description", "fix", "id"];
+
+/// Columns a Critical chain query may reference.
+pub const CHAIN_COLUMNS: &[&str] = &["unit", "depth", "at", "took", "origin", "description"];
 
 /// Columns either dependency query may reference.
 ///
@@ -165,6 +169,16 @@ fn num_or_null(value: Option<u64>) -> Field<'static> {
     }
 }
 
+/// Microseconds as **seconds**, so that a query reads in the unit the column
+/// shows: `[startup, gt, 1]` is "took over a second", not "over a
+/// microsecond". The row keeps microseconds; only the comparison is scaled.
+fn secs_or_null(usec: Option<u64>) -> Field<'static> {
+    match usec {
+        Some(n) => Field::Number(n as f64 / 1_000_000.0),
+        None => Field::Null,
+    }
+}
+
 fn time_or_null(value: Option<DateTime<Utc>>) -> Field<'static> {
     match value {
         Some(t) => Field::DateTime(t),
@@ -187,14 +201,7 @@ impl RowFields for ServiceRow {
             "mem_peak" => num_or_null(self.mem_peak),
             "tasks" => num_or_null(self.tasks),
             "cpu" => num_or_null(self.cpu),
-            // Seconds, so that a query reads in the unit the column shows:
-            // `[startup, gt, 1]` is "took over a second", not "over a
-            // microsecond". The row keeps microseconds; only the comparison
-            // is scaled.
-            "startup" => match self.startup {
-                Some(usec) => Field::Number(usec as f64 / 1_000_000.0),
-                None => Field::Null,
-            },
+            "startup" => secs_or_null(self.startup),
             "restarts" => num_or_null(self.restarts),
             "needs_reload" => Field::Bool(self.needs_reload),
             "dropins" => Field::Number(self.dropins as f64),
@@ -265,6 +272,22 @@ impl RowFields for SecurityRow {
             "description" => text_or_null(&self.description),
             "fix" => text_or_null(&self.fix),
             "id" => Field::Text(Cow::Borrowed(&self.id)),
+            _ => Field::Null,
+        }
+    }
+}
+
+impl RowFields for ChainRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "unit" => Field::Text(Cow::Borrowed(&self.unit)),
+            // A number, so that `[depth, lte, 3]` asks for the top of the
+            // chain rather than for a string that happens to start with a 3.
+            "depth" => Field::Number(self.depth as f64),
+            "at" => secs_or_null(self.at),
+            "took" => secs_or_null(self.took),
+            "origin" => text_or_null(&self.origin),
+            "description" => text_or_null(&self.description),
             _ => Field::Null,
         }
     }
@@ -358,7 +381,7 @@ mod tests {
     #[test]
     fn every_level_allows_a_query_on_exactly_the_columns_it_declares() {
         use crate::model;
-        let levels: [(&str, &[&str], Vec<not_yet_done_content::ColumnSchema>); 7] = [
+        let levels: [(&str, &[&str], Vec<not_yet_done_content::ColumnSchema>); 8] = [
             ("service", SERVICE_COLUMNS, model::service_columns()),
             ("timer", TIMER_COLUMNS, model::timer_columns()),
             ("unit file", UNIT_FILE_COLUMNS, model::unit_file_columns()),
@@ -366,6 +389,7 @@ mod tests {
             ("log", LOG_COLUMNS, model::log_columns()),
             ("security", SECURITY_COLUMNS, model::security_columns()),
             ("dependency", DEP_COLUMNS, crate::deps::dep_columns()),
+            ("chain", CHAIN_COLUMNS, crate::chain::chain_columns()),
         ];
         for (level, queryable, schema) in levels {
             let declared: Vec<&str> = schema.iter().map(|c| c.key.as_str()).collect();

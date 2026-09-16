@@ -7788,7 +7788,7 @@ notes too, e.g. `/Alpha/Beta`.
 
 - [ ] Rename the parent to `Alphonse` past the adapter
       (`cargo run -p not-yet-done-task-cli -- task edit <id> --description
-      Alphonse`), which does not move directories, then `n` on
+    Alphonse`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
@@ -8246,3 +8246,75 @@ verb below a no-op that still exercises the whole path.
       `gdbus call --system --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.EnableUnitFiles '["<unit>"]' false false`
       and watch it refuse with `InteractiveAuthorizationRequired` while the same
       verb through the adapter succeeds.
+
+## systemd — the critical chain as a level (phase 7, stage 4)
+
+What a unit's start waited for, one hop per row, on `C` under Services, Failed
+and Timers of both systemd tabs. The adapter computes the walk from unit
+timestamps rather than parsing `systemd-analyze critical-chain`, so the point
+of most of these boxes is the cross-check against that command — and the
+places where the two deliberately disagree. Read-only throughout; a terminal
+beside the TUI is the whole apparatus.
+
+- [x] System tab, Services subtab, a service that starts during boot
+      (`sshd.service`, `polkit.service`, `systemd-logind.service`): `C` opens a
+      list whose unit column, top to bottom, is exactly the tree
+      `systemd-analyze critical-chain <unit>` draws — same units, same order.
+      Verified for eight units through
+      `nyd adapter systemd-system:service:chain 'service:<unit>' ls`.
+- [x] The numbers match too: `At` is what the tree prints after `@` and `Took`
+      is what it prints after `+`, give or take the rounding each display does.
+      Checked over every running service of both managers.
+- [x] The **first row has an `At` and the tree does not.** `systemd-analyze`
+      prints the unit you asked about through a different code path than its
+      children and that path drops the timestamp — `sshd.service +38ms`, while
+      every line under it gets `@6.538s`. The level's first row carries both.
+- [ ] Sort by `Took` descending (`c s`, or click the header): the most
+      expensive hop is the first row, and its `Depth` still says where in the
+      chain it sat. Sort by `Depth` ascending and the chain is back. This is
+      the whole reason the level is a list and not a tree.
+- [ ] `Depth` is the level's default sort — open it fresh and row 0 is the unit
+      you asked about, not whatever sorts first alphabetically.
+- [x] A unit that has **never started this boot** gives exactly one row: itself,
+      with `At` and `Took` blank and `Origin` empty. There is no chain, and the
+      level says so rather than inventing one. `getty@tty1.service` on the
+      system tab is one if a display manager has tty1; confirm with
+      `systemctl show <unit> -p ActiveEnterTimestampMonotonic` reading `0`.
+      Note that `systemd-analyze` answers the same question with a full tree
+      under a blank root line.
+- [ ] `Origin` on the **system** tab: find a unit restarted since boot
+      (`systemctl restart <something harmless>`, then `r`) and its row reads
+      `after` in yellow. `systemd-analyze` puts the same unit in the same boot
+      tree with no comment at all — run it and compare.
+- [x] `Origin` on the **user** tab is `after` on most chains, dimmed rather
+      than yellow, and that is correct rather than a fault: this manager
+      finishes its startup in under 200 ms, so anything started from the
+      session or activated on demand by D-Bus is legitimately outside the
+      window. 22 of 28 running user services were in this state when the level
+      was built.
+- [x] The user chains are **short** — half a dozen rows, ending at `-.slice`,
+      with no service on them. Also an answer rather than a defect: a user
+      manager's whole startup is slices, sockets and targets, and the services
+      of a session are started by the session.
+- [x] Where the two disagree on the **system** manager, ours is the one that
+      can be checked. Under `local-fs.target`, `systemd-analyze` prints a
+      `/run` mount that came up five seconds _after_ the target it is shown as
+      having held up; the level picks the mount that was in place when the
+      target became active. Compare the two `ActiveEnterTimestampMonotonic`
+      values against `local-fs.target`'s own.
+- [x] A **timer's** chain is the timer's own, not that of the service it
+      triggers — unlike the security level one row above it, which redirects.
+      `C` on a timer row, and `systemd-analyze critical-chain <timer>.timer`
+      agrees.
+- [ ] The runtime verbs reach a chain row: `a r` on the row with the biggest
+      `Took` restarts _that_ unit, not the unit the chain was opened on. This
+      is the point of the level having verbs at all.
+- [ ] `q` on the level, `[took, gt, 1]` — only the hops that cost over a
+      second. `[origin, =, after]` — only what is not from this startup. Both
+      compare in seconds while the rows keep their microseconds.
+- [ ] Unit files subtab: **no** `C`, on either tab. A unit the manager never
+      loaded has no timestamps, so there is nothing to walk; the view file says
+      so where the binding would have been.
+- [ ] Device rows render: a chain that reaches a disk ends in a
+      `dev-disk-by\x2duuid-….device` row with the backslash escapes intact,
+      and the column does not wrap or truncate them into nonsense.

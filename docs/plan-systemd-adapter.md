@@ -39,7 +39,7 @@ it is open _there_ rather than now.
 | [4 — Journal](#phase-4--journal)                         | `systemd:log` level, cursor pagination, `highlights:`, `--follow`              | level or external terminal, query syntax, follow yes/no                   |
 | [5 — Live](#phase-5--live)                               | D-Bus signals → `Invalidation::Row`, dependency tree, timer countdown          | `kind: countdown` and `kind: bytes` generic or adapter-side, signal scope |
 | [6 — Diagnostics](#phase-6--diagnostics)                 | `analyze security` / `blame`, drift audit, resource columns, waybar            | which of the four, in which order                                         |
-| [7 — Beyond the user bus](#phase-7--beyond-the-user-bus) | system bus + polkit, remote hosts, containers                                  | polkit route, subtabs vs. instances, whether at all                       |
+| [7 — Beyond the user bus](#phase-7--beyond-the-user-bus) | system bus + polkit, `systemd:chain`, remote hosts, containers                 | polkit route, subtabs vs. instances, whether at all                       |
 
 After phase 2 this is a tab one uses daily. After phase 4 it replaces
 `systemctl` and `journalctl` for a handful of user units. From phase 5 it
@@ -1505,6 +1505,92 @@ already there by being disruptive. This tightens the **user** manager too,
 where `disable dbus.socket` had the same shape and the same consequence one
 login later — it was simply never noticed, because that hole was open from
 phase 1 rather than opened by this stage.
+
+### What it took, beyond the plan — stage 4
+
+**Computed, not parsed — and that was not the original plan.** Every other
+`systemd-analyze` subcommand this adapter uses is parsed, because
+[phase 6b](#phase-6b--the-security-level) found that `security` has a `--json=`
+and `verify` has stable prose. `critical-chain` has neither. Its only output is
+a box-drawing tree with systemd-escaped unit names, and a parser for it breaks
+on the first unit whose own name contains a `└` — which is a unit anyone can
+write. So the walk is computed here from the same unit timestamps the Startup
+column already reads: one `ListUnits`, one manager property read, one `GetAll`
+per hop. That buys three things a parser could not have — the same code on both
+managers, cells with types instead of `+4.525s` in a string, and the ability to
+say of a row that its timestamp is not from this startup at all.
+
+**The obvious rule is wrong, and it looks right.** "Of everything this unit is
+`After=`, take the one that became active last" was the rule until it was
+measured. On this machine `sysinit.target` has 57 `After=` dependencies and the
+latest of them is the journal, not because it held anything up but because it
+had been restarted 91 hours into the uptime — a timestamp later than
+`sysinit.target`'s own. The rule that holds adds one clause: the latest one
+that became active **before this unit did**. Every hop is then strictly earlier
+than the one before it, which is also why the chain cannot loop.
+
+**We do not reproduce `systemd-analyze`, and the differences are the finding.**
+The computed chains were checked against the real command on every running
+service of both managers. On the system manager 53 of 56 come out identical,
+unit for unit and number for number. The three that do not, and 22 of the 28 on
+the user manager, differ for one reason: `systemd-analyze` will not look at a
+dependency that became active after the _manager_ finished starting up. Two
+consequences, both measured:
+
+- A unit started after boot gets a chain assembled out of whatever was still
+  inside the window, with nothing in the tree to say so. The user manager makes
+  this the normal case rather than the exception — it finished at 185 ms and
+  `session.slice` came up at 202 ms, and on the strength of those seventeen
+  milliseconds 22 of 28 running user services are shown a chain through
+  `dbus.socket` and the slices below it instead of the slice they actually
+  waited for.
+- Inside the window the filter is all there is: the comparison against the
+  unit's own activation is missing. `local-fs.target` became active at 7.969 s,
+  and the line printed under it is a `/run` mount at 13.116 s — five seconds
+  after the target it is shown as having held up. The walk here picks the
+  boot-partition mount at 7.967 s, the latest dependency that was in place when
+  the target came up.
+
+Neither is a reason to distrust `systemd-analyze` at what it is for. It is a
+boot analyser, the window is its subject, and refusing to leave it is a
+defensible choice for a tool that prints one tree and exits. It is the wrong
+choice for a level that sits under any unit on a list, which is why this one
+computes the walk instead of shelling out to it.
+
+**Four states in a column, rather than a sentence over the level.** The gate
+asked for a root that is not from this boot to be named. It became `origin` on
+every row instead — `startup`, `after`, `before`, or empty for a unit that
+never became active — because a per-row cell survives sorting, can be filtered
+on (`[origin, =, after]`), and names the restart on the row where it happens
+rather than at the top of a level that may be twelve rows long. The two views
+colour it differently and say why in their own comments: `warning` on the
+system tab, where a row outside the boot window is the anomaly
+`systemd-analyze` prints silently, and `text_dim` on the user tab, where it is
+most of the session and yellow would cry wolf.
+
+**A list with a `depth` column, because the point of the level is a sort.**
+The level exists to find the biggest `+`. Finding it is a sort, and a tree
+stops being the chain the moment it is sorted — so the indentation is data:
+`depth` 0 is the unit asked about, sort by `took` for the culprit, sort by
+`depth` to get the chain back. This is the first level whose natural order is
+not its name, which is what `finish_by(…, "depth")` exists for; `finish()` is
+now a one-line wrapper over it.
+
+**Not under a unit file.** The journal and the security checks are offered
+there, because both read something that exists without the manager ever having
+loaded the unit — a file on disk in one case, the journal's own records in the
+other. A critical chain is made of timestamps, and a unit that was never loaded
+has none. The level is bound under services and timers on both tabs, and the
+Unit files subtab carries a comment saying why it is missing rather than
+leaving the gap to be discovered.
+
+**A timer's chain is the timer's.** Worth stating because the security level
+one row above it does the opposite: `systemd-analyze security` on a timer
+refuses, so that level silently analyses the service the timer triggers. The
+chain does not redirect — a timer has a start of its own, and what the manager
+had to bring up before it could begin waiting is a different question from what
+its service waits for. Both views say so where the levels sit next to each
+other.
 
 ---
 
