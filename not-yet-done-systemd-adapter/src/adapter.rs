@@ -1042,9 +1042,16 @@ impl Node for SystemdRoot {
     /// `Noop` when nothing failed: [`failed::message`] has nothing to say, and
     /// a hook that reported "all good" on every launch would teach its reader
     /// to dismiss the one report that matters along with the rest.
+    ///
+    /// A name that is not an action of this node is refused, not ignored. The
+    /// manager is what a `connected` hook binds to, and a binding whose `run:`
+    /// is a typo has nothing else to go wrong: answering `Noop` would make it
+    /// indistinguishable from the silence of a report with nothing to say.
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         if name != failed::REPORT {
-            return Ok(ActionDispatch::Noop);
+            return Err(ContentError::NotSupported(format!(
+                "the manager has no action {name}"
+            )));
         }
         let names = failed::units(&self.shared.bus).await?;
         Ok(
@@ -1498,6 +1505,23 @@ mod tests {
 
     fn adapter() -> SystemdAdapter {
         SystemdAdapter::new("systemd".into(), &SystemdConfig::default())
+    }
+
+    /// A `connected` binding whose `run:` is a typo must be told apart from a
+    /// report that had nothing to say — both are silent otherwise, and only one
+    /// of them is a configuration mistake. The refusal comes before the bus is
+    /// touched, so the test needs no manager.
+    #[tokio::test]
+    async fn the_manager_refuses_an_action_it_does_not_have() {
+        let root = adapter().root_node();
+        let ctx = ActionContext::default();
+        match root.invoke_action("report-nothing", &ctx).await {
+            Err(ContentError::NotSupported(why)) => assert!(
+                why.contains("report-nothing"),
+                "the refusal names the action: {why}"
+            ),
+            other => panic!("answered {other:?}"),
+        }
     }
 
     #[test]

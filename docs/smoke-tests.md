@@ -8381,26 +8381,33 @@ systemctl --user reset-failed nyd-hook-probe.service          # clean up
 - [x] The system instance answers for its own manager only: with a failed
       _user_ unit present, `nyd adapter systemd-system ls` stays silent and
       `-t systemd:failed` there reports `(no rows)`.
-- [ ] A failed **non-service** unit is the whole reason the level exists. Break
-      a mount or a socket (a `.mount` unit pointing at a device that is not
-      there will do) and check that it appears on the level with its `kind`, and
-      that it is named in the startup report. It will _not_ appear on the
-      `Failed` subtab of the systemd tab — that subtab is still the Services
-      level with a query, which is the limitation recorded in
+- [x] A failed **non-service** unit is the whole reason the level exists. A user
+      manager serves no `.mount` units, so the cheapest break is a socket: one
+      whose `ListenStream` is a privileged port, _with_ the companion service it
+      names — without that service the socket refuses before it ever binds and
+      lands back in `inactive`, not in `failed`. It appears on the level with
+      `kind: socket` and is named in the startup report. It does _not_ appear on
+      the `Failed` subtab, nor anywhere on the Services level, which carries no
+      `.socket` row at all — the limitation recorded in
       [the plan](plan-systemd-adapter.md#phase-6d--the-ambient-half).
-- [ ] TUI, with something failing before launch: the report lands in the
-      notification centre (`f10`) as a normal notice, newest first, and the
-      notification bar shows it on the way in. Before this phase the hook could
-      only reach stderr, which is behind the alternate screen — so a hook that
-      spoke said nothing.
-- [ ] TUI, both managers failing at once: two notices, one per instance, each
+- [x] TUI, with something failing before launch: the report lands in the
+      notification centre as a normal notice (`●`, not `✖`), newest first, and
+      the notification bar shows it on the way in. Before this phase the hook
+      could only reach stderr, which is behind the alternate screen — so a hook
+      that spoke said nothing. The page is on `z l`, not `f10`: it lives in the
+      `z` which-key group.
+- [x] TUI, both managers failing at once: two notices, one per instance, each
       naming its own manager (`1 user unit failed` / `1 system unit failed`).
-      That is the point of the wording, not a duplicate.
-- [ ] Past five names the rest is counted, not printed: with six or more units
+      That is the point of the wording, not a duplicate. Note the notice text
+      carries no instance prefix — the manager _is_ the distinguishing word.
+- [x] Past five names the rest is counted, not printed: with six or more units
       failing the line reads `… and N more`. Six probes
       (`nyd-hook-probe-1` … `-6`) are the cheapest way to see it.
-- [ ] A binding that cannot run reports as an **error** notice naming the
+- [x] A binding that cannot run reports as an **error** notice naming the
       instance, the hook and the action — point a `connected` binding at an
       action id that does not exist and check the wording. A throttled or
       skipped binding stays quiet by contrast; only a failure is worth a
-      colour.
+      colour. This one **found a bug**: the manager node answered any unknown
+      action with `Noop`, so a typo in `run:` was indistinguishable from a
+      report that had nothing to say. It now refuses, the way the node's
+      `prepare` and `execute` always did.
