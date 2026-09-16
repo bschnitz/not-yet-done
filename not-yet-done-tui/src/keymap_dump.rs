@@ -10,6 +10,12 @@
 //! first, then tab by tab and level by level), each row as
 //! `<key>  <action>  <config path>`. Actions that carry no key at all are
 //! collected into a trailing "Unbound" section — the menu's third scope.
+//!
+//! One thing the dump knows that the menu does not: a tab can be configured,
+//! loaded and keymapped and still be absent from `tabs.order`, which is an
+//! allowlist. Its bindings are real but unreachable, because no key switches
+//! to the tab. Such scopes are marked rather than dropped — dropping them
+//! would hide the very config mistake the dump is read to find.
 
 use crate::keymap::ShortcutRow;
 use std::collections::HashMap;
@@ -17,8 +23,10 @@ use unicode_width::UnicodeWidthStr;
 
 /// Render `rows` as the printable keymap. `filter`, when given, keeps only
 /// rows whose key, action name, scope or config path contains it
-/// (case-insensitive).
-pub fn render(rows: &[ShortcutRow], filter: Option<&str>) -> String {
+/// (case-insensitive). `hidden_tabs` names the tabs that `tabs.order` leaves
+/// out (see [`crate::app::App::hidden_tab_names`]); every scope belonging to
+/// one is marked unreachable.
+pub fn render(rows: &[ShortcutRow], filter: Option<&str>, hidden_tabs: &[String]) -> String {
     let needle = filter.map(str::to_lowercase);
     let kept: Vec<&ShortcutRow> = rows
         .iter()
@@ -41,12 +49,26 @@ pub fn render(rows: &[ShortcutRow], filter: Option<&str>) -> String {
             None => String::new(),
         }
     ));
+    if !hidden_tabs.is_empty() {
+        out.push_str(&format!(
+            "{} not in tabs.order, so no key switches there: {}\n",
+            if hidden_tabs.len() == 1 {
+                "One configured tab is"
+            } else {
+                "Configured tabs are"
+            },
+            hidden_tabs.join(", "),
+        ));
+    }
 
     for scope in group_order(&bound) {
         let mut group: Vec<&&ShortcutRow> = bound.iter().filter(|r| r.scope == scope).collect();
         group.sort_by_key(|r| (sort_key(&r.keys), r.name.to_lowercase()));
         out.push('\n');
         out.push_str(&scope);
+        if scope_is_hidden(&scope, hidden_tabs) {
+            out.push_str("   (not in tabs.order — unreachable)");
+        }
         out.push('\n');
         let key_w = group.iter().map(|r| width(&r.keys)).max().unwrap_or(0);
         let name_w = group.iter().map(|r| width(&r.name)).max().unwrap_or(0);
@@ -96,6 +118,15 @@ fn haystack(row: &ShortcutRow) -> String {
 /// for the handful of runtime-only claims that carry no source.
 fn source_path(row: &ShortcutRow) -> String {
     row.source.as_ref().map(|s| s.human()).unwrap_or_default()
+}
+
+/// Whether `scope` belongs to a tab that `tabs.order` leaves out. Scope
+/// labels are `Tab` or `Tab › level › level`, so the tab is the first
+/// segment — and `Global` never matches, which is right: the global keys
+/// work no matter which tabs are visible.
+fn scope_is_hidden(scope: &str, hidden_tabs: &[String]) -> bool {
+    let tab = scope.split(" › ").next().unwrap_or(scope);
+    hidden_tabs.iter().any(|h| h == tab)
 }
 
 /// Scope labels in first-seen order, so the sections follow the tab bar
@@ -164,7 +195,7 @@ mod tests {
             row("e", "edit", "Jira"),
             row("2", "Switch to Jira", "Global"),
         ];
-        let out = render(&rows, None);
+        let out = render(&rows, None, &[]);
         let global = out.find("Global").unwrap();
         let jira = out.find("\nJira\n").unwrap();
         assert!(global < jira, "Global section comes first:\n{out}");
@@ -179,7 +210,7 @@ mod tests {
             row("ga", "second", "Global"),
             row("b", "first", "Global"),
         ];
-        let out = render(&rows, None);
+        let out = render(&rows, None, &[]);
         let pos = |n: &str| out.find(n).unwrap();
         assert!(pos("first") < pos("second"));
         assert!(pos("second") < pos("third"));
@@ -191,7 +222,7 @@ mod tests {
             row("", "toggle-tracking", "Trackings"),
             row("e", "edit", "Jira"),
         ];
-        let out = render(&rows, None);
+        let out = render(&rows, None, &[]);
         assert!(out.contains("Unbound (1)"));
         let unbound = out.find("Unbound (1)").unwrap();
         assert!(out.find("toggle-tracking").unwrap() > unbound);
@@ -200,10 +231,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_outside_tabs_order_is_marked_in_every_one_of_its_scopes() {
+        let rows = vec![
+            row("1", "Switch to Tasks", "Global"),
+            row("e", "edit", "Jira"),
+            row("r", "refresh", "systemd"),
+            row("C", "chain", "systemd › Services"),
+        ];
+        let out = render(&rows, None, &["systemd".to_string()]);
+        assert!(out.contains("One configured tab is not in tabs.order"));
+        assert!(out.contains("systemd   (not in tabs.order — unreachable)"));
+        assert!(out.contains("systemd › Services   (not in tabs.order — unreachable)"));
+        // The visible tab and the global scope stay unmarked.
+        assert!(out.contains("\nJira\n"));
+        assert!(out.contains("\nGlobal\n"));
+    }
+
+    #[test]
     fn filter_matches_key_name_and_scope() {
         let rows = vec![row("e", "edit", "Jira"), row("d", "delete", "Tasks")];
-        assert!(!render(&rows, Some("jira")).contains("delete"));
-        assert!(!render(&rows, Some("delete")).contains("Jira"));
-        assert!(render(&rows, Some("d")).contains("delete"));
+        assert!(!render(&rows, Some("jira"), &[]).contains("delete"));
+        assert!(!render(&rows, Some("delete"), &[]).contains("Jira"));
+        assert!(render(&rows, Some("d"), &[]).contains("delete"));
     }
 }

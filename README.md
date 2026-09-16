@@ -2725,10 +2725,20 @@ actually want reminders in.
   stays the prefix itself.
 - `collapse_in_bars: true` drops every hint, saved-query favorite and script
   shortcut bound under `prefix` from the action and status bar, and puts a
-  single `o Open ...` entry where the first of them stood. Without a `title`
-  that entry reads `o …`. A view that binds the bare prefix key to an action
-  of its own — plain `o` in the tasks view — is left alone: that key runs its
-  action instead of opening the menu, so folding it away would hide it.
+  single `o Open ...` entry in the **status bar** in their place. Without a
+  `title` that entry reads `o …`. A view that binds the bare prefix key to an
+  action of its own — plain `o` in the tasks view — is left alone: that key
+  runs its action instead of opening the menu, so folding it away would hide
+  it.
+
+**Why the group entry always lands in the status bar**, wherever the keys it
+folded lived: it is a chord prefix, not an action. It opens the which-key
+popup and nothing else, so it can never light up — and lighting up is the one
+thing the action bar is for. Deciding it per level instead made the entry
+wander: the systemd `a` verbs are fire-and-forget on a unit file, so the group
+folded in the status bar, while on a service `kill` asks for a signal, which
+put the very same `a Action …` in the action bar as well — once in each bar.
+It now has one place on every level.
 
 **The window leader is a group like any other.** Naming `w` covers the
 split/close/focus chords _and_ the pane tags: a split hands each pane a letter

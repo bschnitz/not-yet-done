@@ -128,6 +128,27 @@ start on every YAML file recognised as a view config (has `tab` +
       → `a` on the comments child now has `id: create_comment`,
       re-test.
 
+### A folded which-key group lives in the status bar
+
+`collapse_in_bars: true` trades every hint, saved-query favorite and script
+shortcut under a prefix for one group entry — and that entry belongs in the
+status bar on every level, because a chord prefix opens a popup and can never
+light up. It used to be placed per level, wherever the folded keys happened to
+live, so the systemd `a Action …` showed up on Services (where `kill` opens a
+signal picker) and nowhere on Unit files.
+
+- [ ] systemd tab, **Services**: the status bar shows `a Action …` exactly
+      once; the action bar shows neither `a` nor any `a <letter>` chord.
+- [ ] systemd tab, **Unit files**: the same `a Action …`, in the same place —
+      this is the level that used to show nothing.
+- [ ] A group whose members are all activatable (`e` over the edit actions of
+      a unit) gets its entry too, and gets it in the status bar.
+- [ ] `o s` (shortcut overview) and the which-key popup still name every
+      folded chord — the folding is a bar affordance only.
+- [ ] Set `collapse_in_bars: false`: the chords return to their own bars
+      (`e h` to the action bar, `a s` to the status bar) and no group entry is
+      left behind.
+
 ### The status bar derives nav/fold hints from the claims
 
 The status bar no longer enumerates `back`/`open`/paging/fold chords by
@@ -4641,6 +4662,13 @@ agree.
       usage; a bare argument without `--keymap` is rejected the same way.
 - [ ] A binding recorded in the menu (`Ctrl+N`) shows up in the next dump; a
       saved-query or script shortcut (DB-stored) deliberately does not.
+- [x] A tab that is loaded but missing from `tabs.order` is named on a line
+      under the header, and every one of its scope headings carries
+      `(not in tabs.order — unreachable)`. Verified against the live config,
+      which has one such tab; `--keymap <that tab>` shows the marker too, and
+      `Global` lists no `Switch to` row for it.
+- [ ] Put every configured tab into `tabs.order`: the extra line under the
+      header disappears and no scope heading is marked.
 
 ## The notification bar — display limit + the notification centre (`f10`)
 
@@ -7788,7 +7816,7 @@ notes too, e.g. `/Alpha/Beta`.
 
 - [ ] Rename the parent to `Alphonse` past the adapter
       (`cargo run -p not-yet-done-task-cli -- task edit <id> --description
-    Alphonse`), which does not move directories, then `n` on
+  Alphonse`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
