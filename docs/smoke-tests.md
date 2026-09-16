@@ -8363,16 +8363,22 @@ vendor, preset, drift, shadows`), which is how the typo was finally
       caught. The query template on this level named `origin` too. Both fixed.
       Diff a copied level against its original field by field; four of the
       seven differences this file had were silent.
-- [ ] **Open — found while measuring the two above.** This level does not draw
-      its last column. With every column switched on, `c c` lists `Path` and
-      `Shadows` as `[x]` and the table draws neither past `Origin`; switch
-      `Path` off and `Shadows` appears, and `Origin` is the one that vanishes.
-      The header then ends at 150 of the 200 available columns, so the missing
-      column is not a width the table ran out of — it had fifty to spare and a
-      `fixed(9)` column to place. The user view's Unit files level, same
-      columns and same sizings but one `flex(3)` fewer, draws all seven. Worth
-      pinning down in `not-yet-done-table` before more levels are copied from
-      this one.
+- [x] **Not a bug — this level draws every column it is given.** The report
+      said the last column was never drawn; it was two measuring mistakes
+      stacked, both worth knowing. First, `nyd-tui sc` cuts every line at 150
+      characters unless `-w` says otherwise, while the pane here is 200 wide —
+      the last column sits at 191 and was clipped by the _reading_ tool, not by
+      the table. Second, what was on screen was not the YAML's column set at
+      all: an override left in the DB by an earlier session
+      (`settings.content_columns:<tab>`, key `view:Unit files`) named `shadows`
+      and not `path`, and an override decides the order as well as the set — so
+      a `hidden: true` column was on display, `Path` was absent, and switching
+      one column off looked like it swapped another. Re-measured with
+      `sc -w 260`: the YAML default draws its six columns ending in `Path`, and
+      with `Shadows` enabled too all seven draw, `Shadows` last at column 190.
+      Two lessons for the next measurement — read a wide table with an explicit
+      `-w`, and check a suspect level against its persisted override before
+      reading the layout code.
 - [x] `a` on a service offers the runtime verbs (start, stop, restart, reload,
       reset-failed, kill, freeze) and the file verbs that switch a unit on or
       off (enable, enable-now, disable, disable-now, preset) — but **no** mask
