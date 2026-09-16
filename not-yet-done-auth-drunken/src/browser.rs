@@ -79,7 +79,17 @@ impl Browser {
             // Its log is our log is nyd's log, all on the stderr this
             // process inherited. A pipe would have to be drained by
             // somebody, and nobody here is free to.
-            .stdout(Stdio::inherit())
+            //
+            // Not stdout, though, whatever the browser puts there: this
+            // process's stdout IS the line protocol nyd reads, and a child
+            // that inherits it can end a login with a sentence meant for a
+            // terminal. Chromium writes exactly one such sentence -- "opening
+            // in an existing browser session", when a second browser meets a
+            // profile that is already in use -- and nyd answered it with
+            // "this is not a protocol line". Dropped rather than piped,
+            // because a pipe nobody drains is the reason the other two
+            // streams are inherited in the first place.
+            .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             // The backstop for every path that cannot wait: a plugin that
             // goes away must not leave a browser behind it.
@@ -98,8 +108,16 @@ impl Browser {
             // exited will never open the socket and its status is the
             // useful half of the message.
             if let Ok(Some(status)) = child.try_wait() {
+                // The one cause worth naming: Chromium allows a single
+                // browser per profile directory, and every login here shares
+                // one profile on purpose -- so a second login that starts
+                // while the first is still up dies right here. Its own
+                // reason is on the stderr above; this is the line nyd shows.
                 return Err(format!(
-                    "`{line}` exited ({status}) without opening a socket"
+                    "`{line}` exited ({status}) without opening a socket \
+                     -- another browser may already be holding the profile \
+                     (a login of its own still running?); its reason is on \
+                     nyd's stderr"
                 ));
             }
             if tokio::time::Instant::now() >= deadline {

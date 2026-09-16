@@ -74,6 +74,12 @@ pub async fn run(
 
     let mut attending = false;
     let mut asking: Option<String> = None;
+    // The step the run is in, and the last line of it that went red. A
+    // tally says a login did not pass; only these two say what stopped it,
+    // and nyd has no other window onto the run -- the report is drawn in a
+    // panel this process never shows.
+    let mut step_name: Option<String> = None;
+    let mut red: Option<String> = None;
     loop {
         tokio::select! {
             // Biased, so that a `cancel` already in the pipe is acted on
@@ -121,13 +127,30 @@ pub async fn run(
                         // also the only place the attention can end, for the
                         // same reason read the other way round.
                         let happened = news.get("happened");
-                        if happened.and_then(|h| h.get("happened")).and_then(Value::as_str)
-                            == Some("began")
-                        {
-                            took_the_person_back(options, browser, &mut attending).await;
-                            if let Some(name) = happened.and_then(|h| text(h, "name")) {
-                                say(PluginLine::step(name));
+                        match happened.and_then(|h| h.get("happened")).and_then(Value::as_str) {
+                            Some("began") => {
+                                took_the_person_back(options, browser, &mut attending).await;
+                                if let Some(name) = happened.and_then(|h| text(h, "name")) {
+                                    step_name = Some(name.clone());
+                                    say(PluginLine::step(name));
+                                }
                             }
+                            // Not said to nyd as it happens -- a step that
+                            // waits carries out a line per round and would
+                            // scroll the status line past reading. Kept for
+                            // the end, where a login that failed has to say
+                            // why.
+                            Some("did") => {
+                                if let Some(why) =
+                                    went_red(happened.and_then(|h| h.get("line")))
+                                {
+                                    red = Some(match &step_name {
+                                        Some(step) => format!("{step}: {why}"),
+                                        None => why,
+                                    });
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some("told") => {
@@ -152,7 +175,7 @@ pub async fn run(
                         }
                     }
                     Some("over") => {
-                        return over(&news, options, request);
+                        return over(&news, options, request, red.as_deref());
                     }
                     _ => {}
                 }
@@ -173,8 +196,29 @@ async fn took_the_person_back(options: &Options, browser: &mut Browser, attendin
     }
 }
 
+/// One line of a step, in words, when it went red -- and `None` when it did
+/// not. `said` is the action as the manifest writes it, holes unrendered, so
+/// a password typed by the flow cannot arrive here as itself.
+fn went_red(line: Option<&Value>) -> Option<String> {
+    let line = line?;
+    let outcome = line.get("outcome")?;
+    let what = outcome.get("outcome").and_then(Value::as_str)?;
+    if !matches!(what, "failed" | "broke" | "noted") {
+        return None;
+    }
+    let verb = line.get("verb").and_then(Value::as_str).unwrap_or("");
+    let said = line.get("said").and_then(Value::as_str).unwrap_or("");
+    let why = outcome.get("said").and_then(Value::as_str).unwrap_or("");
+    Some(format!("{what} `{verb} {said}` -- {why}").replace("  ", " "))
+}
+
 /// What the run yielded, as the values nyd asked for.
-fn over(news: &Value, options: &Options, request: &[String]) -> Result<Outcome, String> {
+fn over(
+    news: &Value,
+    options: &Options,
+    request: &[String],
+    red: Option<&str>,
+) -> Result<Outcome, String> {
     if news.get("stopped").and_then(Value::as_bool) == Some(true) {
         return Err("the login was stopped in the browser".into());
     }
@@ -183,9 +227,11 @@ fn over(news: &Value, options: &Options, request: &[String]) -> Result<Outcome, 
     let (failed, broke) = (count("failed").unwrap_or(0), count("broke").unwrap_or(0));
     if failed > 0 || broke > 0 {
         let ran = count("ran").unwrap_or(0);
-        return Err(format!(
-            "the login flow did not pass: {ran} steps, {failed} failed, {broke} broke"
-        ));
+        let tally = format!("{ran} steps, {failed} failed, {broke} broke");
+        return Err(match red {
+            Some(why) => format!("the login flow did not pass ({tally}) -- {why}"),
+            None => format!("the login flow did not pass: {tally}"),
+        });
     }
 
     let empty = serde_json::Map::new();
