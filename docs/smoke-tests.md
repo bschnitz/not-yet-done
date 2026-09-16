@@ -7899,7 +7899,7 @@ cell must move without a reload.
 - [x] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
       the order is the same. The sort menu (`c s`) on the Timers subtab lists
       `Name, Description, Active, Sub, Enabled, Next, Last, Unit, Result,
-  Persistent` — neither `Left` nor `Ago` is in it, which is the point:
+Persistent` — neither `Left` nor `Ago` is in it, which is the point:
       a column the engine computes has nothing to sort on. `Next` ascending
       runs soonest-first, and a timer with no next elapse sorts to the end.
 - [x] Calendar: the `In` column counts down to the next appointment and ticks
@@ -7913,7 +7913,7 @@ cell must move without a reload.
       sorting on `Mem` runs by size, not by the text of the rendered cell.
       Both measured: the query left exactly the three units above 100 MiB
       standing, and `Mem` descending runs `500 MiB … 1.1 MiB → 976 KiB →
-  648 KiB`, which no text sort produces. Descending also puts every unit
+648 KiB`, which no text sort produces. Descending also puts every unit
       with **no** value first — an absent value sorts to the end ascending,
       so it leads when the sort is reversed. That is the same trap the
       `startup` note in the query template warns about.
@@ -7945,13 +7945,19 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       "0 changes", and nothing in the row moves. Check with
       `find ~/.config/systemd/user -name '<unit>'` that the enable symlink is
       really there first.
-- [ ] **Blocked — needs a write under `/etc`.** The counter-case, and it is
-      not a bug: a unit enabled from
+- [x] The counter-case, and it is not a bug: a unit enabled from
       `/etc/systemd/user/<target>.wants/` also reads `enabled` with an empty
       `Drift`, and `a p` on it still reports a change — it writes a second
       symlink under `~/.config/systemd/user`, because user-level preset can
       only enable at user level. `systemctl --user preset <unit>` does the
-      same. Undo with `rm` of the new symlink and its `.wants` directory, then
+      same. Measured on a throwaway unit whose file and `.wants` link both sat
+      under `/etc/systemd/user`: the row read `enabled`, Origin `admin`, Drift
+      blank, and `a p` answered `Enabled <unit> — the preset wants it on` with
+      `+ ~/.config/systemd/user/default.target.wants/<unit>` under it. The row
+      did **not** move afterwards — `ListUnitFiles` still reports the `/etc`
+      file as the winner, so State, Origin and Drift all stay as they were,
+      and the second symlink is visible only in the answer. Undo with `rm` of
+      the new symlink and its `.wants` directory, then
       `systemctl --user daemon-reload`; `is-enabled` still says `enabled`
       afterwards, from `/etc`.
 - [x] `a p` on a row reading `should-enable` asks for confirmation naming the
@@ -8008,26 +8014,36 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       `a d` answers `Disabled <unit>` and names the same path with a `-`.
       `ls` on that directory agrees both times. Note which verb asks first:
       `a e` writes straight away, `a d` puts up `Disable <unit>? It will not
-  come back on the next login. (y/n)` — the confirmation sits on the verb
+come back on the next login. (y/n)` — the confirmation sits on the verb
       that takes something away.
 - [x] Pressing the same verb twice keeps its old sentence: the second `a d`
       says `<unit> was already disabled` with no path lines under it, because
       nothing moved. It still asks for confirmation first — the manager is
       what decides there was nothing to do, so the question comes before the
       answer can be known.
-- [ ] **Half measured; the other half needs a write under `/etc`.** The
-      direction of `a p` is in the headline, and it is the half the user
+- [x] The direction of `a p` is in the headline, and it is the half the user
       cannot know in advance: on a `should-enable` row it reads
       `Enabled <unit> — the preset wants it on`, on a `should-disable` row
       `Disabled <unit> — the preset wants it off`. A unit already in line still
-      answers `already matches its preset`, with nothing under it. The
-      `should-enable` sentence and the `already matches` sentence are both
-      confirmed, one after the other on the same throwaway unit, the first
-      with the written symlink under it and the second with nothing. The
-      `should-disable` sentence cannot be staged here: a user-level preset is
-      only read from `/etc/systemd/user-preset/`, `/run` and `/usr/lib` —
-      never from `$XDG_CONFIG_HOME` — and this machine ships no `disable *`
-      line, so every unmatched unit reads `should-enable`.
+      answers `already matches its preset`, with nothing under it. All four
+      sentences confirmed. Staging the `should-disable` half needs a write
+      under `/etc`, because a user-level preset is only read from
+      `/etc/systemd/user-preset/`, `/run` and `/usr/lib` — never from
+      `$XDG_CONFIG_HOME` — and this machine ships no `disable *` line, so
+      without one every unmatched unit reads `should-enable`. A single
+      `disable <unit>` line in `/etc/systemd/user-preset/00-*.preset` stages it
+      for one throwaway unit and nothing else. **This found a bug, and it was
+      the whole point of staging the half that looked redundant:** the
+      `should-disable` press answered `<unit> has no [Install] section, so
+    there is nothing to enable` — on a unit whose `[Install]` section is
+      right there, after removing its symlink correctly. `PresetUnitFiles`
+      returns `carries_install_info = false` whenever the policy decided to
+      **disable**, and `files()` read that flag as "no [Install] section" for
+      every operation instead of for `enable` alone. So the whole disabling
+      half of `a p` — the headline and the removed path with it — was
+      unreachable, and the row changing to `disabled` under a sentence saying
+      nothing had happened was the only hint. Fixed; both directions and both
+      `already matches` cases then came back verbatim.
 - [x] A refusal is never reported as the verb. Mask an inert vendor unit
       (`a m` on, say, a synth or a torrent daemon you do not run — it writes a
       `/dev/null` link into `~/.config/systemd/user`), then press `a p` on it:
@@ -8038,7 +8054,7 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       which answers `Unmasked <unit>` and names the link it removed. All four
       answers came back verbatim on `fluidsynth.service`. Two details worth
       having: masking asks first (`Nothing can start it again — not a
-  dependency, not you — until it is unmasked.`) while unmasking does not,
+dependency, not you — until it is unmasked.`) while unmasking does not,
       and the refusal of `a e` is the manager's own sentence passed through —
       `Action 'enable': enabling <unit>: Unit <path> is masked` — not a
       rewrite of it.
@@ -8046,7 +8062,7 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       `static` row says there is nothing to enable because it is started by
       something else — no path lines, because none were written. Measured in
       full: `<unit> has no [Install] section, so there is nothing to enable —
-  it is started by something else, not at login`, and no confirmation
+it is started by something else, not at login`, and no confirmation
       either, because nothing was going to be written.
 
 ## systemd — the security level (phase 6b)
@@ -8304,10 +8320,37 @@ screen.
       `should-enable` row must be named in `90-systemd.preset`. The failure this
       catches is the loud one — reading the wrong scope finds no policy at all,
       and no policy means "enable everything", so every disabled unit drifts.
-- [ ] The `shadows` column is answering the system question. Put a copy of a
+- [x] The `shadows` column is answering the system question. Put a copy of a
       vendor unit in `/etc/systemd/system/`, refresh, and confirm the column
       names the `/usr/lib` file it hides — then remove it again. An empty column
       proves nothing here: the wrong scope is silently empty, not wrong.
+      Measured with a copy of an inert timer-triggered vendor unit: with the
+      copy in place `[shadows, has, /usr]` listed it first, `Path` read
+      `/etc/systemd/system/<unit>` and `Shadows` the `/usr/lib` file; `r` after
+      the `rm` dropped the row again. The query also answers on a machine
+      nobody has touched — `default.target` in `/etc` shadows the `/usr/lib`
+      one, and three `/run/systemd/generator/` units shadow theirs — which is
+      the cheap proof that the **system** search path is being walked, since
+      the generator directory exists in no user scope.
+- [x] **The fourth field this level copied wrong, found the same way as the
+      first three.** `Origin` was keyed `origin`; the adapter's column is
+      `vendor`. A column key nothing answers renders as an empty column and
+      says nothing — while the same name in a query is refused out loud
+      (`unknown systemd column 'origin' — valid columns: name, state, path,
+    vendor, preset, drift, shadows`), which is how the typo was finally
+      caught. The query template on this level named `origin` too. Both fixed.
+      Diff a copied level against its original field by field; four of the
+      seven differences this file had were silent.
+- [ ] **Open — found while measuring the two above.** This level does not draw
+      its last column. With every column switched on, `c c` lists `Path` and
+      `Shadows` as `[x]` and the table draws neither past `Origin`; switch
+      `Path` off and `Shadows` appears, and `Origin` is the one that vanishes.
+      The header then ends at 150 of the 200 available columns, so the missing
+      column is not a width the table ran out of — it had fifty to spare and a
+      `fixed(9)` column to place. The user view's Unit files level, same
+      columns and same sizings but one `flex(3)` fewer, draws all seven. Worth
+      pinning down in `not-yet-done-table` before more levels are copied from
+      this one.
 - [x] `a` on a service offers the runtime verbs (start, stop, restart, reload,
       reset-failed, kill, freeze) and the file verbs that switch a unit on or
       off (enable, enable-now, disable, disable-now, preset) — but **no** mask

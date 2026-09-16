@@ -635,7 +635,14 @@ async fn failure_detail(bus: &Bus, unit: &str) -> String {
 /// would have forced.
 async fn files(bus: &Bus, change: FileChange, unit: &str) -> Result<String> {
     let result = bus.change_unit_file(change, unit).await?;
-    if !result.carries_install_info {
+    // Only `enable` may read this flag. `PresetUnitFiles` returns it `false`
+    // whenever the policy decided to *disable* — there is no install info to
+    // carry when nothing is being installed — so taking it at face value there
+    // told the user a unit with a perfectly good `[Install]` section had none,
+    // and swallowed the removed symlink along with the sentence. Measured on a
+    // unit an `/etc/systemd/user-preset/` line wants off: the link was gone,
+    // the row read `disabled`, and the bar claimed there was nothing to enable.
+    if change == FileChange::Enable && !result.carries_install_info {
         // Not an error — systemd did exactly what was asked and it amounted to
         // nothing. Saying "enabled" here would be the lie.
         //
