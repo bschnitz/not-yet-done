@@ -562,9 +562,12 @@ views:
     query:
       editable: true
       menu_key: q
-      template: |
-        # The same level as Services, with a query on it. Nothing here is a
-        # separate node type.
+      # `default:` and not `template:`. A template is only the text the `q`
+      # editor comes up with; it filters nothing until someone opens the menu
+      # and confirms it. This subtab has to be narrow the moment it is opened,
+      # so the query belongs in `default:` — the same level as Services, with a
+      # query on it. Nothing here is a separate node type.
+      default: |
         query:
           [active, =, failed]
     columns:
@@ -669,13 +672,19 @@ views:
       - key: left
         label: Left
         kind: countdown
+        # `kind: countdown` carries no value of its own — it renders
+        # `countdown_to` minus now. Without the field the column is silently
+        # empty, which on a manager that has timers is the whole column gone.
+        countdown_to: next
         sizing: "fixed(10)"
       - key: last
         label: Last
         kind: datetime
         style: secondary
         sizing: "fixed(20)"
-      - key: triggers
+      # The unit the timer starts. The adapter calls the field `unit`; there is
+      # no `triggers` key, and asking for one leaves the column blank.
+      - key: unit
         label: Triggers
         style: secondary
         sizing: "flex(2)"
