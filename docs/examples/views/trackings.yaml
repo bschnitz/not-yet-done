@@ -273,7 +273,10 @@ views:
       # overlap / future guards the legacy `nyd track move` exposed. The form's
       # `gravity` (start|end) snaps to a boundary and finds the next free slot;
       # `offset` (+1h, -30min, …) is applied after the snap; the three toggles
-      # relax the overlap/future guards. `type: custom` → form popup →
+      # relax the overlap/future guards. Which trackings count as being in the
+      # way is the adapter's tracking policy (`group_paths`): under a grouped
+      # policy an interval of another group shares the clock rather than
+      # blocking the move. `type: custom` → form popup →
       # `execute("move", …)`. Bound to `M` (shift-m), next to the `a m` /
       # `a p` repack gesture below; this manual-form move is the escape hatch
       # for an arbitrary start time the repack cascade doesn't cover.
@@ -308,8 +311,8 @@ views:
     #     does the same across every deleted tracking the list can reach,
     #     confirming with the combined counts.
     #   * `s` toggle-tracking — start/stop time tracking on the row's *task*
-    #     (the same policy as the Tasks tab: the adapter's `allow_parallel`,
-    #     or the invocation's `group_paths` — see tasks.yaml). The
+    #     (the same policy as the Tasks tab: the adapter's `allow_parallel` /
+    #     `group_paths`, or the invocation's own — see tasks.yaml). The
     #     toggle does NOT rebuild the view: the adapter patches the affected
     #     row's running marker / frozen duration in place (M9) so a deep,
     #     fully-expanded tree stays responsive. Structural effects (a newly

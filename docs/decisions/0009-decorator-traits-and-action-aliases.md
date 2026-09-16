@@ -1,6 +1,8 @@
 # 0009 — Decorator traits for the content layer, and action aliases
 
-- **Status:** accepted, implemented
+- **Status:** accepted, implemented; the choice of _where the group paths
+  live_ is superseded by
+  [0011](0011-tracking-policy-as-an-adapter-setting.md)
 - **Date:** 2026-09-07
 - **Affects:** `not-yet-done-content` — `decorate.rs`, `aliasing.rs`,
   `anonymize.rs`; `not-yet-done-host` — `AdapterInstance`,

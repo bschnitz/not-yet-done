@@ -1071,16 +1071,18 @@ pub(crate) fn toggle_tracking_action() -> NodeAction {
     ))
 }
 
-/// The policy a `toggle-tracking` invocation runs under.
+/// The policy an invocation runs under: the adapter's own
+/// (`allow_parallel` / `group_paths`, resolved once at startup by
+/// [`crate::tracking_policy_from_config`]) unless the invocation passes
+/// `group_paths` of its own.
 ///
-/// Without a `group_paths` argument the adapter's configured policy applies
-/// (`allow_parallel`). With it, each pattern is a regex over the task's label
-/// path (`/Root/Child/Leaf`, root first); the first matching pattern decides
-/// the group, tasks matching none share one rest group, and starting a
-/// tracking stops only the running ones in the same group. Grouping is a
-/// refinement of exclusivity, so it cannot be combined with
-/// `allow_parallel: true` — that is reported as an error rather than picking
-/// a winner silently.
+/// Each pattern is a regex over the task's label path (`/Root/Child/Leaf`,
+/// root first); the first matching pattern decides the group, tasks matching
+/// none share one rest group, and two trackings only get in each other's way
+/// — a start stopping the other, a move colliding with it — when they share a
+/// group. Grouping is a refinement of exclusivity, so it cannot be combined
+/// with `allow_parallel: true` — that is reported as an error rather than
+/// picking a winner silently.
 pub(crate) fn tracking_policy_for(
     handle: &CoreHandle,
     args: &ActionArgs,

@@ -135,7 +135,7 @@ flowchart TD
 | **not-yet-done-host**               | The adapter wiring for every frontend: factory registry, `resolve_adapter`, hooks                                                                                                                             | content, every adapter                                               |
 | **not-yet-done-tui**                | The terminal UI: event loop, views, app state                                                                                                                                                                 | core, content, filter, host, local, postgres, forest, table, ratatui |
 | **not-yet-done-cli** (`nyd`)        | The generic adapter frontend (CLI) plus the `tag`/`backup`/`config` built-ins                                                                                                                                 | host, content, core, task-core, filter                               |
-| **not-yet-done-task-cli** (`nyd-t`) | The native domain CLI for tasks and trackings (typed JSON, graded exit codes)                                                                                                                                 | task-core                                                            |
+| **not-yet-done-task-cli** (`nyd-t`) | Maintenance verbs on the task DB (backup list/restore, db sync, tag styling); not installed, not an interface                                                                                                 | task-core                                                            |
 | **not-yet-done-waybar**             | The Waybar CFFI module (the running-tracking count in the status bar)                                                                                                                                         | content, host                                                        |
 | **not-yet-done-content**            | The `ContentAdapter` trait, the `Node`/`Content` abstraction and auth orchestration                                                                                                                           | —                                                                    |
 | **not-yet-done-local-adapter**      | Tasks/trackings/projects as a ContentAdapter (via `task-core`)                                                                                                                                                | content, task-core, filter                                           |
@@ -908,11 +908,13 @@ file never abort the caller.
   configured adapter the same way (building it through
   `host::resolve_adapter`). Terse everyday forms are aliases (`cli.yaml`);
   `tag`/`backup`/`config` remain built-ins.
-- **`nyd-t`** (`not-yet-done-task-cli`) — the native domain CLI directly on
-  `task-core`, with typed, domain-shaped JSON and graded exit codes (a
-  stability contract for batch scripts). Adapters are interop boundaries,
-  `nyd-t` is our own domain in its own idiom — see
-  [ADR 0004](decisions/0004-two-cli-binaries-adapter-vs-domain.md).
+- **`nyd-t`** (`not-yet-done-task-cli`) — a maintenance tool directly on
+  `task-core`, **not installed** and not an interface: it bypasses the
+  adapter, so adapter-level settings (the tracking policy, lifecycle hooks)
+  never reach it. Kept for the verbs with no adapter path — `backup
+list`/`restore`, `db sync`, tag styling. Scripts use `nyd adapter …`; see
+  [ADR 0012](decisions/0012-one-interface-the-adapter-protocol.md), which
+  supersedes [ADR 0004](decisions/0004-two-cli-binaries-adapter-vs-domain.md).
 - **Waybar** (`not-yet-done-waybar`) — a CFFI `.so` that shows the active
   tracking in the status bar. A thin protocol frontend: it resolves the same
   in-process `trackings` adapter through the host as the TUI and `nyd` do

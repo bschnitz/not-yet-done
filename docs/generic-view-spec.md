@@ -2467,24 +2467,30 @@ arguments — once per instance:
 ```yaml
 adapter:
   type: tasks
-  config_inline: '{ tracking_marker: "⏱️" }'
+  config_inline: '{ tracking_marker: "⏱️", group_paths: ["^/Work", "^/Autotrack"] }'
   aliases:
-    my-toggle-tracking:
+    toggle-tracking-solo:
       action: toggle-tracking # the target — an action the adapter has
-      args: { group_paths: ["^/Work", "^/Other/Group"] }
-      label: track (grouped) # optional; default = the target's label
+      args: { group_paths: [] } # this one key ignores the groups above
+      label: track (exclusive) # optional; default = the target's label
 ```
 
 (`group_paths` is the tasks adapter's own parameter: regexes over a task's
 label path, `/Root/Child/Leaf`; the first match decides the task's group, no
-match is the shared rest group, and a start stops only the running trackings
-of its own group. Which parameters an action takes is the adapter's business —
+match is the shared rest group, and two trackings only get in each other's way
+inside one group. Which parameters an action takes is the adapter's business —
 `nyd <instance> help --full` lists them.)
+
+Note what is **not** an alias here: the groups themselves. A policy that
+should hold for every action of the instance belongs in the adapter's config
+(`group_paths` above), where actions the alias never touches — `move`, and
+whatever the adapter grows next — read it as well. An alias is for the
+exception: one binding that departs from the instance's setting.
 
 To everything outside the adapter the alias **is** an action: it is listed
 next to its target on every level where the target is (the action bar, the
 shortcut overview, `nyd <instance> help --full`, the `--keymap` dump), it is
-bound like one (`- { key: s, id: my-toggle-tracking }`), a hook can name it,
+bound like one (`- { key: S, id: toggle-tracking-solo }`), a hook can name it,
 and the CLI runs it by name. It is not global — an alias of a per-node action
 exists exactly where that action exists, and invoking it on a level without
 the target is refused with a message naming both.

@@ -101,13 +101,15 @@ pub struct CoreHandle {
     /// Bus channel key for this handle — the database DSN. Local adapters on
     /// the same database share it; adapters elsewhere use a different channel.
     channel: String,
-    /// Tracking policy mirrored from the adapter's `allow_parallel` config:
-    /// [`TrackingPolicy::Exclusive`] (the default) makes a start stop every
-    /// other active tracking, [`TrackingPolicy::Parallel`] lets them
-    /// coexist. A `toggle-tracking` invocation may override it with a
-    /// [`TrackingPolicy::Grouped`] built from its `group_paths` argument
-    /// (see [`crate::task::tracking_policy_for`]). The local adapters need
-    /// it because the `tracking:` toggle in the task edit-buffer (A1b) goes
+    /// The adapter's tracking policy, built once from its `allow_parallel`
+    /// and `group_paths` config (see [`tracking_policy_from_config`]) and
+    /// used by every action that has to decide whether two trackings are in
+    /// each other's way: starting one stops the others in its group
+    /// ([`TrackingService::start`]), moving one only collides with the
+    /// others in its group ([`MoveOptions::policy`]). An invocation may
+    /// still override it by passing `group_paths` itself (see
+    /// [`crate::task::tracking_policy_for`]). The local adapters need it
+    /// because the `tracking:` toggle in the task edit-buffer (A1b) goes
     /// through the adapter, not the host's native session.
     pub tracking_policy: TrackingPolicy,
     /// Directory the `backup` action writes timestamped copies of this
@@ -307,6 +309,22 @@ pub struct LocalAdapterConfig {
     /// behaviour; `true` permits concurrent trackings.
     #[serde(default)]
     pub allow_parallel: Option<bool>,
+    /// Path regexes partitioning tasks into tracking groups. Trackings in
+    /// different groups ignore each other: starting one does not stop the
+    /// others, and moving one is not blocked by them.
+    ///
+    /// *Why it exists:* exclusivity is the right default for one person's
+    /// day, but a second tree tracked *alongside* the first — a mirror tree
+    /// an automation fills, say — is not a competing entry. Each pattern is
+    /// matched against the task's label path (`/Root/Child/Leaf`, root
+    /// first); the first match decides the group, tasks matching none share
+    /// one rest group, and that rest group excludes itself like any other.
+    /// Set here it holds for **every** action of the adapter; an individual
+    /// invocation can still pass its own `group_paths`. Grouping refines
+    /// exclusivity, so it cannot be combined with `allow_parallel: true` —
+    /// the adapter refuses to open rather than pick a winner.
+    #[serde(default)]
+    pub group_paths: Option<Vec<String>>,
     /// Where the `backup` action writes timestamped copies of this adapter's
     /// database, and how many to retain.
     ///
@@ -354,6 +372,35 @@ pub struct BackupSettings {
 /// sites) so this crate's public surface is unchanged.
 pub use not_yet_done_task_core::bootstrap::default_task_dsn;
 
+/// The [`TrackingPolicy`] an adapter's config describes.
+///
+/// `group_paths` wins when it is non-empty: each entry is a regex over task
+/// label paths, and a start or a move only ever touches the trackings in its
+/// own group. Without it the two-state `allow_parallel` flag decides. The two
+/// are mutually exclusive — grouping already *is* a refinement of exclusivity,
+/// so `allow_parallel: true` beside it is a contradiction, and the adapter
+/// says so instead of silently honouring one of them. An invalid regex is
+/// reported the same way, naming the offending pattern.
+///
+/// Called while the adapter is being created, so a contradictory or
+/// unparseable config keeps the adapter from opening at all — the tab reports
+/// the error and no action ever runs under a guessed policy.
+pub fn tracking_policy_from_config(
+    allow_parallel: Option<bool>,
+    group_paths: Option<&[String]>,
+) -> std::result::Result<TrackingPolicy, String> {
+    let groups = group_paths.unwrap_or(&[]);
+    if groups.is_empty() {
+        return Ok(TrackingPolicy::from_parallel_flag(
+            allow_parallel.unwrap_or(false),
+        ));
+    }
+    if allow_parallel == Some(true) {
+        return Err("group_paths cannot be combined with allow_parallel: true".to_string());
+    }
+    TrackingPolicy::grouped(groups)
+}
+
 /// Parse a local adapter's `config`, open its task database, and bundle the
 /// resolved services with the host bus into a [`CoreHandle`].
 ///
@@ -386,6 +433,9 @@ pub fn open_core_handle(
         .unwrap_or_else(not_yet_done_task_core::backup::default_backup_dir);
     let backup_max_count = backup.max_count.unwrap_or(10);
 
+    let tracking_policy = tracking_policy_from_config(cfg.allow_parallel, cfg.group_paths.as_deref())
+        .map_err(|e| ContentError::Other(e.into()))?;
+
     let mut handle = CoreHandle::new(
         domain.task_service,
         domain.tracking_repo,
@@ -394,7 +444,7 @@ pub fn open_core_handle(
         domain.project_service,
         ctx.event_bus.clone(),
         dsn,
-        TrackingPolicy::from_parallel_flag(cfg.allow_parallel.unwrap_or(false)),
+        tracking_policy,
     )
     .with_backup(backup_dir, backup_max_count);
     if let Some(marker) = cfg.tracking_marker {
@@ -576,5 +626,52 @@ mod tests {
         let (inv_tx, mut inv_rx) = broadcast::channel(8);
         publish_row_patches(&inv_tx, std::iter::empty());
         assert!(inv_rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod tracking_policy_config_tests {
+    use super::*;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn without_group_paths_the_parallel_flag_decides() {
+        assert!(
+            tracking_policy_from_config(None, None)
+                .unwrap()
+                .is_exclusive()
+        );
+        assert!(matches!(
+            tracking_policy_from_config(Some(true), None).unwrap(),
+            TrackingPolicy::Parallel
+        ));
+        // An empty list is no grouping at all, not an empty grouping.
+        assert!(matches!(
+            tracking_policy_from_config(Some(true), Some(&[])).unwrap(),
+            TrackingPolicy::Parallel
+        ));
+    }
+
+    #[test]
+    fn group_paths_build_the_grouped_policy() {
+        let policy =
+            tracking_policy_from_config(None, Some(&paths(&["^/Work", "^/Autotrack"]))).unwrap();
+        assert!(!policy.stops("/Work/Doku", "/Autotrack/Mirror"));
+        assert!(policy.stops("/Work/Doku", "/Work/Meeting"));
+    }
+
+    #[test]
+    fn grouping_and_allow_parallel_together_are_refused() {
+        let err = tracking_policy_from_config(Some(true), Some(&paths(&["^/Work"]))).unwrap_err();
+        assert!(err.contains("cannot be combined with allow_parallel"), "{err}");
+    }
+
+    #[test]
+    fn an_invalid_pattern_names_itself() {
+        let err = tracking_policy_from_config(None, Some(&paths(&["^/Work", "("]))).unwrap_err();
+        assert!(err.starts_with("group_paths[1] '('"), "{err}");
     }
 }

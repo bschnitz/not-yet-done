@@ -83,6 +83,13 @@ pub struct MoveOptions {
     pub gravity: Option<GravityDirection>,
     pub granularity: Option<Granularity>,
     pub offset: Option<chrono::Duration>,
+    /// Which of the trackings a move lands on count as being in the way.
+    /// The same rule that decides whether a start stops a running tracking
+    /// (see [`TrackingPolicy`]) decides whether a move collides with it, so
+    /// two trackings only ever block each other when they share a group —
+    /// a mirror tree tracked alongside the real work is not an obstacle.
+    /// Default [`TrackingPolicy::Exclusive`]: every overlap is in the way.
+    pub policy: TrackingPolicy,
 }
 
 pub struct SplitTracking {
@@ -412,6 +419,7 @@ impl TrackingService for TrackingServiceImpl {
                     entry_id,
                     tracking.task_id,
                     gravity,
+                    &options.policy,
                 )
                 .await?
             }
@@ -425,7 +433,10 @@ impl TrackingService for TrackingServiceImpl {
                 {
                     return Err(AppError::OverlapSameTask);
                 }
-                if !overlapping.is_empty() && !options.allow_overlap {
+                let blocking = self
+                    .blocking_overlaps(&options.policy, tracking.task_id, overlapping)
+                    .await?;
+                if !blocking.is_empty() && !options.allow_overlap {
                     return Err(AppError::OverlapOtherTask);
                 }
                 proposed_start
@@ -716,6 +727,7 @@ impl TrackingServiceImpl {
         exclude_id: Uuid,
         task_id: Uuid,
         gravity: &GravityDirection,
+        policy: &TrackingPolicy,
     ) -> Result<chrono::DateTime<chrono::Utc>, AppError> {
         match gravity {
             GravityDirection::Start => {
@@ -725,13 +737,14 @@ impl TrackingServiceImpl {
                         .tracking_repository
                         .find_overlapping(candidate, candidate + duration, exclude_id)
                         .await?;
-                    if overlapping.is_empty() {
-                        return Ok(candidate);
-                    }
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-                    candidate = overlapping
+                    let blocking = self.blocking_overlaps(policy, task_id, overlapping).await?;
+                    if blocking.is_empty() {
+                        return Ok(candidate);
+                    }
+                    candidate = blocking
                         .iter()
                         .filter_map(|t| t.ended_at)
                         .max()
@@ -745,18 +758,63 @@ impl TrackingServiceImpl {
                         .tracking_repository
                         .find_overlapping(candidate_end - duration, candidate_end, exclude_id)
                         .await?;
-                    if overlapping.is_empty() {
-                        return Ok(candidate_end - duration);
-                    }
                     if overlapping.iter().any(|t| t.task_id == task_id) {
                         return Err(AppError::OverlapSameTask);
                     }
-                    candidate_end = overlapping
+                    let blocking = self.blocking_overlaps(policy, task_id, overlapping).await?;
+                    if blocking.is_empty() {
+                        return Ok(candidate_end - duration);
+                    }
+                    candidate_end = blocking
                         .iter()
                         .map(|t| t.started_at)
                         .min()
                         .ok_or(AppError::NoFreeSlot)?;
                 }
+            }
+        }
+    }
+
+    /// Narrow the trackings overlapping a candidate slot down to the ones
+    /// that are really in the way of a tracking on `task_id`.
+    ///
+    /// The question "is this tracking an obstacle?" is the same question as
+    /// "would starting here have stopped it?", so it is answered by the same
+    /// [`TrackingPolicy`]: `Exclusive` keeps every overlap, `Parallel` keeps
+    /// none, and `Grouped` keeps only those whose task falls into the same
+    /// group. Label paths are resolved lazily and cached per task, so a slot
+    /// crowded with trackings of one task costs one lookup, not one each.
+    async fn blocking_overlaps(
+        &self,
+        policy: &TrackingPolicy,
+        task_id: Uuid,
+        overlapping: Vec<tracking::Model>,
+    ) -> Result<Vec<tracking::Model>, AppError> {
+        match policy {
+            TrackingPolicy::Exclusive => Ok(overlapping),
+            TrackingPolicy::Parallel => Ok(Vec::new()),
+            TrackingPolicy::Grouped(_) => {
+                if overlapping.is_empty() {
+                    return Ok(overlapping);
+                }
+                let moving = self.label_path(task_id).await?;
+                let mut paths: std::collections::HashMap<Uuid, String> =
+                    std::collections::HashMap::new();
+                let mut blocking = Vec::new();
+                for t in overlapping {
+                    let path = match paths.get(&t.task_id) {
+                        Some(p) => p.clone(),
+                        None => {
+                            let p = self.label_path(t.task_id).await?;
+                            paths.insert(t.task_id, p.clone());
+                            p
+                        }
+                    };
+                    if policy.stops(&moving, &path) {
+                        blocking.push(t);
+                    }
+                }
+                Ok(blocking)
             }
         }
     }
