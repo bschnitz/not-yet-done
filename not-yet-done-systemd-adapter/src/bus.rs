@@ -288,6 +288,29 @@ impl Bus {
             .collect())
     }
 
+    /// When this manager's own startup began and when it ended, on the
+    /// monotonic clock.
+    ///
+    /// The two numbers `systemd-analyze time` subtracts from each other, read
+    /// as properties instead of parsed out of its output. The first is the zero
+    /// every `@` on the critical chain counts from; the second is what
+    /// separates a unit that came up during the startup from one that was
+    /// started long afterwards.
+    ///
+    /// The end is `None` while the manager is still starting up —
+    /// `FinishTimestampMonotonic` is `0` until it finishes, and a startup that
+    /// has not ended is a different answer from one that ended at time zero.
+    pub async fn startup_window(&self) -> Result<(u64, Option<u64>)> {
+        let proxy = self.manager_proxy().await?;
+        let began = self
+            .deadline("reading the startup time", proxy.userspace_timestamp_monotonic())
+            .await?;
+        let ended = self
+            .deadline("reading the startup time", proxy.finish_timestamp_monotonic())
+            .await?;
+        Ok((began, (ended > 0).then_some(ended)))
+    }
+
     /// All properties of one interface on one unit.
     ///
     /// `GetAll` rather than a property each: the columns of a level want five

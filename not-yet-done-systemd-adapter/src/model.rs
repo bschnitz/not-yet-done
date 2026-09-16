@@ -90,7 +90,7 @@ pub(crate) fn as_str(props: &HashMap<String, OwnedValue>, key: &str) -> String {
     }
 }
 
-fn as_u64(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u64> {
+pub(crate) fn as_u64(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u64> {
     let n = match props.get(key).map(|v| &**v)? {
         Value::U64(n) => *n,
         Value::U32(n) => u64::from(*n),
@@ -202,7 +202,7 @@ fn activation_usec(unit: &HashMap<String, OwnedValue>) -> Option<u64> {
 /// would be `0` in whole seconds. Formatted from integer arithmetic rather
 /// than through a float, so the cell is exact and never picks up an
 /// exponent.
-fn secs_cell(usec: Option<u64>) -> String {
+pub(crate) fn secs_cell(usec: Option<u64>) -> String {
     match usec {
         Some(n) => format!("{}.{:06}", n / 1_000_000, n % 1_000_000),
         None => String::new(),

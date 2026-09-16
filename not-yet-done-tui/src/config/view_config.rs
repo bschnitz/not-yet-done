@@ -3392,6 +3392,69 @@ views:
         }
     }
 
+    /// The critical chain hangs off units, and only off units.
+    ///
+    /// Unlike the journal, which reads a unit *name* and so works even for a
+    /// unit the manager has never loaded, a chain is made of timestamps. A
+    /// unit file that was never loaded has none, the adapter offers no chain
+    /// level under `systemd:unitfile`, and a `navigate_to` there would be a
+    /// key that can only fail. So the binding is pinned both ways: present on
+    /// every service and timer subtab of both view files, absent on the unit
+    /// files subtab of each.
+    ///
+    /// `C` and not `c` — lowercase `c` is the column leader.
+    #[test]
+    fn committed_systemd_examples_bind_the_chain_to_units_only() {
+        for (name, yaml) in [
+            (
+                "systemd.yaml",
+                include_str!("../../../docs/examples/views/systemd.yaml"),
+            ),
+            (
+                "systemd-system.yaml",
+                include_str!("../../../docs/examples/views/systemd-system.yaml"),
+            ),
+        ] {
+            let (cfg, _) = ViewFileConfig::parse_reporting_unknown_fields(yaml)
+                .unwrap_or_else(|e| panic!("committed {name} must parse: {e}"));
+
+            for view in &cfg.views {
+                let wants_chain = view.node_type != "systemd:unitfile";
+
+                let child = view
+                    .children
+                    .iter()
+                    .find(|c| c.node_type == "systemd:chain");
+                assert_eq!(
+                    child.is_some(),
+                    wants_chain,
+                    "{name}: subtab `{}` carries a chain level",
+                    view.name
+                );
+
+                let navigate = view
+                    .actions
+                    .iter()
+                    .find(|a| a.navigate_to.as_deref() == Some("systemd:chain"));
+                assert_eq!(
+                    navigate.is_some(),
+                    wants_chain,
+                    "{name}: subtab `{}` binds the chain drill",
+                    view.name
+                );
+
+                if let Some(navigate) = navigate {
+                    assert!(
+                        navigate.key_strings().iter().any(|k| k == "C"),
+                        "{name}: subtab `{}` opens the chain with `C`, not {:?}",
+                        view.name,
+                        navigate.key
+                    );
+                }
+            }
+        }
+    }
+
     /// The two dependency axes, as the view file has to shape them.
     ///
     /// "What does this unit need?" is a tree, and a tree continuation only
