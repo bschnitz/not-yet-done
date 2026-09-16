@@ -7899,7 +7899,7 @@ cell must move without a reload.
 - [x] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
       the order is the same. The sort menu (`c s`) on the Timers subtab lists
       `Name, Description, Active, Sub, Enabled, Next, Last, Unit, Result,
-    Persistent` — neither `Left` nor `Ago` is in it, which is the point:
+  Persistent` — neither `Left` nor `Ago` is in it, which is the point:
       a column the engine computes has nothing to sort on. `Next` ascending
       runs soonest-first, and a timer with no next elapse sorts to the end.
 - [x] Calendar: the `In` column counts down to the next appointment and ticks
@@ -7913,7 +7913,7 @@ cell must move without a reload.
       sorting on `Mem` runs by size, not by the text of the rendered cell.
       Both measured: the query left exactly the three units above 100 MiB
       standing, and `Mem` descending runs `500 MiB … 1.1 MiB → 976 KiB →
-    648 KiB`, which no text sort produces. Descending also puts every unit
+  648 KiB`, which no text sort produces. Descending also puts every unit
       with **no** value first — an absent value sorts to the end ascending,
       so it leads when the sort is reversed. That is the same trap the
       `startup` note in the query template warns about.
@@ -8008,7 +8008,7 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       `a d` answers `Disabled <unit>` and names the same path with a `-`.
       `ls` on that directory agrees both times. Note which verb asks first:
       `a e` writes straight away, `a d` puts up `Disable <unit>? It will not
-    come back on the next login. (y/n)` — the confirmation sits on the verb
+  come back on the next login. (y/n)` — the confirmation sits on the verb
       that takes something away.
 - [x] Pressing the same verb twice keeps its old sentence: the second `a d`
       says `<unit> was already disabled` with no path lines under it, because
@@ -8038,7 +8038,7 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       which answers `Unmasked <unit>` and names the link it removed. All four
       answers came back verbatim on `fluidsynth.service`. Two details worth
       having: masking asks first (`Nothing can start it again — not a
-    dependency, not you — until it is unmasked.`) while unmasking does not,
+  dependency, not you — until it is unmasked.`) while unmasking does not,
       and the refusal of `a e` is the manager's own sentence passed through —
       `Action 'enable': enabling <unit>: Unit <path> is masked` — not a
       rewrite of it.
@@ -8046,7 +8046,7 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
       `static` row says there is nothing to enable because it is started by
       something else — no path lines, because none were written. Measured in
       full: `<unit> has no [Install] section, so there is nothing to enable —
-    it is started by something else, not at login`, and no confirmation
+  it is started by something else, not at login`, and no confirmation
       either, because nothing was going to be written.
 
 ## systemd — the security level (phase 6b)
@@ -8145,13 +8145,17 @@ systemd view while the adapter offered all three the whole time.
       with one blank line appended to the buffer, which is the workaround —
       but the action cannot be used as designed until the save of a prepared
       buffer is told apart from the abandonment of one.
-- [ ] **Blocked — the follow-up question is refused on this level.** The write
-      lands, and then the picker that asks what to do about the running unit
-      fails with `Action 'apply' not exposed by node`: `apply` is offered on
+- [ ] **Cause fixed, awaiting a live re-run.** The write landed, and then the
+      picker that asks what to do about the running unit failed with
+      `Action 'apply' not exposed by node`: `apply` was offered on
       `systemd:service`, `systemd:timer` and `systemd:unitfile`, and the row
-      that was saved is a `systemd:security` one. So a harden of a running
-      unit never asks whether to restart it, and says so as an error rather
-      than staying silent about it.
+      that was saved is a `systemd:security` one — so a harden of a running
+      unit never asked whether to restart it. `edit::actions_for` now offers
+      `apply` on the security level too, and only that one: a check row is not
+      a place to open a unit file from. Confirmed headless —
+      `nyd adapter systemd security:<unit>:<check> actions` lists `apply` next
+      to `harden`. What is left is to walk it in the TUI: harden a running
+      unit, answer the picker, and see the unit actually restart.
 - [x] Do it a second time on another check. The buffer comes up with the first
       stanza already in it and the second appended below, each under its own
       `[Service]` heading — a repeated section header is fine, and systemd
