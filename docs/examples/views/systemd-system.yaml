@@ -105,6 +105,18 @@ adapter:
   # Local and never logs in, so it loads at startup like the other local tabs.
   manual_connect: false
 
+# The same startup report as the user instance (see systemd.yaml for what it
+# costs and why it carries no throttle) — against the system manager, where the
+# failure it most often catches is a mount rather than a service. Reading the
+# manager's unit list needs no privilege, so this fires no polkit dialog.
+#
+# Running both instances' reports means two notifications on a bad morning, one
+# per manager. That is the point: they are two different machines' worth of
+# state, and the message names which manager it speaks for.
+hooks:
+  connected:
+    - run: report-failed
+
 views:
   # ---------------------------------------------------------------- services
   - name: Services

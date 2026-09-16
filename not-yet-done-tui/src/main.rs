@@ -220,7 +220,7 @@ async fn main() -> Result<()> {
     // launch — but now any adapter can hook any action on any cadence, with no
     // TUI code change. The throttle is checked before each adapter is built, so
     // a within-window launch constructs nothing extra.
-    not_yet_done_host::fire_connected_hooks().await;
+    report_hooks(&mut app, not_yet_done_host::fire_connected_hooks().await);
 
     let mut terminal = terminal::setup()?;
     // Ask the terminal which graphics protocol it speaks. Must sit between
@@ -233,6 +233,33 @@ async fn main() -> Result<()> {
     terminal::restore(&mut terminal)?;
 
     result
+}
+
+/// Hand what the `connected` hooks said to the notification centre.
+///
+/// The hooks were fired and their reports dropped, which meant a hook could
+/// only ever speak through stderr — and stderr is behind the alternate screen
+/// by the time anyone could read it. A hook that returns a message returns it
+/// *because* someone has to see it: the systemd instance's `report-failed` is
+/// silent unless a unit has failed, and when it is not silent it is the first
+/// thing to read after a launch.
+///
+/// A failed binding is worth an error notice for the opposite reason: a hook
+/// that never runs is otherwise indistinguishable from one that ran and had
+/// nothing to say. Throttled and skipped bindings stay quiet — that is the
+/// configuration working, not a result.
+fn report_hooks(app: &mut App, reports: Vec<not_yet_done_host::HookReport>) {
+    use not_yet_done_host::HookOutcome;
+    for report in reports {
+        match report.outcome {
+            HookOutcome::Fired(Some(message)) => app.notify(message),
+            HookOutcome::Failed(reason) => app.notify_error(format!(
+                "hook {}:{} ({}) failed: {reason}",
+                report.instance, report.hook, report.action
+            )),
+            HookOutcome::Fired(None) | HookOutcome::Throttled | HookOutcome::Skipped(_) => {}
+        }
+    }
 }
 
 async fn run_loop(

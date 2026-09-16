@@ -341,12 +341,19 @@ fn context_for(binding: &HookBinding) -> ActionContext {
 
 /// Interpret an action's dispatch as a hook outcome. The actions hooks invoke
 /// are the fire-and-forget kind (`backup`, `restore-all`, a toggle): a `Notify`,
-/// `Reload`, `Noop`, or `Confirm` (already auto-confirmed) means success. The
-/// interactive dispatches (open an editor, run a query, create a child) cannot
-/// be driven head-less, so they count as a configuration error.
+/// `Done`, `Reload`, `Noop`, or `Confirm` (already auto-confirmed) means
+/// success. The interactive dispatches (open an editor, run a query, create a
+/// child) cannot be driven head-less, so they count as a configuration error.
+///
+/// `Done` is `Notify` plus a pane reload, and a hook has no pane — so the
+/// reload is the half that does not apply, not the message. Reading it as
+/// undrivable would have failed every hook bound to a write verb that reports
+/// what it did (every systemd verb, for one) while the write itself had
+/// already happened.
 fn outcome_for(dispatch: ActionDispatch) -> HookOutcome {
     match dispatch {
         ActionDispatch::Notify { message } => HookOutcome::Fired(Some(message)),
+        ActionDispatch::Done { message } => HookOutcome::Fired(message),
         ActionDispatch::Reload | ActionDispatch::Noop | ActionDispatch::Confirm { .. } => {
             HookOutcome::Fired(None)
         }
@@ -1181,6 +1188,18 @@ tracking_started:
             HookOutcome::Fired(Some("ok".into()))
         );
         assert_eq!(outcome_for(ActionDispatch::Noop), HookOutcome::Fired(None));
+        // A write verb that reports what it did: the pane reload is the half a
+        // hook cannot use, the message is the half it exists for.
+        assert_eq!(
+            outcome_for(ActionDispatch::Done {
+                message: Some("started backup.service".into())
+            }),
+            HookOutcome::Fired(Some("started backup.service".into()))
+        );
+        assert_eq!(
+            outcome_for(ActionDispatch::Done { message: None }),
+            HookOutcome::Fired(None)
+        );
         assert_eq!(
             outcome_for(ActionDispatch::Error("boom".into())),
             HookOutcome::Failed("boom".into())

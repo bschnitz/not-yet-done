@@ -126,7 +126,7 @@ fn as_bool(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
 ///
 /// Both `0` and "unset" mean *never happened*, and a row says that with an empty
 /// cell rather than with 1970.
-fn realtime(props: &HashMap<String, OwnedValue>, key: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn realtime(props: &HashMap<String, OwnedValue>, key: &str) -> Option<DateTime<Utc>> {
     let usec = as_u64(props, key).filter(|n| *n > 0)?;
     DateTime::from_timestamp_micros(i64::try_from(usec).ok()?)
 }
@@ -270,7 +270,7 @@ fn num(value: Option<u64>) -> String {
 
 /// An instant as a cell, canonical RFC 3339 so `kind: datetime` and
 /// `kind: elapsed` can both read it.
-fn instant(value: Option<DateTime<Utc>>) -> String {
+pub(crate) fn instant(value: Option<DateTime<Utc>>) -> String {
     value.map(|t| t.to_rfc3339()).unwrap_or_default()
 }
 

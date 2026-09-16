@@ -98,6 +98,9 @@ pub const UNIT_FILE_COLUMNS: &[&str] = &[
     "name", "state", "path", "vendor", "preset", "drift", "shadows",
 ];
 
+/// Columns a Failed query may reference.
+pub const FAILED_COLUMNS: &[&str] = &["name", "kind", "description", "load", "sub", "since"];
+
 /// The columns compared as instants. A comparison against one of these needs a
 /// right-hand side that resolved to a real date, or the query would silently
 /// match nothing.
@@ -293,6 +296,20 @@ impl RowFields for ChainRow {
     }
 }
 
+impl RowFields for crate::failed::FailedRow {
+    fn field(&self, column: &str) -> Field<'_> {
+        match column {
+            "name" => Field::Text(Cow::Borrowed(&self.name)),
+            "kind" => Field::Text(Cow::Borrowed(&self.kind)),
+            "description" => text_or_null(&self.description),
+            "load" => text_or_null(&self.load),
+            "sub" => text_or_null(&self.sub),
+            "since" => time_or_null(self.since),
+            _ => Field::Null,
+        }
+    }
+}
+
 impl RowFields for DepRow {
     fn field(&self, column: &str) -> Field<'_> {
         match column {
@@ -381,7 +398,7 @@ mod tests {
     #[test]
     fn every_level_allows_a_query_on_exactly_the_columns_it_declares() {
         use crate::model;
-        let levels: [(&str, &[&str], Vec<not_yet_done_content::ColumnSchema>); 8] = [
+        let levels: [(&str, &[&str], Vec<not_yet_done_content::ColumnSchema>); 9] = [
             ("service", SERVICE_COLUMNS, model::service_columns()),
             ("timer", TIMER_COLUMNS, model::timer_columns()),
             ("unit file", UNIT_FILE_COLUMNS, model::unit_file_columns()),
@@ -390,6 +407,7 @@ mod tests {
             ("security", SECURITY_COLUMNS, model::security_columns()),
             ("dependency", DEP_COLUMNS, crate::deps::dep_columns()),
             ("chain", CHAIN_COLUMNS, crate::chain::chain_columns()),
+            ("failed", FAILED_COLUMNS, crate::failed::failed_columns()),
         ];
         for (level, queryable, schema) in levels {
             let declared: Vec<&str> = schema.iter().map(|c| c.key.as_str()).collect();

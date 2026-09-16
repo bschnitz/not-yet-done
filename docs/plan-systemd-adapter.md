@@ -38,7 +38,7 @@ it is open _there_ rather than now.
 | [3 — Creating](#phase-3--creating)                       | form wizard, skeleton templates, **timer + service as a pair**                 | form vs. editor default, `natural-date` → `OnCalendar`, templates         |
 | [4 — Journal](#phase-4--journal)                         | `systemd:log` level, cursor pagination, `highlights:`, `--follow`              | level or external terminal, query syntax, follow yes/no                   |
 | [5 — Live](#phase-5--live)                               | D-Bus signals → `Invalidation::Row`, dependency tree, timer countdown          | `kind: countdown` and `kind: bytes` generic or adapter-side, signal scope |
-| [6 — Diagnostics](#phase-6--diagnostics)                 | `analyze security` / `blame`, drift audit, resource columns, waybar            | which of the four, in which order                                         |
+| [6 — Diagnostics](#phase-6--diagnostics)                 | `analyze security` / `blame`, drift audit, resource columns, failed level      | which of the four, in which order                                         |
 | [7 — Beyond the user bus](#phase-7--beyond-the-user-bus) | system bus + polkit, `systemd:chain`, remote hosts, containers                 | polkit route, subtabs vs. instances, whether at all                       |
 
 After phase 2 this is a tab one uses daily. After phase 4 it replaces
@@ -891,10 +891,12 @@ worth, so it is cut into four, each of which is usable on the day it lands:
   rather than out of that command, plus the memory high-water mark beside the
   current one. `critical-chain` and `IOReadBytes` were measured and dropped;
   the decisions are in [the phase](#phase-6c--the-clock-and-the-meter) below.
-- **6d — the ambient half**: a failed-units indicator through the existing
-  Waybar CFFI module, and a `connected` hook that raises a notification when
-  units are already failed at startup, so it lands in the notification centre
-  without anyone going to look.
+- **6d — the ambient half**: a `systemd:failed` level that covers every unit
+  type rather than only services, and a `connected` hook that raises a
+  notification when units are already failed at startup, so it lands in the
+  notification centre without anyone going to look. The Waybar indicator this
+  bullet used to name was dropped, not deferred; the reason is in
+  [the phase](#phase-6d--the-ambient-half) below.
 
 ### Phase 6a — the audit
 
@@ -1266,6 +1268,92 @@ documents the working idiom instead: `[startup, gte, 0]` selects the units that
 have actually run (26 of 31 rows here). Worth noting for the same reason as in
 [phase 6b](#phase-6b--the-security-level): `[startup, is, null]` matches
 nothing, because `is null` does not reach an absent numeric field.
+
+### Phase 6d — the ambient half
+
+**Delivers** what is broken, said once, without anyone going to look: a
+`systemd:failed` level listing every loaded unit in that state, and a
+`connected` hook that reports those units through the notification centre the
+first time an instance connects. The Waybar indicator that was named here is
+**not built and not planned** — see the last decision below.
+
+### The questions, decided
+
+**Failed units are a level of their own, not a query on Services.** The obvious
+shape is a default query on the list that already exists, and the shipped views
+do exactly that: the `Failed` subtab is the Services level with
+`[active, =, failed]` in front of it (D2). That subtab's own comment names what
+is wrong with it — a failed _timer_ does not appear on it — and the problem is
+wider than timers. The Services level is "every unit whose name ends in
+`.service`", while `systemctl --failed` covers every unit type there is. On this machine 85
+mounts, 44 sockets and 8 timers are loaded, and the failure people actually hit
+is a mount. A second reason is addressing: a node id on the Services level is
+`service:<name>`, and `get_by_id` has no prefix for a mount — so a failed mount
+handed back from a query would be a row that cannot be opened. `systemd:failed`
+has its own `failed:` prefix whose suffix is the whole unit name, which is
+exactly what the control verbs act on, so `restart` and `reset-failed` work
+there with no new plumbing. `Scope::Loaded` covers the level too: every row on
+it is loaded by definition.
+
+**The whole answer is one D-Bus round trip.** `ListUnits` already carries every
+loaded unit's `ActiveState`, so the failed set is a filter over a call the
+adapter makes anyway — no per-unit `GetAll` to find out who is broken. The
+per-unit property reads that fill the level's columns are affordable for the
+opposite reason: a healthy machine has zero rows there and an unhealthy one has
+a handful. The hook does not even do that much; it needs only the names.
+
+**`StateChangeTimestamp`, not `ActiveEnterTimestamp`, for the `since` column.**
+The latter is when the unit last came _up_, which for a unit that has been
+failing since boot is either long ago or never — the column would be empty on
+precisely the rows it exists for. `StateChangeTimestamp` is when it entered the
+state it is in now, which is the question "since when is this broken?".
+
+**Saying nothing is the feature.** `failed::message` returns `None` for an empty
+list and the action answers `Noop`, so a healthy login produces no notification
+at all. A startup notice that says "all good" every single day teaches its reader
+to dismiss it without looking, and then it is worthless on the day it says
+something else. That is also why the shipped binding carries no `throttle`:
+there is nothing to throttle when the quiet case is silent, and a throttle would
+mean a second failure inside the window goes unmentioned.
+
+**Being the first real user of the hook machinery found two holes in it.**
+Neither is 6d's own; both would have hit any hook bound to any adapter.
+
+- **Both front-ends dropped the reports.** `fire_connected_hooks` returned a
+  `Vec<HookReport>` that the TUI discarded and the CLI ignored. A hook could
+  therefore never speak to the user: the TUI's only other channel is stderr,
+  which is behind the alternate screen. The TUI now routes `Fired(Some(msg))`
+  into the notification centre and `Failed` into it as an error; the CLI prints
+  to stderr rather than stdout, because a hook's remark is out of band with
+  respect to the verb and stdout is what a caller pipes.
+- **`outcome_for` did not know `ActionDispatch::Done`.** It mapped `Notify`,
+  `Reload`, `Noop` and `Confirm` to success and everything else to "cannot drive
+  head-less" — and `Done` is what every systemd write verb returns. A hook bound
+  to `start` or `restart` would have reported failure _after_ the unit had
+  already been started. `Done` is `Notify` plus a pane reload; a hook has no
+  pane, so the reload is the half that does not apply, not the message.
+
+**The `Failed` subtab keeps pointing at the Services level.** The new level is
+declared by the adapter but by no view: it is reachable from the CLI
+(`nyd adapter systemd ls -t systemd:failed`) and it is what the `connected` hook
+reads. Repointing the subtab is not a one-line edit — the two levels carry
+different column sets, and the subtab's rows unfold into a `dependencies` child
+that a `failed:` id would have to be taught — so it is a piece of work in its
+own right, and it is one this plan is not asking for. The consequence is stated
+rather than hidden: until someone does it, a failed mount or socket is visible
+from the CLI and in the startup notification, and not on the tab.
+
+**The Waybar indicator is dropped, not deferred.** The plan named a permanent
+failed-unit count in the bar, and the design was worked out — a `source:`
+discriminant in the Waybar module's config so the one `.so` could be
+instantiated twice, once for trackings and once for this. It is not being built.
+The count it would show is zero almost every day, so the bar would spend its
+life carrying a widget that says nothing, and the two halves that do the work
+are already here: the `connected` hook covers "tell me without my going to
+look", and the level covers "let me go look". Adding a third, always-visible
+copy of the same fact buys a glance and costs a permanent fixture. If that trade
+ever looks different, the level is the data source and the module change is
+small — but it is not on this plan.
 
 ## Phase 7 — Beyond the user bus
 

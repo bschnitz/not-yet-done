@@ -55,6 +55,7 @@ pub mod create;
 pub mod deps;
 pub mod edit;
 pub mod factory;
+pub mod failed;
 pub mod journal;
 pub mod live;
 pub mod model;
@@ -111,3 +112,11 @@ pub const SECURITY_PREFIX: &str = "security:";
 /// sits on many chains, and a row is addressed by its id. Split on `>` like a
 /// dependency id: a unit name may hold a colon, never a `>`.
 pub const CHAIN_PREFIX: &str = "chain:";
+
+/// Node-id prefix for a unit on the Failed level (`failed:<unit>`).
+///
+/// Its own prefix rather than `service:` because the level's population is
+/// every kind of unit, and a mount addressed as a service would be looked up
+/// on a level it has no row on. The suffix is the whole unit name, so the
+/// control verbs — which act on a name — need nothing of their own here.
+pub const FAILED_PREFIX: &str = "failed:";

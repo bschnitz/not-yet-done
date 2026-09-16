@@ -86,6 +86,26 @@ adapter:
   # Local and never logs in, so it loads at startup like the other local tabs.
   manual_connect: false
 
+# What is broken, said once, without anyone going to look.
+#
+# `connected` fires right after the adapter is built — for the TUI that is
+# every launch — and `report-failed` answers the one question about the machine
+# rather than about a row: which loaded units, of any type, are in a failed
+# state. The answer lands in the notification centre (f10), so a failed mount
+# or a service that died overnight is on screen before the tab is ever opened.
+#
+# It is silent when nothing has failed, which is why it carries no throttle: a
+# report that only exists when there is something to report is not noise, and a
+# throttle would make the launch *after* a failure the quiet one.
+#
+# The cost is one `ListUnits` round trip per launch — the manager already
+# carries every unit's active state in that one reply, so nothing is polled per
+# unit. That does mean the bus is touched at startup even if the tab is never
+# opened; drop this block if that is not the trade you want.
+hooks:
+  connected:
+    - run: report-failed
+
 views:
   # ---------------------------------------------------------------- services
   - name: Services

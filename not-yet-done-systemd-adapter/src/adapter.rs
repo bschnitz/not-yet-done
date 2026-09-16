@@ -74,6 +74,7 @@ use crate::control;
 use crate::create;
 use crate::deps::{self, Axis, DepRow};
 use crate::edit;
+use crate::failed;
 use crate::journal;
 use crate::live;
 use crate::model::{
@@ -221,6 +222,12 @@ impl ContentAdapter for SystemdAdapter {
             let row = UnitFileRow::build(&entry, &policy, &paths);
             return Ok(Box::new(self.node(row.summary())));
         }
+        if let Some(name) = failed::unit_of(id) {
+            let entry = self.find_unit(name).await?;
+            let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
+            let row = failed::FailedRow::build(&entry, &unit);
+            return Ok(Box::new(self.node(row.summary())));
+        }
         if let Some(rest) = id.strip_prefix(crate::LOG_PREFIX) {
             // A cursor never holds a colon, a unit name may — so split from the
             // right, the same way a property id is split.
@@ -364,6 +371,11 @@ impl ContentAdapter for SystemdAdapter {
                 columns: unit_file_columns(),
                 list: Box::new(move |params| Box::pin(self.list_unit_files(params))),
             },
+            Child {
+                node_type: failed::failed_type(),
+                columns: failed::failed_columns(),
+                list: Box::new(move |params| Box::pin(self.list_failed(params))),
+            },
         ]
     }
 
@@ -395,6 +407,7 @@ impl ContentAdapter for SystemdAdapter {
         actions.extend(create::actions_for(&node_type.type_id, manager));
         actions.extend(journal::actions_for(&node_type.type_id));
         actions.extend(security::actions_for(&node_type.type_id, manager));
+        actions.extend(failed::actions_for(&node_type.type_id));
         actions
     }
 
@@ -404,6 +417,18 @@ impl ContentAdapter for SystemdAdapter {
     /// subscribe before the first load without racing the watcher's start.
     fn subscribe_invalidations(&self) -> broadcast::Receiver<Invalidation> {
         self.shared.inv_tx.subscribe()
+    }
+
+    /// The lifecycle hooks this adapter fires.
+    ///
+    /// Just `connected` — the point at which the manager is reachable and can
+    /// be asked what has failed, which is the whole reason the hook is worth
+    /// binding here (see the `hooks:` block in
+    /// `docs/examples/views/systemd.yaml`). The adapter fires no events of its
+    /// own beyond that; the live watcher's business is invalidations, which
+    /// repaint a pane rather than invoke an action.
+    fn hooks(&self) -> Vec<&str> {
+        vec!["connected"]
     }
 
     /// The one named value list this adapter serves: the signals `kill` sends.
@@ -752,6 +777,36 @@ impl SystemdAdapter {
             .collect())
     }
 
+    /// Every loaded unit that is in a failed state, of whatever kind.
+    ///
+    /// The one level that does not select by suffix: what its rows have in
+    /// common is how they ended, not what they are. The per-unit property read
+    /// is affordable here for a reason the other levels do not enjoy — a
+    /// healthy machine has none of these rows, and an unhealthy one has a
+    /// handful.
+    async fn list_failed(&self, params: ListParams) -> Result<ListResult> {
+        self.ensure_watcher().await;
+        let query = compile(params.query.as_deref(), query::FAILED_COLUMNS)?;
+        let _busy = self
+            .status()
+            .busy("Reading failed units", self.shared.timeout_secs);
+        let entries = failed::entries(self.bus()).await?;
+        self.status().connected();
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let unit = self.bus().properties(&entry.path, UNIT_IFACE).await;
+            rows.push(failed::FailedRow::build(&entry, &unit));
+        }
+        Ok(finish(
+            query::retain(rows, &query)
+                .iter()
+                .map(failed::FailedRow::summary)
+                .collect(),
+            &params.sort,
+            &failed::failed_columns(),
+        ))
+    }
+
     /// Read each unit's generic and type-specific properties and fold both into
     /// a row.
     ///
@@ -981,6 +1036,25 @@ impl Node for SystemdRoot {
         })
     }
 
+    /// Say which units are in a failed state — the one question about the
+    /// machine rather than about a row, which is why it hangs off the manager.
+    ///
+    /// `Noop` when nothing failed: [`failed::message`] has nothing to say, and
+    /// a hook that reported "all good" on every launch would teach its reader
+    /// to dismiss the one report that matters along with the rest.
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        if name != failed::REPORT {
+            return Ok(ActionDispatch::Noop);
+        }
+        let names = failed::units(&self.shared.bus).await?;
+        Ok(
+            match failed::message(self.shared.bus.manager(), &names) {
+                Some(message) => ActionDispatch::Notify { message },
+                None => ActionDispatch::Noop,
+            },
+        )
+    }
+
     /// The two roads into creating: a form, or a buffer that names itself.
     async fn execute(
         &mut self,
@@ -1046,6 +1120,9 @@ impl UnitNode {
             // And a chain row is the unit it names, not the one the chain was
             // opened on — the verbs act on the culprit the level found.
             .or_else(|| crate::chain::unit_of(&self.id))
+            // A failed row is one unit, named in full — the verbs that get it
+            // running again act on exactly that name.
+            .or_else(|| failed::unit_of(&self.id))
     }
 
     /// The checks every verb passes before it reaches the manager, in the order
@@ -1424,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn the_root_offers_exactly_the_three_unit_levels() {
+    fn the_root_offers_exactly_the_four_unit_levels() {
         let a = adapter();
         let root = a.root_node();
         let types: Vec<String> = a
@@ -1437,7 +1514,8 @@ mod tests {
             vec![
                 "systemd:service".to_string(),
                 "systemd:timer".to_string(),
-                "systemd:unitfile".to_string()
+                "systemd:unitfile".to_string(),
+                "systemd:failed".to_string()
             ]
         );
     }
