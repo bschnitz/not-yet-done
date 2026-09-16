@@ -382,8 +382,8 @@ views:
       # it is not, there is no question to ask and none is asked. Protected
       # units (see `protect:` above) refuse the editor too: the unit file
       # decides what the unit comes back as.
-      - { name: edit drop-in, key: "e e", id: edit }
-      - { name: edit whole unit file, key: "e f", id: edit-full }
+      - { name: edit drop-in, key: "e e", type: edit, id: edit }
+      - { name: edit whole unit file, key: "e f", type: edit, id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -733,7 +733,7 @@ views:
           # `DeviceAllow=` check stays exposed whenever the clock is protected,
           # in either order. That is systemd's own arithmetic, not a gap in the
           # table.
-          - { name: harden, key: "e h", id: harden }
+          - { name: harden, key: "e h", type: edit, id: harden }
 
       # ------------------------------------ what the start waited for
       #
@@ -1169,8 +1169,8 @@ views:
       # it is not, there is no question to ask and none is asked. Protected
       # units (see `protect:` above) refuse the editor too: the unit file
       # decides what the unit comes back as.
-      - { name: edit drop-in, key: "e e", id: edit }
-      - { name: edit whole unit file, key: "e f", id: edit-full }
+      - { name: edit drop-in, key: "e e", type: edit, id: edit }
+      - { name: edit whole unit file, key: "e f", type: edit, id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -1522,8 +1522,8 @@ views:
       # it is not, there is no question to ask and none is asked. Protected
       # units (see `protect:` above) refuse the editor too: the unit file
       # decides what the unit comes back as.
-      - { name: edit drop-in, key: "e e", id: edit }
-      - { name: edit whole unit file, key: "e f", id: edit-full }
+      - { name: edit drop-in, key: "e e", type: edit, id: edit }
+      - { name: edit whole unit file, key: "e f", type: edit, id: edit-full }
       # Clears the failed state so the unit can be started again — and so it
       # stops showing up in the Failed subtab. Changes nothing about what is
       # running.
@@ -1875,8 +1875,8 @@ views:
       # it is not, there is no question to ask and none is asked. Protected
       # units (see `protect:` above) refuse the editor too: the unit file
       # decides what the unit comes back as.
-      - { name: edit drop-in, key: "e e", id: edit }
-      - { name: edit whole unit file, key: "e f", id: edit-full }
+      - { name: edit drop-in, key: "e e", type: edit, id: edit }
+      - { name: edit whole unit file, key: "e f", type: edit, id: edit-full }
       # The unit's own journal — `J` opens it as a level, `a j` follows it in
       # a terminal. The Services subtab above carries the explanation.
       - { name: journal, key: J, type: navigate, navigate_to: "systemd:log" }

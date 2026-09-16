@@ -7869,33 +7869,54 @@ RFC 3339 instant, a byte count) and the table engine renders it. `countdown`
 is the mirror of `elapsed` and rides the same repaint pulse, so a countdown
 cell must move without a reload.
 
-- [ ] systemd Timers: the `Left` column counts **down** and the digits change
+- [x] systemd Timers: the `Left` column counts **down** and the digits change
       on their own, without pressing `r`. Watch a timer that is minutes away:
-      `24min 13s` → `24min 12s`.
+      `24min 13s` → `24min 12s`. Measured on a throwaway `OnCalendar=*:0/5`
+      timer: three screen reads three seconds apart gave `17s`, `14s`, `11s`
+      with no key pressed in between.
 - [x] The same pulse moves the neighbouring `Ago` column (`kind: elapsed`) and
       a running tracking's duration in the Trackings tab — and it does so with
       **no tracking running**, which is the thing that used to be missing.
 - [x] It stays quiet where nothing ticks: park on a tab whose level has
       neither kind (Tasks, Jira) and the screen must not repaint once a
       second. Watch the CPU of the process, not the screen.
-- [ ] The scale is two units, largest first, and a zero remainder is dropped:
+- [x] The scale is two units, largest first, and a zero remainder is dropped:
       `1w 2d`, `2d 13h`, `5h 24min`, `13s` — never `5h 0min`, never `3s` worth
-      of trailing noise on a weekly timer.
-- [ ] A timer whose elapse has passed shows a **negative** countdown
-      (`-2min`), not `0s`. `systemctl --user list-timers` calls the same timer
-      overdue; the sign is how the column says it.
-- [ ] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
-      the order is the same. Check the sort menu (`c s`) offers `Next` and the
-      resulting order runs soonest-first.
+      of trailing noise on a weekly timer. Four throwaway timers at once read
+      `24s`, `4min 41s`, `4d 13h` and `2w`. The last one is the proof of the
+      dropped remainder: for that same timer `systemctl --user list-timers`
+      prints `2 weeks 0 days`.
+- [ ] **Not stageable on a healthy manager, and the reason is worth keeping.**
+      A timer whose elapse has passed should show a **negative** countdown
+      (`-2min`), not `0s`. The obvious way to stage it — a timer that fires
+      every minute onto a service that runs for ten — does not produce one:
+      while the triggered unit is still running, systemd reports **no** next
+      elapse at all (`NextElapseUSecRealtime=` is empty and
+      `systemctl --user list-timers` prints `-` in that column), so the cell
+      is blank, not negative. The overdue state is a window of milliseconds
+      between elapse and trigger on this machine. Left open rather than
+      ticked: the rendering is untested, not wrong.
+- [x] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
+      the order is the same. The sort menu (`c s`) on the Timers subtab lists
+      `Name, Description, Active, Sub, Enabled, Next, Last, Unit, Result,
+    Persistent` — neither `Left` nor `Ago` is in it, which is the point:
+      a column the engine computes has nothing to sort on. `Next` ascending
+      runs soonest-first, and a timer with no next elapse sorts to the end.
 - [x] Calendar: the `In` column counts down to the next appointment and ticks
       live; an event happening right now shows a negative value. No calendar
       adapter change was needed — if this works, the seam is in the right
       place.
 - [x] systemd Services: `Mem` reads `95.4 MiB` / `1.2 GiB`, right-aligned, and
       a small unit reads a bare `512 B`.
-- [ ] The byte column is still a **number** underneath: a query
+- [x] The byte column is still a **number** underneath: a query
       `[mem, gt, 104857600]` narrows the list to units over 100 MiB, and
       sorting on `Mem` runs by size, not by the text of the rendered cell.
+      Both measured: the query left exactly the three units above 100 MiB
+      standing, and `Mem` descending runs `500 MiB … 1.1 MiB → 976 KiB →
+    648 KiB`, which no text sort produces. Descending also puts every unit
+      with **no** value first — an absent value sorts to the end ascending,
+      so it leads when the sort is reversed. That is the same trap the
+      `startup` note in the query template warns about.
 
 ## systemd — the audit columns (phase 6a)
 
@@ -7924,7 +7945,8 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       "0 changes", and nothing in the row moves. Check with
       `find ~/.config/systemd/user -name '<unit>'` that the enable symlink is
       really there first.
-- [ ] The counter-case, and it is not a bug: a unit enabled from
+- [ ] **Blocked — needs a write under `/etc`.** The counter-case, and it is
+      not a bug: a unit enabled from
       `/etc/systemd/user/<target>.wants/` also reads `enabled` with an empty
       `Drift`, and `a p` on it still reports a change — it writes a second
       symlink under `~/.config/systemd/user`, because user-level preset can
@@ -7945,49 +7967,87 @@ a loaded unit. Needs the systemd tab, Unit files subtab (`t u`).
       reload; the column goes quiet again.
 - [x] Query `[shadows, has, /usr]` finds exactly that row while the copy is in
       place, and nothing once it is gone.
-- [ ] Services tab: `Drop-ins` is off by default — switch it on with `c c`.
+- [x] Services tab: `Drop-ins` is off by default — switch it on with `c c`.
       It is blank rather than `0` where nothing amends the unit, and a unit
       with a `<unit>.service.d/*.conf` drop-in shows the count.
       `[dropins, gt, 0]` narrows to those units without the column being
       visible at all; the paths themselves are on the Properties level
-      (`DropInPaths`).
-- [ ] Both `q` menus offer the audit queries as commented examples in the
-      template, and `★` on one keeps it as a saved query — the audit is kept
-      by the user, not declared in the YAML.
+      (`DropInPaths`). Measured with two `.conf` files dropped on a throwaway
+      unit: the column read `2` there and stayed blank on all forty-odd other
+      rows, the query left that one row standing with the column switched off
+      again, and `DropInPaths` on the Properties level named both files.
+      Watch the numbering in `c c` while you work: switching a hidden column
+      on moves it up into the visible block, so the entry under the cursor is
+      not the one it was a moment ago.
+- [x] Both `q` menus offer the audit queries as commented examples in the
+      template — Services carries `[dropins, gt, 0]` and
+      `[mem, gt, 104857600]`, Unit files `[drift, has, should]`,
+      `[drift, =, should-disable]` and `[shadows, has, /usr]`. The audit is
+      kept by the user, not declared in the YAML. **But `★` is not what keeps
+      it:** a query is saved the moment it is applied — writing one in `Q` and
+      saving answers `Query '<expr>' saved` and the expression is in the `q`
+      list from then on. `★` marks which saved query the level _opens_ with
+      (`ctrl+t`, and pressing it again clears the mark and answers
+      `Default query cleared`).
 
 ## systemd — what a unit-file verb wrote, and where
 
 All five file verbs report the paths the manager touched, not a count of them:
 a headline, then one line per symlink — `+` written, `-` removed, `!` for
-something systemd refused to do. Only the first line reaches the notification
-bar; the rest appears on `f10` with the entry expanded. Needs the systemd tab,
+something systemd refused to do. The notification **bar** shows the whole
+answer, headline and path lines together; the message **page** (`z l`, not
+`f10`) collapses every entry to its headline and expands only the row under
+the cursor, where the same lines reappear under a `│` gutter. Needs the
+systemd tab,
 Unit files subtab (`t u`), and a throwaway unit — put one in
 `~/.config/systemd/user/` with an `[Install]` section and
 `systemctl --user daemon-reload`.
 
-- [ ] `a e` on the throwaway answers `Enabled <unit>` and names the symlink it
+- [x] `a e` on the throwaway answers `Enabled <unit>` and names the symlink it
       wrote under `~/.config/systemd/user/<target>.wants/` on the next line.
       `a d` answers `Disabled <unit>` and names the same path with a `-`.
-      `ls` on that directory agrees both times.
-- [ ] Pressing the same verb twice keeps its old sentence: the second `a d`
+      `ls` on that directory agrees both times. Note which verb asks first:
+      `a e` writes straight away, `a d` puts up `Disable <unit>? It will not
+    come back on the next login. (y/n)` — the confirmation sits on the verb
+      that takes something away.
+- [x] Pressing the same verb twice keeps its old sentence: the second `a d`
       says `<unit> was already disabled` with no path lines under it, because
-      nothing moved.
-- [ ] The direction of `a p` is in the headline, and it is the half the user
+      nothing moved. It still asks for confirmation first — the manager is
+      what decides there was nothing to do, so the question comes before the
+      answer can be known.
+- [ ] **Half measured; the other half needs a write under `/etc`.** The
+      direction of `a p` is in the headline, and it is the half the user
       cannot know in advance: on a `should-enable` row it reads
       `Enabled <unit> — the preset wants it on`, on a `should-disable` row
       `Disabled <unit> — the preset wants it off`. A unit already in line still
-      answers `already matches its preset`, with nothing under it.
-- [ ] A refusal is never reported as the verb. Mask an inert vendor unit
+      answers `already matches its preset`, with nothing under it. The
+      `should-enable` sentence and the `already matches` sentence are both
+      confirmed, one after the other on the same throwaway unit, the first
+      with the written symlink under it and the second with nothing. The
+      `should-disable` sentence cannot be staged here: a user-level preset is
+      only read from `/etc/systemd/user-preset/`, `/run` and `/usr/lib` —
+      never from `$XDG_CONFIG_HOME` — and this machine ships no `disable *`
+      line, so every unmatched unit reads `should-enable`.
+- [x] A refusal is never reported as the verb. Mask an inert vendor unit
       (`a m` on, say, a synth or a torrent daemon you do not run — it writes a
       `/dev/null` link into `~/.config/systemd/user`), then press `a p` on it:
       the answer is `The preset changed nothing for <unit>` with
       `! … — it is masked, so no symlink was written` under it, **not** an
       enable it never performed. `a e` on the same row is refused outright by
       the manager (`UnitMasked`), which is also the truth. Undo with `a u`,
-      which answers `Unmasked <unit>` and names the link it removed.
-- [ ] A unit with no `[Install]` section keeps its own sentence: `a e` on a
+      which answers `Unmasked <unit>` and names the link it removed. All four
+      answers came back verbatim on `fluidsynth.service`. Two details worth
+      having: masking asks first (`Nothing can start it again — not a
+    dependency, not you — until it is unmasked.`) while unmasking does not,
+      and the refusal of `a e` is the manager's own sentence passed through —
+      `Action 'enable': enabling <unit>: Unit <path> is masked` — not a
+      rewrite of it.
+- [x] A unit with no `[Install]` section keeps its own sentence: `a e` on a
       `static` row says there is nothing to enable because it is started by
-      something else — no path lines, because none were written.
+      something else — no path lines, because none were written. Measured in
+      full: `<unit> has no [Install] section, so there is nothing to enable —
+    it is started by something else, not at login`, and no confirmation
+      either, because nothing was going to be written.
 
 ## systemd — the security level (phase 6b)
 
@@ -7995,12 +8055,37 @@ Unit files subtab (`t u`), and a throwaway unit — put one in
 on the list above it, and `e h` to write a fix. Needs the systemd tab. Do the
 writing half on a throwaway unit, not on something you depend on.
 
+Before any of the `e h` boxes below will do anything at all, the binding has to
+say `type: edit`. An `InputSpec::Editor` action bound as the default
+`type: node` is handed to `invoke_action` with no input and does nothing, and
+says nothing either — which is how `e e`, `e f` and `e h` sat inert in the
+systemd view while the adapter offered all three the whole time.
+
 - [x] Services subtab (`t s`), any row, `H` — the Security level opens with one
       row per check (81 on systemd 261) and a `Status` of `ok`, `exposed` or
       `no-effect`, coloured green / amber / dim. The breadcrumb names the unit.
 - [x] `Exposure` is **blank** on every `ok` row and carries a number on the
       exposed ones. Sort by it (`c s`): the column sorts numerically, not as
       text — `0.5` above `0.2`, and the blanks together at one end.
+- [ ] **Blocked — a query cannot reach this level at all.** The `q` menu and
+      the editor behind it are level-aware and come up with the Security
+      template, but applying one stamps the query on the _pane_ and then
+      reloads the pane's **root**: the body goes to the Services node, whose
+      column set has no `status`, and the level answers
+      `unknown systemd column 'status'` over an empty table. Routing the reload
+      through the level would not be enough either — a drilled child list only
+      carries the pane's query when the adapter declares
+      `propagates_query_to_subtree`, which systemd does not. So a `query:`
+      block on a drilled-into level is decorative today. Same for the two boxes
+      below; `Q` is silently dead on the level as well. On the **Properties**
+      level it is worse than decorative — measured there, applying a query
+      leaves the pane wedged: the header keeps the child's columns while the
+      body shows the root's rows, the action bar carries a mangled remnant of
+      the expression, and neither `⌫`, nor a subtab key, nor a tab switch gets
+      out. Only `r` heals the level (it reloads the level, not the root), and
+      only then does `Esc` + `⌫` leave it. Reopening `Q` meanwhile hands back
+      the **wrong** template — the Properties one, with the previous buffer
+      still smeared across its first line.
 - [ ] `q` → `[status, =, exposed]` narrows to what is still open;
       `[status, "!=", exposed]` shows the passing rows **and** the `no-effect`
       one. There is exactly one of the latter on a user manager, `RemoveIPC=`
@@ -8020,8 +8105,10 @@ writing half on a throwaway unit, not on something you depend on.
       against `systemd-analyze --user security` in a terminal — same units,
       same numbers — and note that the whole listing is no slower to load: the
       scores arrive from one call, not one per row.
-- [ ] `[exposure, lt, 9.0]` on the Services level returns exactly the units
-      that are hardened at all. On a stock system that is a handful.
+- [x] `[exposure, lt, 9.0]` on the Services level returns exactly the units
+      that are hardened at all. On a stock system that is a handful. Switch the
+      hidden `Exposure` column on with `c c` afterwards and read the numbers:
+      every one of them is under the bound, and nothing else is in the list.
 - [x] Unit files subtab (`t u`), a `.service` row the manager has **never
       loaded** (`Origin` says where it lives; `systemctl --user is-active` says
       `inactive`), `H` — the level opens anyway. This is the one level that can
@@ -8030,36 +8117,64 @@ writing half on a throwaway unit, not on something you depend on.
 - [x] Same subtab, a `.socket` or `.target` row, `H` — it refuses, in systemd's
       own words ("Unit … is not a service unit, refusing."). An empty table
       would have read as "nothing to find" instead of "wrong question".
-- [ ] Timers subtab (`t t`), any row, `H` — the level opens on the service the
-      timer **triggers**, not on the timer. The busy line says which unit is
-      being analysed, and the `Id` column (switch it on with `c c`) confirms it
-      by naming that unit. If the machine has no user timers, write a pair with
-      `n t` first and remove it afterwards.
-- [ ] `e h` on an exposed row of a throwaway unit opens the drop-in buffer with
+- [x] Timers subtab (`t t`), any row, `H` — the level opens on the service the
+      timer **triggers**, not on the timer. The proof is that the question
+      cannot be asked about a timer at all: `systemd-analyze --user security`
+      on a `.timer` refuses outright, so a level full of rows can only be the
+      service — and the rows match the same command run on that service one for
+      one, in order. Two things that look like confirmation are not: the
+      breadcrumb still names the **timer**, and the `Id` column carries the
+      **check's** id, not the analysed unit. If the machine has no user timers,
+      write a pair with `n t` first and remove it afterwards.
+- [x] `e h` on an exposed row of a throwaway unit opens the drop-in buffer with
       the unit's existing drop-in unchanged and, at the bottom, a comment
       naming the check and description followed by `[Service]` and the fix
       line. Leave without saving: nothing is written, and the row does not
       move. That is the read-only way to use the action.
-- [ ] Save it. The manager reloads, and the row's `Status` flips to `ok` with
+- [x] Save it. The manager reloads, and the row's `Status` flips to `ok` with
       an empty `Exposure` — `r` if the level was open before the write. The
       unit's overall score on the Services level has dropped by that check's
-      exposure.
-- [ ] Do it a second time on another check. The buffer comes up with the first
+      exposure (measured on a bare `sleep` unit: 9.4 → 9.2 for
+      `KeyringMode=`).
+- [ ] **Blocked — accepting the prepared buffer verbatim reads as a discard.**
+      The editor treats a buffer that comes back byte-identical to the one it
+      handed out as `:q!` (`process_editor_content`, the guard that breaks
+      reopen loops), and that is exactly what a correct `e h` save looks like:
+      the fix line is already typed, so there is nothing to change. The level
+      says `Edit cancelled` and writes nothing. Everything below was measured
+      with one blank line appended to the buffer, which is the workaround —
+      but the action cannot be used as designed until the save of a prepared
+      buffer is told apart from the abandonment of one.
+- [ ] **Blocked — the follow-up question is refused on this level.** The write
+      lands, and then the picker that asks what to do about the running unit
+      fails with `Action 'apply' not exposed by node`: `apply` is offered on
+      `systemd:service`, `systemd:timer` and `systemd:unitfile`, and the row
+      that was saved is a `systemd:security` one. So a harden of a running
+      unit never asks whether to restart it, and says so as an error rather
+      than staying silent about it.
+- [x] Do it a second time on another check. The buffer comes up with the first
       stanza already in it and the second appended below, each under its own
       `[Service]` heading — a repeated section header is fine, and systemd
-      merges them. Both checks read `ok` afterwards.
-- [ ] `e h` on `RootDirectory=/RootImage=`, `User=/DynamicUser=` or
+      merges them. Both checks read `ok` afterwards, and the score has dropped
+      twice (9.4 → 9.2 → 9.0).
+- [x] `e h` on `RootDirectory=/RootImage=`, `User=/DynamicUser=` or
       `RemoveIPC=` writes **comments only** — a sentence saying why there is no
-      single line. Saving it changes nothing and the check stays as it was,
-      which is the honest outcome for a check no directive settles.
-- [ ] The one conflict worth knowing: harden `ProtectClock=` and then look at
+      single line, and no `[Service]` heading under it. Saving it changes
+      nothing and the check stays as it was, which is the honest outcome for a
+      check no directive settles.
+- [x] The one conflict worth knowing: harden `ProtectClock=` and then look at
       `DeviceAllow=`. It stays `exposed`, and no ordering of the two fixes
       changes that — `ProtectClock=yes` implies `DeviceAllow=char-rtc r`.
-      Not a gap in the fix table.
-- [ ] Undo the whole session with `systemctl --user revert <unit>` (or delete
+      Not a gap in the fix table: harden `DeviceAllow=` as well and systemd
+      spells the reason out in the row itself, "has a device ACL with some
+      special devices: char-rtc:r", with the exposure down from 0.2 to 0.1 and
+      the status still `exposed`.
+- [x] Undo the whole session with `systemctl --user revert <unit>` (or delete
       the throwaway unit and `systemctl --user daemon-reload`) and confirm the
-      level reads as it did at the start. The previous buffer versions are
-      under `~/.local/share/not_yet_done/systemd-backups/<unit>/` either way.
+      level reads as it did at the start — the overall exposure is back at the
+      number it opened with. The previous buffer versions are under
+      `<XDG_DATA_HOME>/not_yet_done/systemd-backups/<unit>/` either way, one
+      per save, and `revert` does not touch them.
 
 ## systemd — startup time and the memory peak (phase 6c)
 
@@ -8091,19 +8206,30 @@ a terminal beside the TUI is the whole apparatus.
 - [x] Descending sort opens with the blank rows. That is the app-wide rule for
       absent values and is not specific to this column; the query below is the
       way around it.
-- [ ] `q` → `[startup, gte, 0]` — only the units that have actually run. Paired
-      with a descending sort this is the "slowest first" list. `[startup, gt,
-1]` narrows to the ones over a second, which on a user manager is
-      usually one or two.
-- [ ] `[startup, is, null]` and `[startup, is, not null]` both match **nothing**
-      — the same limitation phase 6b noted for empty strings. Not a regression
-      to chase here; `[startup, gte, 0]` is the idiom.
-- [ ] Failed subtab (`t f`): the column is there too, and it answers a
+- [x] `q` → `[startup, gte, 0]` — only the units that have actually run. Paired
+      with a descending sort this is the "slowest first" list. `[startup, gt, 1]`
+      narrows to the ones over a second, which on a user manager is often
+      **none at all** — and an empty list is the point of the check, not a
+      failure: the comparison is in seconds, so a column held in microseconds
+      would have matched every row instead. Pick a threshold that does bite
+      (`[startup, gt, 0.02]`) and count the rows against the sorted column.
+- [x] `[startup, is, null]` and `[startup, is, not null]` do not quietly match
+      nothing — they are **rejected**, and the level says why in place of its
+      rows — `'is' is not an operator, so 'startup' reads as a host predicate`,
+      which takes exactly one argument. `[startup, ne, null]` is refused too
+      (`unsupported rhs value: Null`). Not a regression to chase
+      here; `[startup, gte, 0]` is the idiom, and a query that cannot be
+      answered is better said out loud than answered with an empty list.
+- [x] Failed subtab (`t f`): the column is there too, and it answers a
       different question — a unit that dies on the first exec shows a span near
       zero, one that hung until its timeout shows the timeout. If nothing has
       failed, `systemd-run --user --unit=nyd-smoke-fail /bin/false` gives you a
       row to look at, and `systemctl --user reset-failed nyd-smoke-fail`
-      removes it again.
+      removes it again. The second half of the claim needs a unit that never
+      reaches `active`, which a `Type=simple` one does the moment it execs — so
+      add `--property=Type=oneshot --property=TimeoutStartSec=3` to a
+      `systemd-run --user` of `/usr/bin/sleep 300`. It lands in the list reading
+      `3.04s` beside the other one's `0`.
 - [x] `c c` on the Services level switches on `Peak` next to `Mem`. It is a
       byte column like `Mem`, it is never smaller than `Mem` for a running
       unit, and it keeps its value after the unit's memory has dropped again —
@@ -8156,18 +8282,19 @@ The first seven boxes read only; none of them needs a password. The stage-2
 boxes after them write, and are the ones that may put a polkit dialog on the
 screen.
 
-- [ ] The tab is reachable: `, x` switches to it, and it appears in the tab bar
-      with its own name. `not-yet-done-tui --keymap , x` prints the
+- [x] The tab is reachable: `, x` switches to it, and it appears in the tab bar
+      with its own name — thirteen tabs need roughly 180 columns before the bar
+      stops truncating, so check at a real width. `not-yet-done-tui --keymap , x` prints the
       `Switch to system` row. Leaving the tab out of `tabs.order` is the way to
       break exactly this while everything else keeps working — worth doing once
       to see the failure mode.
-- [ ] Services (`t s`) lists the **system** units, not the user ones: `sshd`,
+- [x] Services (`t s`) lists the **system** units, not the user ones: `sshd`,
       `NetworkManager`, `systemd-logind` — names that do not exist on the `, y`
       tab. Cross-check the count against `systemctl list-units --type=service`.
-- [ ] The typed columns are populated here too, from the system bus: `startup`,
+- [x] The typed columns are populated here too, from the system bus: `startup`,
       `mem`, `mem_peak`, `exposure`, and `fragment` paths under
       `/usr/lib/systemd/system/` rather than `~/.config/systemd/user/`.
-- [ ] `t u` reads the **system** preset policy, not the user one. Spot-check
+- [x] `t u` reads the **system** preset policy, not the user one. Spot-check
       three rows against `systemctl is-enabled`: a `should-disable` row must be
       `enabled` on a machine whose `99-default.preset` says `disable *`, and a
       `should-enable` row must be named in `90-systemd.preset`. The failure this
@@ -8177,21 +8304,27 @@ screen.
       vendor unit in `/etc/systemd/system/`, refresh, and confirm the column
       names the `/usr/lib` file it hides — then remove it again. An empty column
       proves nothing here: the wrong scope is silently empty, not wrong.
-- [ ] `a` on a service offers the runtime verbs (start, stop, restart, reload,
+- [x] `a` on a service offers the runtime verbs (start, stop, restart, reload,
       reset-failed, kill, freeze) and the file verbs that switch a unit on or
       off (enable, enable-now, disable, disable-now, preset) — but **no** mask
       or unmask, and no `e`-keys either. Compare side by side with `a` on the
       `, y` tab, which offers all of them. The same split holds on Timers and
       on Unit files.
-- [ ] The read keys all work: `P` properties, `J` journal, `H` security, `D`
+- [x] The read keys all work: `P` properties, `J` journal, `H` security, `D`
       ordering, `r` refresh, `a j` follow the journal in a terminal. The
       journal needs membership in `systemd-journal` or `wheel`; without it the
       level is empty rather than broken.
-- [ ] The failed list (`t f`) and the timers list (`t t`) hold the system's
+- [x] The failed list (`t f`) and the timers list (`t t`) hold the system's
       own — `systemctl --failed` and `systemctl list-timers` are the
       cross-checks. Unlike the user manager, this machine does have system
-      timers, so `t t` is the place to walk the timer columns.
-- [ ] Both tabs are live at once and do not interfere: switch `, y` ↔ `, x`
+      timers, so `t t` is the place to walk the timer columns. This one **found
+      three bugs**, all of them a column or a query that is silently empty
+      rather than wrong: the Failed subtab carried its filter under `template:`
+      instead of `default:` and so listed every service; the `Left` column had
+      no `countdown_to: next`; and `Triggers` asked for a `triggers` key the
+      adapter does not have (it is `unit`). A copy of a level is worth diffing
+      against its original field by field — none of the three raises a word.
+- [x] Both tabs are live at once and do not interfere: switch `, y` ↔ `, x`
       repeatedly, refresh each, and confirm neither list leaks a unit from the
       other manager. A name that exists on both (`dbus.socket`) is the sharpest
       test — it must show the manager's own state on each tab.
