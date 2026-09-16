@@ -8035,7 +8035,7 @@ come back on the next login. (y/n)` — the confirmation sits on the verb
       for one throwaway unit and nothing else. **This found a bug, and it was
       the whole point of staging the half that looked redundant:** the
       `should-disable` press answered `<unit> has no [Install] section, so
-    there is nothing to enable` — on a unit whose `[Install]` section is
+  there is nothing to enable` — on a unit whose `[Install]` section is
       right there, after removing its symlink correctly. `PresetUnitFiles`
       returns `carries_install_info = false` whenever the policy decided to
       **disable**, and `files()` read that flag as "no [Install] section" for
@@ -8161,17 +8161,34 @@ systemd view while the adapter offered all three the whole time.
       with one blank line appended to the buffer, which is the workaround —
       but the action cannot be used as designed until the save of a prepared
       buffer is told apart from the abandonment of one.
-- [ ] **Cause fixed, awaiting a live re-run.** The write landed, and then the
-      picker that asks what to do about the running unit failed with
+- [x] **Fixed and walked live.** The write landed, and then the picker that
+      asks what to do about the running unit failed with
       `Action 'apply' not exposed by node`: `apply` was offered on
       `systemd:service`, `systemd:timer` and `systemd:unitfile`, and the row
       that was saved is a `systemd:security` one — so a harden of a running
       unit never asked whether to restart it. `edit::actions_for` now offers
       `apply` on the security level too, and only that one: a check row is not
-      a place to open a unit file from. Confirmed headless —
-      `nyd adapter systemd security:<unit>:<check> actions` lists `apply` next
-      to `harden`. What is left is to walk it in the TUI: harden a running
-      unit, answer the picker, and see the unit actually restart.
+      a place to open a unit file from. Walked in the TUI on a throwaway
+      `sleep` unit, and all three entries of the picker do something
+      different: `restart` answers `Restarting <unit> — done`, the main PID
+      changes, `systemctl --user show -p KeyringMode` reads `private`, and the
+      row flips to `ok` with an empty `Exposure`; `nothing` answers
+      `<unit> keeps running the configuration it started with`, the PID does
+      not move, and the drop-in on disk has grown the new stanza all the same;
+      `reload-or-restart` answers `Reloading or restarting <unit> — done` and,
+      since a `sleep` unit has nothing to reload, restarts it.
+- [x] The aftermath of that last restart is not a bug in the action. The unit
+      came back as `failed` with `218/CAPABILITIES` — an unprivileged user
+      service cannot drop capabilities, so any `CapabilityBoundingSet=~…` line
+      the security level offers is unusable there. The harden was written and
+      applied exactly as asked; the kernel refused it. Worth knowing before
+      picking a check to harden a **user** unit with.
+- [ ] The built-in editor does not scroll to the end of a prepared buffer. On
+      the second and later `e h` of the same unit the appended stanza sits
+      below the visible window, so the buffer looks unchanged and the action
+      looks like a no-op. `G` shows it. Cheap to fix (open with the cursor on
+      the appended block, which is the part the user is meant to read) and it
+      belongs to the editor, not the systemd adapter.
 - [x] Do it a second time on another check. The buffer comes up with the first
       stanza already in it and the second appended below, each under its own
       `[Service]` heading — a repeated section header is fine, and systemd
@@ -8337,7 +8354,7 @@ screen.
       `vendor`. A column key nothing answers renders as an empty column and
       says nothing — while the same name in a query is refused out loud
       (`unknown systemd column 'origin' — valid columns: name, state, path,
-    vendor, preset, drift, shadows`), which is how the typo was finally
+  vendor, preset, drift, shadows`), which is how the typo was finally
       caught. The query template on this level named `origin` too. Both fixed.
       Diff a copied level against its original field by field; four of the
       seven differences this file had were silent.
