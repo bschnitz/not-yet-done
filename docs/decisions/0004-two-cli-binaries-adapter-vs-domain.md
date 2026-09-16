@@ -1,6 +1,11 @@
 # 0004 — Two CLI binaries: `nyd` (adapter frontend) vs. `nyd-t` (domain CLI)
 
-- **Status:** accepted, implemented
+- **Status:** superseded by
+  [0012](0012-one-interface-the-adapter-protocol.md) — the reasons for a
+  second binary were measured and did not hold; scripts address the domain
+  through the adapter protocol, and `nyd-t` is no longer installed. The
+  core-side decisions below (`default_task_dsn`, `open_module`, backups
+  against `tasks.db`) remain in force.
 - **Date:** 2026-06-21
 - **Affects:** `not-yet-done-cli` (`nyd`), the new `not-yet-done-task-cli`
   (`nyd-t`), `not-yet-done-task-core` (`bootstrap::open_module`,

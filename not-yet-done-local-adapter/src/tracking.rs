@@ -1493,14 +1493,19 @@ async fn execute_split(
 }
 
 /// `execute("move")` — move the tracking to a new start time, honouring the
-/// gravity / overlap / future guards. Granularity is derived from how the user
-/// expressed `start` (so a bare date snaps to the day, `9am` to the hour, …),
-/// but only when a gravity is set — matching the CLI `track move`. Delegates to
+/// gravity / overlap / future guards. Which trackings count as being in the
+/// way is the adapter's [`TrackingPolicy`] (overridable per invocation via
+/// `group_paths`, see [`crate::task::tracking_policy_for`]): under a grouped
+/// policy a tracking in another group shares the clock instead of blocking.
+/// Granularity is derived from how the user expressed `start` (so a bare date
+/// snaps to the day, `9am` to the hour, …), but only when a gravity is set —
+/// matching the CLI `track move`. Delegates to
 /// [`TrackingService::move_tracking`]; emits [`DomainEvent::TrackingChanged`].
 async fn execute_move(
     handle: &CoreHandle,
     tracking_id: Uuid,
     values: &HashMap<String, String>,
+    args: &ActionArgs,
 ) -> Result<ActionOutcome> {
     let start: LocalDateTime = form_required(values, "start")?
         .parse()
@@ -1530,6 +1535,7 @@ async fn execute_move(
         gravity,
         granularity,
         offset,
+        policy: crate::task::tracking_policy_for(handle, args).map_err(invalid_input)?,
     };
 
     handle
@@ -1772,6 +1778,10 @@ async fn invoke_paste_move(
         *flow.lock().unwrap() = None;
     }
 
+    let policy = match crate::task::tracking_policy_for(handle, &ctx.args) {
+        Ok(p) => p,
+        Err(e) => return ActionDispatch::Error(e),
+    };
     let options = MoveOptions {
         allow_overlap: false,
         allow_same_task_overlap: false,
@@ -1779,6 +1789,7 @@ async fn invoke_paste_move(
         gravity: None,
         granularity: None,
         offset: None,
+        policy,
     };
     match handle
         .tracking_service
@@ -2303,7 +2314,7 @@ impl Node for TrackingEntryNode {
         &mut self,
         action_id: &str,
         input: ActionInput,
-        _args: &ActionArgs,
+        args: &ActionArgs,
     ) -> Result<ActionOutcome> {
         match (action_id, input) {
             // Reached via the generic `DeleteSelf` confirm flow, which calls
@@ -2313,7 +2324,7 @@ impl Node for TrackingEntryNode {
                 execute_split(&self.handle, self.tracking_id()?, &values).await
             }
             ("move", ActionInput::Form(values)) => {
-                execute_move(&self.handle, self.tracking_id()?, &values).await
+                execute_move(&self.handle, self.tracking_id()?, &values, args).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on a tracking"
@@ -5114,6 +5125,7 @@ mod restore_scope_tests {
     use shaku::HasComponent;
 
     use not_yet_done_content::InMemoryHostBus;
+    use not_yet_done_task_core::service::TrackingPolicy;
     use not_yet_done_task_core::entity::{
         task::{self, TaskStatus},
         tracking as tracking_entity,
@@ -5196,6 +5208,51 @@ mod restore_scope_tests {
             path: Set(None),
         };
         model.insert(db).await.expect("insert task").id
+    }
+
+    /// A task under `parent`, so its label path has more than one segment —
+    /// what a grouped policy matches its patterns against.
+    async fn insert_child_task(
+        db: &sea_orm::DatabaseConnection,
+        desc: &str,
+        parent: Uuid,
+    ) -> Uuid {
+        let now = Utc::now();
+        let model = task::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            description: Set(desc.to_string()),
+            status: Set(TaskStatus::Todo),
+            deleted: Set(false),
+            deleted_at: Set(None),
+            priority: Set(0),
+            parent_id: Set(Some(parent)),
+            created_at: Set(now),
+            updated_at: Set(now),
+            last_tracked_at: Set(None),
+            path: Set(None),
+        };
+        model.insert(db).await.expect("insert child task").id
+    }
+
+    /// A completed tracking for `task_id` covering [start, end) on 2026-03-22,
+    /// hours given in UTC.
+    async fn insert_tracking_hours(
+        db: &sea_orm::DatabaseConnection,
+        task_id: Uuid,
+        from_hour: u32,
+        to_hour: u32,
+    ) -> Uuid {
+        use chrono::TimeZone;
+        let model = tracking_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            task_id: Set(task_id),
+            predecessor_id: Set(None),
+            started_at: Set(Utc.with_ymd_and_hms(2026, 3, 22, from_hour, 0, 0).unwrap()),
+            ended_at: Set(Some(Utc.with_ymd_and_hms(2026, 3, 22, to_hour, 0, 0).unwrap())),
+            deleted: Set(false),
+            created_at: Set(Utc::now()),
+        };
+        model.insert(db).await.expect("insert tracking").id
     }
 
     /// A deleted tracking for `task_id`, returning its id.
@@ -5377,7 +5434,7 @@ mod restore_scope_tests {
         let mut values = HashMap::new();
         values.insert("start".to_string(), "2026-03-20T08:00:00Z".to_string());
 
-        let outcome = execute_move(&handle, original, &values)
+        let outcome = execute_move(&handle, original, &values, &ActionArgs::new())
             .await
             .expect("move succeeds");
         assert!(matches!(outcome, ActionOutcome::Done { .. }));
@@ -5394,6 +5451,49 @@ mod restore_scope_tests {
     }
 
     #[tokio::test]
+    async fn execute_move_lands_on_a_tracking_of_another_group() {
+        let (mut handle, db) = setup().await;
+        handle.tracking_policy = TrackingPolicy::grouped(&["^/Work", "^/Autotrack"]).unwrap();
+
+        let work = insert_task(&db, "Work").await;
+        let doku = insert_child_task(&db, "Dokumentation", work).await;
+        let autotrack = insert_task(&db, "Autotrack").await;
+        let mirrored = insert_child_task(&db, "Mirrored ticket", autotrack).await;
+
+        // The slot is taken — but by the mirror tree, which is a group of its
+        // own and therefore not in the way.
+        insert_tracking_hours(&db, mirrored, 8, 10).await;
+        let moving = insert_tracking_hours(&db, doku, 14, 15).await;
+
+        let mut values = HashMap::new();
+        values.insert("start".to_string(), "2026-03-22T08:00:00Z".to_string());
+        execute_move(&handle, moving, &values, &ActionArgs::new())
+            .await
+            .expect("a tracking in another group is not an obstacle");
+    }
+
+    #[tokio::test]
+    async fn execute_move_still_refuses_an_overlap_inside_the_group() {
+        let (mut handle, db) = setup().await;
+        handle.tracking_policy = TrackingPolicy::grouped(&["^/Work", "^/Autotrack"]).unwrap();
+
+        let work = insert_task(&db, "Work").await;
+        let doku = insert_child_task(&db, "Dokumentation", work).await;
+        let meeting = insert_child_task(&db, "Meeting", work).await;
+
+        insert_tracking_hours(&db, meeting, 8, 10).await;
+        let moving = insert_tracking_hours(&db, doku, 14, 15).await;
+
+        let mut values = HashMap::new();
+        values.insert("start".to_string(), "2026-03-22T08:00:00Z".to_string());
+        let err = execute_move(&handle, moving, &values, &ActionArgs::new())
+            .await
+            .err()
+            .expect("same group still collides");
+        assert!(format!("{err}").contains("overlap"), "{err}");
+    }
+
+    #[tokio::test]
     async fn execute_move_rejects_invalid_gravity() {
         let (handle, db) = setup().await;
         let task = insert_task(&db, "Eta project").await;
@@ -5403,7 +5503,7 @@ mod restore_scope_tests {
         values.insert("start".to_string(), "2026-03-20T08:00:00Z".to_string());
         values.insert("gravity".to_string(), "sideways".to_string());
 
-        let err = execute_move(&handle, original, &values)
+        let err = execute_move(&handle, original, &values, &ActionArgs::new())
             .await
             .err()
             .expect("invalid gravity");

@@ -442,6 +442,10 @@ pub mod cli {
             gravity: gravity_dir,
             granularity,
             offset: offset.map(|o| o.duration),
+            // This CLI has no notion of tracking groups — every overlap is in
+            // the way. Grouped moves go through the adapter interface, which
+            // carries the policy (`nyd adapter <inst>:entry <id> move`).
+            policy: not_yet_done_task_core::service::TrackingPolicy::Exclusive,
         };
 
         let start_ctx: not_yet_done_task_core::local_context::LocalContext = start.into();

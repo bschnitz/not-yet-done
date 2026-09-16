@@ -18,7 +18,7 @@ A terminal-based task and time tracking application with a rich TUI, CLI, and Wa
 - **Scripts** — run user scripts on the focused node or a view's filtered set via the `:script` fuzzy menu, with background, capture, and interactive modes — or automatically after a reload via a hook binding
 - **Filter DSL** — YAML-based query language with natural-language date expressions
 - **Anonymization** — `NYD_ANON=1` masks real customer/ticket/person names with deterministic, format-preserving fakes across every adapter, for safe screenshots and screencasts of a production instance
-- **Daily backups** — the core DB (`nyd.db`) is backed up once a day on startup; the split-out `tasks.db` is backed up through a configurable [lifecycle hook](#lifecycle-hooks) (`backup` bound to the adapter's `connected` event with a 24h throttle), so it happens however you launch — TUI or any `nyd tasks …` command. The Tasks/Trackings tabs also expose a manual `backup` action (`B`), and `nyd-t backup` manages them from the CLI
+- **Daily backups** — the core DB (`nyd.db`) is backed up once a day on startup; the split-out `tasks.db` is backed up through a configurable [lifecycle hook](#lifecycle-hooks) (`backup` bound to the adapter's `connected` event with a 24h throttle), so it happens however you launch — TUI or any `nyd tasks …` command. The Tasks/Trackings tabs also expose a manual `backup` action (`B`), and so does the CLI (`nyd adapter tasks backup`)
 
 ## Installation
 
@@ -558,18 +558,24 @@ Press `c` to open the column configurator. Toggle columns on/off and reorder the
 
 ## CLI
 
-There are **two** command-line binaries, by design:
+There are **two** command-line binaries, but only one of them is an
+interface:
 
-| Binary  | Crate                   | Role                                                                                                                                                                                                                                                               |
-| ------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `nyd`   | `not-yet-done-cli`      | Generic front-end over the `ContentAdapter` protocol — drives **foreign** systems (Jira, Confluence, Postgres, Taiga, Stoat) and our own tasks/trackings/projects _as adapters_, all through one uniform interface.                                                |
-| `nyd-t` | `not-yet-done-task-cli` | Dedicated **Tasks & Time-Tracking** CLI on the native domain core (`not-yet-done-task-core`). Produces typed, domain-shaped output (e.g. `track export`'s joined tracking+task JSON, `task tree`'s nested hierarchy) and graded exit codes that scripts depend on. |
+| Binary  | Crate                   | Role                                                                                                                                                                                                                                            |
+| ------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nyd`   | `not-yet-done-cli`      | Generic front-end over the `ContentAdapter` protocol — drives **foreign** systems (Jira, Confluence, Postgres, Taiga, Stoat) and our own tasks/trackings/projects _as adapters_, all through one uniform interface.                             |
+| `nyd-t` | `not-yet-done-task-cli` | Maintenance tool directly on the domain core (`not-yet-done-task-core`), for the few verbs the adapter has no path for: `backup list`/`backup restore`, `db sync`, tag styling. **Not installed** — run it from the workspace when you need it. |
 
-Both build on the **same core**: the in-process TUI adapters and `nyd-t` each
-talk to `not-yet-done-task-core` in their own idiom. Adapters are _interop
-boundaries_ (a uniform protocol for many systems); `nyd-t` is the domain's own
-front-end. See [decision 0004](docs/decisions/0004-two-cli-binaries-adapter-vs-domain.md)
-for the why.
+Both build on the **same core**, but only `nyd` is an _interface_. Scripts and
+every other programmatic consumer address tasks and trackings through
+`nyd adapter …`, the same way the TUI does: the join-shaped tracking rows and
+the nested task hierarchy are assembled from columns the adapter already
+returns. `nyd-t` sits beside the adapter rather than behind it, so
+adapter-level settings — the tracking policy, lifecycle hooks — never reach it;
+that is why it was retired as an interface. See
+[decision 0012](docs/decisions/0012-one-interface-the-adapter-protocol.md), and
+[0004](docs/decisions/0004-two-cli-binaries-adapter-vs-domain.md) for the
+decision it supersedes.
 
 ### `nyd` — generic adapter front-end
 
@@ -589,51 +595,37 @@ projects are reached as adapter instances (`nyd tasks …`, `nyd trackings …`,
 > in `nyd-t` (below). The only built-in commands remaining in `nyd` are `tag`
 > and `backup` (which still operate on the legacy core DB).
 
-### `nyd-t` — Tasks & Time-Tracking CLI
+### `nyd-t` — maintenance tool, not an interface
 
-`nyd-t` (installed from `not-yet-done-task-cli`) is the native domain CLI. It
-operates on the split-out **task database** — `NYD_TASKS_DB` when set,
+`nyd-t` (crate `not-yet-done-task-cli`) is **not installed**, and nothing
+should script against it — see
+[decision 0012](docs/decisions/0012-one-interface-the-adapter-protocol.md). It
+talks to the domain core directly, which means the settings configured on the
+adapter instance do not apply: most importantly the
+[tracking policy](docs/decisions/0011-tracking-policy-as-an-adapter-setting.md),
+so a move made through `nyd-t` judges overlaps by a different rule than the
+same move made anywhere else.
+
+What it is still the right tool for are the verbs with no adapter path. Run it
+from the workspace:
+
+```bash
+cargo run -p not-yet-done-task-cli -- backup list
+cargo run -p not-yet-done-task-cli -- backup restore 20260323-185627-tasks.db
+cargo run -p not-yet-done-task-cli -- db sync          # create/upgrade the task DB schema
+cargo run -p not-yet-done-task-cli -- tag add "urgent" --fg "#FFFFFF" --bg "#FF5733"
+```
+
+It operates on the split-out **task database** — `NYD_TASKS_DB` when set,
 otherwise the per-host default `<data-local>/not_yet_done/tasks.db` (the same
 file the Tasks/Trackings adapters open when their config carries no explicit
 `database:` DSN). It does **not** read the core config's `database.url` (that
 points at the legacy `nyd.db`).
 
-Run `nyd-t <group> --help` for the full, self-documenting reference; the groups
-are:
-
-```bash
-# Tasks — CRUD, path resolution, subtree export
-nyd-t task add "Write report" --parent <id> --project Work --tag urgent
-nyd-t task list --project Work
-nyd-t task tree <id|description-prefix> [--last-tracked-since 2026-04-01] [--pretty]
-nyd-t task show --path /Work/Clients/Acme/Tickets [-i]   # graded exit codes: 4=not found, 5=ambiguous
-nyd-t task edit <id> --description … --add-tag … --remove-project …
-nyd-t task delete <id>
-
-# Time tracking — start/stop, summary, export, reschedule
-nyd-t track start <task-id> [--parallel]
-nyd-t track stop [--task-id <id>]                        # omit to stop all
-nyd-t track summary [--from 2026-03-01] [--to today] [--task-id <id>]
-nyd-t track export [<ids>…] [--task-id <id>] [--from …] [--to …] \
-                   [--active-only] [--sort-by-started-at asc|desc] [--pretty]
-nyd-t track move  <id> "yesterday 9am" [--gravity start|end] [--offset +1h] [--json]
-nyd-t track split <id> "10:30" [--task <other-task-id>]
-nyd-t track restore <id>
-
-# Projects, tags, schema, backups
-nyd-t project add "Work" --description …       # list / edit / delete too
-nyd-t tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""   # list/edit/new/delete
-nyd-t db sync                                  # create/upgrade the task DB schema
-nyd-t backup create | list | restore <file>   # backs up the task DB (tasks.db)
-
-# Ad-hoc filter queries (debug/inspect a FilterExpr before saving it)
-echo 'query: [deleted, =, false]' | nyd-t query run --entity task     # JSON to stdout
-nyd-t query run --entity tracking --file filter.yaml [--debug]        # --debug dumps the resolved FilterExpr
-```
-
-The `track export` / `task tree` JSON shapes and `task show` exit codes are a
-**stable contract** the user's TUI batch scripts rely on (daily reports,
-hour-totals, “goto task” from Jira/Taiga).
+`nyd-t <group> --help` still lists `task`, `track`, `project` and `query`.
+Those all have adapter equivalents and survive only because the binary is one
+clap tree; reach for `nyd adapter tasks …` / `nyd adapter trackings …`
+instead.
 
 ### Tags & Backup
 
@@ -1204,7 +1196,7 @@ The typical shape is the mirror image of the manual flow — the view
 reloads, the hook script reconciles something via the CLI, and hands a
 command back to the TUI:
 
-`reload → hook script → nyd/nyd-t calls → {"commands": [...]} → cmdline`
+`reload → hook script → nyd adapter calls → {"commands": [...]} → cmdline`
 
 #### Loop protection
 
@@ -2005,9 +1997,9 @@ that must not. Rename them freely — but an id lives in **both** files, as
 
 The Waybar CFFI module shows how many trackings are running in your status bar
 and lists them, each with its full task path and elapsed time, in the tooltip
-on hover. It counts rather than names because grouped tracking
-(`toggle-tracking` with `group_paths`) lets several trackings run at once, and
-a bar has no room for two descriptions.
+on hover. It counts rather than names because grouped tracking (the adapter's
+`group_paths`) lets several trackings run at once, and a bar has no room for
+two descriptions.
 
 It is a thin frontend over the same in-process `trackings` content adapter the
 TUI and `nyd` use — it does **not** open the database itself. This means it
@@ -2575,7 +2567,8 @@ Two things to know:
   fires the trackings instance's hooks. Configure the block in **both**
   `tasks.yaml` and `trackings.yaml` (pointing at one script) to catch every
   toggle. `nyd-t track start/stop` writes through the domain core directly
-  and fires **no** hooks.
+  and fires **no** hooks — one of the reasons it is no longer an interface
+  ([0012](docs/decisions/0012-one-interface-the-adapter-protocol.md)).
 - A hook script that itself drives the CLI (`nyd tasks … do toggle-tracking`)
   would fire the same hook again in the child process. The child inherits
   `NYD_HOOK_DEPTH=1` and runs no event hooks at that depth, so the recursion
@@ -2667,12 +2660,25 @@ colours come from [`theme.vim`](#theme-colors).
 
 ### Tracking
 
-Whether starting a tracking stops the running ones is decided by the tasks
-adapter, not by `tui.yaml`: `allow_parallel` in the adapter's config blob
-(`config_inline: '{ allow_parallel: true }'`, default `false` = exclusive), and
-per invocation `toggle-tracking --group-paths` narrows exclusivity to groups of
-tasks — see [`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml)
-and [action aliases](docs/generic-view-spec.md#naming-an-action-with-its-arguments-filled-in--aliases).
+Whether two trackings are in each other's way is decided by the tasks adapter,
+not by `tui.yaml`, and one setting answers it for every action: `allow_parallel`
+in the adapter's config blob (`config_inline: '{ allow_parallel: true }'`,
+default `false` = exclusive), or `group_paths` — regexes over a task's label
+path that partition tasks into tracking groups
+(`config_inline: '{ group_paths: ["^/Work", "^/Autotrack"] }'`).
+
+Under a grouped policy two trackings only collide when they share a group:
+starting one stops the running ones of its group alone, and moving one is
+blocked only by intervals of its own group. That is what lets a mirror tree an
+automation fills run alongside the work it mirrors without either blocking the
+other. The two settings are mutually exclusive — grouping already refines
+exclusivity — and an adapter configured with both refuses to open rather than
+picking a winner. A single invocation may still pass its own `group_paths`; see
+[`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml) and
+[action aliases](docs/generic-view-spec.md#naming-an-action-with-its-arguments-filled-in--aliases).
+Why the policy is a setting of the instance rather than an argument of each
+binding:
+[ADR 0011](docs/decisions/0011-tracking-policy-as-an-adapter-setting.md).
 
 ### Theme
 
@@ -3088,7 +3094,7 @@ the phased implementation plan derived from it is in
 # Frontends
 not-yet-done-tui          # TUI binary (ratatui + tuirealm)
 not-yet-done-cli          # nyd — generic adapter front-end + tag/backup/config
-not-yet-done-task-cli     # nyd-t — native Tasks/Trackings domain CLI
+not-yet-done-task-cli     # nyd-t — maintenance verbs on the task DB (not installed)
 not-yet-done-waybar       # Waybar CFFI module (cdylib)
 
 # Host — one adapter-wiring path shared by all front-ends

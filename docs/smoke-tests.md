@@ -7619,15 +7619,15 @@ TUI, CLI and hooks all see it as a real action.
       (`r` reload, credential prompt, reminders on the calendar tab) — the
       anon decorator lost its seven dead forwards
 
-## Grouped tracking (`toggle-tracking` with `group_paths`)
+## Grouped tracking (`group_paths` on the adapter)
 
-`group_paths` is a list parameter of `toggle-tracking` (tasks, tracking
-entries, duration tree, condensed rows): regexes over the task's label path
-(`/Root/Child/Leaf`). First match = the task's group, no match = one shared
-rest group; a start stops only the running trackings of its own group. Set it
-up as an alias (`my-toggle-tracking`, see the example in `tasks.yaml`) bound
-on `s`, with a tree `Work/A`, `Work/B`, `Other/C`, `Other/D` and
-`group_paths: ["^/Work"]`.
+`group_paths` is a setting of the tasks/trackings adapter: regexes over the
+task's label path (`/Root/Child/Leaf`). First match = the task's group, no
+match = one shared rest group; two trackings only get in each other's way
+inside one group — a start stops the running ones of its own group, a move
+collides only with its own group. Set
+`config_inline: '{ group_paths: ["^/Work"] }'` on both tabs, with a tree
+`Work/A`, `Work/B`, `Other/C`, `Other/D`.
 
 - [ ] `s` on `C`, then `s` on `A` → both show `⏱` (different groups)
 - [ ] `s` on `B` → `A` loses its `⏱`, `B` gains it, `C` keeps it
@@ -7637,13 +7637,20 @@ on `s`, with a tree `Work/A`, `Work/B`, `Other/C`, `Other/D` and
       duration-tree row and on a condensed cell) behave identically, and the
       tasks tab's markers follow live
 - [ ] `nyd tasks <id> help --full` lists `group_paths` on `toggle-tracking`
-      and shows the alias's paths as its default
-- [ ] Plain `toggle-tracking` (no alias) still stops everything else
-- [ ] `config_inline: '{ allow_parallel: true }'` + the alias → `s` shows
-      "group_paths cannot be combined with allow_parallel: true", nothing
-      starts
-- [ ] `group_paths: ["("]` → the notification names `group_paths[0]` and the
-      regex error; nothing starts
+      (an invocation can still override the adapter's list)
+- [ ] An alias with `args: { group_paths: [] }` bound on `S` → that key stops
+      everything else, `s` keeps honouring the groups
+- [ ] `config_inline: '{ allow_parallel: true, group_paths: ["^/Work"] }'` →
+      the tab does not open and reports "group_paths cannot be combined with
+      allow_parallel: true"; no action of it runs
+- [ ] `config_inline: '{ group_paths: ["("] }'` → the tab does not open and
+      the message names `group_paths[0]` and the regex error
+- [ ] Trackings tab, `a p` (paste-move) onto a day whose free time is covered
+      by trackings of **another** group → the move lands (the other group is
+      not an obstacle); onto a day packed with trackings of the **same**
+      group → "Move failed: Tracking would overlap …"
+- [ ] `M` (the move form) with an explicit start inside another group's
+      interval → moves; inside its own group's interval → refused
 - [ ] `ctrl+n` outline: `-t` on `A` and `C` under the default policy →
       "Only one task can be tracked at a time"; the same buffer is accepted
       when the adapter policy is grouped — not reachable from the outline
@@ -7672,7 +7679,8 @@ tree above.
 - [ ] The same from the trackings tab writes the same lines (with the
       trackings instance in the payload's `instance`)
 - [ ] `nyd tasks <id of C> do toggle-tracking` → the line appears before the
-      command returns; `nyd-t track stop` writes nothing
+      command returns; a stop made past the adapter
+      (`cargo run -p not-yet-done-task-cli -- track stop`) writes nothing
 - [ ] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
       the JSON carries `hook`, `instance`, `task_id`, `task_path`,
       `tracking_id`, `started_at`, `ended_at`
@@ -7709,7 +7717,7 @@ and the same script without `when:` in `tasks.yaml`.
       `edit prepare …`, `x` + a script writes `script:<name> script …`
 - [ ] Tasks: an action that asks `(y/n)` writes nothing on the question and
       one line on `y`
-- [ ] Tasks: an alias (`my-toggle-tracking`) is reported under the **real**
+- [ ] Tasks: an alias (`toggle-tracking-solo`) is reported under the **real**
       id (`toggle-tracking`)
 - [ ] `nyd tasks <id> do toggle-tracking` → one line with `execute`, no
       label, before the command returns
@@ -7778,8 +7786,9 @@ Trackings tab, `q e` on the active query (or `nyd adapter trackings ls -q`).
 Tasks tab. Pick a task with notes (`n` opens the file) whose parent has
 notes too, e.g. `/Alpha/Beta`.
 
-- [ ] Rename the parent to `Alphonse` with the CLI (`nyd-t task edit
---description`), which does not move directories, then `n` on
+- [ ] Rename the parent to `Alphonse` past the adapter
+      (`cargo run -p not-yet-done-task-cli -- task edit <id> --description
+      Alphonse`), which does not move directories, then `n` on
       `Beta` → the same notes file opens; the parent directory on disk is
       still `<sid>_alpha`, found by its short-id prefix.
 - [ ] Rename the parent in the TUI editor instead → the adapter moves the
