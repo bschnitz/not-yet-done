@@ -1680,6 +1680,20 @@ had to bring up before it could begin waiting is a different question from what
 its service waits for. Both views say so where the levels sit next to each
 other.
 
+**The verbs are on the level, because the answer to a chain is usually a
+verb.** The level was read-only at first and that was the wrong cut: you read a
+chain to find the hop that cost the startup its seconds, and what you want next
+is to act on that hop — walking back out to Services and finding the row again
+is a detour with no purpose. So the chain level carries the ordering level's
+eight keys (`a s`, `a x`, `a r`, `a e`, `a d`, `a m`, `a u`, `a p`), on the user
+tab and on the system tab alike, minus the two the system view withholds from
+every level (`mask` / `unmask`). `enable-now` and `disable-now`, which the
+adapter offers on a `systemd:chain` node, stay unbound on both: they are two
+decisions in one keystroke, and a hop on the way to something else is the wrong
+row to take them from. Nothing new is needed to make this safe — the verb acts
+on the row under the cursor, and the protection list and the confirmations meet
+it here exactly as they do on Services.
+
 ---
 
 ## Safety net

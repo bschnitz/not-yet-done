@@ -856,8 +856,25 @@ views:
             style: text_dim
           - when: { field: origin, matches: '^$' }
             style: text_dim
+        # A chain row is a unit, so the verbs belong here too: the point of
+        # reading a chain is finding the hop that cost the startup its
+        # seconds, and what you want next is to act on that hop — not to walk
+        # back out to the Services level and find the row again.
+        #
+        # The same eight the ordering level carries. `enable-now` and
+        # `disable-now` the adapter would also accept here stay behind: they
+        # are two decisions in one keystroke, and a hop on the way to
+        # something else is the wrong row to make them from.
         actions:
           - { name: refresh, key: r, type: reload }
+          - { name: start, key: "a s", id: start }
+          - { name: stop, key: "a x", id: stop }
+          - { name: restart, key: "a r", id: restart }
+          - { name: enable, key: "a e", id: enable }
+          - { name: disable, key: "a d", id: disable }
+          - { name: mask, key: "a m", id: mask }
+          - { name: unmask, key: "a u", id: unmask }
+          - { name: apply preset, key: "a p", id: preset }
 
       # ------------------------------------ what a unit needs, and when
       #
