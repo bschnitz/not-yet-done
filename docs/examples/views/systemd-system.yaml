@@ -288,9 +288,9 @@ views:
             # Filter the properties. Columns: name, value, interface.
             #
             #   query:
-            #     [name, like, Timeout]        # every timeout at once
+            #     [name, has, Timeout]         # every timeout at once
             #     [interface, =, Service]      # drop the generic Unit half
-            #     [value, like, /etc]          # what points into the system config
+            #     [value, has, /etc]           # what points into the system config
             query:
               [name, has, ""]
         columns:
