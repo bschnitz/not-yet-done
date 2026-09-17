@@ -178,18 +178,22 @@ views:
         key: Enter
         node_type: jira:comment
 
-        # A drill level may carry its own query editor, in the same shape as
-        # the view-level `query:` above. It is read in preference to the
-        # parent's while this level is the one on screen — a query is written
-        # in terms of *this* level's columns, so the parent's `template:`
-        # would teach the wrong vocabulary. Omit the block and the level uses
-        # the view's, which is how every view file behaved before this
-        # existed.
+        # A drill level may carry its own query, in the same shape as the
+        # view-level `query:` above. It is read in preference to the parent's
+        # while this level is the one on screen — a query is written in terms
+        # of *this* level's columns, so the parent's would teach the wrong
+        # vocabulary and name fields the adapter does not have here. Omit the
+        # block and the level uses the view's, which is how every view file
+        # behaved before this existed.
         #
-        # Only the editor is per level: `template:`, `editable:` and
-        # `menu_key:`. Which query is *live* belongs to the pane and follows
-        # the user down the drill, so `default:` and `inherit_default:` have
-        # nothing to act on here and are ignored.
+        # `default:`, `template:`, `editable:` and `menu_key:` all act on this
+        # level: its default filters it on open, its template seeds `+new`,
+        # and `Q` edits it here. What is *live* belongs to the level too —
+        # drilling in starts the child unfiltered (or at its own `default:`)
+        # and stepping back out restores what the level above was showing.
+        # `inherit_default:` is the exception: the tab's ★ default query is
+        # stamped onto a subtab's root list at startup, so it has nothing to
+        # act on down here and is ignored.
         query:
           editable: true
           menu_key: q
@@ -1602,6 +1606,13 @@ menu and vice versa.
   commits (and only then, if the spec actually changed, reloads and persists).
 - Levels that expose no sortable columns say so via a notification instead of
   opening an empty popup — the same gate `S` uses.
+- **The sort belongs to the level, not to the pane.** `S` and `c s` offer the
+  columns of the level under the cursor and order that level — drilling in
+  starts the child level unsorted (its own columns are a different set), and
+  stepping back out brings the parent's sort back with it. Only the root
+  list's sort is persisted (one row per view scope, restored at startup): a
+  sort picked on a drilled level names a column that does not exist at the
+  root, so it lives exactly as long as the level does.
 - **A script can order the rows as well.** A sequence that no column expresses
   — a rank the script fetched elsewhere, a score over several columns — comes
   from a `load` hook answering with

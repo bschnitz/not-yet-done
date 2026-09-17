@@ -117,6 +117,54 @@ fn collect_declared_levels(
     }
 }
 
+/// The part of a pane's state that belongs to **one level** rather than to
+/// the pane: what was asked for (the query), in what order (the sort), and
+/// what the last answer at that level said about its columns and paging.
+///
+/// A pane shows one level at a time, so these live unboxed on
+/// [`ContentPane`] and always describe what is on screen. Drilling in
+/// stashes them into the [`NavFrame`] and starts the child level with its
+/// own; stepping back out restores them. Without that split a query typed
+/// on a drilled level — or a sort picked there — is sent against the root's
+/// node type, which has different columns: the adapter either refuses the
+/// column name or, worse, answers with the root's rows.
+#[derive(Debug, Default)]
+struct LevelState {
+    /// Active query override (set by editor or saved query selection).
+    /// Holds the **raw** string; if the adapter understands inline
+    /// variable syntax (e.g. Taiga's `${name:default}`), substitution
+    /// happens at load time via `ContentAdapter::render_query`.
+    active_query: Option<String>,
+    /// Name of the active saved query (for status bar display).
+    active_query_name: Option<String>,
+    /// Variable bindings for the active query. Empty when the query
+    /// has no variables (or the adapter doesn't support them).
+    active_query_vars: std::collections::HashMap<String, String>,
+    /// Which language [`Self::active_query`] is written in: the adapter's own
+    /// (`Saved`) or an extended-query Markdown document (`Extended`). It rides
+    /// with the body rather than being derived from it — a document is only
+    /// recognisable by where it was loaded from, and guessing from the text
+    /// would make a `yaml`-adapter's query indistinguishable from a spec fence.
+    active_query_kind: QueryKind,
+    /// Query rendered by the last accepted adapter text search
+    /// ([`SearchMode::Adapter`]).
+    text_search_query: Option<String>,
+    /// Set while this level shows the result of an adapter-native custom
+    /// query (e.g. raw SQL from the Q-editor).
+    active_custom_query: Option<CustomQueryRunState>,
+    /// Sort the user has requested here. Empty = let the adapter pick.
+    current_sort: Vec<SortKey>,
+    /// Page request the user is currently on.
+    current_page: Option<PageRequest>,
+    /// Sort the adapter actually applied to the last result.
+    last_applied_sort: Vec<SortKey>,
+    /// Pagination state of the last result, if the adapter returned one.
+    last_page_info: Option<PageInfo>,
+    /// Sortable columns advertised by the adapter for this level's node
+    /// type at the time of its last load.
+    last_columns: Vec<not_yet_done_content::ColumnSchema>,
+}
+
 /// Snapshot of a previous navigation level (pushed when drilling down).
 struct NavFrame {
     /// Breadcrumb label for this level.
@@ -145,6 +193,9 @@ struct NavFrame {
     /// Restored on `nav_back` so the resurrected level resumes with the
     /// same expanded set, cached children, and cursor depth.
     tree: Option<TreeState>,
+    /// Query and sort of the level this frame snapshots. Taken from the
+    /// pane on the way in, put back on the way out — see [`LevelState`].
+    level: LevelState,
 }
 
 /// Parameters for an outgoing `FetchContentPreview` request.
@@ -4948,6 +4999,71 @@ impl ContentPane {
 
     // ── Navigation (drill-down / back) ──────────────────────────────
 
+    /// Whether the pane is showing its view's own root list rather than a
+    /// level drilled into from it. The sort a level carries is persisted
+    /// per view, so only the root's may be written back.
+    pub fn is_at_root(&self) -> bool {
+        self.nav_stack.is_empty() && self.active_child.is_none()
+    }
+
+    /// Lift the level-owned state off the pane, leaving it cleared. Paired
+    /// with [`Self::set_level_state`] around every level change.
+    fn take_level_state(&mut self) -> LevelState {
+        LevelState {
+            active_query: self.active_query.take(),
+            active_query_name: self.active_query_name.take(),
+            active_query_vars: std::mem::take(&mut self.active_query_vars),
+            active_query_kind: std::mem::take(&mut self.active_query_kind),
+            text_search_query: self.text_search_query.take(),
+            active_custom_query: self.active_custom_query.take(),
+            current_sort: std::mem::take(&mut self.current_sort),
+            current_page: self.current_page.take(),
+            last_applied_sort: std::mem::take(&mut self.last_applied_sort),
+            last_page_info: self.last_page_info.take(),
+            last_columns: std::mem::take(&mut self.last_columns),
+        }
+    }
+
+    /// Install `state` as the level the pane is now showing.
+    fn set_level_state(&mut self, state: LevelState) {
+        self.active_query = state.active_query;
+        self.active_query_name = state.active_query_name;
+        self.active_query_vars = state.active_query_vars;
+        self.active_query_kind = state.active_query_kind;
+        self.text_search_query = state.text_search_query;
+        self.active_custom_query = state.active_custom_query;
+        self.current_sort = state.current_sort;
+        self.current_page = state.current_page;
+        self.last_applied_sort = state.last_applied_sort;
+        self.last_page_info = state.last_page_info;
+        self.last_columns = state.last_columns;
+    }
+
+    /// What a level drilled into from `parent` starts out asking for.
+    ///
+    /// Empty for every ordinary adapter: the child's node type has its own
+    /// columns, and the parent's query would not even parse against them —
+    /// the level's own `query:` default takes over in
+    /// [`Self::level_load_request`]. A filtered-tree adapter (capability
+    /// `propagates_query_to_subtree`) means its query for the whole subtree,
+    /// so there the child inherits it and the drilled list stays filtered.
+    ///
+    /// Nothing else is inherited: a sort names a column of the level it was
+    /// picked on, and the page/columns of the answer above say nothing about
+    /// the one below.
+    fn level_state_for_child(&self, parent: &LevelState) -> LevelState {
+        if !self.capabilities.propagates_query_to_subtree {
+            return LevelState::default();
+        }
+        LevelState {
+            active_query: parent.active_query.clone(),
+            active_query_name: parent.active_query_name.clone(),
+            active_query_vars: parent.active_query_vars.clone(),
+            active_query_kind: parent.active_query_kind,
+            ..LevelState::default()
+        }
+    }
+
     /// Prepare drill-down: snapshot current level, set child config.
     /// Returns the child_node_type so the caller can spawn the load.
     fn drill_down_prepare(
@@ -4966,6 +5082,8 @@ impl ContentPane {
         } else {
             None
         };
+        let parent_level = self.take_level_state();
+        let child_level = self.level_state_for_child(&parent_level);
         let frame = NavFrame {
             label: item_label.to_string(),
             parent_node_id: item_id.to_string(),
@@ -4979,8 +5097,10 @@ impl ContentPane {
             preview_scroll: self.preview_scroll,
             preview_markdown: self.preview_markdown,
             tree: stashed_tree,
+            level: parent_level,
         };
         self.nav_stack.push(frame);
+        self.set_level_state(child_level);
 
         let node_type_id = child_def.node_type.clone();
         self.active_child = Some(child_def.clone());
@@ -5046,6 +5166,7 @@ impl ContentPane {
 
         self.items = frame.items;
         self.active_child = frame.active_child;
+        self.set_level_state(frame.level);
         self.preview_open = frame.preview_open;
         self.preview_key = frame.preview_key;
         self.preview_description = frame.preview_description;
@@ -5271,6 +5392,42 @@ impl ContentPane {
 
     // ── Loading ──────────────────────────────────────────────────────
 
+    /// The request that (re)fetches **the level on screen**.
+    ///
+    /// At the root that is [`Self::root_load_request`]. Inside a drill it is
+    /// the child level's own: the query typed or picked there (falling back
+    /// to that level's `query:` default), the sort chosen there, and the page
+    /// its `pagination:` block asks for. Both keys are the level's because
+    /// they name its columns — a sort key or a filter field from the root is
+    /// not a column of the child, and sending it is how a drilled level used
+    /// to come back either empty or filled with the root's rows.
+    pub fn level_load_request(&self, view_defs: &[ViewDef]) -> Option<LoadRequest> {
+        let Some(child) = self.active_child.as_ref() else {
+            return self.root_load_request(view_defs);
+        };
+        // Same rule as the root: only an active query can be an extended
+        // document, so the kind travels with it and not with the fallback.
+        let (query, kind) = match self.active_query.clone() {
+            Some(q) => (Some(q), self.active_query_kind),
+            None => (
+                child.query.as_ref().and_then(|q| q.default.clone()),
+                QueryKind::Saved,
+            ),
+        };
+        Some(LoadRequest {
+            node_type_id: child.node_type.clone(),
+            query,
+            kind,
+            sort: self.current_sort.clone(),
+            page: self.drill_load_page(),
+            vars: self.active_query_vars.clone(),
+        })
+    }
+
+    /// The request that fetches the view's **root** list, whatever level the
+    /// pane happens to be showing. Use [`Self::level_load_request`] unless
+    /// the root is what is actually meant (the eager-subtree load, the
+    /// subtree query a filtered tree propagates).
     pub fn root_load_request(&self, view_defs: &[ViewDef]) -> Option<LoadRequest> {
         let view_def = self.view_def(view_defs)?;
         // The view's configured default is a literal body in the adapter's own
@@ -6397,18 +6554,19 @@ impl ContentPane {
             }
             hints.push(ActionBarHint::new(sh.key, sh.label, source));
         }
-        if self.nav_stack.is_empty() {
-            if let Some(mk) = query_menu_key {
-                if !hints.iter().any(|h| h.key == mk) {
-                    hints.push(ActionBarHint::new(
-                        mk.to_string(),
-                        "queries",
-                        ActiveSurface::QueryMenu,
-                    ));
-                }
+        // Both query surfaces follow the level on screen, not the pane: the
+        // menu key is claimed in every leaf of the focused view, and a
+        // drilled level's `query:` block is its own (see `query_config`).
+        if let Some(mk) = query_menu_key {
+            if !hints.iter().any(|h| h.key == mk) {
+                hints.push(ActionBarHint::new(
+                    mk.to_string(),
+                    "queries",
+                    ActiveSurface::QueryMenu,
+                ));
             }
         }
-        if self.nav_stack.is_empty() && self.is_query_editable(view_defs) {
+        if self.is_query_editable(view_defs) {
             if !hints.iter().any(|h| h.label == "edit query") {
                 hints.push(ActionBarHint::new(
                     content_kb.hint_label(&ContentAction::EditQuery, key_icons),
@@ -6924,8 +7082,11 @@ impl ContentPane {
             }
         }
 
-        // Edit-query — root level + editable.
-        if self.nav_stack.is_empty() && self.is_query_editable(view_defs) {
+        // Edit-query — wherever the level on screen declares an editable
+        // `query:` block, root or drilled. It used to be root-only because
+        // the load it triggers went to the root regardless; now the level
+        // runs its own query, so the key belongs where the block is.
+        if self.is_query_editable(view_defs) {
             if let Some(b) = content_kb.get(&ContentAction::EditQuery) {
                 km.push(KeyClaim::handler(
                     b.clone(),
@@ -7784,9 +7945,10 @@ impl ContentPane {
                     )));
                 }
                 let query = render_apply_query(cfg, &values);
-                // `SpawnContentLoad` re-lists the *root* level, so the pane
-                // has to be standing there when the rows land — otherwise
-                // they would be poured into the drilled-into child level.
+                // The query this action builds is written against the root
+                // level's fields, so the root is the level it has to be
+                // applied to: step back out first, then set it. The load that
+                // follows re-lists whatever level the pane is standing on.
                 self.reset_to_root(view_defs);
                 self.set_query(query, None);
                 // A different result set makes the old offset meaningless —
@@ -16370,6 +16532,158 @@ mod tests {
             view.active_pane().fetch_error.as_deref(),
             Some("connection failed")
         );
+    }
+
+    /// A pane's query and sort describe the **level** it is showing, not the
+    /// pane. Drilling in stashes the parent's and starts the child with its
+    /// own: a sort key naming a root column, or a filter written against the
+    /// root's fields, means nothing one node type further down.
+    #[test]
+    fn drilling_in_starts_the_child_level_unfiltered_and_unsorted() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.active_pane_mut()
+            .set_query("status = open".into(), Some("open".into()));
+        assert!(view.set_current_sort(vec![SortKey {
+            column: "summary".into(),
+            direction: SortDirection::Desc,
+        }]));
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let req = view.active_pane().level_load_request(&view_defs).unwrap();
+        assert_eq!(req.node_type_id, "mock:comment");
+        assert_eq!(req.query, None);
+        assert!(req.sort.is_empty());
+    }
+
+    /// …and what is picked on the drilled level is what that level asks for,
+    /// against its own node type.
+    #[test]
+    fn a_drilled_level_asks_with_the_query_and_sort_picked_on_it() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        view.active_pane_mut().set_query("author = me".into(), None);
+        assert!(view.set_current_sort(vec![SortKey {
+            column: "created".into(),
+            direction: SortDirection::Asc,
+        }]));
+
+        let req = view.active_pane().level_load_request(&view_defs).unwrap();
+        assert_eq!(req.node_type_id, "mock:comment");
+        assert_eq!(req.query.as_deref(), Some("author = me"));
+        assert_eq!(req.sort.len(), 1);
+        assert_eq!(req.sort[0].column, "created");
+    }
+
+    /// Stepping back out puts the level above back the way it was left —
+    /// its query, its sort, its page — without a reload having to rebuild it.
+    #[test]
+    fn stepping_back_out_restores_the_query_and_sort_of_the_level_above() {
+        use not_yet_done_content::SortDirection;
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.active_pane_mut()
+            .set_query("status = open".into(), Some("open".into()));
+        assert!(view.set_current_sort(vec![SortKey {
+            column: "summary".into(),
+            direction: SortDirection::Desc,
+        }]));
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut().set_query("author = me".into(), None);
+        assert!(view.set_current_sort(vec![SortKey {
+            column: "created".into(),
+            direction: SortDirection::Asc,
+        }]));
+
+        assert!(view.active_pane_mut().nav_back(&view_defs));
+
+        let req = view.active_pane().level_load_request(&view_defs).unwrap();
+        assert_eq!(req.query.as_deref(), Some("status = open"));
+        assert_eq!(req.sort.len(), 1);
+        assert_eq!(req.sort[0].column, "summary");
+        assert_eq!(
+            view.active_pane().active_query_name.as_deref(),
+            Some("open")
+        );
+    }
+
+    /// A level with no query of its own falls back to its **own** `query:`
+    /// default, the way the root falls back to the ViewDef's.
+    #[test]
+    fn a_drilled_level_falls_back_to_its_own_query_default() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+
+        let mut child_def = config.views[0].children[0].clone();
+        child_def.query = Some(crate::config::view_config::QueryConfig {
+            default: Some("kind = note".into()),
+            template: None,
+            editable: true,
+            menu_key: Some("q".into()),
+            inherit_default: false,
+        });
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let req = view.active_pane().level_load_request(&view_defs).unwrap();
+        assert_eq!(req.query.as_deref(), Some("kind = note"));
+    }
+
+    /// The one adapter shape that does share a query across levels: a
+    /// filtered tree (`propagates_query_to_subtree`) means its query for the
+    /// whole subtree, so the child inherits it instead of starting clean.
+    #[test]
+    fn a_subtree_propagating_adapter_hands_its_query_to_the_child() {
+        let adapter: Arc<dyn ContentAdapter> = Arc::new(
+            not_yet_done_content::mock::MockAdapterBuilder::new("mock")
+                .capabilities(not_yet_done_content::AdapterCapabilities {
+                    propagates_query_to_subtree: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        let config = test_config_with_children();
+        let mut view = ContentView::new(
+            test_theme(),
+            &config,
+            Some(adapter),
+            &KeyBindingConfig::default(),
+        );
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.active_pane_mut()
+            .set_query("in_tree /Work".into(), Some("work".into()));
+
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+
+        let req = view.active_pane().level_load_request(&view_defs).unwrap();
+        assert_eq!(req.query.as_deref(), Some("in_tree /Work"));
+        // Inherited, not copied wholesale: the sort still names the parent's
+        // columns and stays behind.
+        assert!(req.sort.is_empty());
     }
 
     #[test]
