@@ -8548,12 +8548,23 @@ beside the TUI is the whole apparatus.
       prints the unit you asked about through a different code path than its
       children and that path drops the timestamp — `sshd.service +38ms`, while
       every line under it gets `@6.538s`. The level's first row carries both.
-- [ ] Sort by `Took` descending (`c s`, or click the header): the most
-      expensive hop is the first row, and its `Depth` still says where in the
-      chain it sat. Sort by `Depth` ascending and the chain is back. This is
-      the whole reason the level is a list and not a tree.
-- [ ] `Depth` is the level's default sort — open it fresh and row 0 is the unit
-      you asked about, not whatever sorts first alphabetically.
+- [ ] **Sorting a drilled-in level loads the pane root instead.** `S` and the
+      column's letter, or `c s` and the menu — both build their offer from the
+      chain level's own six columns, and both answer by replacing the rows with
+      the _root_ level's: three dozen service rows under the breadcrumb
+      `Services › <unit> › Chain`, drawn against the chain's columns, so
+      everything but `Description` is blank. `r` puts the chain back in depth
+      order with the sort forgotten. Measured on a throwaway pair whose second
+      hop cost a full second, so a descending order would have been
+      unmistakable. Same fault as the ordering-level query one section above:
+      what a pane does with a query or a sort is bound to its root and not to
+      the level the keys were pressed on. The fix belongs to the TUI.
+- [x] `Depth` is the level's default sort — open it fresh and row 0 is the unit
+      you asked about, not whatever sorts first alphabetically. Confirmed on
+      both managers: `-.slice` and `app.slice` would head an alphabetical list
+      and sit last here. The sort marker on the header is elided to `Depth…` —
+      `fixed(6)` leaves no room for it — which is cosmetic, but it is also the
+      only place the default sort is visible at all.
 - [x] A unit that has **never started this boot** gives exactly one row: itself,
       with `At` and `Took` blank and `Origin` empty. There is no chain, and the
       level says so rather than inventing one. `getty@tty1.service` on the
@@ -8561,10 +8572,14 @@ beside the TUI is the whole apparatus.
       `systemctl show <unit> -p ActiveEnterTimestampMonotonic` reading `0`.
       Note that `systemd-analyze` answers the same question with a full tree
       under a blank root line.
-- [ ] `Origin` on the **system** tab: find a unit restarted since boot
-      (`systemctl restart <something harmless>`, then `r`) and its row reads
-      `after` in yellow. `systemd-analyze` puts the same unit in the same boot
-      tree with no comment at all — run it and compare.
+- [x] `Origin` on the **system** tab reads `after` in the warning colour on
+      row 0, while every hop below says `startup` in ordinary text. No restart
+      is needed to find a subject:
+      `systemctl show '*.service' -p ActiveEnterTimestampMonotonic` names the
+      services that came up minutes into the uptime. The critical-chain command
+      on the same unit prints the identical tree, numbers included, and says
+      nothing at all about the unit having started long after the boot it is
+      drawn into.
 - [x] `Origin` on the **user** tab is `after` on most chains, dimmed rather
       than yellow, and that is correct rather than a fault: this manager
       finishes its startup in under 200 ms, so anything started from the
@@ -8585,18 +8600,35 @@ beside the TUI is the whole apparatus.
       triggers — unlike the security level one row above it, which redirects.
       `C` on a timer row, and `systemd-analyze critical-chain <timer>.timer`
       agrees.
-- [ ] The runtime verbs reach a chain row: `a r` on the row with the biggest
-      `Took` restarts _that_ unit, not the unit the chain was opened on. This
-      is the point of the level having verbs at all.
-- [ ] `q` on the level, `[took, gt, 1]` — only the hops that cost over a
-      second. `[origin, =, after]` — only what is not from this startup. Both
-      compare in seconds while the rows keep their microseconds.
-- [ ] Unit files subtab: **no** `C`, on either tab. A unit the manager never
-      loaded has no timestamps, so there is nothing to walk; the view file says
-      so where the binding would have been.
-- [ ] Device rows render: a chain that reaches a disk ends in a
-      `dev-disk-by\x2duuid-….device` row with the backslash escapes intact,
-      and the column does not wrap or truncate them into nonsense.
+- [ ] **The runtime verbs do not reach a chain row — they have no keys.** The
+      level's `actions:` block is one line, `refresh` on `r`, in both view
+      files; `restart`, `enable`, `stop` and the rest turn up in `--keymap`
+      under the chain scope in the list of actions _without_ a binding. So
+      `a r` on the row with the biggest `Took` does nothing, measured against
+      that unit's `ActiveEnterTimestamp` before and after. Two ways out, and it
+      is a decision rather than a bug: either the section heading is right and
+      the level is read-only, in which case the verbs should go off the level
+      and this box with them; or they are meant to be reachable, and the chain
+      level needs the same `a` keys the Services level has.
+- [ ] **The chain level's query cannot be opened at all.** The level declares
+      `query:` with `editable: true`, `menu_key: q` and a template naming its
+      own columns, but the action bar on the level offers neither `q` nor `Q`,
+      and `Q` — which `--keymap` does bind there to `content.edit_query` — is a
+      silent no-op. The same key one level up opens the Services template in
+      the editor at once. `[took, gt, 1]` and `[origin, =, after]` are
+      therefore untested and the level's `query:` block is dead config. Same
+      root as the sort box above: the query machinery belongs to the pane
+      root.
+- [x] Unit files subtab: **no** `C`, on either tab. `--keymap` lists 21
+      bindings for the user tab's Unit files scope and 13 for the system tab's,
+      and `C` is in neither; the view file says why where the binding would
+      have been — a unit the manager never loaded has no timestamps, so the
+      adapter does not offer the level under a unit file at all.
+- [x] Device rows render: the chain of a service that waits on an encrypted
+      volume ends in a `dev-disk-by\x2duuid-….device` row with every backslash
+      escape intact, on one line, and `systemd-analyze` prints the same name
+      character for character. The `flex(3)` unit column has room for it at 200
+      columns.
 
 ## systemd — failed units: the level and the startup report (phase 6d)
 
