@@ -781,10 +781,14 @@ views:
             #   query:
             #     [took, gt, 1]              # the hops that cost over a second
             #     [origin, =, after]         # what is not from this startup
-            #     [unit, has, .mount]        # only the mounts on the way
+            #     [unit, like, "%.mount"]    # only the mounts on the way
             #
             # `at` and `took` compare in seconds, so `[took, gt, 1]` is "over
             # a second" — the rows themselves keep their microseconds.
+            #
+            # A value that reads as `.word` or `word.word` is taken for a
+            # column reference, not for text — so `[unit, has, .mount]`
+            # matches nothing at all. For a unit suffix use `like` and a `%`.
             #
             # The line below matches everything — replace it with your filter:
             query:
