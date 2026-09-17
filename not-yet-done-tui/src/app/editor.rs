@@ -267,6 +267,7 @@ impl App {
         let height = editor.height.clone();
         let line_numbers = editor.line_numbers;
         let label = session.label().to_string();
+        let cursor_line = session.cursor_line();
 
         self.pending_session = Some(session);
         self.last_editor_buffer = Some(content.clone());
@@ -275,7 +276,7 @@ impl App {
             // No child process, no temp file: mount the pane and let the
             // key handler drive it. The session stays pending exactly as
             // for an external editor.
-            self.mount_builtin_editor(&label, &content, &height, line_numbers);
+            self.mount_builtin_editor(&label, &content, &height, line_numbers, cursor_line);
             return EditorRequest::None;
         }
 
@@ -325,14 +326,18 @@ impl App {
         content: &str,
         height: &str,
         line_numbers: bool,
+        cursor_line: Option<usize>,
     ) {
-        self.builtin_editor = Some(crate::components::builtin_editor::BuiltinEditorPane::new(
-            &self.theme,
-            label,
-            content,
-            height,
-            line_numbers,
-        ));
+        self.builtin_editor = Some(
+            crate::components::builtin_editor::BuiltinEditorPane::new(
+                &self.theme,
+                label,
+                content,
+                height,
+                line_numbers,
+            )
+            .opened_at(cursor_line),
+        );
     }
 
     /// Feed a key to the mounted builtin editor and act on what it reports.
@@ -401,7 +406,10 @@ impl App {
             .as_ref()
             .map(|s| s.label().to_string())
             .unwrap_or_default();
-        self.mount_builtin_editor(&label, content, &height, line_numbers);
+        // Top, not wherever the session wanted the first open: this buffer
+        // carries systemd's complaint in its header, and that is the line the
+        // user needs to read now.
+        self.mount_builtin_editor(&label, content, &height, line_numbers, None);
         true
     }
 

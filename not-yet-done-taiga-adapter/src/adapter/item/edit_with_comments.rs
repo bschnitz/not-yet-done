@@ -290,6 +290,7 @@ impl TaigaItemNode {
         out.push_str(&template::render_cache_section(&tables));
 
         Ok(EditorPrep {
+            cursor_line: None,
             template: out,
             version: self.detail.version.to_string(),
             suffix: ".md".into(),

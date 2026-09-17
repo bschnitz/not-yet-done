@@ -171,6 +171,7 @@ impl TaigaItemNode {
             attach_count,
         );
         Ok(EditorPrep {
+            cursor_line: None,
             // Create/promote has no optimistic-lock token, like `clone`.
             template,
             version: String::new(),

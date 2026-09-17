@@ -151,6 +151,7 @@ impl ConfluenceCommentNode {
         let detail = self.detail().await?;
         let template = format_xhtml(&detail.body_storage).await;
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             version: detail.version_number.to_string(),
             suffix: ".html".into(),

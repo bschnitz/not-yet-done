@@ -132,6 +132,16 @@ pub trait EditSession: Send + Sync {
         None
     }
 
+    /// Line the editor should open on (0-based). `None` (the default) opens
+    /// at the top; a session whose buffer was *prepared* — text typed for the
+    /// user and appended below what the file already said — points here at the
+    /// part they are meant to read, so the new block is not left below the
+    /// fold. Only the builtin pane honours it; an external editor is spawned
+    /// unchanged.
+    fn cursor_line(&self) -> Option<usize> {
+        None
+    }
+
     /// Tab that owns this session.
     fn scope(&self) -> SessionScope;
 

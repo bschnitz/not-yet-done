@@ -931,6 +931,7 @@ impl Node for DbScriptNode {
     async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id == "edit" {
             return Ok(EditorPrep {
+                cursor_line: None,
                 template: self.read_body().await?,
                 version: String::new(),
                 suffix: Node::node_type(self).file_extension.clone(),

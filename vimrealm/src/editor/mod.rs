@@ -175,6 +175,21 @@ impl VimEditor {
         self.buffer.text()
     }
 
+    /// Put the cursor on `line` (0-based, clamped into the buffer) at its
+    /// first column. The next render scrolls the viewport to follow, so a
+    /// host that prepared a long buffer can open it on the part the reader
+    /// is meant to see rather than at the top.
+    pub fn set_cursor_line(&mut self, line: usize) {
+        self.buffer.set_cursor(Position::new(line, 0));
+    }
+
+    /// Builder form of [`Self::set_cursor_line`]. Call it *after*
+    /// [`Self::with_text`] — replacing the text resets the cursor.
+    pub fn with_cursor_line(mut self, line: usize) -> Self {
+        self.set_cursor_line(line);
+        self
+    }
+
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
     }

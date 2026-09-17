@@ -573,6 +573,7 @@ impl Node for KimaiTimesheetNode {
     async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         match action_id {
             "edit" => Ok(EditorPrep {
+                cursor_line: None,
                 template: template::render_edit_template(
                     &self.ts,
                     &self.projects,

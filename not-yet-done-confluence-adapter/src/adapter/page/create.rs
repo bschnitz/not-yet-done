@@ -32,6 +32,7 @@ impl ConfluencePageNode {
         // `space_key` cached — saves the second roundtrip on save.
         let _ = self.detail().await?;
         Ok(EditorPrep {
+            cursor_line: None,
             template: render_template(),
             version: String::new(),
             suffix: ".html".into(),

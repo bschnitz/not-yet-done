@@ -388,6 +388,7 @@ impl Node for StoatMessageNode {
                 let mut template = mentions::render_slugs(&self.content_body, &table);
                 template.push_str(&mentions::cache_section(&table));
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     // Revolt messages carry no optimistic-concurrency token;
                     // we don't guard against concurrent edits (low-conflict,

@@ -703,6 +703,7 @@ impl Node for WorkflowNode {
         if action_id == EDIT_ACTION {
             let template = self.ctx.repo.read(&self.name).map_err(io_err)?;
             return Ok(EditorPrep {
+                cursor_line: None,
                 template,
                 version: String::new(),
                 suffix: ".md".into(),

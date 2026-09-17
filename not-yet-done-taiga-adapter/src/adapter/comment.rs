@@ -119,6 +119,7 @@ impl Node for TaigaCommentNode {
                     self.parent_id, c.author, c.created, COMMENT_SEPARATOR, c.body,
                 );
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     version: c.created.clone(),
                     suffix: ".md".into(),

@@ -511,6 +511,7 @@ impl Node for JiraIssueNode {
                 let detail = self.detail().await?;
                 let tables = self.slug_tables(detail).await;
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template: self.render_3b(&edit_full_fields(), detail, None, None, &tables),
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
@@ -557,6 +558,7 @@ impl Node for JiraIssueNode {
                     None => (None, ActionArgs::new()),
                 };
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     version: detail.updated.clone(),
                     suffix: ".md".into(),
@@ -572,6 +574,7 @@ impl Node for JiraIssueNode {
                 let template = self.ticket_markdown(Purpose::Editing).await?;
                 let detail = self.detail().await?;
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     version: detail.updated.clone(),
                     suffix: ".md".into(),
@@ -598,6 +601,7 @@ impl Node for JiraIssueNode {
                     true,
                 );
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     version: detail.updated.clone(),
                     suffix: ".jira".into(),
@@ -606,6 +610,7 @@ impl Node for JiraIssueNode {
                 })
             }
             "create_comment" => Ok(EditorPrep {
+                cursor_line: None,
                 template: format!("# New comment for {}\n\n", self.key),
                 version: String::new(),
                 suffix: ".jira".into(),

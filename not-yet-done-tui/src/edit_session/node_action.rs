@@ -64,6 +64,9 @@ pub struct NodeActionEditSession {
     /// change — and the final close — never re-send. Only consulted while
     /// [`Self::commit_on_save`] is set.
     last_applied: Option<String>,
+    /// Where the adapter wants the editor opened — see
+    /// [`EditorPrep::cursor_line`].
+    cursor_line: Option<usize>,
 }
 
 impl NodeActionEditSession {
@@ -111,6 +114,7 @@ impl NodeActionEditSession {
             action_id,
             last_applied: Some(prep.template.clone()),
             template: prep.template,
+            cursor_line: prep.cursor_line,
             version: prep.version,
             suffix: prep.suffix,
             file_path: prep.file_path,
@@ -132,6 +136,10 @@ impl EditSession for NodeActionEditSession {
 
     fn suffix(&self) -> &str {
         &self.suffix
+    }
+
+    fn cursor_line(&self) -> Option<usize> {
+        self.cursor_line
     }
 
     fn spawn_context(&self) -> super::EditorSpawnContext {
@@ -462,6 +470,7 @@ mod tests {
         }
         async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
+                cursor_line: None,
                 template: String::new(),
                 version: "v1".into(),
                 suffix: ".md".into(),
@@ -701,6 +710,7 @@ mod tests {
         }
         async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
+                cursor_line: None,
                 template: "orig".into(),
                 version: "v1".into(),
                 suffix: ".md".into(),
@@ -810,6 +820,7 @@ mod tests {
         }
         async fn prepare(&self, _action_id: &str, _args: &ActionArgs) -> ContentResult<EditorPrep> {
             Ok(EditorPrep {
+                cursor_line: None,
                 template: "orig".into(),
                 version: "v1".into(),
                 suffix: ".conf".into(),

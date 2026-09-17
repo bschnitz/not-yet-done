@@ -1512,6 +1512,20 @@ pub struct EditorPrep {
     /// attachments live in) instead of the struct growing a field per case.
     /// Empty by default; nothing in the framework depends on a key.
     pub args: ActionArgs,
+    /// Line the editor should open on (0-based), for a buffer whose useful
+    /// part is not its first line.
+    ///
+    /// A *prepared* buffer that appends to what a file already says — the
+    /// systemd security level types the fix for one check at the end of the
+    /// drop-in — otherwise opens on a header the user has already read, with
+    /// the new part below the fold. The action then looks like it did
+    /// nothing. `None` (the default) opens at the top, which is right for a
+    /// buffer meant to be read from the start.
+    ///
+    /// Honoured by a frontend that hosts the editor itself (the TUI's builtin
+    /// pane). An external editor is left alone on purpose: the command is the
+    /// user's, and `+N` is not a flag every editor has.
+    pub cursor_line: Option<usize>,
 }
 
 /// A selectable option for an `InputSpec::Picker` action.

@@ -216,6 +216,7 @@ impl Node for StoatChannelNode {
                 let users = self.user_map().await;
                 let table = mentions::user_table(&users);
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template: mentions::cache_section(&table),
                     version: String::new(),
                     suffix: ".md".into(),

@@ -29,6 +29,7 @@ impl ConfluencePageNode {
     /// optimistic-lock token; the buffer is body-only XHTML.
     pub(super) async fn prepare_add_comment(&self) -> Result<EditorPrep> {
         Ok(EditorPrep {
+            cursor_line: None,
             template: COMMENT_TEMPLATE.to_string(),
             version: String::new(),
             suffix: ".html".into(),
