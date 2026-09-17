@@ -2530,12 +2530,19 @@ impl App {
 
     /// Soft (re)load: list from the adapter, serving any warm cache. This is
     /// the default used by the ~16 ordinary load call sites.
+    ///
+    /// Loads the level the pane is *showing*, like [`Self::spawn_content_reload`]
+    /// does — for a pane at its root the two are the same call, and for a
+    /// drilled-in pane the root listing is never what the caller meant. Every
+    /// caller that changes what the pane asks for (a query applied, a sort
+    /// committed, a search accepted) reaches the adapter through here, so the
+    /// change lands on the level it was made on.
     pub fn spawn_content_load(
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
     ) {
-        self.spawn_content_load_inner(view_index, pane_id, false);
+        self.reload_content_pane_level(view_index, pane_id, false);
     }
 
     /// Hard reload (the `r` action): ask the adapter to `refresh()` — abort
@@ -2555,6 +2562,9 @@ impl App {
         self.reload_content_pane_level(view_index, pane_id, true);
     }
 
+    /// List the view's **root** level into `pane_id`. Reached only through
+    /// [`Self::reload_content_pane_level`]'s root branch — a drilled pane
+    /// goes to [`Self::spawn_content_drill_down_inner`] instead.
     fn spawn_content_load_inner(
         &self,
         view_index: usize,
@@ -3718,8 +3728,10 @@ impl App {
     /// `propagates_query_to_subtree` — flat adapters keep child loads
     /// query-free (their child node types don't share the parent's query
     /// semantics). For filtered-tree adapters (the task forest) it mirrors
-    /// [`ContentPane::root_load_request`]'s query resolution so the subtree
-    /// filters by the same query as the root.
+    /// [`ContentPane::level_load_request`]'s query resolution so the subtree
+    /// filters by the same query as the level being expanded — which, for
+    /// such an adapter, is the one the root was filtered by: the child
+    /// inherits it at drill time.
     fn subtree_query_for_pane(
         cv: &crate::views::content_view::ContentView,
         pane: &crate::views::content_view::ContentPane,
@@ -3728,7 +3740,7 @@ impl App {
         if !adapter.capabilities().propagates_query_to_subtree {
             return None;
         }
-        let req = pane.root_load_request(&cv.view_defs)?;
+        let req = pane.level_load_request(&cv.view_defs)?;
         let text = req.query?;
         Some(match req.kind {
             QueryKind::Saved => SubtreeQuery {
@@ -3777,20 +3789,38 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        // Honor the active child's pagination config if any; otherwise
-        // re-use whatever page the pane already has (e.g. after `>`/`<`),
-        // and fall back to the historical hard-coded first page of 50.
-        let page = pane
-            .drill_load_page()
-            .unwrap_or(not_yet_done_content::PageRequest {
-                offset: 0,
-                limit: 50,
-            });
-        // Filtered-tree adapters (capability `propagates_query_to_subtree`)
-        // want the pane's active query honored at every depth, so the
-        // drilled child list stays filtered. Flat adapters leave the
-        // capability `false` and the child load keeps `query: None`.
-        let subtree_query = Self::subtree_query_for_pane(cv, pane, &adapter);
+        // The drilled level asks for itself: the query it carries (typed
+        // there, picked from the menu there, or its own `query:` default),
+        // the sort picked on its columns, and the page its `pagination:`
+        // block wants. A filtered-tree adapter's query is already in that
+        // state — the child inherits it when the drill is prepared (see
+        // `ContentPane::level_state_for_child`) — so nothing is recomputed
+        // from the root here.
+        let Some(req) = pane.level_load_request(&cv.view_defs) else {
+            return;
+        };
+        let crate::views::content_view::LoadRequest {
+            node_type_id: _,
+            query,
+            sort,
+            page,
+            vars,
+            kind,
+        } = req;
+        // Honor the level's pagination config if any; otherwise re-use
+        // whatever page the pane already has (e.g. after `>`/`<`), and fall
+        // back to the historical hard-coded first page of 50.
+        let page = page.unwrap_or(not_yet_done_content::PageRequest {
+            offset: 0,
+            limit: 50,
+        });
+        // Same split as the root load: a saved query is one adapter-native
+        // body and is rendered once here; an extended document is rendered
+        // per branch inside the executor and must reach it verbatim.
+        let query = match kind {
+            QueryKind::Saved => query.map(|raw| adapter.render_query(&raw, &vars)),
+            QueryKind::Extended => query,
+        };
         let retries = cv
             .view_defs
             .get(pane.view_def_index())
@@ -3814,7 +3844,9 @@ impl App {
                 let adapter = Arc::clone(&adapter);
                 let node_id = node_id.clone();
                 let child_node_type = child_node_type.clone();
-                let subtree_query = subtree_query.clone();
+                let query = query.clone();
+                let sort = sort.clone();
+                let vars = vars.clone();
                 let tx = tx.clone();
                 async move {
                     let parent = adapter
@@ -3840,26 +3872,26 @@ impl App {
                     // branches list this parent instead of the root, which is
                     // what makes a drilled level filter by the same document
                     // as the level above it.
-                    let list = match subtree_query {
-                        Some(sq) if sq.kind == QueryKind::Extended => {
+                    let list = match (kind, query) {
+                        (QueryKind::Extended, Some(document)) => {
                             run_extended_query(
                                 &*adapter,
                                 parent.as_ref(),
                                 node_type,
-                                &sq.text,
-                                &sq.vars,
-                                &[],
+                                &document,
+                                &vars,
+                                &sort,
                                 &columns,
                                 None,
                                 &tx,
                             )
                             .await?
                         }
-                        subtree_query => {
+                        (_, query) => {
                             let params = not_yet_done_content::ListParams {
                                 node_type,
-                                query: subtree_query.map(|sq| sq.text),
-                                sort: Vec::new(),
+                                query,
+                                sort,
                                 page: Some(page),
                                 download: false,
                                 group_by: None,
@@ -3941,7 +3973,7 @@ impl App {
         // themselves. Empty = the adapter's stored order.
         let sort = cv
             .find_pane(pane_id)
-            .and_then(|p| p.root_load_request(&cv.view_defs))
+            .and_then(|p| p.level_load_request(&cv.view_defs))
             .map(|r| r.sort)
             .unwrap_or_default();
         let tx = self.load_tx.clone();
@@ -8366,7 +8398,8 @@ impl App {
                 self.modal_message = Some(":query apply — this tab has no adapter".to_string());
                 return;
             }
-            // Stamp the query+vars onto the target pane; `root_load_request`
+            // Stamp the query+vars onto the target pane, where they become
+            // the state of the level it is showing; `level_load_request`
             // (read by `spawn_content_load`) returns them via `active_query`
             // / `active_query_vars`.
             cv.set_query_for_pane_with_vars(
@@ -11551,6 +11584,14 @@ impl App {
         let Some(adapter) = cv.adapter.as_ref() else {
             return;
         };
+        // The stored sort is keyed by the view's query scope, so it can only
+        // describe that view's root list. A sort picked on a drilled level
+        // names a column of *its* node type; writing it here would restore it
+        // onto the root at the next start, where the column does not exist.
+        // It lives as long as the level does and no longer.
+        if !cv.active_pane().is_at_root() {
+            return;
+        }
         let adapter = Arc::clone(adapter);
         let scope = cv.query_scope.clone();
         let sort = SortableView::current_sort(cv).to_vec();
