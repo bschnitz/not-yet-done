@@ -7847,16 +7847,50 @@ Description`. Unit rows leave `Relation` blank rather than borrowing a
 - [x] `D` on a unit row opens the ordering level instead: `after` rows are
       what it waits for, `before` rows what waits for it. It does not unfold
       — one hop is all there is — and `h` walks back up.
-- [ ] `q` on the ordering level offers its own template (`[relation, =,
-after]`), not the Services one.
-- [ ] `a s` / `a x` on a dependency row act on _that_ unit, whatever kind it
-      is — start a `.socket` from under the service that needs it and the row
-      changes state in place. `a k` (kill) and `a l` (reload) are not offered
-      there at all.
-- [ ] Timers tab: the same two levels, and the first row of a timer's tree is
-      usually the service it triggers.
-- [ ] Failed tab: expanding a failed unit is the fast way to the unit
-      underneath that actually broke.
+- [x] `q` on the ordering level offers its own template — "Filter the
+      ordering. Columns: name, relation, active, sub, load, description", with
+      `[relation, =, after]` as the first example — and not the Services one.
+      The `+new` entry needs a name first: `enter` on an empty filter with no
+      saved queries does nothing at all.
+- [ ] **But the query it offers cannot be applied from the TUI.** Saving
+      `[relation, =, after]` on the ordering level empties the level behind
+      `Fetch failed: unknown systemd column 'relation' — valid columns: name,
+      description, load, active, sub, enabled, …` — the Services column set.
+      The query reaches the pane root instead of the level it was written on,
+      which is the wedged-pane defect already on the list, here with a column
+      name that says so out loud. The adapter itself is innocent:
+      `nyd adapter systemd 'service:pipewire.service' ls --type systemd:order
+-q 'query: [relation, =, after]'` narrows 8 rows to 5, and an unknown column
+      there is rejected against the _dependency_ set
+      (`name, relation, active, sub, load, description`). Fix belongs to the
+      TUI's query routing, not here.
+- [x] `a s` / `a x` on a dependency row act on _that_ unit, whatever kind it
+      is. Measured on a throwaway pair, a parent with `Wants=` on a child:
+      `a x` under the parent asks "Stop <child>? Whatever depends on it stops
+      too." — naming the dependency, not the row it hangs under — and on `y`
+      both the dependency row and the child's own top-level row flip to
+      `inactive / dead` in place, while the parent stays `active` because
+      `Wants=` is soft. `a s` brings it back the same way. The `a` menu there
+      offers exactly d/D/e/E/m/p/r/s/u/x: `a k` (kill), `a l` (reload),
+      `a f` (reset failed) and `a j` (follow the journal) are not on it.
+- [x] Timers tab: both levels are there — but the service a timer triggers is
+      an _ordering_ edge, never a needs edge, so `D` finds it and `enter` does
+      not. A minimal timer needs nothing of its own: it carries no expand
+      marker at all and `enter` drills into Properties, while `D` lists its
+      service as a `before` row. A packaged one is no different — `man-db.timer`
+      needs `-.mount` and `sysinit.target` and nothing else, and `man-db.service`
+      shows up only among its ordering rows. The Timers level already carries a
+      `Triggers` column, which is the cheaper place to read it anyway.
+- [x] Failed tab: expanding a failed unit is the fast way to the unit
+      underneath that actually broke. Two throwaway units, the outer one
+      wanting and ordered after an inner one that exits non-zero: both land on
+      the tab, and unfolding the outer shows `app.slice` and `basic.target`
+      `active` next to the inner unit `failed` — the cause picked out by state
+      alone. The header follows the cursor here too: on the failed unit the
+      Failed columns, on a dependency row `Relation / Active / Sub / Load`.
+      Note that a unit whose _hard_ requirement fails never reaches the tab —
+      its job is cancelled rather than failed, and only the inner unit is
+      listed.
 - [x] CLI parity: `nyd adapter systemd 'service:pipewire.service' ls --type
 systemd:dep` and `… --type systemd:order` list the same rows, and
       `nyd adapter systemd 'dep:pipewire.service>basic.target' show` prints
