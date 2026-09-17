@@ -2362,6 +2362,7 @@ mod tests {
             version: String::new(),
             suffix: ".md".into(),
             file_path: Some(dir.join("drafts").join("reply.md")),
+            cursor_line: None,
             args: Default::default(),
         }
     }
@@ -2417,6 +2418,7 @@ mod tests {
             version: String::new(),
             suffix: ".md".into(),
             file_path: None,
+            cursor_line: None,
             args: Default::default(),
         };
         let inv = inv_from(&["nyd", "adapter", "mail", "reply", "-m", "my answer"]);
