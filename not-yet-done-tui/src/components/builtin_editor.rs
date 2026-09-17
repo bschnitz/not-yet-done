@@ -145,6 +145,18 @@ impl BuiltinEditorPane {
         }
     }
 
+    /// Open on `line` instead of the top — what a session hands over when
+    /// its buffer was prepared and the part worth reading sits at the end.
+    /// `None` leaves the cursor on the first line. The editor's own render
+    /// pass scrolls the viewport to wherever the cursor is, so placing it is
+    /// all this takes.
+    pub fn opened_at(mut self, line: Option<usize>) -> Self {
+        if let Some(line) = line {
+            self.editor.set_cursor_line(line);
+        }
+        self
+    }
+
     /// Rows the pane wants out of a terminal `available` rows tall. Never
     /// takes the whole screen: the content view keeps at least a third, so
     /// the row being edited stays visible above the pane.

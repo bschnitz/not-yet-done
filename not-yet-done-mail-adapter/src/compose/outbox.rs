@@ -183,6 +183,7 @@ impl Outbox {
             _ => fresh,
         };
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             version: String::new(),
             suffix: ".md".to_string(),

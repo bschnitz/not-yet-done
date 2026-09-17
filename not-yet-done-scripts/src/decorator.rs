@@ -379,6 +379,7 @@ impl Node for ScriptNode {
         if action_id == SCRIPT_EDIT_ACTION_ID {
             let template = self.repo.read(&self.scope, &self.name).map_err(io_err)?;
             return Ok(EditorPrep {
+                cursor_line: None,
                 template,
                 version: String::new(),
                 suffix: self.node_type.file_extension.clone(),

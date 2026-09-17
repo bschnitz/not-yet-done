@@ -8188,12 +8188,21 @@ systemd view while the adapter offered all three the whole time.
       the security level offers is unusable there. The harden was written and
       applied exactly as asked; the kernel refused it. Worth knowing before
       picking a check to harden a **user** unit with.
-- [ ] The built-in editor does not scroll to the end of a prepared buffer. On
-      the second and later `e h` of the same unit the appended stanza sits
-      below the visible window, so the buffer looks unchanged and the action
-      looks like a no-op. `G` shows it. Cheap to fix (open with the cursor on
-      the appended block, which is the part the user is meant to read) and it
-      belongs to the editor, not the systemd adapter.
+- [x] **Fixed — a prepared buffer now opens where its new text is.** The
+      built-in editor used to start every buffer on line 1, so the second and
+      later `e h` of the same unit showed a header the user had already read
+      with the appended stanza below the fold, and the action looked like a
+      no-op. `EditorPrep` carries a `cursor_line` now, the systemd adapter
+      points it at the end of the stanza it just appended, and the editor's own
+      render pass scrolls the viewport to follow. Measured against a drop-in
+      padded past the pane height: the buffer opens on line 20 of 46 with the
+      cursor at 46:1 and the whole new block — comment, `[Service]`, directive
+      — in view. Aiming at the stanza's _first_ line was tried first and is
+      worse: the editor scrolls only as far as it must, so the block then
+      starts on the bottom row with the directive still off screen. `e e` on
+      the same unit still opens at 1:1, which is right for a buffer meant to be
+      read from the top, and external editors are left alone on purpose — the
+      command is the user's and `+N` is not a flag every editor has.
 - [x] Do it a second time on another check. The buffer comes up with the first
       stanza already in it and the second appended below, each under its own
       `[Service]` heading — a repeated section header is fine, and systemd

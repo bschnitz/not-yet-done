@@ -157,6 +157,7 @@ impl Node for JiraCommentNode {
                     self.issue_key, c.author, c.created, COMMENT_SEPARATOR, c.body
                 );
                 Ok(EditorPrep {
+                    cursor_line: None,
                     template,
                     version: self.comment.updated.clone(),
                     suffix: ".jira".into(),

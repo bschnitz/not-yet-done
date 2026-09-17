@@ -32,6 +32,7 @@ impl TaigaItemNode {
         let tables = build_tables(&statuses, &members, &tags);
         let template = render_clone_template(&self.detail, &tables);
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             // No version semantics — create has no optimistic-lock token.
             version: String::new(),

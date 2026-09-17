@@ -1448,8 +1448,18 @@ impl Node for UnitNode {
             let row = security::check(self.shared.bus.manager(), &target.unit, field).await?;
             body.push_str(&security::drop_in(&row));
         }
+        let template = edit::template(&target, &state, &body, &[]);
+        // Harden the same unit twice and the second buffer opens on a header
+        // the user read the first time, with the new stanza far below the
+        // fold — the action reads as a no-op. The stanza ends the buffer, and
+        // the editor scrolls only far enough to bring the cursor into view, so
+        // pointing at the last line puts the whole new block on screen; aiming
+        // at its first line would leave it starting at the bottom edge.
+        let cursor_line =
+            (action_id == security::HARDEN).then(|| template.lines().count().saturating_sub(1));
         Ok(EditorPrep {
-            template: edit::template(&target, &state, &body, &[]),
+            template,
+            cursor_line,
             version: edit::version(&target),
             // The unit's own extension, not the drop-in's `.conf`: `.service`
             // is what an editor recognises.

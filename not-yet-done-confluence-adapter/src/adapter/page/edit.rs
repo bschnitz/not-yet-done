@@ -40,6 +40,7 @@ impl ConfluencePageNode {
         let detail = self.detail().await?;
         let body = format_xhtml(&detail.body_storage).await;
         Ok(EditorPrep {
+            cursor_line: None,
             template: render_filled(&detail.title, &body),
             version: detail.version.to_string(),
             suffix: ".html".into(),

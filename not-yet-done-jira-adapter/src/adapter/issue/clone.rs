@@ -36,6 +36,7 @@ impl JiraIssueNode {
         let detail = self.detail().await?;
         let template = self.render_clone_template(detail);
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             // No version semantics — create has no optimistic-lock token.
             version: String::new(),

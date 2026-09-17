@@ -1297,6 +1297,7 @@ impl Node for ViewNode {
             .await?
             .ok_or_else(|| ContentError::NotFound(format!("view {}", self.name)))?;
         Ok(EditorPrep {
+            cursor_line: None,
             template: view_ddl::edit_buffer(&self.name, &definition, SQLITE_REPLACE_NOTE),
             version: definition,
             suffix: ".sql".into(),
@@ -1451,6 +1452,7 @@ impl NewRow<'_> {
     async fn prepare(&self) -> Result<EditorPrep> {
         let columns = self.columns().await.map_err(ContentError::NotSupported)?;
         Ok(EditorPrep {
+            cursor_line: None,
             template: row_edit::new_row_buffer(
                 &format!("{} in {}", self.table, self.database),
                 SQLITE_INSERT_NOTE,
@@ -1662,6 +1664,7 @@ impl Node for RowNode {
 
         let row = RowSnapshot::new(read.cells);
         Ok(EditorPrep {
+            cursor_line: None,
             template: row_edit::edit_buffer(
                 &self.label_for_header(),
                 &keys.note(),

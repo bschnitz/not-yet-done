@@ -1181,6 +1181,7 @@ async fn fire_tracking_hook(
 /// nothing to conflict with.
 fn prepare_add(parent_id: Option<Uuid>) -> EditorPrep {
     EditorPrep {
+        cursor_line: None,
         template: editor_templates::new_task(parent_id),
         version: String::new(),
         suffix: ".md".into(),
@@ -1210,6 +1211,7 @@ async fn prepare_edit(
     let notes_str = notes::read_notes(&task, &all_tasks(snapshot));
     let template = editor_templates::edit_task_with_notes(&task, is_tracked, &notes_str);
     Ok(EditorPrep {
+        cursor_line: None,
         template,
         version: task.updated_at.to_rfc3339(),
         suffix: ".md".into(),
@@ -1386,6 +1388,7 @@ fn prepare_edit_tree(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep> 
     let template =
         tree_edit::serialize_with_indent(&root, &subtree, TREE_EDIT_INDENT, &snapshot.tracked);
     Ok(EditorPrep {
+        cursor_line: None,
         template,
         version: String::new(),
         suffix: ".md".into(),
@@ -1456,6 +1459,7 @@ fn prepare_edit_notes(snapshot: &ForestSnapshot, id: Uuid) -> Result<EditorPrep>
         .ok_or_else(|| ContentError::NotFound(id.to_string()))?;
     let notes_str = notes::read_notes(&task, &all_tasks(snapshot));
     Ok(EditorPrep {
+        cursor_line: None,
         template: notes_str,
         version: String::new(),
         suffix: ".md".into(),

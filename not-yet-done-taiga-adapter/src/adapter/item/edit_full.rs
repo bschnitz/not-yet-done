@@ -62,6 +62,7 @@ impl TaigaItemNode {
         let tables = build_tables(&statuses, &members, &tags);
         let template = render_3b(&edit_full_fields(), &self.detail, &tables, None, None, true);
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             version: self.detail.version.to_string(),
             suffix: ".md".into(),

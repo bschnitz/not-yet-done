@@ -197,6 +197,7 @@ impl ConfluenceSpaceNode {
     /// only thing the POST needs.
     async fn prepare_create_page(&self) -> Result<EditorPrep> {
         Ok(EditorPrep {
+            cursor_line: None,
             template: render_template(),
             version: String::new(),
             suffix: ".html".into(),

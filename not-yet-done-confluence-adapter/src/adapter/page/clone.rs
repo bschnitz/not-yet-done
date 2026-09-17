@@ -52,6 +52,7 @@ impl ConfluencePageNode {
             template.push('\n');
         }
         Ok(EditorPrep {
+            cursor_line: None,
             template,
             // POST has no optimistic-lock token — clone is a fresh create.
             version: String::new(),
