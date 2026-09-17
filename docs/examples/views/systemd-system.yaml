@@ -525,8 +525,23 @@ views:
             style: warning
           - when: { field: origin, matches: '^(before|)$' }
             style: text_dim
+        # A chain row is a unit, so the verbs belong here too: the hop that
+        # cost the boot its seconds is the row you want to act on, and
+        # walking back out to the Services level to find it again is the
+        # detour this saves.
+        #
+        # The same set as on the user tab minus `a m` / `a u` — masking is
+        # not offered on this manager at all, for the reason in the header —
+        # and minus `enable-now` / `disable-now`, which are two decisions in
+        # one keystroke and stay where the row is the unit you meant.
         actions:
           - { name: refresh, key: r, type: reload }
+          - { name: start, key: "a s", id: start }
+          - { name: stop, key: "a x", id: stop }
+          - { name: restart, key: "a r", id: restart }
+          - { name: enable, key: "a e", id: enable }
+          - { name: disable, key: "a d", id: disable }
+          - { name: apply preset, key: "a p", id: preset }
       - &ordering
         name: Ordering
         node_type: "systemd:order"

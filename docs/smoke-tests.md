@@ -7861,12 +7861,12 @@ Description`. Unit rows leave `Relation` blank rather than borrowing a
       the level and to nothing else: `h` back out and the Services list is
       unfiltered and still sorted `Unit ▲`, drill in again and the `before` row
       is back. This used to end in `Fetch failed: unknown systemd column
-  'relation' — valid columns: name, description, load, active, sub,
-  enabled, …`, the _Services_ column set, because the pane sent its query
+'relation' — valid columns: name, description, load, active, sub,
+enabled, …`, the _Services_ column set, because the pane sent its query
       against its root whatever level was on screen. The adapter was innocent
       all along and still answers the same thing headless:
       `nyd adapter systemd 'service:<unit>' ls --type systemd:order
-  -q 'query: [relation, =, after]'`.
+-q 'query: [relation, =, after]'`.
 - [x] `a s` / `a x` on a dependency row act on _that_ unit, whatever kind it
       is. Measured on a throwaway pair, a parent with `Wants=` on a child:
       `a x` under the parent asks "Stop <child>? Whatever depends on it stops
@@ -8534,8 +8534,9 @@ What a unit's start waited for, one hop per row, on `C` under Services, Failed
 and Timers of both systemd tabs. The adapter computes the walk from unit
 timestamps rather than parsing `systemd-analyze critical-chain`, so the point
 of most of these boxes is the cross-check against that command — and the
-places where the two deliberately disagree. Read-only throughout; a terminal
-beside the TUI is the whole apparatus.
+places where the two deliberately disagree. A terminal beside the TUI is the
+whole apparatus for all but the last four boxes, which need one throwaway user
+service to act on — the level itself is not read-only.
 
 - [x] System tab, Services subtab, a service that starts during boot
       (`sshd.service`, `polkit.service`, `systemd-logind.service`): `C` opens a
@@ -8606,16 +8607,46 @@ beside the TUI is the whole apparatus.
       triggers — unlike the security level one row above it, which redirects.
       `C` on a timer row, and `systemd-analyze critical-chain <timer>.timer`
       agrees.
-- [ ] **The runtime verbs do not reach a chain row — they have no keys.** The
-      level's `actions:` block is one line, `refresh` on `r`, in both view
-      files; `restart`, `enable`, `stop` and the rest turn up in `--keymap`
-      under the chain scope in the list of actions _without_ a binding. So
-      `a r` on the row with the biggest `Took` does nothing, measured against
-      that unit's `ActiveEnterTimestamp` before and after. Two ways out, and it
-      is a decision rather than a bug: either the section heading is right and
-      the level is read-only, in which case the verbs should go off the level
-      and this box with them; or they are meant to be reachable, and the chain
-      level needs the same `a` keys the Services level has.
+- [x] **The runtime verbs reach a chain row.** They used not to: the level's
+      `actions:` block was one line, `refresh` on `r`, while `--keymap` listed
+      `restart`, `enable`, `stop` and the rest under the chain scope in the
+      actions _without_ a binding, so `a r` on the row with the biggest `Took`
+      did nothing at all. The level now carries the same eight keys the
+      ordering level has — `a s` start, `a x` stop, `a r` restart, `a e`
+      enable, `a d` disable, `a m` mask, `a u` unmask, `a p` preset — and the
+      `a` menu on the level lists exactly those eight. All eight measured from
+      the row 0 of a throwaway user service's own chain: `a r` moves both
+      `ActiveEnterTimestamp` and the main PID, `a x` asks its question first
+      and leaves `ActiveState=inactive`, `a s` brings it back, `a e` names the
+      `default.target.wants` symlink it wrote and `a d` the one it removed,
+      `a m` / `a u` flip `UnitFileState` between `masked` and `disabled`, and
+      `a p` answers "the preset wants it on". `enable-now` and `disable-now`,
+      which the adapter also offers on a `systemd:chain` node, stay unbound on
+      purpose: they are two decisions in one keystroke, and the ordering level
+      makes the same cut.
+- [x] The **system** tab's chain level binds six of those eight, and that is
+      the file's own policy rather than a level that got less: `mask` and
+      `unmask` are not offered on that manager anywhere — the view file's
+      header says why — and the `a` menu on a system chain lists `a d`, `a e`,
+      `a p`, `a r`, `a s`, `a x` and nothing else. No other difference between
+      the tabs: the chain level is not read-only on either.
+- [x] The verb takes the unit **under the cursor**, not the unit the chain was
+      asked about, and the adapter's `protect:` list reaches this level like
+      any other. `a x` on the `-.slice` row at the foot of a user chain is
+      refused outright — "on the protection list — it holds up the session",
+      no question asked and no verb sent — and so is `a x` on the
+      `basic.target` row of a system chain, which is the same refusal before
+      polkit is ever consulted.
+- [x] Two refusals worth recognising, neither of them ours. Stopping a unit
+      from its own chain can empty the level: a unit with nothing referencing
+      it is unloaded the moment it goes inactive, the next fetch answers
+      `no loaded unit <name>`, and the level is left with a header and no rows
+      — enable the unit, or reach it from a chain it is not the root of, and
+      the row stays. And `a m` on a unit whose fragment already lives in
+      `$XDG_CONFIG_HOME/systemd/user` reports
+      `File '…/<unit>' already exists`, because that is exactly where the mask
+      symlink would go; `systemctl --user mask` prints the same sentence
+      character for character.
 - [x] **The chain level's query is offered, written and run on the level.**
       `q` opens on the level and `+new` opens the level's _own_ template, the
       one naming `unit, depth, at, took, origin, description`; `Q` opens the
