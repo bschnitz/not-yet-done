@@ -7852,18 +7852,21 @@ Description`. Unit rows leave `Relation` blank rather than borrowing a
       `[relation, =, after]` as the first example — and not the Services one.
       The `+new` entry needs a name first: `enter` on an empty filter with no
       saved queries does nothing at all.
-- [ ] **But the query it offers cannot be applied from the TUI.** Saving
-      `[relation, =, after]` on the ordering level empties the level behind
-      `Fetch failed: unknown systemd column 'relation' — valid columns: name,
-      description, load, active, sub, enabled, …` — the Services column set.
-      The query reaches the pane root instead of the level it was written on,
-      which is the wedged-pane defect already on the list, here with a column
-      name that says so out loud. The adapter itself is innocent:
-      `nyd adapter systemd 'service:pipewire.service' ls --type systemd:order
--q 'query: [relation, =, after]'` narrows 8 rows to 5, and an unknown column
-      there is rejected against the _dependency_ set
-      (`name, relation, active, sub, load, description`). Fix belongs to the
-      TUI's query routing, not here.
+- [x] And the query it offers is applied to the level it was written on.
+      `Q` opens the same template as an ad-hoc filter — it used to be claimed
+      only while the nav stack was empty and did nothing here — and saving
+      `[relation, =, after]` drops the single `before` row from a six-row
+      ordering list, leaving the five `after` ones under an unchanged
+      breadcrumb with `Query applied` in the status bar. The filter belongs to
+      the level and to nothing else: `h` back out and the Services list is
+      unfiltered and still sorted `Unit ▲`, drill in again and the `before` row
+      is back. This used to end in `Fetch failed: unknown systemd column
+  'relation' — valid columns: name, description, load, active, sub,
+  enabled, …`, the _Services_ column set, because the pane sent its query
+      against its root whatever level was on screen. The adapter was innocent
+      all along and still answers the same thing headless:
+      `nyd adapter systemd 'service:<unit>' ls --type systemd:order
+  -q 'query: [relation, =, after]'`.
 - [x] `a s` / `a x` on a dependency row act on _that_ unit, whatever kind it
       is. Measured on a throwaway pair, a parent with `Wants=` on a child:
       `a x` under the parent asks "Stop <child>? Whatever depends on it stops
@@ -8117,31 +8120,30 @@ systemd view while the adapter offered all three the whole time.
 - [x] `Exposure` is **blank** on every `ok` row and carries a number on the
       exposed ones. Sort by it (`c s`): the column sorts numerically, not as
       text — `0.5` above `0.2`, and the blanks together at one end.
-- [ ] **Blocked — a query cannot reach this level at all.** The `q` menu and
-      the editor behind it are level-aware and come up with the Security
-      template, but applying one stamps the query on the _pane_ and then
-      reloads the pane's **root**: the body goes to the Services node, whose
-      column set has no `status`, and the level answers
-      `unknown systemd column 'status'` over an empty table. Routing the reload
-      through the level would not be enough either — a drilled child list only
-      carries the pane's query when the adapter declares
-      `propagates_query_to_subtree`, which systemd does not. So a `query:`
-      block on a drilled-into level is decorative today. Same for the two boxes
-      below; `Q` is silently dead on the level as well. On the **Properties**
-      level it is worse than decorative — measured there, applying a query
-      leaves the pane wedged: the header keeps the child's columns while the
-      body shows the root's rows, the action bar carries a mangled remnant of
-      the expression, and neither `⌫`, nor a subtab key, nor a tab switch gets
-      out. Only `r` heals the level (it reloads the level, not the root), and
-      only then does `Esc` + `⌫` leave it. Reopening `Q` meanwhile hands back
-      the **wrong** template — the Properties one, with the previous buffer
-      still smeared across its first line.
-- [ ] `q` → `[status, =, exposed]` narrows to what is still open;
+- [x] A query reaches this level. The `q` menu and the editor behind it come
+      up with the Security template, `Q` opens the same one as an ad-hoc
+      filter, and what is saved is run against the Security node rather than
+      the pane's root — the level answered `unknown systemd column 'status'`
+      over an empty table for as long as the query went to the root. The
+      **Properties** level, which used to be worse than decorative (header
+      keeping the child's columns over the root's rows, and neither `⌫` nor a
+      subtab key nor a tab switch getting out), filters in place now and `⌫`
+      leaves at the first press.
+- [x] But the Properties template teaches an operator that matches nothing.
+      `[name, like, Timeout]` — its own first example — returns an empty level
+      under a cheerful `Query applied`, because `like` is the wildcard operator
+      and wants them spelled out: `[name, like, "%Timeout%"]` returns the
+      ten timeout properties, and so does `[name, has, Timeout]`. The same
+      holds headless, so this is the template's fault and not the TUI's. The
+      examples in both view files now say `has`, which is the operator that
+      example actually wanted; the `[fragment, like, "/etc/%"]` ones were
+      already correct.
+- [x] `q` → `[status, =, exposed]` narrows to what is still open;
       `[status, "!=", exposed]` shows the passing rows **and** the `no-effect`
       one. There is exactly one of the latter on a user manager, `RemoveIPC=`
       — the check that cannot apply here at all. Its `Exposure` is blank and
       its `Fix` is too.
-- [ ] `[exposure, gte, 0.3]` returns only exposed rows without a word about the
+- [x] `[exposure, gte, 0.3]` returns only exposed rows without a word about the
       status. A passing check has no exposure rather than an exposure of zero,
       which is what makes the short query correct.
 - [x] The `Fix` column is not a copy of `Check`. Find a group check —
@@ -8548,17 +8550,21 @@ beside the TUI is the whole apparatus.
       prints the unit you asked about through a different code path than its
       children and that path drops the timestamp — `sshd.service +38ms`, while
       every line under it gets `@6.538s`. The level's first row carries both.
-- [ ] **Sorting a drilled-in level loads the pane root instead.** `S` and the
-      column's letter, or `c s` and the menu — both build their offer from the
-      chain level's own six columns, and both answer by replacing the rows with
-      the _root_ level's: three dozen service rows under the breadcrumb
-      `Services › <unit> › Chain`, drawn against the chain's columns, so
-      everything but `Description` is blank. `r` puts the chain back in depth
-      order with the sort forgotten. Measured on a throwaway pair whose second
-      hop cost a full second, so a descending order would have been
-      unmistakable. Same fault as the ordering-level query one section above:
-      what a pane does with a query or a sort is bound to its root and not to
-      the level the keys were pressed on. The fix belongs to the TUI.
+- [x] **Sorting a drilled-in level sorts that level.** `S` and the column's
+      letter, and `c s` and the menu, both build their offer from the chain
+      level's own six columns, and both reorder the chain's own rows. Measured
+      on a system-tab chain of eight hops whose most expensive one cost 4.37s
+      at depth 6: `Took` descending lifts it to row 0, ahead of the 132ms unit
+      the chain was asked about, and the header reads `Took ▼`. A second
+      column stacks rather than replaces — on a three-hop user chain, `At`
+      ascending on top of `Took` descending reads `Took ▼₁ At ▲₂` and breaks
+      the two zero-`Took` rows by timestamp. The sort
+      belongs to the level: `h` back out and the Services list still carries
+      its own `Unit ▲`, drill in again and the chain is back in `Depth` order
+      with the sort forgotten. It is deliberately not persisted either — a
+      drilled level's sort names a column the root does not have. This used to
+      answer by replacing the rows with the _root_ level's, drawn against the
+      chain's columns so that everything but `Description` came out blank.
 - [x] `Depth` is the level's default sort — open it fresh and row 0 is the unit
       you asked about, not whatever sorts first alphabetically. Confirmed on
       both managers: `-.slice` and `app.slice` would head an alphabetical list
@@ -8610,19 +8616,22 @@ beside the TUI is the whole apparatus.
       the level is read-only, in which case the verbs should go off the level
       and this box with them; or they are meant to be reachable, and the chain
       level needs the same `a` keys the Services level has.
-- [ ] **The chain level's query is offered, written and then run against the
-      wrong level.** `q` opens on the level and `+new` opens the level's _own_
-      template, the one naming `unit, depth, at, took, origin, description` —
-      all correct. Saving `[origin, =, after]` empties the level behind
-      `Fetch failed: unknown systemd column 'origin' — valid columns: name,
-    description, load, active, sub, enabled, …`, which is the _Services_
-      column set: the query was applied as a root load. `r` puts the chain
-      back and the query chip stays lit but unused, so unlike the ordering
-      level this one does not wedge. `Q` is a silent no-op here by
-      construction — the key is claimed only while the nav stack is empty —
-      even though `--keymap` lists it in the chain scope. Same root as the
-      sort box above: the offer comes from the level, the load goes to the
-      pane root.
+- [x] **The chain level's query is offered, written and run on the level.**
+      `q` opens on the level and `+new` opens the level's _own_ template, the
+      one naming `unit, depth, at, took, origin, description`; `Q` opens the
+      same template as an ad-hoc filter, where it used to be a silent no-op —
+      claimed only while the nav stack was empty, though `--keymap` listed it
+      in the chain scope all along. `[took, gt, 1]` on the eight-hop chain
+      above leaves exactly the one hop that cost over a second, and
+      `[origin, =, after]` on a user chain drops the `startup` row: breadcrumb
+      unchanged, `Query applied`, and an `r` refresh keeps both the filter and
+      the sort instead of throwing them away.
+- [x] Stepping out and back in is what clears an ad-hoc `Q` filter, and on a
+      level with no saved queries it is the only thing that does. Saving an
+      empty buffer answers `Cancelled (empty query)` and leaves the previous
+      filter in force, and the `q` list has no "(none)" entry to pick — it is
+      empty until something is saved. `⌫` then `C` gives the unfiltered chain
+      back in `Depth` order, which is the escape hatch worth knowing.
 - [x] Unit files subtab: **no** `C`, on either tab. `--keymap` lists 21
       bindings for the user tab's Unit files scope and 13 for the system tab's,
       and `C` is in neither; the view file says why where the binding would

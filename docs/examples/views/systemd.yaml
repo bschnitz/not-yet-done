@@ -477,7 +477,7 @@ views:
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
       # only scroll them. The same content as a level is sortable and
-      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # filterable with everything the tab already has: `[name, has, Timeout]`
       # answers in one keystroke what grepping a wall of text answers in three.
       #
       # Both interfaces at once: the generic `Unit` one (ActiveState,
@@ -496,9 +496,9 @@ views:
             # Filter the properties. Columns: name, value, interface.
             #
             #   query:
-            #     [name, like, Timeout]        # every timeout at once
+            #     [name, has, Timeout]         # every timeout at once
             #     [interface, =, Service]      # drop the generic Unit half
-            #     [value, like, /home]         # what points into my home
+            #     [value, has, /home]          # what points into my home
             query:
               [name, has, ""]
         columns:
@@ -1213,7 +1213,7 @@ views:
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
       # only scroll them. The same content as a level is sortable and
-      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # filterable with everything the tab already has: `[name, has, Timeout]`
       # answers in one keystroke what grepping a wall of text answers in three.
       #
       # Both interfaces at once: the generic `Unit` one (ActiveState,
@@ -1232,9 +1232,9 @@ views:
             # Filter the properties. Columns: name, value, interface.
             #
             #   query:
-            #     [name, like, Timeout]        # every timeout at once
+            #     [name, has, Timeout]         # every timeout at once
             #     [interface, =, Service]      # drop the generic Unit half
-            #     [value, like, /home]         # what points into my home
+            #     [value, has, /home]          # what points into my home
             query:
               [name, has, ""]
         columns:
@@ -1558,7 +1558,7 @@ views:
     children:
       # `systemctl show` is two hundred `Key=value` lines and a terminal can
       # only scroll them. The same content as a level is sortable and
-      # filterable with everything the tab already has: `[name, like, Timeout]`
+      # filterable with everything the tab already has: `[name, has, Timeout]`
       # answers in one keystroke what grepping a wall of text answers in three.
       #
       # Both interfaces at once: the generic `Unit` one (ActiveState,
@@ -1577,9 +1577,9 @@ views:
             # Filter the properties. Columns: name, value, interface.
             #
             #   query:
-            #     [name, like, Timeout]        # every timeout at once
+            #     [name, has, Timeout]         # every timeout at once
             #     [interface, =, Service]      # drop the generic Unit half
-            #     [value, like, /home]         # what points into my home
+            #     [value, has, /home]          # what points into my home
             query:
               [name, has, ""]
         columns:
