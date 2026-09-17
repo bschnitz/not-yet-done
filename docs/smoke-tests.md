@@ -8610,15 +8610,19 @@ beside the TUI is the whole apparatus.
       the level is read-only, in which case the verbs should go off the level
       and this box with them; or they are meant to be reachable, and the chain
       level needs the same `a` keys the Services level has.
-- [ ] **The chain level's query cannot be opened at all.** The level declares
-      `query:` with `editable: true`, `menu_key: q` and a template naming its
-      own columns, but the action bar on the level offers neither `q` nor `Q`,
-      and `Q` — which `--keymap` does bind there to `content.edit_query` — is a
-      silent no-op. The same key one level up opens the Services template in
-      the editor at once. `[took, gt, 1]` and `[origin, =, after]` are
-      therefore untested and the level's `query:` block is dead config. Same
-      root as the sort box above: the query machinery belongs to the pane
-      root.
+- [ ] **The chain level's query is offered, written and then run against the
+      wrong level.** `q` opens on the level and `+new` opens the level's _own_
+      template, the one naming `unit, depth, at, took, origin, description` —
+      all correct. Saving `[origin, =, after]` empties the level behind
+      `Fetch failed: unknown systemd column 'origin' — valid columns: name,
+    description, load, active, sub, enabled, …`, which is the _Services_
+      column set: the query was applied as a root load. `r` puts the chain
+      back and the query chip stays lit but unused, so unlike the ordering
+      level this one does not wedge. `Q` is a silent no-op here by
+      construction — the key is claimed only while the nav stack is empty —
+      even though `--keymap` lists it in the chain scope. Same root as the
+      sort box above: the offer comes from the level, the load goes to the
+      pane root.
 - [x] Unit files subtab: **no** `C`, on either tab. `--keymap` lists 21
       bindings for the user tab's Unit files scope and 13 for the system tab's,
       and `C` is in neither; the view file says why where the binding would
