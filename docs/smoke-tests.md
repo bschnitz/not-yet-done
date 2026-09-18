@@ -8500,7 +8500,11 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       helper at all — `auth_admin_keep` doing its job.
 - [ ] **Dismissing** the dialog is reported as an ordinary sentence, not as a
       red adapter error: the notification says the write was not authorised and
-      nothing happened. The unit's row is unchanged.
+      nothing happened. The unit's row is unchanged. Unmeasured for the same
+      reason as its stage-3 twin below — it needs someone to press Cancel, and
+      every dialog raised while measuring was authenticated in about three
+      seconds. `pkcheck --revoke-temp` makes the precondition available on
+      demand, so it is one press away.
 - [x] A protected system unit refuses _before_ any dialog: `a x` on
       `systemd-journald.service` says it is on the protection list and that it
       holds up **the machine** — the user tab's wording says "the session".
@@ -8545,50 +8549,58 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       `polkit-agent-helper` runs for the `gdbus` call at all. It is not that
       polkit said no; it is that the manager never asked, because the caller
       did not say it was willing to wait for a human.
-- [ ] A write that waits does not trip the read deadline. With a dialog on
-      screen, leave it unanswered for more than ten seconds before answering:
-      the verb must still run. Leaving it for five minutes is the other end —
-      the adapter gives the pane back and says the wait was never answered.
+- [x] A write that waits does not trip the read deadline — but it does trip a
+      shorter one that is not ours. With a dialog on screen, leave it
+      unanswered for more than ten seconds before answering: the verb must
+      still run. It does; a dialog answered after 24 s restarted its unit
+      normally, so the ten-second read deadline plainly does not apply to a
+      write that is waiting on a human.
 
-      **This is the box that found a bug, and it stays open until the bug is
-      fixed.** Ten seconds is fine: a dialog answered after 24 s restarted its
-      unit normally. Twenty-five is not. A dialog answered after about 25 s
-      comes back as a red adapter error — "Action 'preset': presetting
-      pamac-cleancache.timer: **Method call timed out**" — and the write is
-      lost, the row unchanged, while the pane's own banner was still counting
-      up towards a limit it never reaches.
+      The other end of the box, "leave it for five minutes", turned out to be
+      unreachable, and finding out why is what this box is worth. A dialog
+      answered at about 25 s used to come back as a red adapter error —
+      "Action 'preset': presetting pamac-cleancache.timer: **Method call timed
+      out**" — with the write lost and the row unchanged, while the pane's own
+      banner was still counting up towards 120 s. Two things were tangled
+      there, and only one of them was ours.
 
-      Two things are tangled here, and only one of them is ours.
+      The **ceiling** is not ours, and that is now measured rather than
+      argued. With the dialog deliberately left untouched:
 
-      The **ceiling** is not. `Bus::write` (`bus.rs`) does the right thing at
-      its own layer: it sets `AllowInteractiveAuth` and wraps the call in
-      `auth_timeout` — `DEFAULT_AUTH_TIMEOUT_SECS = 300`, deliberately
-      "minutes rather than seconds". Something upstream gives up long before
-      that. The string "Method call timed out" is in neither zbus nor this
-      repo; it lives in `libsystemd.so.0`, which is sd-bus's default
-      25-second reply timeout — so what expired is a call **systemd itself**
-      made while asking polkit, not the call the adapter made. Whether
-      systemd 261 can be persuaded otherwise is an upstream question. The
-      decisive test is one line and has not been run yet: `systemctl enable`
-      on a `static` unit from an unauthorised shell, dialog deliberately left
-      for thirty seconds. If plain `systemctl` fails the same way, no amount
-      of work here will fix it, and the honest move is to say so in the tab
-      rather than to keep promising five minutes.
+      - `systemctl restart man-db.timer` — 25.01 s, then "Failed to restart
+        man-db.timer: Die Wartezeit für die Verbindung ist abgelaufen".
+      - `busctl call … Manager RestartUnit ss man-db.timer replace` — 25.00 s,
+        then "Call failed: Connection timed out".
 
-      What **is** ours is the sentence. `write_error` already turns
+      No adapter, no zbus, no configuration of ours anywhere in either road.
+      systemd asks polkit on the caller's behalf over sd-bus, whose default
+      reply timeout is 25 seconds; when it expires, sd-bus synthesises
+      `org.freedesktop.DBus.Error.NoReply` carrying the string "Method call
+      timed out" (all three strings are in `libsystemd.so.0`, and `busctl`
+      merely prints the `ETIMEDOUT` it maps to). The journal shows the other
+      side of the same moment: polkitd logs the operator as having **FAILED**
+      to authenticate, because the helper was torn down under it. So
+      `auth_timeout` — `DEFAULT_AUTH_TIMEOUT_SECS = 300`, "minutes rather than
+      seconds" — can never fire on this path, and the five-minute half of this
+      box cannot be measured at all. Both `bus.rs` and `config.rs` now say so
+      where a reader will meet the knob.
+
+      What **was** ours is the sentence, and it is fixed. `write_error` turns
       `InteractiveAuthorizationRequired` and `AccessDenied` into plain
-      language, on the stated principle that declining a password is a
-      decision and not an adapter error. A timeout while a dialog is open is
-      the same kind of event — the user did not get there in time — and it
-      falls through the match into `ContentError::Other`, arriving as raw
-      transport text that names neither the dialog nor the password. Map
-      `org.freedesktop.DBus.Error.Timeout` and `…NoReply` alongside the other
-      two and say what happened: the authorisation was not answered in time,
-      and nothing was changed.
+      language, on the principle that declining a password is a decision and
+      not an adapter error; a timeout while the dialog is open is the same
+      kind of event and used to fall through into raw transport text. It now
+      has its own arm — `NoReply` and `Timeout` together — saying the dialog
+      went unanswered for the 25 seconds systemd waits, that nothing changed,
+      and to run it again.
 
-      Re-measure both halves afterwards. Until the ceiling is understood the
-      five-minute half cannot be measured at all, and the ten-second half
-      passes only because 10 is under 25.
+      That last sentence is covered by tests rather than by a live press, and
+      deliberately: reproducing it costs an untouched dialog and a 25-second
+      wait per case, and a `zbus::Error::MethodError` cannot be constructed
+      without a `Message`. The name-to-sentence half is split out as
+      `write_error_named` and tested there (`bus::tests`, three cases). A live
+      confirmation is still worth taking the next time a dialog is going
+      unanswered anyway.
 
 - [x] `a e` / `a d` / `a p` are offered on Services, Failed, Timers and Unit
       files of the system tab, and `a m` / `a u` are not — the action list shows
@@ -8613,18 +8625,40 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       on every boot from now on, for everyone who uses it. (y/n)"; on the user
       tab the same key produced no prompt at all and went straight to its
       result.
-- [ ] Two dialogs, not one, on a cold session: the first for the symlinks
-      (`manage-unit-files`), the second for the reload (`reload-daemon`). Answer
-      both and the verb completes. A cold session is `pkcheck --revoke-temp`,
-      not a logout. **Blocked by the 25-second timeout above**: the attempt
-      never got as far as the second dialog, because answering the first one
-      took longer than zbus was willing to wait and the whole write died with
-      "Method call timed out". Re-measure once that is fixed.
-- [ ] Dismissing **either** dialog is an ordinary sentence, not a red error, and
-      the row is unchanged.
-- [ ] A verb whose work was already done still reports honestly:
-      `a e` on an already-enabled unit says it was already enabled rather than
-      claiming to have changed something.
+- [x] **One** dialog on a cold session, not two — the box asked for the wrong
+      number. A file verb is two polkit actions, the symlinks
+      (`manage-unit-files`) and the reload (`reload-daemon`), each
+      `auth_admin_keep`, so two dialogs is the reasonable guess. Measured on a
+      cold cache (`pkcheck --revoke-temp`, not a logout): `disable` on
+      `pamac-cleancache.timer` put up exactly one dialog — one
+      `polkit-agent-helper` instance in the journal — removed the symlink and
+      reported "Disabled pamac-cleancache.timer".
+
+      The reason is in the policy, not in the adapter: `pkaction --verbose`
+      shows `manage-unit-files` carrying
+      `org.freedesktop.policykit.imply -> org.freedesktop.systemd1.reload-daemon
+      org.freedesktop.systemd1.manage-units`. Authorising the file change
+      grants the reload and the runtime verbs with it, so the second action
+      never reaches a human. Worth knowing in both directions: the count is a
+      property of systemd's shipped policy, and a machine that overrides it
+      would see two.
+
+- [ ] Dismissing the dialog is an ordinary sentence, not a red error, and the
+      row is unchanged. Still unmeasured, and for a dull reason: it needs a
+      deliberate Cancel, and on this machine every dialog put up during the
+      measuring session was authenticated within about three seconds. The
+      precondition is cheap to arrange — `pkcheck --revoke-temp`, then any
+      system verb — so this is a one-press box for whoever gets there next.
+      The path it exercises is `AccessDenied`, which `write_error` already
+      maps and which `bus::tests` covers as a sentence.
+- [x] A verb whose work was already done still reports honestly: `a e` on an
+      already-enabled unit says it was already enabled rather than claiming to
+      have changed something. Measured on `pamac-cleancache.timer`, which was
+      already `enabled`: "pamac-cleancache.timer was already enabled", no
+      symlink line under it, and `systemctl is-enabled` unchanged. The dialog
+      still appears — the authorisation is asked for and spent before systemd
+      discovers there is nothing to do, the same order the no-`[Install]` box
+      further down describes.
 - [x] A unit with no `[Install]` section (`dbus.service`) says so, and on the
       system tab the sentence ends "not at **boot**" — the user tab says "not at
       login". Both halves measured, on other units: `dbus.service` is an alias
@@ -8641,17 +8675,23 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       dialog appears first and the authorisation is spent before anything
       discovers there was nothing to do.
 
-- [ ] `a p` on a unit the Preset column marks `should-disable` disables it, the
-      Drift column clears on the next `r`, and `systemctl is-enabled` agrees.
-      Put it back with `a e` afterwards. **Blocked by the same timeout.** The
-      half that did measure: the Drift column finds its candidates, and the
-      prompt is the right one — "Apply the preset policy to
-      pamac-cleancache.timer on this machine? It is enabled or disabled to
-      match what the distribution ships — the Preset column says which — and
-      that holds from the next boot". Pick the candidate from the Unit files
-      level rather than by guessing; a timer whose preset disagrees with its
-      state is both harmless and reversible, which most `should-disable` rows
-      on a real machine are not.
+- [x] `a p` on a unit the Preset column marks `should-disable` disables it, the
+      Drift column clears, and `systemctl is-enabled` agrees. Put it back with
+      `a e` afterwards. Measured end to end on `pamac-cleancache.timer`
+      (`State` enabled, `Preset` disabled, so `Drift` says `should-disable`):
+      the prompt reads "Apply the preset policy to pamac-cleancache.timer on
+      this machine? It is enabled or disabled to match what the distribution
+      ships — the Preset column says which — and that holds from the next
+      boot"; the verb answered "Disabled pamac-cleancache.timer — the preset
+      wants it off" and named the symlink it removed; the row afterwards read
+      `State disabled`, `Preset disabled`, **`Drift` empty**; and
+      `systemctl is-enabled` said `disabled`. `a e` put all three back,
+      `should-disable` included.
+
+      Pick the candidate from the Unit files level rather than by guessing; a
+      timer whose preset disagrees with its state is both harmless and
+      reversible, which most `should-disable` rows on a real machine are not.
+
 - [x] The protection list covers the file verbs too, and refuses before any
       dialog: `a d` on `dbus.socket` (system tab) says it holds up the machine.
       The same now holds on the **user** tab for `dbus.socket` there — that is
