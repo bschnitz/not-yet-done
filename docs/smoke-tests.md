@@ -8985,10 +8985,10 @@ that, but every value with a dot in it — a unit name, a host name, a version
 nothing without a word. The marker is now explicit: a **leading dot** names a
 column, everything else is text.
 
-- [x] A dotted value is the value. `nyd adapter systemd-system ls -q
-  'query: [name, eq, accounts-daemon.service]'` returns that one row.
-      Before the change it depended on the punctuation in the name, which is
-      the worst kind of rule to have to remember.
+- [x] A dotted value is the value.
+      `nyd adapter systemd-system ls -q 'query: [name, eq, accounts-daemon.service]'`
+      returns that one row. Before the change it depended on the punctuation in
+      the name, which is the worst kind of rule to have to remember.
 - [x] A marked reference to a column that does not exist is refused by name,
       and the message says what the dot did: "unknown systemd column 'service'
       on the right of 'name' — a value written with a leading dot is a column
@@ -9004,16 +9004,33 @@ column, everything else is text.
       `eval::tests` (three cases) and measured through the CLI: on the system
       tab `[name, eq, .description]` returns the 12 services whose description
       is their own name — the `not-found` ones, where systemd has nothing
-      better to call them — and `[name, ne, .description]` returns the other 130. Together they are the 142 rows of the unfiltered level, which is
-      the check worth doing: the two halves partition it, so neither is quietly
+      better to call them — and `[name, ne, .description]` returns the other 130. Together they are the 142 rows of the unfiltered level, which is the
+      check worth doing: the two halves partition it, so neither is quietly
       matching nothing.
-- [x] A `matches` pattern is never taken from a column: `[title, matches,
-    .pattern]` is false rather than compiling whatever the row holds. A regex
-      out of the data would put one entry per row into the pattern cache and
-      let the rows decide what the filter means.
-- [ ] TUI: the same two cases through `Q` on a content level — the refusal
-      reaches the status bar as a sentence and the table keeps its rows, the
-      literal narrows the table. Measured only through the CLI so far.
-- [ ] A saved query that still spells an old-style reference (`task.created_at`
-      on the right) now compares against the text `task.created_at`. Nothing
-      shipped does, but a hand-written one might: the fix is a leading dot.
+- [x] A `matches` pattern is never taken from a column:
+      `[title, matches, .pattern]` is false rather than compiling whatever the
+      row holds. A regex out of the data would put one entry per row into the
+      pattern cache and let the rows decide what the filter means.
+- [x] TUI: the same cases through `Q` on a content level. On the systemd tab,
+      `query: [name, eq, .servicename]` is refused and the sentence arrives as
+      the pane banner ("Fetch failed: unknown systemd column 'servicename' on
+      the right of 'name' — …"). The level does **not** keep its rows: the load
+      failed, so the table empties down to its header. A dotted literal
+      (`[name, eq, dbus-broker.service]`) then narrows it to that one row, and
+      `[name, eq, .description]` returns the three services whose description
+      is their own name — the same field-vs-field path the CLI takes, through
+      the editor the user actually types in.
+- [ ] The refused query's banner is cut off at the terminal width, and the half
+      that gets lost is the half that helps: the cure ("write it without the
+      dot") and the list of valid columns. A fetch error is only ever a banner
+      — `set_items_for_pane` puts it in `pane.fetch_error`, and nothing logs a
+      notice — so `z l` cannot show the rest either. Every adapter's load
+      errors share that path, so this is a content-view question, not a filter
+      one.
+- [x] No saved query anywhere still spells an old-style reference. Scanned the
+      whole query store in `nyd.db`, every view YAML under the config, the
+      example views and the local scripts (131 files) for a leaf whose operator
+      is a real operator and whose right-hand value is `word.word`: the only
+      four hits are the chain-template comments that say a dot there is text.
+      A hand-written one would now compare against that text; the fix is a
+      leading dot.
