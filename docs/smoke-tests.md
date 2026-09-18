@@ -233,11 +233,24 @@ Every tick below was read that way, not from a screenshot.
       tracking state, which no reload re-reads from foreign writes. Drive the
       toggle through the UI or the box measures nothing.
 - [x] **Cut**: `a m` on a task → the `Mark for move` hint turns accent + bold + underlined, and a tab switch away and back leaves it muted again.
-- [ ] **Editor**: open an editor (`e`/`a`) → the corresponding hint
-      (`edit`/`add`/…) is marked as long as the edit session is open.
-- [ ] Rebinding test: move `jump_mode` to a different key in `tui.yaml`
-      → the hint shows the new key AND still marks correctly (identity
-      via the configured key, not hardcoded).
+- [x] **Editor**: `e e` on a task → while the edit session is open the
+      `edit` hint turns accent + bold + underlined, and `edit node` and
+      `edit query` next to it stay muted — only the session's own hint
+      lights up. Closing the editor leaves it muted again. Measured a
+      second time on `Q` (`query_edit`), which reaches the same
+      `ActiveSurface::Editor(label)` through the other half of the
+      mapping. Two traps for whoever repeats this. The marked label is
+      its own styled run and no longer carries the leading space of the
+      muted one, so a filter written as `" edit"` silently drops exactly
+      the case it is looking for — filter on `"edit"`. And the reading is
+      worthless whenever the screen has scrolled (the capture then shows
+      a stale bar that predates the keypress); check that the action bar
+      is still where it belongs before believing any capture.
+- [x] Rebinding test: `content.jump_mode` moved from the shipped `f j` to
+      `J` in the copy's `tui.yaml` → the hint reads `J jump` instead of
+      `f j jump`, arms on `J`, marks accent + bold + underlined while the
+      overlay is open, and goes muted again on `Esc`. The identity is the
+      configured key, nothing hardcoded.
 - [ ] **Link hop**: in a Stoat chat with visible links (a bare URL
       and/or a markdown `[text](url)`) press `f` → every link gets a
       green label; type the label → the URL opens in the browser (opener
