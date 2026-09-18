@@ -8675,14 +8675,35 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       property of systemd's shipped policy, and a machine that overrides it
       would see two.
 
-- [ ] Dismissing the dialog is an ordinary sentence, not a red error, and the
-      row is unchanged. Still unmeasured, and for a dull reason: it needs a
-      deliberate Cancel, and on this machine every dialog put up during the
-      measuring session was authenticated within about three seconds. The
-      precondition is cheap to arrange — `pkcheck --revoke-temp`, then any
-      system verb — so this is a one-press box for whoever gets there next.
-      The path it exercises is `AccessDenied`, which `write_error` already
-      maps and which `bus::tests` covers as a sentence.
+- [x] Dismissing the dialog is an ordinary sentence, not a red error, and the
+      row is unchanged. Measured on a file verb, `disable` on
+      `pamac-cleancache.timer`, with the dialog dismissed rather than answered:
+
+      ```
+      disabling pamac-cleancache.timer was not authorised — the request was
+      dismissed or refused
+      ```
+
+      That is the whole of it — one sentence, no D-Bus name, no transport
+      text, and no error styling of ours in the capture (the only red in it
+      belongs to the textual agent's own AUTHENTICATING banner). The row did
+      not move: `unitfile:pamac-cleancache.timer show` still reads
+      `State enabled`, `Preset disabled`, `Drift should-disable`, and the
+      symlink under `timers.target.wants` still carries its old timestamp. The
+      journal confirms which path was taken — polkitd logs the operator as
+      having FAILED to authenticate for `manage-unit-files` — so this is the
+      `AccessDenied` arm of `write_error`, the same one `bus::tests` covers.
+
+      Dismissing it needed no human, by the same trick as the timeout box
+      above: register a textual agent for the writing process
+      (`pkttyagent --process $$` inside a `script -qec … /dev/null` wrapper,
+      then `exec` the write so the pid stays the one the agent was registered
+      for), and `pkill -x pkttyagent` while the prompt is up. polkit treats a
+      vanished agent exactly like a cancelled one. Note the cost: that is a
+      failed login, and three of them inside `fail_interval` lock the account
+      through `pam_faillock` — `sudo` included. Budget two probes per ten
+      minutes, or raise `deny` for the duration.
+
 - [x] A verb whose work was already done still reports honestly: `a e` on an
       already-enabled unit says it was already enabled rather than claiming to
       have changed something. Measured on `pamac-cleancache.timer`, which was
