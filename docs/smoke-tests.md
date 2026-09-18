@@ -8498,13 +8498,42 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       at 07:07:51), and the unit restarted in the same second the helper
       finished. The immediately following `a r` ran with **no** dialog and no
       helper at all — `auth_admin_keep` doing its job.
-- [ ] **Dismissing** the dialog is reported as an ordinary sentence, not as a
+- [x] **Dismissing** the dialog is reported as an ordinary sentence, not as a
       red adapter error: the notification says the write was not authorised and
-      nothing happened. The unit's row is unchanged. Unmeasured for the same
-      reason as its stage-3 twin below — it needs someone to press Cancel, and
-      every dialog raised while measuring was authenticated in about three
-      seconds. `pkcheck --revoke-temp` makes the precondition available on
-      demand, so it is one press away.
+      nothing happened. The unit's row is unchanged. Measured on
+      `man-db.timer`: "restarting man-db.timer was not authorised — the request
+      was dismissed or refused". The row is unchanged in the literal sense —
+      the unit's `ActiveEnterTimestamp` still read 07:58:11, the last
+      _authorised_ restart, after both a refused attempt at 07:59:25 and this
+      one at 08:00:28.
+
+      Getting there needed a trick worth writing down, because waiting for a
+      human to press Cancel is not something a measuring session can rely on.
+      `pkttyagent --process $$` registers a **textual** polkit agent for one
+      process, which takes the prompt instead of the desktop agent — no dialog
+      appears on screen at all. It needs a controlling terminal, so run the
+      whole thing under `script -qec … /dev/null`, and register before
+      `exec`ing the write so the pid the agent was registered for is still the
+      pid that asks. Then:
+
+      - **unanswered** — feed the pty nothing. After 25 s the write comes back
+        with the sentence from the timeout box above, verbatim and live.
+      - **dismissed** — `pkill -x pkttyagent` while the prompt is up. polkit
+        treats a vanished agent as a cancelled one and answers `AccessDenied`,
+        which is the same path a Cancel press takes. (`-x`, not `-f`: `-f`
+        matches the pattern inside your own command line and kills the shell
+        that issued it. Sending `^C` down the pty is no good either — SIGINT
+        reaches the write, not just the prompt, and the process dies at 130
+        before it can print anything.)
+
+      **This costs faillock entries.** Every unanswered or cancelled prompt is
+      a failed login for `pam_faillock`; with the shipped `deny=3` the third
+      one locks the account for `unlock_time` (600 s here), which locks
+      `sudo` too, since both go through `system-auth`. `faillock --user <you>`
+      lists them and the lock expires on its own; resetting it early needs
+      root, which is exactly what you have just locked yourself out of. Budget
+      two probes per ten minutes, or raise `deny` for the duration.
+
 - [x] A protected system unit refuses _before_ any dialog: `a x` on
       `systemd-journald.service` says it is on the protection list and that it
       holds up **the machine** — the user tab's wording says "the session".
@@ -8594,13 +8623,16 @@ dialog really appeared is `polkit-agent-helper` in the system journal.
       went unanswered for the 25 seconds systemd waits, that nothing changed,
       and to run it again.
 
-      That last sentence is covered by tests rather than by a live press, and
-      deliberately: reproducing it costs an untouched dialog and a 25-second
-      wait per case, and a `zbus::Error::MethodError` cannot be constructed
-      without a `Message`. The name-to-sentence half is split out as
-      `write_error_named` and tested there (`bus::tests`, three cases). A live
-      confirmation is still worth taking the next time a dialog is going
-      unanswered anyway.
+      That sentence is covered twice. As a test, because a
+      `zbus::Error::MethodError` cannot be constructed without a `Message`:
+      the name-to-sentence half is split out as `write_error_named` and tested
+      there (`bus::tests`, three cases). And live, on `man-db.timer`, using
+      the textual-agent trick described under the dismissal box above — the
+      prompt was left alone and 25 seconds later the write came back
+      "restarting man-db.timer was dropped — the authentication dialog went
+      unanswered for 25 seconds, which is as long as systemd waits. Nothing
+      changed; run it again and answer sooner." No raw transport text
+      anywhere in it.
 
 - [x] `a e` / `a d` / `a p` are offered on Services, Failed, Timers and Unit
       files of the system tab, and `a m` / `a u` are not — the action list shows
