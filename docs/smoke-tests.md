@@ -8456,77 +8456,221 @@ A polkit dialog for `org.freedesktop.systemd1.manage-units` is
 again for a while. So test the dialog first, before the cache is warm — after
 that a verb running without a prompt is correct, not a skipped check.
 
-- [ ] `a r` on a harmless system timer (`man-db.timer`, `logrotate.timer`)
+**What "for a while" actually means, measured.** `auth_admin_keep` does not
+grant the _session_, it grants the **calling process**, and the grant lives
+five minutes. `pkcheck --list-temp` prints it with the subject attached:
+
+    authorization id: tmpauthz0
+    action:           org.freedesktop.systemd1.manage-units
+    subject:          unix-process:39817 (not-yet-done-tui)
+    obtained:         Fri 07:07:52     expires: Fri 07:12:51
+
+Three consequences, all of which cost time before they were understood. A
+second process gets its own dialog, so the same verb run through the CLI asks
+again while the tab is still warm — that is correct, not a regression. The
+warm window closes by itself after five minutes, so a long measuring session
+keeps going cold underneath. And `pkcheck --revoke-temp` empties it on demand,
+which makes the "log out and back in" advice below unnecessary: one command
+puts every box on this page back into its cold-session precondition.
+
+**Do not probe the cache with `pkcheck --action-id … --process $$`.** It
+answers for _your shell_, which is a different subject than the TUI, so it
+reports "authentication required" while the tab writes without a prompt. The
+only honest probe is `pkcheck --list-temp`, and the only honest proof that a
+dialog really appeared is `polkit-agent-helper` in the system journal.
+
+- [x] `a r` on a harmless system timer (`man-db.timer`, `logrotate.timer`)
       restarts it and the notification reports the outcome — "Restarting
       man-db.timer — done", not "sent". `systemctl status man-db.timer`
-      confirms the new start timestamp.
-- [ ] The dialog appears on the first write of a fresh session, and the verb
-      runs after it is answered. To get a fresh one, log out and back in (or
-      revoke the cached authorisation) rather than waiting.
+      confirms the new start timestamp. Measured three times on
+      `man-db.timer`; the notification page (`z l`) carries all three as
+      "Restarting man-db.timer — done", and the journal shows the
+      stop/start pair at the same second each time. The `Next` and `Left`
+      columns move on the following refresh, which is the cheaper check of
+      the two — this timer has a randomised delay, so `Next` lands somewhere
+      new every time rather than on a predictable value.
+- [x] The dialog appears on the first write of a fresh session, and the verb
+      runs after it is answered. To get a fresh one, `pkcheck --revoke-temp`
+      — logging out is not needed, see the note above. Measured: with nothing
+      cached, `a r` put the banner "Restart man-db.timer… (6s/120s)" on the
+      pane and the dialog on the screen; the journal brackets it exactly
+      ("Starting Authorization Manager Agent Helper" at 07:07:27, "Finished"
+      at 07:07:51), and the unit restarted in the same second the helper
+      finished. The immediately following `a r` ran with **no** dialog and no
+      helper at all — `auth_admin_keep` doing its job.
 - [ ] **Dismissing** the dialog is reported as an ordinary sentence, not as a
       red adapter error: the notification says the write was not authorised and
       nothing happened. The unit's row is unchanged.
-- [ ] A protected system unit refuses _before_ any dialog: `a x` on
+- [x] A protected system unit refuses _before_ any dialog: `a x` on
       `systemd-journald.service` says it is on the protection list and that it
       holds up **the machine** — the user tab's wording says "the session".
       No password can override that; `unprotect:` in the adapter config can.
-- [ ] `sshd.service` and `NetworkManager.service` are deliberately **not**
+      Measured with a cold polkit cache, which is what makes it a real
+      measurement: `pkcheck --action-id org.freedesktop.systemd1.manage-units`
+      still wanted authentication, and the refusal came anyway, instantly and
+      without a dialog — "Action 'stop': permission denied: Stop refused:
+      systemd-journald.service is on the protection list — it holds up the
+      machine." The user tab's `-.slice` says "the session" in the same
+      sentence. The list is consulted before the bus call, so polkit never
+      hears about it.
+- [x] `sshd.service` and `NetworkManager.service` are deliberately **not**
       protected. Confirm `a` offers the disruptive verbs on them — and then do
-      not press it over SSH.
-- [ ] The CLI agrees with the tab on both roads:
+      not press it over SSH. Measured without stopping either, which is the
+      point: the `a` popup on system Services lists all fourteen verbs
+      (`a D` disable and stop, `a E` enable and start, `a L` reload or
+      restart, `a d`, `a e`, `a f`, `a j`, `a k`, `a l`, `a p`, `a r`, `a s`,
+      `a x`, `a z`), and `reset-failed` — harmless, but routed through the
+      same protection check — went through on both units rather than coming
+      back with the refusal `systemd-journald.service` gets. `protect.rs`
+      names both in a comment explaining why they are absent.
+- [x] The CLI agrees with the tab on both roads:
       `nyd adapter systemd-system:service <id> start` works, and
       `nyd adapter systemd-system:service <id> mask` reports no such action.
       `nyd adapter systemd-system:service help --full` lists the runtime verbs
-      and the file verbs, and neither `mask` nor `unmask`.
-- [ ] The flag is what carries it: run the same call through `gdbus`, which
+      and the file verbs, and neither `mask` nor `unmask`. All three measured.
+      The id needs its level prefix — `service:man-db.service`, not the bare
+      unit name, which otherwise answers "unknown systemd id" and reads like a
+      missing unit. `mask` and `unmask` both come back
+      "no action 'mask' on 'service:man-db.service' (available: start, stop,
+      restart, reload, reload-or-restart, enable, enable-now, disable,
+      disable-now, preset, reset-failed, kill, freeze, follow, …)" — the
+      refusal lists what there is, which is what makes it useful rather than
+      merely correct.
+- [x] The flag is what carries it: run the same call through `gdbus`, which
       does not set it, and watch it come back
       `org.freedesktop.DBus.Error.InteractiveAuthorizationRequired` while the
-      adapter's own call succeeds.
+      adapter's own call succeeds. Measured with `RestartUnit` on
+      `man-db.timer`: `gdbus` was refused in the same minute the tab restarted
+      the same unit. The sharper reading is in the journal — **no**
+      `polkit-agent-helper` runs for the `gdbus` call at all. It is not that
+      polkit said no; it is that the manager never asked, because the caller
+      did not say it was willing to wait for a human.
 - [ ] A write that waits does not trip the read deadline. With a dialog on
       screen, leave it unanswered for more than ten seconds before answering:
       the verb must still run. Leaving it for five minutes is the other end —
       the adapter gives the pane back and says the wait was never answered.
 
-### The unit-file verbs on the system manager (phase 7, stage 3)
+      **This is the box that found a bug, and it stays open until the bug is
+      fixed.** Ten seconds is fine: a dialog answered after 24 s restarted its
+      unit normally. Twenty-five is not. A dialog answered after about 25 s
+      comes back as a red adapter error — "Action 'preset': presetting
+      pamac-cleancache.timer: **Method call timed out**" — and the write is
+      lost, the row unchanged, while the pane's own banner was still counting
+      up towards a limit it never reaches.
 
-These change what the machine does at the **next boot**, so every box here is
-worth a `systemctl is-enabled <unit>` before and after. Pick something inert —
-`avahi-dnsconfd.service` is disabled and its preset agrees, which makes every
-verb below a no-op that still exercises the whole path.
+      Two things are tangled here, and only one of them is ours.
 
-- [ ] `a e` / `a d` / `a p` are offered on Services, Failed, Timers and Unit
+      The **ceiling** is not. `Bus::write` (`bus.rs`) does the right thing at
+      its own layer: it sets `AllowInteractiveAuth` and wraps the call in
+      `auth_timeout` — `DEFAULT_AUTH_TIMEOUT_SECS = 300`, deliberately
+      "minutes rather than seconds". Something upstream gives up long before
+      that. The string "Method call timed out" is in neither zbus nor this
+      repo; it lives in `libsystemd.so.0`, which is sd-bus's default
+      25-second reply timeout — so what expired is a call **systemd itself**
+      made while asking polkit, not the call the adapter made. Whether
+      systemd 261 can be persuaded otherwise is an upstream question. The
+      decisive test is one line and has not been run yet: `systemctl enable`
+      on a `static` unit from an unauthorised shell, dialog deliberately left
+      for thirty seconds. If plain `systemctl` fails the same way, no amount
+      of work here will fix it, and the honest move is to say so in the tab
+      rather than to keep promising five minutes.
+
+      What **is** ours is the sentence. `write_error` already turns
+      `InteractiveAuthorizationRequired` and `AccessDenied` into plain
+      language, on the stated principle that declining a password is a
+      decision and not an adapter error. A timeout while a dialog is open is
+      the same kind of event — the user did not get there in time — and it
+      falls through the match into `ContentError::Other`, arriving as raw
+      transport text that names neither the dialog nor the password. Map
+      `org.freedesktop.DBus.Error.Timeout` and `…NoReply` alongside the other
+      two and say what happened: the authorisation was not answered in time,
+      and nothing was changed.
+
+      Re-measure both halves afterwards. Until the ceiling is understood the
+      five-minute half cannot be measured at all, and the ten-second half
+      passes only because 10 is under 25.
+
+- [x] `a e` / `a d` / `a p` are offered on Services, Failed, Timers and Unit
       files of the system tab, and `a m` / `a u` are not — the action list shows
-      no Mask entry there, while the user tab still has one.
-- [ ] The prompt is the system one, not the session one. `a d` on the system tab
+      no Mask entry there, while the user tab still has one. All four subtabs
+      read off the `a` popup: every one carries `a e` enable, `a d` disable and
+      `a p` apply preset, plus `a D` / `a E` for the two-in-one verbs, and not
+      one of them lists mask or unmask. The same popup on `, y` Services does
+      list `a m` mask and `a u` unmask, which is what makes the absence a
+      policy rather than an oversight.
+- [x] The prompt is the system one, not the session one. `a d` on the system tab
       names **the next boot** and says "for anyone"; the same verb on the user
-      tab names the next login. Both name the unit.
-- [ ] `a e` asks on the system tab and does **not** ask on the user tab. That is
+      tab names the next login. Both name the unit. Measured side by side —
+      system: "Disable accounts-daemon.service on this machine? It will not
+      start at the next boot — for anyone, not only for you. (y/n)"; user:
+      "Disable at-spi-dbus-bus.service? It will not come back on the next
+      login. (y/n)". Both were answered `n`, which is itself worth doing once:
+      the pane logs a plain "Cancelled" rather than an error.
+- [x] `a e` asks on the system tab and does **not** ask on the user tab. That is
       the same verb, deliberately: enabling for yourself is cheap and legible,
-      enabling for the machine is a decision.
+      enabling for the machine is a decision. Measured: on the system tab
+      `a e` put up "Enable accounts-daemon.service on this machine? It starts
+      on every boot from now on, for everyone who uses it. (y/n)"; on the user
+      tab the same key produced no prompt at all and went straight to its
+      result.
 - [ ] Two dialogs, not one, on a cold session: the first for the symlinks
       (`manage-unit-files`), the second for the reload (`reload-daemon`). Answer
-      both and the verb completes. This needs a session where nothing has been
-      cached yet — log out and back in first.
+      both and the verb completes. A cold session is `pkcheck --revoke-temp`,
+      not a logout. **Blocked by the 25-second timeout above**: the attempt
+      never got as far as the second dialog, because answering the first one
+      took longer than zbus was willing to wait and the whole write died with
+      "Method call timed out". Re-measure once that is fixed.
 - [ ] Dismissing **either** dialog is an ordinary sentence, not a red error, and
       the row is unchanged.
 - [ ] A verb whose work was already done still reports honestly:
       `a e` on an already-enabled unit says it was already enabled rather than
       claiming to have changed something.
-- [ ] A unit with no `[Install]` section (`dbus.service`) says so, and on the
+- [x] A unit with no `[Install]` section (`dbus.service`) says so, and on the
       system tab the sentence ends "not at **boot**" — the user tab says "not at
-      login".
+      login". Both halves measured, on other units: `dbus.service` is an alias
+      for `dbus-broker.service` on this machine and the level answers "no
+      loaded unit dbus.service", which is correct and useless for this box —
+      pick anything the Enabled column calls `static`. User tab,
+      `at-spi-dbus-bus.service`: "has no [Install] section, so there is
+      nothing to enable — it is started by something else, not at login".
+      System manager, `logrotate.service`: the same sentence ending "not at
+      boot", and `systemctl is-enabled` still says `static` afterwards.
+
+      One thing this box shows that the sentence does not: the refusal comes
+      from **systemd**, after polkit, not from a pre-check in the adapter. The
+      dialog appears first and the authorisation is spent before anything
+      discovers there was nothing to do.
+
 - [ ] `a p` on a unit the Preset column marks `should-disable` disables it, the
       Drift column clears on the next `r`, and `systemctl is-enabled` agrees.
-      Put it back with `a e` afterwards.
-- [ ] The protection list covers the file verbs too, and refuses before any
+      Put it back with `a e` afterwards. **Blocked by the same timeout.** The
+      half that did measure: the Drift column finds its candidates, and the
+      prompt is the right one — "Apply the preset policy to
+      pamac-cleancache.timer on this machine? It is enabled or disabled to
+      match what the distribution ships — the Preset column says which — and
+      that holds from the next boot". Pick the candidate from the Unit files
+      level rather than by guessing; a timer whose preset disagrees with its
+      state is both harmless and reversible, which most `should-disable` rows
+      on a real machine are not.
+- [x] The protection list covers the file verbs too, and refuses before any
       dialog: `a d` on `dbus.socket` (system tab) says it holds up the machine.
       The same now holds on the **user** tab for `dbus.socket` there — that is
       new in this stage, and it is the one behaviour change outside the system
-      tab.
-- [ ] The flag carries the file verbs as well: run
+      tab. Both measured, and the two sentences differ in exactly the one word
+      they should: "Disable refused: dbus.socket is on the protection list — it
+      holds up **the machine**. Lift it with unprotect: in the adapter config,
+      or use systemctl." against "…it holds up **the session**. …" No dialog
+      appeared for either, and no `polkit-agent-helper` ran. Note the address:
+      `dbus.socket` lives on the Unit files level, so it is
+      `unitfile:dbus.socket` — there is no `socket` level to aim at.
+- [x] The flag carries the file verbs as well: run
       `gdbus call --system --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.EnableUnitFiles '["<unit>"]' false false`
       and watch it refuse with `InteractiveAuthorizationRequired` while the same
-      verb through the adapter succeeds.
+      verb through the adapter succeeds. Measured with
+      `avahi-dnsconfd.service`: refused exactly as the runtime verb is, which
+      is the point — the flag is set once, in `Bus::write`, for every
+      privileged call the adapter makes, so the file verbs inherit it rather
+      than each arranging it for themselves.
 
 ## systemd — the critical chain as a level (phase 7, stage 4)
 
