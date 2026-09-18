@@ -36,10 +36,10 @@ assert!(matches(&expr, &Task { title: "Deploy the bar".into(), priority: 5 }));
 
 ```toml
 [dependencies]
-rowsieve = "0.1"
+rowsieve = "0.2"
 
 # To write "end of next week" on the right-hand side of a comparison:
-# rowsieve = { version = "0.1", features = ["natural-dates"] }
+# rowsieve = { version = "0.2", features = ["natural-dates"] }
 ```
 
 ## The language
@@ -63,7 +63,7 @@ and: # every branch matches; `or` and `not` likewise
 | `is_null` `is_not_null` | Whether the row has a value at all.                   |
 | `matches`               | A regular expression, against the raw value.          |
 
-Three rules are worth knowing before writing a filter:
+A few rules are worth knowing before writing a filter:
 
 - **Text compares case-insensitively.** These filters are a search feature, not
   an exact-match store. `matches` is the exception — a regex is a
@@ -78,6 +78,13 @@ Three rules are worth knowing before writing a filter:
 - **A dotted name stays whole.** `tags.sender` reaches `RowFields::field` as
   `"tags.sender"`. A qualifier is a join alias only to a host that has joins;
   a row in memory has none, so the dot is part of the path into it.
+- **A value is text unless it is marked.** On the right-hand side a leading
+  dot names a column instead — `[updated_at, ">", .created_at]` compares two
+  columns of the same row, and `.task.created_at` names a qualified one.
+  Without the dot, `dbus.socket` and `v1.2` are what they look like. The
+  marker is not decoration: a reference that resolves to nothing matches
+  nothing, so guessing at dotted words used to turn ordinary values into
+  silent empty results. `eval::validate_fields` checks this side too.
 
 ## Extending it
 
@@ -99,7 +106,10 @@ misspelt name is a branch that quietly matches nothing.
 
 **Translating an expression into SQL.** That needs a schema, a dialect and a
 query builder, and every host has different ones. The AST is public precisely
-so a host can walk it and build its own `WHERE` clause.
+so a host can walk it and build its own `WHERE` clause. Column-vs-column is
+the one thing such a host gets that the in-memory evaluator does not: `matches`
+answers `false` for a leaf whose right-hand side is a reference, the same way
+it does for a `Custom` predicate it cannot resolve.
 
 **A date grammar.** The language has no date type: a resolved date is a string
 literal that the evaluator compares as an instant. With the `natural-dates`

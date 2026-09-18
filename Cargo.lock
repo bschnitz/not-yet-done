@@ -6546,7 +6546,7 @@ dependencies = [
 
 [[package]]
 name = "rowsieve"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "natural-date",

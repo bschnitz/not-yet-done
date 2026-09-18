@@ -336,11 +336,15 @@ impl FilterExpr {
     }
 }
 
-/// Parse a string as a column reference.
+/// Parse a **left-hand** string as a column reference.
 ///
 /// - `.column`       → unqualified ColRef
-/// - `alias.column`  → qualified ColRef  
-/// - bare string     → unqualified ColRef (only valid in lhs position)
+/// - `alias.column`  → qualified ColRef
+/// - bare string     → unqualified ColRef
+///
+/// Everything in this position is a column — there is nothing else it could
+/// be — so a dot here is a qualifier and needs no marker. The right-hand side
+/// is the opposite case and has its own parser, [`parse_rhs_col_ref`].
 fn parse_col_ref(s: &str) -> ColRef {
     if let Some(field) = s.strip_prefix('.') {
         // .field → unqualified
@@ -357,23 +361,41 @@ fn parse_col_ref(s: &str) -> ColRef {
 
 /// Determine whether a rhs string is a column reference.
 ///
-/// A rhs string is a column reference iff it starts with `.` and looks like
-/// an identifier, or matches the `alias.column` pattern (two simple
-/// identifiers separated by a single dot).
+/// A **leading dot** marks one, and nothing else does: `.updated_at` for a
+/// column of this row, `.task.updated_at` for a qualified one. Any other
+/// string is text, dots and all.
 ///
-/// Strings that look like dates, numbers, or URIs are NOT column references.
+/// It used to read `alias.column` as a reference too, on the theory that a
+/// dotted word is a rarer thing to compare against than a join. That is true
+/// of task titles and false of nearly everything else a host filters:
+/// `dbus.socket`, `man-db.timer`, `example.com`, `v1.2` all became references
+/// to columns that do not exist, and an expression whose right-hand side does
+/// not resolve matches nothing — an empty view with no error anywhere. The
+/// marker is now explicit, so a value is only a column when it was written as
+/// one. Costs a dot in the rare case, removes a trap from the common one.
 fn is_col_ref(s: &str) -> bool {
-    if let Some(field) = s.strip_prefix('.') {
-        // .field — must be a simple identifier after the dot
-        return field.chars().all(|c| c.is_alphanumeric() || c == '_');
-    }
-    // alias.column — exactly one dot, both parts are simple identifiers
-    let parts: Vec<&str> = s.splitn(3, '.').collect();
-    if parts.len() != 2 {
+    let Some(path) = s.strip_prefix('.') else {
         return false;
-    }
+    };
     let is_ident = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_');
-    is_ident(parts[0]) && is_ident(parts[1])
+    let mut parts = path.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(column), None, _) => is_ident(column),
+        (Some(table), Some(column), None) => is_ident(table) && is_ident(column),
+        _ => false,
+    }
+}
+
+/// Parse a **right-hand** string that [`is_col_ref`] has accepted.
+///
+/// The leading dot is the marker, not part of the path: `.created_at` is the
+/// unqualified column, `.task.created_at` the qualified one.
+fn parse_rhs_col_ref(s: &str) -> ColRef {
+    let path = s.strip_prefix('.').unwrap_or(s);
+    match path.split_once('.') {
+        Some((table, column)) => ColRef::qualified(table, column),
+        None => ColRef::unqualified(path),
+    }
 }
 
 /// Parse a YAML scalar value as a [`Literal`].
@@ -398,7 +420,7 @@ fn yaml_value_to_rhs(v: &serde_yaml::Value) -> Result<Rhs, String> {
     match v {
         serde_yaml::Value::String(s) => {
             if is_col_ref(s) {
-                Ok(Rhs::Col(parse_col_ref(s)))
+                Ok(Rhs::Col(parse_rhs_col_ref(s)))
             } else {
                 Ok(Rhs::Lit(parse_literal_str(s)))
             }
@@ -540,10 +562,11 @@ impl<'de> Visitor<'de> for FilterExprVisitor {
 /// loaded and saved keeps its meaning and settles on one shape.
 ///
 /// It is not byte-for-byte round-tripping, and cannot be: the terse array form
-/// resolves `foo.bar` to a field reference and `"5"` to a number when it reads
-/// them, so a *string literal* that happens to look like either comes back as
-/// the other thing. Write such values through a host that quotes them, or keep
-/// the source document if the exact bytes matter.
+/// resolves `"5"` to a number when it reads it, so a *string literal* that
+/// happens to look like one comes back as the other thing. Write such values
+/// through a host that quotes them, or keep the source document if the exact
+/// bytes matter. A column reference does survive, in both directions: it is
+/// written back with its leading dot, which is what marks it.
 impl Serialize for FilterExpr {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -583,10 +606,7 @@ fn single_key<S: Serializer, T: Serialize + ?Sized>(
 
 /// The right-hand side, where a leading dot is what marks a field reference.
 fn dotted(col: &ColRef) -> String {
-    match col.table {
-        Some(_) => col.path().into_owned(),
-        None => format!(".{}", col.column),
-    }
+    format!(".{}", col.path())
 }
 
 // ---------------------------------------------------------------------------
@@ -631,8 +651,9 @@ mod tests {
 
     #[test]
     fn test_qualified_col_ref() {
-        // Future join syntax: alias.column
-        let expr = parse("[task.updated_at, '>', task.created_at]");
+        // Join syntax: a qualifier needs no marker on the left, and the dot
+        // that marks a reference on the right comes before the whole path.
+        let expr = parse("[task.updated_at, '>', .task.created_at]");
         assert_eq!(
             expr,
             FilterExpr::Leaf(FilterLeaf {
@@ -641,6 +662,38 @@ mod tests {
                 rhs: Rhs::Col(ColRef::qualified("task", "created_at")),
             })
         );
+    }
+
+    #[test]
+    fn a_dotted_value_is_text() {
+        // The values a host actually filters on are full of dots. None of
+        // them is a column reference, and reading them as one used to empty
+        // the view without a word.
+        for value in ["dbus.socket", "man-db.timer", "example.com", "v1.2"] {
+            let expr = parse(&format!("[unit, '=', {value}]"));
+            assert_eq!(
+                expr,
+                FilterExpr::Leaf(FilterLeaf {
+                    lhs: ColRef::unqualified("unit"),
+                    op: Operator::Eq,
+                    rhs: Rhs::Lit(Literal::String(value.into())),
+                }),
+                "{value} should have stayed text"
+            );
+        }
+    }
+
+    #[test]
+    fn a_marked_column_survives_a_round_trip() {
+        for written in [".created_at", ".task.created_at"] {
+            let expr = parse(&format!("[updated_at, '>', '{written}']"));
+            let back = serde_yaml::to_string(&expr).unwrap();
+            assert!(
+                back.contains(written),
+                "{written} came back as {back}, losing its marker"
+            );
+            assert_eq!(expr, serde_yaml::from_str::<FilterExpr>(&back).unwrap());
+        }
     }
 
     #[test]

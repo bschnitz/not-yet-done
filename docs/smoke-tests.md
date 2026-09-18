@@ -8975,3 +8975,36 @@ systemctl --user reset-failed nyd-hook-probe.service          # clean up
       action with `Noop`, so a typo in `run:` was indistinguishable from a
       report that had nothing to say. It now refuses, the way the node's
       `prepare` and `execute` always did.
+
+## The filter language — a value is text unless it is marked
+
+`rowsieve` used to read any right-hand value shaped like `.word` or
+`word.word` as a column reference. Nothing in the shipped views ever used
+that, but every value with a dot in it — a unit name, a host name, a version
+— fell into it, and a reference to a column that does not exist matches
+nothing without a word. The marker is now explicit: a **leading dot** names a
+column, everything else is text.
+
+- [x] A dotted value is the value. `nyd adapter systemd-system ls -q
+    'query: [name, eq, accounts-daemon.service]'` returns that one row.
+      Before the change it depended on the punctuation in the name, which is
+      the worst kind of rule to have to remember.
+- [x] A marked reference to a column that does not exist is refused by name,
+      and the message says what the dot did: "unknown systemd column 'service'
+      on the right of 'name' — a value written with a leading dot is a column
+      reference, not text. Write 'service' without the dot to compare against
+      the literal. Valid columns: …". That is `eval::validate_fields`, which
+      now walks both sides of a leaf.
+- [x] A marked reference that **resolves** is still evaluated as `false` by
+      the in-memory evaluator — `[name, eq, .description]` comes back empty.
+      That is the documented limit of `matches` (column-vs-column belongs to
+      hosts that translate to SQL, like the tasks filter builder), not a
+      regression. It is also the one silent case left in the language, and the
+      reason to finish the job: teaching `matches_leaf` to compare two fields
+      of the same row would close it.
+- [ ] TUI: the same two cases through `Q` on a content level — the refusal
+      reaches the status bar as a sentence and the table keeps its rows, the
+      literal narrows the table. Measured only through the CLI so far.
+- [ ] A saved query that still spells an old-style reference (`task.created_at`
+      on the right) now compares against the text `task.created_at`. Nothing
+      shipped does, but a hand-written one might: the fix is a leading dot.
