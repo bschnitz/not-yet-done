@@ -297,20 +297,38 @@ pub fn like_match(text: &str, pattern: &str) -> bool {
 // Up-front validation
 // ---------------------------------------------------------------------------
 
-/// Reject column names the row source does not know.
+/// Reject column names the row source does not know, on either side.
 ///
 /// Worth doing before evaluating anything: an unknown column silently matches
 /// nothing, and "empty view" is the least diagnosable failure a query can
 /// have. `noun` names the row kind in the message ("calendar column",
 /// "column").
+///
+/// Both sides, because both can name one. A right-hand value written with a
+/// leading dot is a column reference (see `is_col_ref`), and a misspelt one
+/// fails the same silent way — with the extra twist that the author may not
+/// have meant a reference at all. The message for that case says so, and says
+/// how to get the literal back.
 pub fn validate_fields(expr: &FilterExpr, known: &[&str], noun: &str) -> Result<(), String> {
     for_each_leaf(expr, &mut |leaf| {
         let col = leaf.lhs.path();
-        if known.contains(&col.as_ref()) {
+        if !known.contains(&col.as_ref()) {
+            return Err(format!(
+                "unknown {noun} '{col}' — valid columns: {}",
+                known.join(", ")
+            ));
+        }
+        let Rhs::Col(reference) = &leaf.rhs else {
+            return Ok(());
+        };
+        let target = reference.path();
+        if known.contains(&target.as_ref()) {
             return Ok(());
         }
         Err(format!(
-            "unknown {noun} '{col}' — valid columns: {}",
+            "unknown {noun} '{target}' on the right of '{col}' — a value written with a leading \
+             dot is a column reference, not text. Write '{target}' without the dot to compare \
+             against the literal. Valid columns: {}",
             known.join(", ")
         ))
     })
@@ -589,6 +607,26 @@ mod tests {
             "{err}"
         );
         assert!(validate_fields(&expr("[title, has, x]"), &["title"], "column").is_ok());
+    }
+
+    #[test]
+    fn a_reference_to_nothing_is_rejected_rather_than_matching_nothing() {
+        let err = validate_fields(
+            &expr("[title, '=', '.tital']"),
+            &["title", "prio"],
+            "column",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("'tital'") && err.contains("leading dot") && err.contains("title, prio"),
+            "{err}"
+        );
+        // A reference that resolves is fine, and so is text that merely has a
+        // dot in it — that is the whole point of the marker.
+        assert!(
+            validate_fields(&expr("[title, '=', '.prio']"), &["title", "prio"], "column").is_ok()
+        );
+        assert!(validate_fields(&expr("[title, '=', dbus.socket]"), &["title"], "column").is_ok());
     }
 
     #[test]
