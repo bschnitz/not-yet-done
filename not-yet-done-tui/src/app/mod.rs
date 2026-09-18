@@ -4516,6 +4516,17 @@ impl App {
                     if let Some(err) = error.as_ref() {
                         not_yet_done_content::http_log::log_error("content_load", err);
                         self.last_error = Some(err.clone());
+                        // Log only — no second bar line: the pane already
+                        // shows this sentence as its banner. What the banner
+                        // cannot do is keep the part that ran off the right
+                        // edge, which is why the centre gets the full text.
+                        let notice = self.content_views.get(view_index).map(|slot| {
+                            let pane = slot.as_view().and_then(|cv| cv.pane_label_for(pane_id));
+                            load_error_notice(slot.tab_name(), pane.as_deref(), err)
+                        });
+                        if let Some(notice) = notice {
+                            self.notification_bar.record_error(&notice);
+                        }
                     }
                     // Hooks run on a load that produced rows, not on a
                     // failed fetch — a script must not act on an empty view
@@ -8576,6 +8587,18 @@ fn credential_form_title(header: Option<&str>, tab_name: Option<&str>) -> String
         (Some(h), None) => h.to_string(),
         (None, Some(tab)) => format!("Login: {tab}"),
         (None, None) => "Login".into(),
+    }
+}
+
+/// How a failed load reads in the notification log: where it happened, then
+/// the very sentence the pane banner shows. The banner is cut off at the
+/// terminal width, and a load error is often the one message whose tail
+/// carries the cure ("write it without the dot", the list of valid columns) —
+/// so the log has to hold the whole thing, and has to say which level asked.
+fn load_error_notice(tab: &str, pane: Option<&str>, err: &str) -> String {
+    match pane {
+        Some(pane) => format!("{tab} \u{203a} {pane}: Fetch failed: {err}"),
+        None => format!("{tab}: Fetch failed: {err}"),
     }
 }
 
@@ -13518,7 +13541,7 @@ fn load_content_views(
 mod tests {
     use super::{
         App, credential_form_allowed, credential_form_title, image_temp_filename,
-        notification_bar_hint, parse_query_apply_args, render_payload_template,
+        load_error_notice, notification_bar_hint, parse_query_apply_args, render_payload_template,
         split_leading_token, which_key_filter, which_key_prefix_allowed,
     };
 
@@ -13558,6 +13581,26 @@ mod tests {
         // …but the owner may keep refreshing its own form (new error, new
         // round of a multi-step script).
         assert!(credential_form_allowed(0, 4, true, Some(4)));
+    }
+
+    #[test]
+    fn a_failed_load_is_logged_with_the_level_that_asked() {
+        // The whole sentence, tail included — the banner keeps only as much
+        // of it as the terminal is wide.
+        assert_eq!(
+            load_error_notice(
+                "systemd",
+                Some("Services"),
+                "unknown systemd column 'servicename' on the right of 'name'"
+            ),
+            "systemd \u{203a} Services: Fetch failed: unknown systemd column \
+             'servicename' on the right of 'name'"
+        );
+        // A tab whose view never came up (a broken slot) has no pane to name.
+        assert_eq!(
+            load_error_notice("Mail", None, "timed out after 50s"),
+            "Mail: Fetch failed: timed out after 50s"
+        );
     }
 
     #[test]
