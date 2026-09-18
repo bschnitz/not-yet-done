@@ -2298,12 +2298,14 @@ Vimium-style link selection: the configured key (usually `f`) labels every link
 visible in the focused pane; typing the label opens the corresponding URL in the
 browser. Useful above all in markdown-rendered panes (e.g. the Stoat chat).
 
-**Opt-in per view/child** — there is _no_ built-in default. Link hop is only
-claimed where a binding exists: either on a view resp. a child via
-`keybindings: { link_hop: f }`, or globally via `keybindings.content.link_hop`
-in `tui.yaml`. Without a binding the key stays free. This way link hop can be
-offered exactly on the panes that actually carry links (e.g. the messages pane
-of the Stoat chat):
+**Opt-in** — there is _no_ built-in default. Link hop is only claimed where a
+binding exists: either on a **child** level via `keybindings: { link_hop: f }`,
+or globally via `keybindings.content.link_hop` in `tui.yaml`. A view level
+cannot carry the binding — `keybindings:` is a child-level key, and in a tree
+the per-level overrides are read off the cursor-depth child, so depth 0 always
+falls through to the global map. Without a binding the key stays free. This way
+link hop can be offered exactly on the panes that actually carry links (e.g. the
+messages pane of the Stoat chat):
 
 ```yaml
 children:
