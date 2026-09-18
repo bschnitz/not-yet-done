@@ -24,8 +24,11 @@
 //!   a qualifier is part of the path rather than a table to resolve.
 //! - **Host predicates evaluate to false.** A `[name, argument]` leaf means
 //!   something only the host can resolve; see [`crate::FilterExpr::Custom`].
-//! - **Field-vs-field comparison is not supported** here and evaluates to
-//!   false; rows expose values, not a resolvable schema.
+//! - **Two fields of the same row can be compared.** A right-hand value
+//!   written with a leading dot names a column — `[updated, '>', .created]` —
+//!   and it goes through the same operator code as a value would, so `>=`
+//!   cannot mean one thing against a literal and another against a column.
+//!   `matches` is the exception: its right-hand side stays a written pattern.
 //! - **`matches` is the exception to case-insensitivity.** A regex is a
 //!   classification rather than a search, so it matches the raw value exactly
 //!   as written; `(?i)` asks for the other behaviour. It is also the one
@@ -95,14 +98,46 @@ fn matches_leaf<R: RowFields + ?Sized>(leaf: &FilterLeaf, row: &R) -> bool {
     match leaf.op {
         Operator::IsNull => field == Field::Null,
         Operator::IsNotNull => field != Field::Null,
+        // A pattern is written, never read out of the data: a regex taken from
+        // a column would put one entry per row into the pattern cache and let
+        // the rows decide what the filter means. A column reference here is
+        // therefore false rather than resolved.
         Operator::Matches => match &leaf.rhs {
             Rhs::Lit(Literal::String(pattern)) => matches_regex(&field, pattern),
             _ => false,
         },
         _ => match &leaf.rhs {
             Rhs::Lit(lit) => eval_op(&field, &leaf.op, lit),
-            Rhs::Col(_) | Rhs::None => false,
+            // The other field of the same row, turned into the literal it
+            // would have been written as. Going back through `eval_op` is the
+            // point: column-vs-column then inherits case-insensitive text,
+            // instants compared as instants, and null-is-false, instead of
+            // growing a second set of rules that can disagree with the first.
+            Rhs::Col(reference) => match field_as_literal(&row.field(&reference.path())) {
+                Some(lit) => eval_op(&field, &leaf.op, &lit),
+                None => false,
+            },
+            Rhs::None => false,
         },
+    }
+}
+
+/// A field as the [`Literal`] it would have been written as, or `None` when
+/// there is nothing to compare against.
+///
+/// A null has no literal, and that is the answer: a comparison against a
+/// missing value is false, `!=` included — the same three-valued logic every
+/// other operator here follows.
+fn field_as_literal(field: &Field) -> Option<Literal> {
+    match field {
+        Field::Null => None,
+        Field::Text(s) => Some(Literal::String(s.as_ref().to_string())),
+        Field::Number(n) => Some(Literal::Float(*n)),
+        Field::Bool(b) => Some(Literal::Bool(*b)),
+        // Spelled the way the date half of the language spells an instant, so
+        // `eval_datetime` parses it back and compares instants rather than the
+        // text of two timestamps.
+        Field::DateTime(dt) => Some(Literal::String(dt.to_rfc3339())),
     }
 }
 
@@ -415,6 +450,64 @@ mod tests {
             ("done", Field::Bool(false)),
             ("note", Field::Null),
         ])
+    }
+
+    #[test]
+    fn two_fields_of_one_row_compare_like_a_field_and_a_value() {
+        let row = TestRow(vec![
+            ("title", Field::Text(Cow::Borrowed("Sprint Planning"))),
+            ("label", Field::Text(Cow::Borrowed("sprint planning"))),
+            ("prio", Field::Number(5.0)),
+            ("ceiling", Field::Number(3.0)),
+            (
+                "created",
+                Field::DateTime(Utc.with_ymd_and_hms(2030, 1, 15, 9, 0, 0).unwrap()),
+            ),
+            (
+                "updated",
+                Field::DateTime(Utc.with_ymd_and_hms(2030, 2, 1, 9, 0, 0).unwrap()),
+            ),
+            ("note", Field::Null),
+        ]);
+
+        // Text, and case-insensitively — the same rule a literal gets.
+        assert!(matches(&expr("[title, '=', '.label']"), &row));
+        assert!(!matches(&expr("[title, '!=', '.label']"), &row));
+        // Numbers compare as numbers, not as their rendering.
+        assert!(matches(&expr("[prio, '>', '.ceiling']"), &row));
+        assert!(!matches(&expr("[ceiling, '>', '.prio']"), &row));
+        // Instants compare as instants: 1 February is after 15 January, which
+        // is not what comparing the two timestamps as text would say about
+        // every pair.
+        assert!(matches(&expr("[updated, '>', '.created']"), &row));
+        assert!(!matches(&expr("[created, '>', '.updated']"), &row));
+        // A substring operator reaches the other field too.
+        assert!(matches(&expr("[title, has, '.label']"), &row));
+    }
+
+    #[test]
+    fn a_null_on_either_side_is_false_even_for_ne() {
+        let row = TestRow(vec![
+            ("title", Field::Text(Cow::Borrowed("Sprint Planning"))),
+            ("note", Field::Null),
+        ]);
+        assert!(!matches(&expr("[title, '=', '.note']"), &row));
+        assert!(!matches(&expr("[title, '!=', '.note']"), &row));
+        assert!(!matches(&expr("[note, '=', '.title']"), &row));
+        // A reference to a column this row does not carry is a null as well.
+        assert!(!matches(&expr("[title, '=', '.nothing_here']"), &row));
+    }
+
+    #[test]
+    fn a_pattern_is_never_taken_from_a_column() {
+        let row = TestRow(vec![
+            ("title", Field::Text(Cow::Borrowed("Sprint Planning"))),
+            ("pattern", Field::Text(Cow::Borrowed("^Sprint"))),
+        ]);
+        // The written pattern works; the one that would have to be read out of
+        // the row does not, deliberately.
+        assert!(matches(&expr("[title, matches, '^Sprint']"), &row));
+        assert!(!matches(&expr("[title, matches, '.pattern']"), &row));
     }
 
     /// A dotted name is one field of one row, not a join.
