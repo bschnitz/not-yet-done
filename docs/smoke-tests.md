@@ -251,13 +251,30 @@ Every tick below was read that way, not from a screenshot.
       `f j jump`, arms on `J`, marks accent + bold + underlined while the
       overlay is open, and goes muted again on `Esc`. The identity is the
       configured key, nothing hardcoded.
-- [ ] **Link hop**: in a Stoat chat with visible links (a bare URL
-      and/or a markdown `[text](url)`) press `f` → every link gets a
-      green label; type the label → the URL opens in the browser (opener
-      from `navigation.link_opener`, default `xdg-open`), the TUI does
-      not block. `Esc` closes the overlay; a pane without links → notice
-      "No links on screen". Generic on every content tab (not just
-      Stoat).
+- [x] **Link hop**: measured on the Tasks tree instead of Stoat (which
+      needs a login), on two throwaway rows — one carrying a bare URL,
+      one a markdown `[text](url)`. The armed key labels both: the bare
+      URL's first character and the markdown link's _display text_ each
+      get a bold black-on-green one-character label. Typing a label
+      hands the URL — for the markdown form the target, not the visible
+      text — to `navigation.link_opener` and the bar says
+      `Opening <url>`. `Esc` clears the labels without opening
+      anything, and on a pane whose rows carry no link at all the
+      notice reads "No links on screen". Non-blocking is not a claim
+      here but a reading: with an opener that sleeps 30 s the TUI
+      answered the next keypress one second after the pick, and the
+      opener's own log shows it still running for another 29. Two
+      things to know before repeating this. The key is **not** `f` and
+      there is no default at all — link hop is opt-in, and only the
+      Stoat messages pane binds it today; everywhere else it has to be
+      asked for, either on a child level or globally as
+      `keybindings.content.link_hop`. A **view** level cannot ask for
+      it: `ViewDef` has no `keybindings:` field, and in a tree the
+      per-level overrides are read off the cursor-depth child, so depth
+      0 always falls through to the global map. And link hop files no
+      action-bar hint by design, so there is nothing here to see light
+      up — this box rides along in this section only because the key
+      belongs to it.
 
 ## EditSession — Jira (refactor phase 7)
 
