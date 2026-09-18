@@ -508,17 +508,21 @@ impl Bus {
     /// user is looking at would still say `disabled` after a successful enable.
     /// It is what `systemctl` does too, for the same reason.
     ///
-    /// It is also not skipped when the change list comes back empty, tempting
-    /// as that is on the system manager where it would save a second password
-    /// dialog. An empty list is not the same as "nothing happened": since the
-    /// drop-in and preset work it has meant, more than once, that the symlinks
-    /// were already as asked while the *manager's* picture was not. The
-    /// dialog is the cheaper of the two mistakes.
+    /// It is also not skipped when the change list comes back empty. An empty
+    /// list is not the same as "nothing happened": since the drop-in and
+    /// preset work it has meant, more than once, that the symlinks were
+    /// already as asked while the *manager's* picture was not.
     ///
     /// Every call here goes through [`Bus::write`] — both the file operation
     /// and the reload. On the system manager they are two separate polkit
-    /// actions (`manage-unit-files` and `reload-daemon`), each `auth_admin_keep`,
-    /// so a cold session is asked twice for one verb and then not again.
+    /// actions (`manage-unit-files` and `reload-daemon`), each
+    /// `auth_admin_keep`, so the obvious guess is that a cold session is asked
+    /// twice for one verb. Measured, it is asked once: systemd ships
+    /// `manage-unit-files` with
+    /// `org.freedesktop.policykit.imply -> reload-daemon manage-units`, so
+    /// authorising the file change grants the reload with it. Not something to
+    /// rely on — it is the distribution's policy, not ours — but it does mean
+    /// the reload costs a user nothing on a normal machine.
     ///
     /// `runtime` is always `false` — everything this adapter writes is meant to
     /// survive a reboot. A `/run` variant is a phase-2 question, together with
@@ -631,8 +635,8 @@ impl Bus {
 
 /// Say what a failed privileged call means, in the user's terms.
 ///
-/// The two names below are polkit's answer arriving as a D-Bus error, and they
-/// are the only ones that are not a fault:
+/// The names below are the authorisation attempt itself arriving as a D-Bus
+/// error, and they are the only ones that are not a fault:
 ///
 ///   * `InteractiveAuthorizationRequired` — the call was refused *before*
 ///     anyone was asked. On this code path that should not happen, since every
@@ -643,13 +647,32 @@ impl Bus {
 ///     authorised. systemd sends the same name whether the dialog was
 ///     dismissed, the password was wrong, or the policy says no outright, so
 ///     the sentence covers all three rather than guessing which one it was.
+///   * `NoReply` / `Timeout` — the dialog was still open when the reply was
+///     due. systemd queries polkit on the caller's behalf over sd-bus, whose
+///     reply timeout is 25 seconds, and that ceiling is not ours to raise:
+///     measured on this machine, a plain `systemctl restart` with the dialog
+///     left untouched fails the same way at 25.0s with no adapter anywhere in
+///     the picture. sd-bus synthesises the refusal as `NoReply` carrying
+///     "Method call timed out", which is transport wording for something a
+///     person did, so it is worth a sentence of its own.
 ///
 /// Anything else is a real error and stays one.
 fn write_error(what: &str, err: zbus::Error) -> ContentError {
     let zbus::Error::MethodError(name, detail, _) = &err else {
         return ContentError::Other(format!("{what}: {err}").into());
     };
-    match name.as_str() {
+    write_error_named(what, name.as_str(), detail.as_deref())
+}
+
+/// The name-to-sentence half of [`write_error`], split off so it can be tested.
+///
+/// Reproducing the real errors means an unanswered polkit dialog and a
+/// twenty-five second wait per case, which is not something a test suite can
+/// have; a `zbus::Error::MethodError` cannot be built without a `Message`
+/// either. Everything worth checking is here, and it is a pure function of the
+/// error name.
+fn write_error_named(what: &str, name: &str, detail: Option<&str>) -> ContentError {
+    match name {
         "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired" => {
             ContentError::PermissionDenied(format!(
                 "{what} needs authorisation and nothing could ask for it — \
@@ -659,10 +682,84 @@ fn write_error(what: &str, err: zbus::Error) -> ContentError {
         "org.freedesktop.DBus.Error.AccessDenied" => ContentError::PermissionDenied(format!(
             "{what} was not authorised — the request was dismissed or refused"
         )),
+        "org.freedesktop.DBus.Error.NoReply" | "org.freedesktop.DBus.Error.Timeout" => {
+            ContentError::Other(
+                format!(
+                    "{what} was dropped — the authentication dialog went unanswered for \
+                     25 seconds, which is as long as systemd waits. Nothing changed; \
+                     run it again and answer sooner."
+                )
+                .into(),
+            )
+        }
         _ => match detail {
             Some(said) => ContentError::Other(format!("{what}: {said}").into()),
             None => ContentError::Other(format!("{what}: {name}").into()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unanswered dialog must not reach the user as transport wording.
+    ///
+    /// Measured on systemd 261: with the dialog left untouched, both a plain
+    /// `systemctl restart` and this adapter fail at 25.0s, and sd-bus
+    /// synthesises the refusal as `NoReply` carrying "Method call timed out".
+    /// That string is what the pane used to print.
+    #[test]
+    fn an_unanswered_dialog_reads_as_a_sentence() {
+        for name in [
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.Timeout",
+        ] {
+            let said = write_error_named(
+                "Restarting man-db.timer",
+                name,
+                Some("Method call timed out"),
+            )
+            .to_string();
+            assert!(said.starts_with("Restarting man-db.timer was dropped"), "{said}");
+            assert!(said.contains("25 seconds"), "{said}");
+            assert!(!said.contains("Method call"), "transport wording leaked: {said}");
+        }
+    }
+
+    /// The two polkit answers that were already mapped keep their sentences.
+    #[test]
+    fn refusals_still_say_which_kind_they_were() {
+        let denied = write_error_named(
+            "Restarting man-db.timer",
+            "org.freedesktop.DBus.Error.AccessDenied",
+            None,
+        );
+        assert!(matches!(denied, ContentError::PermissionDenied(_)));
+        assert!(denied.to_string().contains("dismissed or refused"));
+
+        let no_agent = write_error_named(
+            "Restarting man-db.timer",
+            "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired",
+            None,
+        );
+        assert!(matches!(no_agent, ContentError::PermissionDenied(_)));
+        assert!(no_agent.to_string().contains("no polkit agent"));
+    }
+
+    /// A real fault keeps whatever the manager said about it.
+    #[test]
+    fn anything_else_is_passed_through() {
+        let said = write_error_named(
+            "Restarting nope.timer",
+            "org.freedesktop.systemd1.NoSuchUnit",
+            Some("Unit nope.timer not found."),
+        )
+        .to_string();
+        assert_eq!(said, "Restarting nope.timer: Unit nope.timer not found.");
+
+        let bare = write_error_named("Restarting nope.timer", "org.example.Odd", None).to_string();
+        assert_eq!(bare, "Restarting nope.timer: org.example.Odd");
     }
 }
 

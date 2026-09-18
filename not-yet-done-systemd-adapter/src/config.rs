@@ -38,6 +38,14 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// after ten seconds would make every system verb fail while the user is still
 /// typing. Not unbounded, though: a dialog nobody ever answers has to give the
 /// pane back eventually.
+///
+/// In practice something stricter fires first. systemd asks polkit over
+/// sd-bus, whose reply timeout is 25 seconds, so a dialog left open that long
+/// ends the write upstream no matter what stands here — measured: a plain
+/// `systemctl restart` with the dialog untouched fails at 25.0s. What is left
+/// for this deadline is the case sd-bus does not cover: a call that stalls
+/// somewhere other than the authorisation, which would otherwise hold the pane
+/// forever.
 pub const DEFAULT_AUTH_TIMEOUT_SECS: u64 = 300;
 
 /// The terminal the journal-follow key falls back to when nothing is
@@ -105,7 +113,9 @@ pub struct SystemdConfig {
     /// to [`DEFAULT_AUTH_TIMEOUT_SECS`]. `0` disables it.
     ///
     /// Only writes against the system manager ever reach polkit, so on a user
-    /// instance this field changes nothing.
+    /// instance this field changes nothing. Raising it past 25 seconds buys
+    /// nothing either: see [`DEFAULT_AUTH_TIMEOUT_SECS`] for the ceiling
+    /// systemd imposes on the dialog itself.
     #[serde(default)]
     pub auth_timeout_secs: Option<u64>,
     /// Units to protect **in addition to** the built-in list — a unit name or a
