@@ -8986,7 +8986,7 @@ nothing without a word. The marker is now explicit: a **leading dot** names a
 column, everything else is text.
 
 - [x] A dotted value is the value. `nyd adapter systemd-system ls -q
-    'query: [name, eq, accounts-daemon.service]'` returns that one row.
+  'query: [name, eq, accounts-daemon.service]'` returns that one row.
       Before the change it depended on the punctuation in the name, which is
       the worst kind of rule to have to remember.
 - [x] A marked reference to a column that does not exist is refused by name,
@@ -8995,13 +8995,22 @@ column, everything else is text.
       reference, not text. Write 'service' without the dot to compare against
       the literal. Valid columns: …". That is `eval::validate_fields`, which
       now walks both sides of a leaf.
-- [x] A marked reference that **resolves** is still evaluated as `false` by
-      the in-memory evaluator — `[name, eq, .description]` comes back empty.
-      That is the documented limit of `matches` (column-vs-column belongs to
-      hosts that translate to SQL, like the tasks filter builder), not a
-      regression. It is also the one silent case left in the language, and the
-      reason to finish the job: teaching `matches_leaf` to compare two fields
-      of the same row would close it.
+- [x] A marked reference that **resolves** now compares the two fields. It used
+      to evaluate to `false` whatever the row said — the last silent case in
+      the language — and `matches_leaf` has since learned to fetch the other
+      field and send it through the same operator code a written value gets.
+      So text stays case-insensitive, numbers compare as numbers, instants as
+      instants, and a null on either side is false including `!=`. Covered by
+      `eval::tests` (three cases) and measured through the CLI: on the system
+      tab `[name, eq, .description]` returns the 12 services whose description
+      is their own name — the `not-found` ones, where systemd has nothing
+      better to call them — and `[name, ne, .description]` returns the other 130. Together they are the 142 rows of the unfiltered level, which is
+      the check worth doing: the two halves partition it, so neither is quietly
+      matching nothing.
+- [x] A `matches` pattern is never taken from a column: `[title, matches,
+    .pattern]` is false rather than compiling whatever the row holds. A regex
+      out of the data would put one entry per row into the pattern cache and
+      let the rows decide what the filter means.
 - [ ] TUI: the same two cases through `Q` on a content level — the refusal
       reaches the status bar as a sentence and the table keeps its rows, the
       literal narrows the table. Measured only through the CLI so far.
