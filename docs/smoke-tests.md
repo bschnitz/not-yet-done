@@ -9020,13 +9020,15 @@ column, everything else is text.
       `[name, eq, .description]` returns the three services whose description
       is their own name — the same field-vs-field path the CLI takes, through
       the editor the user actually types in.
-- [ ] The refused query's banner is cut off at the terminal width, and the half
+- [x] The refused query's banner is cut off at the terminal width, and the half
       that gets lost is the half that helps: the cure ("write it without the
-      dot") and the list of valid columns. A fetch error is only ever a banner
-      — `set_items_for_pane` puts it in `pane.fetch_error`, and nothing logs a
-      notice — so `z l` cannot show the rest either. Every adapter's load
-      errors share that path, so this is a content-view question, not a filter
-      one.
+      dot") and the list of valid columns. A failed load now also records a
+      notice, so the centre keeps the whole sentence: pressing `z l` after the
+      refusal above shows "systemd › Services: Fetch failed: unknown systemd
+      column 'servicename' …" wrapped over five lines, ending in the full list
+      of valid columns, and `y` copies it. Log only — the pane banner already
+      says it once, and a second bar line would only push another message out.
+      Every adapter's load errors take that path, not just filter ones.
 - [x] No saved query anywhere still spells an old-style reference. Scanned the
       whole query store in `nyd.db`, every view YAML under the config, the
       example views and the local scripts (131 files) for a leaf whose operator

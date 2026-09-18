@@ -11810,6 +11810,14 @@ impl ContentView {
         }
     }
 
+    /// [`Self::pane_label`] for a caller that only holds the pane's id —
+    /// the load path, which reports an error long after the pane it belongs
+    /// to has stopped being the focused one. `None` for a pane that is gone
+    /// by then (a closed split).
+    pub fn pane_label_for(&self, id: PaneId) -> Option<String> {
+        self.find_pane(id).map(|pane| self.pane_label(pane))
+    }
+
     /// Every adapter action across *all* declared levels of this view's tree
     /// that no `actions:` entry binds yet — keyless, but bindable.
     ///
