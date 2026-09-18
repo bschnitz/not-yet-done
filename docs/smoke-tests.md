@@ -211,15 +211,28 @@ The upper action bar marks every shortcut that is currently **active**
 `ActionHint` carries its own `active` flag — the component no longer
 knows any special cases.
 
-- [ ] **Jump**: press `J` (or the configured `jump_mode` key) → the
-      `jump` hint is marked as long as the hop overlay is open; after a
-      pick or `Esc` the marking goes away. Across all content tabs
-      (tasks, trackings, Jira, …) and in all views (list/tree/condensed).
-- [ ] **Track**: start a tracking in tasks / trackings (`t`/`s`) → the
-      `track` hint stays marked as long as a tracking is running; stop →
-      marking gone.
-- [ ] **Cut**: put a node on the move clipboard with `a m` (mark-move) →
-      the `cut` hint is marked until paste/abort/tab switch.
+How to read the marking without trusting the eye: capture the bar **with**
+its escape codes and compare the attributes per hint. An unmarked hint has a
+dim key and a muted label; a marked one turns accent, bold and underlined.
+Every tick below was read that way, not from a screenshot.
+
+- [x] **Jump**: press the configured `jump_mode` key → the `jump` hint turns
+      accent + bold + underlined while the hop overlay is open, and falls back
+      to the muted label after `Esc`. Measured on the tasks tree and on the
+      trackings list. Note for whoever repeats this: the shipped config binds
+      jump to `f j` and folds the `f` group, so by default there is no `jump`
+      hint in the action bar at all to mark — the group entry sits in the
+      status bar and cannot light up. Unfold `f` first.
+- [x] **Track**: `s` on a task → `track` marked; `s` again → muted, with zero
+      open trackings left in the copy's database. Two things that looked like
+      failures and are not: `s` on a row whose task is not tracking **starts**
+      one (it does not stop the running one elsewhere), so the hint correctly
+      stays marked while any tracking is open; and ending a tracking behind
+      the app's back (writing `ended_at` straight into the copy) plus `r`
+      does **not** clear the marking — the flag follows the app's own
+      tracking state, which no reload re-reads from foreign writes. Drive the
+      toggle through the UI or the box measures nothing.
+- [x] **Cut**: `a m` on a task → the `Mark for move` hint turns accent + bold + underlined, and a tab switch away and back leaves it muted again.
 - [ ] **Editor**: open an editor (`e`/`a`) → the corresponding hint
       (`edit`/`add`/…) is marked as long as the edit session is open.
 - [ ] Rebinding test: move `jump_mode` to a different key in `tui.yaml`
