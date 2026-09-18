@@ -137,17 +137,30 @@ light up. It used to be placed per level, wherever the folded keys happened to
 live, so the systemd `a Action …` showed up on Services (where `kill` opens a
 signal picker) and nowhere on Unit files.
 
-- [ ] systemd tab, **Services**: the status bar shows `a Action …` exactly
-      once; the action bar shows neither `a` nor any `a <letter>` chord.
-- [ ] systemd tab, **Unit files**: the same `a Action …`, in the same place —
-      this is the level that used to show nothing.
-- [ ] A group whose members are all activatable (`e` over the edit actions of
-      a unit) gets its entry too, and gets it in the status bar.
-- [ ] `o s` (shortcut overview) and the which-key popup still name every
-      folded chord — the folding is a bar affordance only.
-- [ ] Set `collapse_in_bars: false`: the chords return to their own bars
-      (`e h` to the action bar, `a s` to the status bar) and no group entry is
-      left behind.
+- [x] systemd tab, **Services**: the status bar shows `a Action …` exactly
+      once (counted, not eyeballed: one hit in the whole screen); the action
+      bar carries only the level's own unfolded keys (`n s`, `n t`, `n f`,
+      `q`, `Q`) — no `a`, no `a <letter>`.
+- [x] systemd tab, **Unit files**: the same single `a Action …`, in the same
+      status-bar run — this is the level that used to show nothing.
+- [x] A group whose members are all activatable (`e` over the edit actions of
+      a unit) gets its entry too, and gets it in the **status** bar: `e Edit …`
+      stands next to `a Action …` on both levels, although its members would
+      each be action-bar hints when unfolded (measured in the next box).
+- [x] `o s` (shortcut overview) and the which-key popup still name every
+      folded chord — the folding is a bar affordance only. Pressing `a` lists
+      all eleven verbs with their keys, and the overview repeats them in its
+      own column; neither drops one.
+- [x] Set `collapse_in_bars: false` — for `e` and `a` only, so the untouched
+      groups stay as a control in the same screen. The chords go back to their
+      own bars: the edit actions of a unit file into the action bar
+      (`e e edit drop-in`, `e f edit whole unit file`), the ten unit verbs into
+      the status bar (`a s start` … `a j follow in a terminal`, eleven hints,
+      the same set the popup listed). No `a Action …` and no `e Edit …` is left
+      behind — zero hits each — while `t`, `c`, `f`, `z` and `o` keep their
+      folded entry. The box named `e h` as the example key; on a unit file the
+      edit actions are `e e` / `e f`, so the key is the level's, the behaviour
+      is the one described.
 
 ### The status bar derives nav/fold hints from the claims
 
@@ -156,17 +169,34 @@ hand; it derives them from the same set of claims the dispatcher uses
 (`ContentPane::build_claims`). Every nav/fold action that can currently
 be triggered therefore appears in the bar automatically.
 
-- [ ] **Tasks / trackings tree**: the status bar shows
-      `[zm] collapse all`, `[zr] expand all` and `[⌫] collapse` — at
-      every cursor depth, as long as the view is in tree mode (was not
-      visible before).
-- [ ] On a grouped flat view, `cycle group` appears in addition; on a
-      tree view with a `tree_aggregate` column, `aggregate`.
-- [ ] **Paging**: `prev page`/`next page` appear only when there
-      actually is a page in that direction (the gate now sits in the
-      claim, no longer in the bar).
-- [ ] `open` appears only when the cursor row can be expanded or drilled
-      into; `back` only after a drill-down.
+- [x] **Tasks / trackings tree**: the status bar shows `⌫ collapse`,
+      `zm collapse all` and `zr expand all` — on the tasks tree at the root
+      and still there two levels down, and on the trackings tree subtab. Read
+      this box together with the one above: the shipped user config folds `z`,
+      so by default the two chords are inside `z Fold …` and only `⌫ collapse`
+      is spelt out. Measured with `collapse_in_bars: false` on the `z` group,
+      which is the state this box describes.
+- [x] On a grouped flat view, `cycle group` appears in addition: the flat
+      trackings subtab shows `zg cycle group` and — being flat — none of the
+      three tree entries, which is the claim gate doing its job in the other
+      direction.
+- [ ] On a tree view with a `tree_aggregate` column, `aggregate`. **Not
+      measurable yet**: no configured view declares `tree_aggregate`. It is
+      part of the adapterized trackings (cutover phase 2), and its own smoke
+      is A2c further down — tick this one when that lands, not before.
+- [x] **Paging**: `prev page`/`next page` appear only when there actually is
+      a page in that direction (the gate now sits in the claim, no longer in
+      the bar). Walked over a local SQLite view of 256 rows at
+      `page_size: 100`: page 1 offers only `> next page`, page 2 offers both,
+      page 3 only `< prev page`.
+- [x] `open` appears only when the cursor row can be expanded or drilled
+      into; `back` only after a drill-down. On a systemd unit-file row
+      `↵/l open` stands in the bar and no `back`; pressing Enter drills into
+      that unit's journal and the pair swaps to `⌫/h back` with no `open`,
+      because a journal line leads nowhere; `⌫` swaps it back. A coupled
+      split behaves differently on purpose — drilling a SQLite table into its
+      rows pane drops `open` but shows no `back`, since the way out of a
+      split is `w h` (focus the parent pane), not the drill stack.
 
 ### Active marking of the action-bar hints
 
@@ -8351,6 +8381,13 @@ question. They are addressed in sessions of their own.
   file verbs. Nothing was done for it on purpose; the claim-based bar work is
   the likely cure. Left here struck through rather than deleted so the next
   reader knows it was checked, not forgotten.
+- The pagination footer promises rows that are not there. When the adapter
+  reports no total (`PageInfo.total: None` — the SQLite adapter does not count
+  first), `format_page_footer` prints the window it _asked_ for, not the one
+  that came back: a 256-row level at `page_size: 100` ends on
+  `Items 201–300 · Page 3` although the page holds 56. Found while
+  measuring the paging hints above. The footer already has the returned rows
+  in hand at the call site, so the fix is to clamp the upper end to them.
 - The validator (keymap.rs) does not know about the auto-numbering digits yet;
   in constellation mode, fixed `tab_*` bindings could show up as a phantom
   collision, or a view digit binding is not tracked as globally claimed. Low
