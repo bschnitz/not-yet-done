@@ -7923,16 +7923,21 @@ cell must move without a reload.
       `24s`, `4min 41s`, `4d 13h` and `2w`. The last one is the proof of the
       dropped remainder: for that same timer `systemctl --user list-timers`
       prints `2 weeks 0 days`.
-- [ ] **Not stageable on a healthy manager, and the reason is worth keeping.**
-      A timer whose elapse has passed should show a **negative** countdown
-      (`-2min`), not `0s`. The obvious way to stage it — a timer that fires
-      every minute onto a service that runs for ten — does not produce one:
-      while the triggered unit is still running, systemd reports **no** next
-      elapse at all (`NextElapseUSecRealtime=` is empty and
-      `systemctl --user list-timers` prints `-` in that column), so the cell
-      is blank, not negative. The overdue state is a window of milliseconds
-      between elapse and trigger on this machine. Left open rather than
-      ticked: the rendering is untested, not wrong.
+- [x] A **negative** countdown renders as `-2min`, not `0s` — but not stageable
+      on a healthy systemd manager, so the proof comes from the two other ends
+      of the same seam: `format_countdown_to` has a unit test for an instant
+      ten minutes past (`-10min`, right-aligned), and the calendar's `In`
+      column shows a negative value live for an appointment already running.
+      The `Left` column reads the same function.
+      Two ways to stage it on a timer both fail, and for different reasons.
+      A timer firing every minute onto a service that runs for ten: while the
+      triggered unit runs, systemd reports **no** next elapse at all
+      (`NextElapseUSecRealtime=` empty, `systemctl --user list-timers` prints
+      `-`), so the cell is blank rather than negative. A wide accuracy window
+      (`AccuracySec=5min`, which systemd may spend anywhere inside): measured
+      on a 20-second timer, the reported elapse never lags — it is future,
+      then briefly empty while the unit runs, then the next future one. The
+      overdue state stays a window of milliseconds between elapse and trigger.
 - [x] Sorting: `Left` is not sortable by itself — sort on `Next` instead, and
       the order is the same. The sort menu (`c s`) on the Timers subtab lists
       `Name, Description, Active, Sub, Enabled, Next, Last, Unit, Result,
@@ -8339,11 +8344,13 @@ a terminal beside the TUI is the whole apparatus.
 Points that came up during smoke tests but do not belong to the refactor in
 question. They are addressed in sessions of their own.
 
-- The action bar drops the `a Action ...` group on the systemd Unit files
-  level while showing it on Services, although both levels declare `a` actions
-  and the which-key popup on `a` lists them correctly. Predates the audit
-  columns; the bar has room, so it is not truncation. Worth a look when the
-  bar is next touched.
+- ~~The action bar drops the `a Action ...` group on the systemd Unit files
+  level while showing it on Services.~~ Gone — re-measured 2026-09-18 on both
+  systemd tabs, at 200 and at 120 columns: the Unit files level lists
+  `a Action ...` in the bar every time, and the popup behind it holds the ten
+  file verbs. Nothing was done for it on purpose; the claim-based bar work is
+  the likely cure. Left here struck through rather than deleted so the next
+  reader knows it was checked, not forgotten.
 - The validator (keymap.rs) does not know about the auto-numbering digits yet;
   in constellation mode, fixed `tab_*` bindings could show up as a phantom
   collision, or a view digit binding is not tracked as globally claimed. Low
