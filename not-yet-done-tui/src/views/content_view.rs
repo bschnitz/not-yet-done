@@ -5382,7 +5382,7 @@ impl ContentPane {
         let Some(info) = self.last_page_info else {
             return;
         };
-        let text = format_page_footer(info, &self.last_applied_sort);
+        let text = format_page_footer(info, self.items.len(), &self.last_applied_sort);
         let style = Style::default()
             .fg(self.theme.text_dim())
             .bg(self.theme.bg());
@@ -14100,9 +14100,14 @@ fn next_page_after(info: Option<PageInfo>) -> Option<PageRequest> {
 
 /// Build the right-hand status text for the pagination footer.
 ///
+/// `loaded_rows` is how many rows the page actually brought back. It only
+/// matters when the adapter reports no total: without it the footer prints
+/// the window it *asked* for, so a level of 256 rows at `page_size: 100`
+/// ends on "Items 201-300" although the last page holds 56.
+///
 /// The function is split out from the renderer so it can be unit-tested
 /// without spinning up a Frame.
-fn format_page_footer(info: PageInfo, applied_sort: &[SortKey]) -> String {
+fn format_page_footer(info: PageInfo, loaded_rows: usize, applied_sort: &[SortKey]) -> String {
     let returned_end_inclusive = (info.offset as u64).saturating_add(info.limit as u64);
     let mut parts: Vec<String> = Vec::new();
     match info.total {
@@ -14122,7 +14127,14 @@ fn format_page_footer(info: PageInfo, applied_sort: &[SortKey]) -> String {
         }
         None => {
             let first = (info.offset as u64) + 1;
-            parts.push(format!("Items {first}\u{2013}{returned_end_inclusive}"));
+            // No total to clamp against, so the rows in hand are the only
+            // truthful upper end.
+            let last = (info.offset as u64).saturating_add(loaded_rows as u64);
+            if loaded_rows == 0 {
+                parts.push("0 items".to_string());
+            } else {
+                parts.push(format!("Items {first}\u{2013}{last}"));
+            }
             if info.has_next || info.has_prev {
                 let current_page = if info.limit > 0 {
                     (info.offset as u64 / info.limit as u64) + 1
@@ -20774,7 +20786,7 @@ mod tests {
             has_next: true,
             has_prev: true,
         };
-        let text = format_page_footer(info, &[]);
+        let text = format_page_footer(info, 25, &[]);
         assert!(text.contains("Items 51\u{2013}75 of 100"), "{text}");
         assert!(text.contains("Page 3/4"), "{text}");
     }
@@ -20788,8 +20800,51 @@ mod tests {
             has_next: false,
             has_prev: false,
         };
-        let text = format_page_footer(info, &[]);
+        let text = format_page_footer(info, 12, &[]);
         assert_eq!(text, "12 items");
+    }
+
+    #[test]
+    fn an_uncounted_last_page_reports_the_rows_it_has() {
+        // What a level looks like when the adapter never counts: the
+        // SQLite tab paging a 256-row view at page_size 100. The final
+        // page asked for a hundred and got fifty-six, and the footer has
+        // to say fifty-six - promising rows that are not on screen sends
+        // the reader looking for them.
+        let info = PageInfo {
+            offset: 200,
+            limit: 100,
+            total: None,
+            has_next: false,
+            has_prev: true,
+        };
+        let text = format_page_footer(info, 56, &[]);
+        assert!(text.contains("Items 201\u{2013}256"), "{text}");
+        assert!(text.contains("Page 3"), "{text}");
+
+        // A full middle page still spans the whole window.
+        let info = PageInfo {
+            offset: 100,
+            limit: 100,
+            total: None,
+            has_next: true,
+            has_prev: true,
+        };
+        let text = format_page_footer(info, 100, &[]);
+        assert!(text.contains("Items 101\u{2013}200"), "{text}");
+    }
+
+    #[test]
+    fn an_uncounted_page_past_the_end_says_so() {
+        let info = PageInfo {
+            offset: 300,
+            limit: 100,
+            total: None,
+            has_next: false,
+            has_prev: true,
+        };
+        let text = format_page_footer(info, 0, &[]);
+        assert!(text.starts_with("0 items"), "{text}");
     }
 
     #[test]
@@ -20806,7 +20861,7 @@ mod tests {
             column: "modified".into(),
             direction: SortDirection::Desc,
         }];
-        let text = format_page_footer(info, &sort);
+        let text = format_page_footer(info, 12, &sort);
         assert!(text.contains("Sort: modified\u{25BC}"), "{text}");
     }
 

@@ -189,6 +189,12 @@ be triggered therefore appears in the bar automatically.
       the bar). Walked over a local SQLite view of 256 rows at
       `page_size: 100`: page 1 offers only `> next page`, page 2 offers both,
       page 3 only `< prev page`.
+- [x] The footer counts what is on screen, not what was asked for. Same
+      256-row level, last page: `Items 201–256 · Page 3`, not the
+      `Items 201–300` it used to promise — the adapter reports no total
+      here (`PageInfo.total: None`), so the rows in hand are the only truthful
+      upper end. A full middle page still spans its whole window
+      (`Items 101–200`), and a page past the end says `0 items`.
 - [x] `open` appears only when the cursor row can be expanded or drilled
       into; `back` only after a drill-down. On a systemd unit-file row
       `↵/l open` stands in the bar and no `back`; pressing Enter drills into
@@ -8381,13 +8387,6 @@ question. They are addressed in sessions of their own.
   file verbs. Nothing was done for it on purpose; the claim-based bar work is
   the likely cure. Left here struck through rather than deleted so the next
   reader knows it was checked, not forgotten.
-- The pagination footer promises rows that are not there. When the adapter
-  reports no total (`PageInfo.total: None` — the SQLite adapter does not count
-  first), `format_page_footer` prints the window it _asked_ for, not the one
-  that came back: a 256-row level at `page_size: 100` ends on
-  `Items 201–300 · Page 3` although the page holds 56. Found while
-  measuring the paging hints above. The footer already has the returned rows
-  in hand at the call site, so the fix is to clamp the upper end to them.
 - The validator (keymap.rs) does not know about the auto-numbering digits yet;
   in constellation mode, fixed `tab_*` bindings could show up as a phantom
   collision, or a view digit binding is not tracked as globally claimed. Low
