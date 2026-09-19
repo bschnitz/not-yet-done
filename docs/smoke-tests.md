@@ -117,16 +117,37 @@ start on every YAML file recognised as a view config (has `tab` +
 
 ## Action bar / status bar
 
-- [ ] `e` (edit), `f` (fuzzy_filter), `/` (search), `q` (queries),
+- [x] `e` (edit), `f` (fuzzy_filter), `/` (search), `q` (queries),
       `Q` (edit query), `Shift+e` (edit + comments) appear in the action
-      bar
-      → `/` is now configured in the user YAML, re-test.
+      bar. Read on the Jira tickets level, whose bar carried, in order:
+      `f f` fuzzy filter, `/` search, `f s` free text, `E` edit +
+      comments, `e e` edit (markdown), `y` clone, `x` script, `q m`
+      queries, `Q` edit query, `f j` jump — all six the box names, plus
+      the adapter's own `text_search`, `clone` and `script` actions,
+      which belong there by the same type rule. The keys are chords in
+      this config (`e e`, `f f`, `q m`), not the bare letters the box
+      names; what decides
+      placement is the action's type, never its key. Two conditions the
+      reading depends on. The `f`, `e` and `q` which-key groups have to
+      be unfolded (`collapse_in_bars: false`) or the bar keeps only the
+      unprefixed hints and the rest turns into one status-bar entry per
+      group. And `e c edit custom cells` stays in the status bar even
+      with `e` unfolded: it is `type: custom` without `in_action_bar`,
+      so unfolding a group never promotes anything — it only stops
+      hiding what the type already placed.
 - [x] `r` (reload), `c`/`a` (navigate), `t` (custom transition) appear
       in the status bar only
 - [ ] On drill-down the hints change to the child-level config
       (comments: `e`/`a`/`f`; attachments: no edit actions)
       → `a` on the comments child now has `id: create_comment`,
-      re-test.
+      re-test. **Needs a live Jira**: the drill levels only exist under
+      a real ticket row, and in the isolated copy the adapter never got
+      one — the `skyway` auth plugin returned nothing within its 120 s
+      deadline on two attempts, so the tab stayed empty. The plugin's
+      browser keeps its own session on disk and only asks a person when
+      that has expired, so the way to unblock this is a single sign-on
+      in the everyday TUI; the copy then finds the session valid and
+      connects without a window.
 
 ### A folded which-key group lives in the status bar
 
