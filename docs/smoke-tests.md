@@ -374,11 +374,10 @@ Every tick below was read that way, not from a screenshot.
       and the list subview `<data>/not_yet_done/scripts/tasks/task_flat/`.
       The titles are `✦ Scripts · tasks · task:item` and
       `✦ Scripts · tasks · task:flat`.
-- [ ] Tasks tab, `x` without a selection → notification "No task
-      selected", the menu does not open. **Measured otherwise:** the menu
-      opens on an empty pane (and, drawn into empty rows, is invisible
-      while it swallows every key). Decide whether the guard becomes real
-      behaviour or the box is rewritten.
+- [x] Tasks tab, `x` without a selection → notification "No row
+      selected", the menu does not open. (An empty pane means no node to
+      seed the menu with — before the fuzzy fix the row lookup fell back
+      to the first unfiltered row and the menu opened for it.)
 - [x] Tasks tab, running a script → the JSON argument is the generic node
       shape `{"node": {…}}` with the keys `ref`, `id`, `label`,
       `node_type`, `tab`, `instance` and `fields`. There is no
@@ -408,7 +407,7 @@ Every tick below was read that way, not from a screenshot.
       the script menu now shows the scripts from
       `scripts/taiga/taiga_item/taiga_comment/`, and the JSON contains
       the fields of the selected comment
-- [ ] A per-view `actions: - {name: script, key: x, type: script}` in a
+- [x] A per-view `actions: - {name: script, key: x, type: script}` in a
       view YAML → pressing `x` triggers the menu; without that entry,
       `x` does nothing (no global default on content tabs)
 - [x] **Batch scope (`scope: filtered_set`)** — trackings, flat
@@ -429,7 +428,7 @@ Every tick below was read that way, not from a screenshot.
       start of the month (RFC3339, rendered in UTC — a local midnight
       shows as the previous day's 22:00/23:00), `filter_max_date` is
       `null` (no upper bound).
-- [ ] An interactive script with a `{json_file}` placeholder in
+- [x] An interactive script with a `{json_file}` placeholder in
       `interactive_command` → served by both paths (trackings +
       content); the old `{tracking_json_file}` has been renamed, so
       tui.yaml needs a one-time adjustment
@@ -452,14 +451,14 @@ Every tick below was read that way, not from a screenshot.
     jump+focus). The tree shows NO duplicates.
   - If the parent path (`/work/.../<slug>/tickets`) does not exist at
     all: a modal error from the script (stderr).
-- [ ] `:tree-find` directly (without a script): `:tree-find "Tasks"
-<text>` (a description substring) jumps to tasks and parks on the
-      first match; `n`/`N` cycle through the others. The same command
+- [x] `:tree-find` directly (without a script): `:tree-find "Tasks"
+    <text>` (a description substring) jumps to tasks and parks on the
+      first match; `n`/`N` cycle through the others (the status bar
+      counts them, e.g. `n/N Tree find "…": 2/4`). The same command
       with `id:<uuid>` instead of the text parks exactly on that node.
-      A modal error for an unknown tab/view, or when the active view is
-      not a tree (with a pointer to `:focus-node`). — the text form is
-      measured (it expands the tree and parks); `n`/`N` and the error
-      cases are not.
+      A modal error for an unknown tab/view ("… is not a content tab"),
+      and one pointing at `:focus-node` when the active view is not a
+      tree.
 
 ## `:query apply` — saved-query activation via cmdline
 
