@@ -102,10 +102,6 @@ pub enum ViewRequest {
 
     // Popups (App manages these as overlays)
     OpenColumnConfig,
-    /// Open the `:script` fuzzy menu seeded with the Trackings-tab
-    /// context (filter's tracking ids + date bounds, legacy
-    /// `<data_dir>/not_yet_done/tracking/scripts/` directory).
-    OpenScriptMenuForTrackings,
     /// Open the `:script` fuzzy menu seeded with the selected content
     /// node's context. App reads the node from the focused pane and
     /// builds the per-`(tab, node_type)` scripts directory.
