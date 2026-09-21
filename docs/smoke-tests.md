@@ -518,33 +518,63 @@ enough for the whole block.
 
 ## `:query edit/new/delete` — saved-query body management
 
-- [ ] On a content tab with a Jira or Taiga adapter, `:query new Test
-foo` → `$EDITOR` opens on an empty buffer with the suffix `.yaml`.
-      Enter content, save, close the editor → notification "Saved query
-      'Test foo'", the file appears under
-      `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/Test foo.yaml`,
-      and the Q menu (key `q`) shows it.
-- [ ] Immediately afterwards, `:query new Test foo` again → modal error
-      "'Test foo' already exists (use :query edit to modify)", no
-      editor.
-- [ ] `:query edit Test foo` → the editor opens with the previously
-      saved content. Change the content, save, close → notification,
-      the file is updated.
-- [ ] `:query edit unknown` → modal error "no saved query named
-      'unknown' (use :query new to create)".
-- [ ] `:query delete Test foo` → the file and any shortcut entry are
-      gone, notification "Deleted saved query 'Test foo'", the Q menu no
-      longer lists it.
-- [ ] `:query delete unknown` → no action, quietly (idempotent, no
-      modal), but a notification all the same.
-- [ ] On a tasks or trackings tab: `:query edit/new/delete foo` → modal
-      error "not on a content tab".
-- [ ] On a Postgres tab (an adapter without `saved_query_store()` → not
-      migrated yet) → modal error "adapter 'postgres' has no saved-query
-      store".
-- [ ] The Q menu orders the list such that new queries show up right
-      away without a restart (the adapter store is re-read before every
-      Q-menu invocation).
+Measured on **Trackings** and on the SQLite tab, with the copy's
+`editors.default` switched to `builtin: true` so the editor opens inside the
+TUI. Trackings is a full saved-query store since the local adapters joined the
+seam, so none of this needs a Jira or Taiga login any more.
+
+- [x] `:query new <name>` on a tab whose adapter has a store → the editor
+      opens on an **empty** buffer titled
+      `new query: <name> — :wq save and close · :q! discard`. Write a body,
+      `:wq` → notification `Saved query '<name>'`, the file appears as
+      `<XDG_DATA_HOME>/not_yet_done/<adapter>/<instance>/queries/<name>.yaml`
+      (the suffix is `adapter.query_body_suffix()`, `.yaml` here, `.jql` on
+      Jira), and the `q m` menu lists it without a restart.
+- [x] Immediately afterwards, `:query new <name>` again → modal error
+      `:query new — '<name>' already exists (saved, use :query edit to modify)`,
+      no editor. The message names the **kind**: saved and extended queries
+      share one namespace, so `existing_query_kind` asks both stores and the
+      answer says which one holds the name.
+- [x] `:query edit <name>` → the editor opens with the stored body, titled
+      `edit query: <name> — …`. Change it, `:wq` → the same
+      `Saved query '<name>'` notification, the file on disk carries the new
+      body.
+- [x] `:query edit unknown` → modal error `:query edit — no saved query named
+    'unknown' (use :query new to create)`.
+- [x] `:query delete <name>` → the body file **and** the `query_shortcut` row
+      are gone, notification `Deleted saved query '<name>'`, the action bar
+      loses its `│ <name> [<key>]` marker, and the `q m` menu no longer lists
+      it.
+- [x] `:query delete unknown` → no modal, as the box always claimed — but the
+      notification is the same `Deleted saved query 'unknown'`. Delete never
+      reports a miss: `delete_content_query` fires the store call as
+      `let _ = store.delete(…)` and the caller notifies unconditionally, so a
+      name that never existed and one that was really removed are
+      indistinguishable from the outside.
+- [x] There is no "not on a content tab" error any more, and this box used to
+      expect one. `Tab` has a single variant, so
+      `current_content_view_index_or_modal` destructures it irrefutably; its
+      only refusal is a tab whose slot is `ContentSlot::Broken`, answered as
+      `:query <sub> — tab '<name>' is in an error state: <first error>`. On the
+      Trackings tab all three subcommands do their ordinary work — which is how
+      every box above was measured.
+- [x] On an adapter without `saved_query_store()` (measured on the SQLite tab,
+      which has none; Postgres, Mail, Stoat and Workflow are in the same
+      position) → `:query new` and `:query edit` answer
+      `:query <sub> — adapter 'sqlite' has no saved-query store`. `:query
+    delete` does **not**: it takes the other path, skips the absent store in
+      an `if let Some`, and still reports `Deleted saved query '<name>'`. Worth
+      fixing — the two halves of the command disagree about whether this tab
+      can hold queries at all.
+- [x] The `q m` list is **not** re-read per invocation, as this box used to
+      claim. It is `reload_content_saved_queries` (`app/mod.rs:12071`) that
+      refills it, and that runs when the view is wired and after
+      save/delete/rename/shortcut — not on opening the menu. Measured both
+      ways: a query file placed into the store directory from outside stays
+      invisible however often the menu is opened, and a `:query delete` of a
+      name that does not even exist is enough of an event to make it appear.
+      For queries the TUI creates itself the promise holds, because creating
+      one is such an event.
 
 ## `:query apply` — variables + popup
 
@@ -572,7 +602,7 @@ shape `[started_at, gt, "${from:<date>}"]`.
 - [x] Query with `${from}` (no default, therefore required): the label
       reads `from (required)` and the field is empty. Submitting it empty
       keeps the popup open and puts the inline error `⚠ This field is
-    required` where the submit hint was — the form driver's own
+  required` where the submit hint was — the form driver's own
       wording, not `'from' is required`. A value plus Enter → reload.
 - [x] `Apply` from the `q m` query menu on a query with variables → the
       same popup and the same behaviour as the shortcut; both are
