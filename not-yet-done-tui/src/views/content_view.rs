@@ -4703,6 +4703,21 @@ impl ContentPane {
         path
     }
 
+    /// The `items` index behind display `row` in flat mode, or `None` when
+    /// that row holds nothing. While a fuzzy filter is in effect the mapping
+    /// is `filtered_indices` alone: a row outside it has no item, so an empty
+    /// match set has no selection at all and an action can never reach back
+    /// into a row the user cannot see. Without a filter the display order
+    /// *is* `items` and `filtered_indices` may not have been rebuilt yet, so
+    /// the row index stands in for itself.
+    fn item_index_for_row(&self, row: usize) -> Option<usize> {
+        match self.filtered_indices.get(row) {
+            Some(&idx) => Some(idx),
+            None if self.table.fuzzy_filter_in_effect() => None,
+            None => Some(row),
+        }
+    }
+
     pub fn selected_item_id(&self) -> Option<&str> {
         if self.tree.is_some() {
             let row = self.table.selected_row();
@@ -4713,17 +4728,17 @@ impl ContentPane {
             return Some(entry.node.id.as_str());
         }
         let row = self.table.selected_row();
-        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let item_idx = self.item_index_for_row(row)?;
         self.items.get(item_idx).map(|item| item.id.as_str())
     }
 
     /// Ids of every currently-visible (filtered) row, in display order.
-    /// Drives `scope: filtered_set` batch scripts. When a fuzzy filter is
-    /// active the set follows `filtered_indices`; otherwise it's the whole
+    /// Drives `scope: filtered_set` batch scripts. When a fuzzy filter is in
+    /// effect the set follows `filtered_indices`; otherwise it's the whole
     /// loaded list. Flat-list oriented — batch scope is only configured on
     /// flat views, so the depth-0 `items` set is exactly the right one.
     pub fn filtered_item_ids(&self) -> Vec<String> {
-        if self.table.fuzzy_active {
+        if self.table.fuzzy_filter_in_effect() {
             // Fuzzy filter narrows the visible set — follow it exactly (an
             // empty match set yields an empty id list, as the user sees).
             self.filtered_indices
@@ -4755,7 +4770,7 @@ impl ContentPane {
             }
             return out;
         }
-        if self.table.fuzzy_active {
+        if self.table.fuzzy_filter_in_effect() {
             self.filtered_indices
                 .iter()
                 .filter_map(|&i| self.items.get(i))
@@ -4796,7 +4811,7 @@ impl ContentPane {
             return Some(entry.node.label.as_str());
         }
         let row = self.table.selected_row();
-        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let item_idx = self.item_index_for_row(row)?;
         self.items.get(item_idx).map(|item| item.label.as_str())
     }
 
@@ -4815,7 +4830,7 @@ impl ContentPane {
             return Some(&entry.node);
         }
         let row = self.table.selected_row();
-        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let item_idx = self.item_index_for_row(row)?;
         self.items.get(item_idx)
     }
 
@@ -4923,7 +4938,7 @@ impl ContentPane {
             }
             return Some(entry.node.id.clone());
         }
-        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+        let item_idx = self.item_index_for_row(row)?;
         let item = self.items.get(item_idx)?;
         if let Some(key) = action.node_id_from.as_deref() {
             let value = item
@@ -4981,8 +4996,10 @@ impl ContentPane {
         }
         match cfg.scope {
             ApplyQueryScope::Row => {
-                let idx = self.filtered_indices.get(row).copied().unwrap_or(row);
-                if let Some(item) = self.items.get(idx) {
+                if let Some(item) = self
+                    .item_index_for_row(row)
+                    .and_then(|idx| self.items.get(idx))
+                {
                     push(node_field_value(item, field));
                 }
             }
@@ -5223,7 +5240,7 @@ impl ContentPane {
 
         let node_id = if let Some(key) = node_id_from {
             let row = self.table.selected_row();
-            let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+            let item_idx = self.item_index_for_row(row)?;
             let value = self
                 .items
                 .get(item_idx)
@@ -6699,8 +6716,10 @@ impl ContentPane {
             return SubViewMessage::Unhandled;
         }
         let row = self.table.selected_row();
-        let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
-        let Some(item) = self.items.get(item_idx) else {
+        let Some(item) = self
+            .item_index_for_row(row)
+            .and_then(|idx| self.items.get(idx))
+        else {
             return SubViewMessage::Unhandled;
         };
         let id = item.id.clone();
@@ -7218,7 +7237,7 @@ impl ContentPane {
                     .and_then(|c| c.enter_action.as_deref())
                 {
                     let row = self.table.selected_row();
-                    let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                    let item_idx = self.item_index_for_row(row)?;
                     let item = self.items.get(item_idx)?;
                     return Some(SubViewMessage::Request(ViewRequest::InvokeNodeAction {
                         view_index,
@@ -7233,7 +7252,7 @@ impl ContentPane {
                     return None;
                 }
                 let row = self.table.selected_row();
-                let item_idx = self.filtered_indices.get(row).copied().unwrap_or(row);
+                let item_idx = self.item_index_for_row(row)?;
                 let item = self.items.get(item_idx)?;
                 let id = item.id.clone();
                 let label = item.label.clone();
@@ -7699,8 +7718,9 @@ impl ContentPane {
                         let selected = match self.tree_entry_at_row(row) {
                             Some(entry) => Some((entry.node.id.clone(), entry.node.label.clone())),
                             None => {
-                                let idx = self.filtered_indices.get(row).copied().unwrap_or(row);
-                                self.items.get(idx).map(|i| (i.id.clone(), i.label.clone()))
+                                self.item_index_for_row(row)
+                                    .and_then(|idx| self.items.get(idx))
+                                    .map(|i| (i.id.clone(), i.label.clone()))
                             }
                         };
                         if let Some((item_id, item_label)) = selected {
@@ -18292,13 +18312,18 @@ mod tests {
             tnode_val("c", "Gamma", "3"),
         ];
 
-        pane.table.fuzzy_active = false;
+        pane.table.filter_text.clear();
         assert_eq!(
             pane.filtered_item_ids(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
         );
 
-        pane.table.fuzzy_active = true;
+        // The question is whether a filter is in effect, not whether its
+        // input box happens to be open. Enter closes the box (`fuzzy_active`
+        // false) and keeps the filter — the batch must still follow it, or a
+        // committed filter silently hands over the whole list.
+        pane.table.fuzzy_active = false;
+        pane.table.filter_text = "a".to_string();
         pane.filtered_indices = vec![0, 2];
         assert_eq!(
             pane.filtered_item_ids(),
@@ -18307,6 +18332,29 @@ mod tests {
 
         pane.filtered_indices = vec![];
         assert!(pane.filtered_item_ids().is_empty());
+    }
+
+    #[test]
+    fn an_empty_match_set_has_no_selected_row() {
+        // A fuzzy filter that matches nothing leaves the pane blank. The row
+        // lookup used to fall back to the raw cursor index into the unfiltered
+        // list, so every row-scoped action (delete, edit, a script) silently
+        // acted on `items[0]` — a row the user could not see.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.items = vec![tnode_val("a", "Alpha", "1"), tnode_val("b", "Beta", "2")];
+
+        // No filter: the row index stands in for itself even before the first
+        // rebuild has filled `filtered_indices`.
+        pane.filtered_indices = vec![];
+        assert_eq!(pane.selected_item_id(), Some("a"));
+
+        pane.table.filter_text = "zzz".to_string();
+        assert_eq!(pane.selected_item_id(), None);
+        assert_eq!(pane.selected_item_label(), None);
+        assert!(pane.selected_item().is_none());
     }
 
     #[test]
