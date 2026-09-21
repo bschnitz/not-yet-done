@@ -540,17 +540,19 @@ seam, so none of this needs a Jira or Taiga login any more.
       `Saved query '<name>'` notification, the file on disk carries the new
       body.
 - [x] `:query edit unknown` → modal error `:query edit — no saved query named
-    'unknown' (use :query new to create)`.
+'unknown' (use :query new to create)`.
 - [x] `:query delete <name>` → the body file **and** the `query_shortcut` row
       are gone, notification `Deleted saved query '<name>'`, the action bar
       loses its `│ <name> [<key>]` marker, and the `q m` menu no longer lists
       it.
-- [x] `:query delete unknown` → no modal, as the box always claimed — but the
-      notification is the same `Deleted saved query 'unknown'`. Delete never
-      reports a miss: `delete_content_query` fires the store call as
-      `let _ = store.delete(…)` and the caller notifies unconditionally, so a
-      name that never existed and one that was really removed are
-      indistinguishable from the outside.
+- [x] `:query delete unknown` → no modal, still idempotent, and since the fix
+      the notification tells the truth: `No saved query named 'unknown'`,
+      against `Deleted saved query '<name>'` for one that really was there. It
+      used to report the deletion either way, because `delete_content_query`
+      fires the store call as `let _ = store.delete(…)` and the caller notified
+      unconditionally. The removal itself still runs in both branches — a
+      shortcut row can outlive the body it points at, and clearing that row is
+      worth doing whether or not a body was found.
 - [x] There is no "not on a content tab" error any more, and this box used to
       expect one. `Tab` has a single variant, so
       `current_content_view_index_or_modal` destructures it irrefutably; its
@@ -560,12 +562,11 @@ seam, so none of this needs a Jira or Taiga login any more.
       every box above was measured.
 - [x] On an adapter without `saved_query_store()` (measured on the SQLite tab,
       which has none; Postgres, Mail, Stoat and Workflow are in the same
-      position) → `:query new` and `:query edit` answer
-      `:query <sub> — adapter 'sqlite' has no saved-query store`. `:query
-    delete` does **not**: it takes the other path, skips the absent store in
-      an `if let Some`, and still reports `Deleted saved query '<name>'`. Worth
-      fixing — the two halves of the command disagree about whether this tab
-      can hold queries at all.
+      position) → all three subcommands now answer
+      `:query <sub> — adapter 'sqlite' has no saved-query store`. `delete` used
+      to disagree with its siblings: it took the other path, skipped the absent
+      store in an `if let Some`, and reported `Deleted saved query '<name>'` on
+      a tab that cannot hold queries at all.
 - [x] The `q m` list is **not** re-read per invocation, as this box used to
       claim. It is `reload_content_saved_queries` (`app/mod.rs:12071`) that
       refills it, and that runs when the view is wired and after
@@ -602,7 +603,7 @@ shape `[started_at, gt, "${from:<date>}"]`.
 - [x] Query with `${from}` (no default, therefore required): the label
       reads `from (required)` and the field is empty. Submitting it empty
       keeps the popup open and puts the inline error `⚠ This field is
-  required` where the submit hint was — the form driver's own
+required` where the submit hint was — the form driver's own
       wording, not `'from' is required`. A value plus Enter → reload.
 - [x] `Apply` from the `q m` query menu on a query with variables → the
       same popup and the same behaviour as the shortcut; both are

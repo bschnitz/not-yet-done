@@ -8278,9 +8278,15 @@ impl App {
     }
 
     /// `:query delete <name>` — remove the body from the adapter's
-    /// store and the shortcut row from the DB. Idempotent: silently
-    /// no-ops when the entry is already gone. Operates on the active
-    /// content tab.
+    /// store and the shortcut row from the DB. Idempotent: a name that
+    /// isn't there is no error, it just doesn't claim a deletion.
+    /// Operates on the active content tab.
+    ///
+    /// Refuses a storeless adapter the way `new` and `edit` do. Without that
+    /// the same tab answered two different questions: `:query new` said
+    /// `adapter 'sqlite' has no saved-query store`, while `:query delete`
+    /// reported success on the very same tab, because the store call sits in
+    /// an `if let Some` and the notification didn't depend on it.
     fn query_delete_command(&mut self, name: &str) {
         let view_index = match self.current_content_view_index_or_modal("delete") {
             Some(idx) => idx,
@@ -8296,10 +8302,35 @@ impl App {
                 return;
             }
         };
-        let kind = self.content_query_kind(view_index, name);
+        let storeless = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .filter(|a| a.saved_query_store().is_none() && a.extended_query_store().is_none())
+            .map(|a| a.adapter_type().to_string());
+        if let Some(adapter_type) = storeless {
+            self.modal_message = Some(format!(
+                ":query delete — adapter '{adapter_type}' has no saved-query store"
+            ));
+            return;
+        }
+        let existing = match self.existing_query_kind(view_index, name) {
+            Ok(kind) => kind,
+            Err(e) => {
+                self.modal_message =
+                    Some(format!(":query delete — could not check names: {e}"));
+                return;
+            }
+        };
+        // The removal itself runs either way: a shortcut row can outlive the
+        // body it points at (a file deleted from outside the app), and that
+        // row is worth clearing whether or not a body was found.
+        let kind = existing.unwrap_or_else(|| self.content_query_kind(view_index, name));
         self.delete_content_query(view_index, &scope, name, kind);
         self.reload_content_saved_queries(view_index);
-        self.notify(format!("Deleted saved query '{name}'"));
+        match existing {
+            Some(_) => self.notify(format!("Deleted saved query '{name}'")),
+            None => self.notify(format!("No saved query named '{name}'")),
+        }
     }
 
     /// Return the active content tab's slot index, or set
