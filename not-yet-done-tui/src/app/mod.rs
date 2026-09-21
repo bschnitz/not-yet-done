@@ -4621,6 +4621,12 @@ impl App {
                     if eager_depth.is_none() {
                         self.fire_pending_tree_find(view_index, pane_id);
                     }
+                    // A `:focus-node` that waited for these rows. Flat
+                    // panes are complete here; an eager tree fires below,
+                    // once `apply_subtree` has ingested its levels.
+                    if eager_depth.is_none() {
+                        self.fire_pending_focus_node(view_index, pane_id);
+                    }
                     // Reload may have shifted the row under the cursor onto a
                     // different item (e.g. mark_as_read sorts the read entry
                     // away). Refresh preview when the row's id no longer
@@ -4716,6 +4722,7 @@ impl App {
                             // race this subtree load — now that the whole tree
                             // is ingested, fire it against the settled cache.
                             self.fire_pending_tree_find(view_index, pane_id);
+                            self.fire_pending_focus_node(view_index, pane_id);
                             // The eager load already laid down the whole
                             // expanded shape; nothing to cascade. A pending
                             // tree-find walk may still want to advance.
@@ -7890,9 +7897,10 @@ impl App {
                 return;
             }
         };
+        let mut switched_needs_load = false;
         if let Some(v) = view_name {
             match cv.switch_to_view_by_name(v) {
-                Ok(_load_needed) => {}
+                Ok(load_needed) => switched_needs_load = load_needed,
                 Err(available) => {
                     self.modal_message = Some(format!(
                         ":focus-node — unknown view '{v}' for tab '{tab_name}' (available: {})",
@@ -7903,6 +7911,8 @@ impl App {
             }
         }
 
+        // Parse before anything defers on the path: a malformed path is
+        // the user's typo and belongs on screen now, not after a load.
         let segments = match crate::views::focus_node::parse_path(path, case_insensitive) {
             Ok(s) => s,
             Err(e) => {
@@ -7911,7 +7921,56 @@ impl App {
             }
         };
 
+        // Nothing to match against yet: a sub-view switched into for the
+        // first time has never been loaded, and a `:query apply` right
+        // before this one (the `# mode: commands` chain) still has its
+        // reload out. Matching against those zero rows reported "unknown
+        // column" — a statement about the empty list, not about the
+        // path. Queue instead and fire when the rows land, exactly as
+        // `:tree-find` does.
+        let loading = cv.has_loads_in_flight();
+        if switched_needs_load || loading || !cv.active_pane().is_loaded() {
+            let pane_id = cv.active_pane_id();
+            cv.active_pane_mut()
+                .queue_pending_focus_node(path.to_string(), case_insensitive);
+            if !loading {
+                self.spawn_content_load(tab_idx, pane_id);
+            }
+            return;
+        }
+
         if let Err(e) = cv.focus_node_in_active_pane(&segments) {
+            self.modal_message = Some(format_focus_error(&e));
+        }
+    }
+
+    /// Fire a `:focus-node` queued by [`Self::focus_node_command`] because
+    /// its target pane had no rows yet. Addresses the pane the command
+    /// named rather than whichever one is focused when the load lands, and
+    /// reports its failure the same way the immediate path does.
+    fn fire_pending_focus_node(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+    ) {
+        let pending = self
+            .content_view_mut(view_index)
+            .and_then(|cv| cv.find_pane_mut(pane_id))
+            .and_then(|pane| pane.take_pending_focus_node());
+        let Some((path, case_insensitive)) = pending else {
+            return;
+        };
+        let segments = match crate::views::focus_node::parse_path(&path, case_insensitive) {
+            Ok(s) => s,
+            Err(e) => {
+                self.modal_message = Some(format_focus_error(&e));
+                return;
+            }
+        };
+        let result = self
+            .content_view_mut(view_index)
+            .map(|cv| cv.focus_node_in_pane(pane_id, &segments));
+        if let Some(Err(e)) = result {
             self.modal_message = Some(format_focus_error(&e));
         }
     }
@@ -8622,6 +8681,9 @@ fn format_focus_error(e: &crate::views::focus_node::FocusError) -> String {
         UnknownColumn { col, available } => format!(
             ":focus-node — unknown column '{col}' (available: {})",
             available.join(", ")
+        ),
+        NotVisible { id } => format!(
+            ":focus-node — row '{id}' matched but is not visible (collapsed parent or active filter)"
         ),
         MultiSegmentUnsupported => {
             ":focus-node — multi-segment drill-down paths are not yet supported".to_string()

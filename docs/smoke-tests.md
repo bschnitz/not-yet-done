@@ -472,7 +472,7 @@ editor). A login-free pair named `probeone` and `probe two words` is
 enough for the whole block.
 
 - [x] On a content tab with at least one saved query, `:query apply
-    <name>` (without `-t`) → the named query becomes active in the
+  <name>` (without `-t`) → the named query becomes active in the
       current view and the rows are reloaded. The action bar does not say
       `Filter: <name>`; it appends `│ <name>` after the last action hint.
 - [x] `:query apply probe two words` with whitespace in the name → the
@@ -497,12 +497,20 @@ enough for the whole block.
       `query apply -t <Tab>:<view> <q>` followed by
       `focus-node -i <Tab>:<view> /<col>|<pattern>` → the saved query is
       already active at the `focus-node` step and the cursor parks on the
-      row. **The first half is confirmed**, the second is not: the cursor
-      stays put and nothing is reported. `:focus-node -i
-    Trackings:condensed /task|Besprechung` typed by hand behaves the
-      same way, so the chain is not the culprit — either the column key,
-      the match, or `focus-node` on a grouped/flat view is broken, and
-      either way it fails silently.
+      row. **The first half is confirmed and the second half now reaches
+      real rows**, but the cursor still parks on the wrong one. Two
+      defects sat behind the earlier "nothing happens" reading. Fixed:
+      `:focus-node` switched into a sub-view it had never loaded and
+      never triggered the load, so the match ran against zero rows and
+      answered `unknown column '<col>' (available: id, label)` — a
+      statement about the empty list, not about the path. It now queues
+      the path on the pane and fires it when the rows land (the seam
+      `:tree-find` already used), and a match no visible row carries is
+      reported instead of silently leaving the cursor. Still open: on a
+      grouped flat view (Trackings `condensed`) a unique match returns
+      success and moves the cursor to the wrong row — `focus_item_by_id`
+      parks by `items` index while the display order carries group
+      header rows, so the two indices disagree.
 - [x] `:query` without a subcommand → modal error ":query expects a
       subcommand (apply | edit | new | delete)". `:query foo` → ":query —
       unknown subcommand 'foo' (apply | edit | new | delete)".

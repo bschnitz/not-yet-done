@@ -699,6 +699,18 @@ pub struct ContentPane {
     /// expand-to-hit walk. Cleared by [`Self::take_pending_tree_find`].
     pub pending_tree_find: Option<String>,
 
+    /// A `:focus-node` path queued by the command because the pane it
+    /// targets had nothing to search yet — a sub-view switched into for
+    /// the first time has never been loaded, and a `query apply` right
+    /// before it (the `# mode: commands` chain) leaves its reload in
+    /// flight. Running the match against those zero rows reported
+    /// `unknown column '<col>' (available: id, label)`, which describes
+    /// the empty list rather than the user's mistake. Holds the raw
+    /// path and the `-i` flag (the parsed segments aren't `Clone`);
+    /// re-parsed and fired by [`crate::app::App::fire_pending_focus_node`]
+    /// once the rows land. Cleared by [`Self::take_pending_focus_node`].
+    pub pending_focus_node: Option<(String, bool)>,
+
     /// Reload fold-preservation signal for eager trees
     /// (`supports_eager_subtree`). `set_items` sets this to `true` on a
     /// *reload* (`was_loaded`) and leaves it `false` on the first load.
@@ -1598,6 +1610,7 @@ impl ContentPane {
             tree_filter_expand_stash: None,
             tree_find: None,
             pending_tree_find: None,
+            pending_focus_node: None,
             eager_reload_preserve_expansion: false,
             eager_reload_reanchor_id: None,
             group_by_override: None,
@@ -1676,6 +1689,24 @@ impl ContentPane {
     /// forced reload).
     pub fn take_pending_tree_find(&mut self) -> Option<String> {
         self.pending_tree_find.take()
+    }
+
+    /// Queue a `:focus-node` path to fire once this pane has rows (see
+    /// [`Self::pending_focus_node`]).
+    pub fn queue_pending_focus_node(&mut self, path: String, case_insensitive: bool) {
+        self.pending_focus_node = Some((path, case_insensitive));
+    }
+
+    /// Take the queued `:focus-node` path, if any, clearing it so it
+    /// fires exactly once — on the load the command waited for.
+    pub fn take_pending_focus_node(&mut self) -> Option<(String, bool)> {
+        self.pending_focus_node.take()
+    }
+
+    /// Whether this pane has ever been populated. `:focus-node` reads it
+    /// to decide between matching now and queueing until the rows land.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
     }
 
     /// Land hits from a successful adapter response. No-op when the
@@ -8474,10 +8505,42 @@ impl ContentView {
         &mut self,
         segments: &[crate::views::focus_node::FocusSegment],
     ) -> Result<(), crate::views::focus_node::FocusError> {
-        let pane = self.active_pane();
+        let id = self.active_pane_id();
+        self.focus_node_in_pane(id, segments)
+    }
+
+    /// [`Self::focus_node_in_active_pane`] for a pane addressed by id —
+    /// what a `:focus-node` queued across a load fires against, since the
+    /// user may have moved the focus in the meantime.
+    ///
+    /// A match that resolves to no *visible* row (it sits under a
+    /// collapsed parent, or a fuzzy filter hides it) is a miss, not a
+    /// success: `focus_item_by_id` says so and the caller must hear it,
+    /// otherwise the cursor silently stays where it was.
+    pub fn focus_node_in_pane(
+        &mut self,
+        pane_id: PaneId,
+        segments: &[crate::views::focus_node::FocusSegment],
+    ) -> Result<(), crate::views::focus_node::FocusError> {
+        let Some(pane) = self.find_pane(pane_id) else {
+            return Err(crate::views::focus_node::FocusError::EmptyPath);
+        };
         let item_id = crate::views::focus_node::focus_in_flat_items(&pane.items, segments)?;
-        self.active_pane_mut().focus_item_by_id(&item_id);
+        let parked = self
+            .find_pane_mut(pane_id)
+            .map(|pane| pane.focus_item_by_id(&item_id))
+            .unwrap_or(false);
+        if !parked {
+            return Err(crate::views::focus_node::FocusError::NotVisible { id: item_id });
+        }
         Ok(())
+    }
+
+    /// True while this tab is waiting on a table load it started itself.
+    /// `:focus-node` reads it so a `query apply` in the same command
+    /// chain settles before the match runs.
+    pub fn has_loads_in_flight(&self) -> bool {
+        self.loads_in_flight.get() > 0
     }
 
     /// True when the level whose items the active pane currently shows
@@ -18332,6 +18395,52 @@ mod tests {
 
         pane.filtered_indices = vec![];
         assert!(pane.filtered_item_ids().is_empty());
+    }
+
+    #[test]
+    fn focus_node_reports_a_match_no_visible_row_carries() {
+        // A row the match found but the display hides (here: a fuzzy
+        // filter) cannot take the cursor. Saying nothing made
+        // `:focus-node` look like a no-op — the miss has to be reported.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane_id = view.active_pane_id();
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.items = vec![
+            tnode_val("a", "Alpha", "1"),
+            tnode_val("b", "Beta", "2"),
+            tnode_val("c", "Gamma", "3"),
+        ];
+        pane.table.fuzzy_active = false;
+        pane.table.filter_text = "a".to_string();
+        pane.filtered_indices = vec![0, 2];
+
+        let segments = crate::views::focus_node::parse_path("/label|Beta", false).unwrap();
+        match view.focus_node_in_pane(pane_id, &segments) {
+            Err(crate::views::focus_node::FocusError::NotVisible { id }) => assert_eq!(id, "b"),
+            other => panic!("expected NotVisible, got {other:?}"),
+        }
+
+        // A row the filter keeps is found and taken.
+        let segments = crate::views::focus_node::parse_path("/label|Gamma", false).unwrap();
+        assert!(view.focus_node_in_pane(pane_id, &segments).is_ok());
+    }
+
+    #[test]
+    fn focus_node_queued_on_a_pane_fires_once() {
+        // The command queues its path when the target pane has no rows
+        // yet; the load handler takes it exactly once.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane = view.active_pane_mut();
+        assert!(!pane.is_loaded(), "a fresh pane has never been populated");
+        pane.queue_pending_focus_node("/label|Beta".to_string(), true);
+        assert_eq!(
+            pane.take_pending_focus_node(),
+            Some(("/label|Beta".to_string(), true)),
+        );
+        assert_eq!(pane.take_pending_focus_node(), None);
     }
 
     #[test]
