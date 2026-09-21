@@ -466,8 +466,12 @@ impl App {
             .view_defs
             .get(view_def_idx)
             .and_then(|vd| vd.script_template.clone());
-        let new_script_template =
-            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+        let new_script_template = per_view_template.unwrap_or_else(|| {
+            self.config
+                .script
+                .template_for(crate::config::view_config::ScriptScope::Node)
+                .to_string()
+        });
 
         let ctx = ScriptContext::ContentNode {
             view_index,
@@ -534,8 +538,12 @@ impl App {
             .view_defs
             .get(view_def_idx)
             .and_then(|vd| vd.script_template.clone());
-        let new_script_template =
-            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+        let new_script_template = per_view_template.unwrap_or_else(|| {
+            self.config
+                .script
+                .template_for(crate::config::view_config::ScriptScope::FilteredSet)
+                .to_string()
+        });
 
         let ctx = ScriptContext::ContentBatch {
             view_index,
@@ -610,8 +618,12 @@ impl App {
             .view_defs
             .get(view_def_idx)
             .and_then(|vd| vd.script_template.clone());
-        let new_script_template =
-            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+        let new_script_template = per_view_template.unwrap_or_else(|| {
+            self.config
+                .script
+                .template_for(crate::config::view_config::ScriptScope::Table)
+                .to_string()
+        });
 
         let ctx = ScriptContext::ContentTable {
             view_index,
@@ -666,8 +678,15 @@ impl App {
             .view_defs
             .get(pane.view_def_index())
             .and_then(|vd| vd.script_template.clone());
-        let new_script_template =
-            per_view_template.unwrap_or_else(|| self.config.script.template.clone());
+        // The load hook always hands over the table shape (see the doc
+        // above), so its scaffold is the table one whatever the level's
+        // action says.
+        let new_script_template = per_view_template.unwrap_or_else(|| {
+            self.config
+                .script
+                .template_for(crate::config::view_config::ScriptScope::Table)
+                .to_string()
+        });
 
         Some(ScriptContext::ContentTable {
             view_index,

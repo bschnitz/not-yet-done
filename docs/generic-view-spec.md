@@ -3093,6 +3093,13 @@ collects:
   cursor is off, the action's configured **`default_field`** applies (otherwise
   `null`).
 
+**The scaffold follows the scope.** Creating a script through the menu
+(typing a name that matches nothing, or `+name`) inserts a starting point that
+reads the payload _this_ level hands over: `script.template` for `node`,
+`script.batch_template` for `filtered_set`, `script.table_template` for `table`
+(all three in `tui.yaml`). A view's own `script_template:` still wins over all
+of them — it is written by hand for one level and knows which shape it wants.
+
 **`# scope:` — a script overrides the level's setting.** The action's `scope:`
 applies to every script of the level, which is one setting too coarse as soon as
 two scripts there want different payloads. A script therefore declares its own in
