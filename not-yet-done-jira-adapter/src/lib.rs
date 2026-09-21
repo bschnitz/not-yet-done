@@ -16,6 +16,6 @@ pub use adapter::{JiraAdapter, JiraAdapterFactory};
 pub use auth_session_store::SqlAuthSessionStore;
 pub use bookmark_store::SqlBookmarkStore;
 pub use client::{
-    JiraAttachment, JiraClient, JiraComment, JiraIssueDetail, JiraSession, JiraTicket,
-    JiraTransition, JiraUser,
+    JiraAttachment, JiraClient, JiraComment, JiraIssueDetail, JiraProject, JiraSession,
+    JiraTicket, JiraTransition, JiraUser, JiraVersion,
 };

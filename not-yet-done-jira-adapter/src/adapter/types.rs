@@ -80,3 +80,29 @@ pub(super) fn user_node_type() -> NodeType {
         display_name: "User".into(),
     }
 }
+
+/// A Jira project — the level that owns [`version_node_type`]. Its rows are
+/// listed on the root; a project's id is its key (`PROJ`), the same string
+/// every issue key starts with.
+pub(super) fn project_node_type() -> NodeType {
+    NodeType {
+        type_id: "jira:project".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Project".into(),
+    }
+}
+
+/// One version of a project — what the business side calls a release, and
+/// what an issue names (but does not describe) in its `fix_versions`. Only
+/// here is it visible whether that release is already out.
+pub(super) fn version_node_type() -> NodeType {
+    NodeType {
+        type_id: "jira:version".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Version".into(),
+    }
+}
