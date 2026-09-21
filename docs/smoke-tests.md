@@ -342,7 +342,7 @@ Every tick below was read that way, not from a screenshot.
 ## EditSession — trackings
 
 - [x] Create a tracking script → it is placed under
-      `<data>/not_yet_done/tracking/scripts/` with `chmod 755`
+      `<data>/not_yet_done/scripts/trackings/tracking_entry/` with `chmod 755`
 - [x] Run a script (background / capture / interactive) → each mode
       works; with capture, an output editor opens (read-only)
 - [x] Edit the tracking query filter via the query menu → live apply on
@@ -350,37 +350,52 @@ Every tick below was read that way, not from a screenshot.
 
 ## `:script` fuzzy menu (trackings + tasks + content)
 
-- [ ] Trackings tab: `x` opens the menu with the scripts under
-      `<data>/not_yet_done/tracking/scripts/`; `X` is no longer bound
+- [x] Trackings tab: `x` opens the menu with the scripts under
+      `<data>/not_yet_done/scripts/trackings/tracking_entry/` (the pool is
+      keyed by node type, not by tab — the title says
+      `✦ Scripts · trackings · tracking:entry`); `X` is no longer bound
       (removed)
-- [ ] Enter on an existing script → runs it (the JSON argument contains
+- [x] Enter on an existing script → runs it (the JSON argument contains
       `tracking_ids` + `filter_min_date` + `filter_max_date` as before)
-- [ ] Type a name with no match + Enter → opens an empty editor on a new
-      script under the matching scripts directory
-- [ ] `+name` as input + Enter → forces CreateNew even when `name`
-      matches an existing script
-- [ ] Ctrl+E → opens the selected script in the editor
-- [ ] Ctrl+D → deletes the selected script (with a notification)
-- [ ] Tasks tab (list **and** tree, both subviews): `x` opens the menu
-      with the scripts under `<data>/not_yet_done/scripts/tasks/` (flat,
-      shared pool). The per-view title is "Scripts · Tasks".
+- [x] Type a name with no match + Enter → opens an editor on a new script
+      under the matching scripts directory
+- [ ] The new-script template follows the scope of the level: on a
+      `scope: filtered_set` level it shows the batch shape
+      (`tracking_ids` + the date bounds), not the node shape. **Known
+      deviation:** the generic `{"node": …}` template is used everywhere,
+      and no shipped view sets `script_template`.
+- [x] `+name` as input + Enter → forces CreateNew even when `name`
+      matches an existing script (the editor then holds the template, not
+      the file — saving overwrites)
+- [x] Ctrl+E → opens the selected script in the editor
+- [x] Ctrl+D → deletes the selected script (with a notification)
+- [x] Tasks tab: each subview has its **own** pool, keyed by its node
+      type — the tree subview uses `<data>/not_yet_done/scripts/tasks/task_item/`
+      and the list subview `<data>/not_yet_done/scripts/tasks/task_flat/`.
+      The titles are `✦ Scripts · tasks · task:item` and
+      `✦ Scripts · tasks · task:flat`.
 - [ ] Tasks tab, `x` without a selection → notification "No task
-      selected", the menu does not open.
-- [ ] Tasks tab, running a script → the JSON argument has the shape
-      `{"task": {…}}` with the keys `id`, `description`, `parent_id` (a
-      UUID or null) and `ancestors` (a list of objects with `id` and
-      `description`). `ancestors` runs root→parent (excluding self). A
-      root task has a null `parent_id` and an empty `ancestors` list.
-- [ ] Tasks tab, `:script` (cmdline) → the same menu as `x`.
-- [ ] Tasks tree, cursor on a task in a deep path (e.g.
+      selected", the menu does not open. **Measured otherwise:** the menu
+      opens on an empty pane (and, drawn into empty rows, is invisible
+      while it swallows every key). Decide whether the guard becomes real
+      behaviour or the box is rewritten.
+- [x] Tasks tab, running a script → the JSON argument is the generic node
+      shape `{"node": {…}}` with the keys `ref`, `id`, `label`,
+      `node_type`, `tab`, `instance` and `fields`. There is no
+      `parent_id`; `ancestors` lives in `fields` as a JSON-encoded
+      **string** holding a list of objects with `id` and `description`,
+      root→parent and excluding self. A root task has an empty
+      `ancestors` list.
+- [x] Tasks tab, `:script` (cmdline) → the same menu as `x`.
+- [x] Tasks tree, cursor on a task in a deep path (e.g.
       `Work/Clients/acme/Tickets/#42 - …`): `ancestors` contains exactly
       the 4 parents in root→parent order.
 - [ ] Tasks tab, a script in `# mode: commands` emits
       `focus-node Taiga:items /ref|<slug>#<n>` → the tab switches to
       Taiga, the cursor parks on the ticket (the reverse direction of
       the `goto_task.py` flow).
-- [ ] `:script` in a content tab with a selected node → menu with the
-      scripts under `<data>/not_yet_done/scripts/<tab>/<view-path>/`;
+- [x] `:script` in a content tab with a selected node → menu with the
+      scripts under `<data>/not_yet_done/scripts/<tab>/<node-type-path>/`;
       running one delivers a JSON object with a `node` key holding
       `ref`, `id`, `label`, `node_type`, `tab`, `instance` and `fields`
       (`label` = the display label of the row, e.g. the task
@@ -396,7 +411,7 @@ Every tick below was read that way, not from a screenshot.
 - [ ] A per-view `actions: - {name: script, key: x, type: script}` in a
       view YAML → pressing `x` triggers the menu; without that entry,
       `x` does nothing (no global default on content tabs)
-- [ ] **Batch scope (`scope: filtered_set`)** — trackings, flat
+- [x] **Batch scope (`scope: filtered_set`)** — trackings, flat
       `trackings` view (`x` with `scope: filtered_set`): running a
       script delivers JSON with the keys `tracking_ids`,
       `filter_min_date` and `filter_max_date` (NOT a `node` key) —
@@ -404,13 +419,16 @@ Every tick below was read that way, not from a screenshot.
       `hours_report.py` / `equalize_trackings.py`; the migrated scripts
       under `<data>/not_yet_done/scripts/trackings/tracking_entry/` run
       unchanged.
-- [ ] Batch scope, `tracking_ids` follows what is visible: without a
-      fuzzy filter = all rows of the active query; with an active fuzzy
-      filter (`f`) = exactly the matching set.
-- [ ] Batch scope, date bounds: with the active query
+- [x] Batch scope, `tracking_ids` follows what is visible: without a
+      fuzzy filter = all rows of the active query; with a fuzzy filter
+      (`f`) = exactly the matching set — also after enter has closed the
+      input box and left the filter standing; a filter that matches
+      nothing yields an empty list.
+- [x] Batch scope, date bounds: with the active query
       `started_at gt last month` → `filter_min_date` is the resolved
-      start of the month (RFC3339), `filter_max_date` is `null` (no
-      upper bound).
+      start of the month (RFC3339, rendered in UTC — a local midnight
+      shows as the previous day's 22:00/23:00), `filter_max_date` is
+      `null` (no upper bound).
 - [ ] An interactive script with a `{json_file}` placeholder in
       `interactive_command` → served by both paths (trackings +
       content); the old `{tracking_json_file}` has been renamed, so
@@ -439,7 +457,9 @@ Every tick below was read that way, not from a screenshot.
       first match; `n`/`N` cycle through the others. The same command
       with `id:<uuid>` instead of the text parks exactly on that node.
       A modal error for an unknown tab/view, or when the active view is
-      not a tree (with a pointer to `:focus-node`).
+      not a tree (with a pointer to `:focus-node`). — the text form is
+      measured (it expands the tree and parks); `n`/`N` and the error
+      cases are not.
 
 ## `:query apply` — saved-query activation via cmdline
 
