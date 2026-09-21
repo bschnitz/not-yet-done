@@ -1168,6 +1168,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "child-log"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4383,6 +4390,7 @@ name = "not-yet-done-content"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "child-log",
  "chrono",
  "dirs",
  "fieldsmith",
@@ -4601,6 +4609,7 @@ dependencies = [
 name = "not-yet-done-office365-web"
 version = "0.1.0"
 dependencies = [
+ "child-log",
  "chrono",
  "libc",
  "serde",
