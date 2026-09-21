@@ -2225,90 +2225,84 @@ cmdline_shortcuts:
 
 ## Tasks tree expand/collapse
 
-An expandable tree in the tasks tab. Bindings: `vt`/`vl` (tree/list
-sub-view), `enter` (toggle the cursor node), `zr` (expand everything),
-`zm` (back to `default_expand_depth`; **not** all the way to the roots,
-set `default_expand_depth: 0` for that). Config:
+An expandable tree in the tasks tab. The sub-view keys are the views'
+own: `t t` (tree) and `t l` (flat list). Folding is `enter` (toggle the
+cursor node), `backspace` (collapse the cursor node's parent), `zr`
+(expand everything) and `zm` (back to the configured depth). The initial
+depth is `expand_depth` **on the view**, not a `tui.yaml` setting:
 
 ```yaml
-tasks:
-  tree:
-    default_expand_depth: 2 # 0 = roots only, 1 = + direct children, ...
+# views/tasks.yaml — on the tree view
+expand_depth: 2 # 0/unset = roots only, N = N levels, all = full cascade
 ```
 
-- [x] In the tasks tab: `vt` → the tree sub-view is active; `vl` → the
-      list sub-view is active (renamed from `t`/`l`).
-- [x] Initially the tree shows only the first `default_expand_depth+1`
-      levels — deeper nodes are hidden; their direct parents carry a `▶`
-      plus an `(N)` suffix (N = the number of direct children).
-- [ ] `enter` on a collapsed parent → it expands, the glyph switches to
+Collapsed parents carry a `▶`, expanded ones a `▼`; both glyphs are
+configurable per view via `tree_markers:` (`enabled`, `collapsed`,
+`expanded`). There is no `(N)` child count any more, and no
+`↵ expand/collapse` hint in the action bar — the fold hints live in the
+status bar (`⌫ collapse`, `z Fold …`, `↵/l open`).
+
+- [x] In the tasks tab: `t t` → the tree sub-view is active; `t l` → the
+      flat list. Switching back and forth keeps the expand state.
+- [x] With `expand_depth: 2` the tree initially shows levels 0 and 1;
+      deeper nodes are hidden and their parents carry a `▶`. No `(N)`
+      suffix anywhere.
+- [x] `enter` on a collapsed parent → it expands, the glyph switches to
       `▼`, the children become visible.
-- [ ] `enter` on an expanded parent → it collapses, the glyph switches to
-      `▶`, the children disappear, the `(N)` suffix appears.
-- [ ] `enter` on a leaf node → no-op (the cursor stays, the tree is
-      unchanged).
-- [ ] `zr` → all branches expanded; all parents show `▼`, no `(N)`
-      suffixes.
-- [ ] `zm` → the tree goes back to `default_expand_depth` (2 levels open,
-      say, deeper ones closed again); the per-node `enter` toggles are
-      discarded in the process.
-- [ ] Set `default_expand_depth: 0` via `:config tui`, then `zm` → now
-      only the roots are visible (vim-style full collapse).
-- [ ] Fuzzy filter active (`f` plus text) → the expand state is ignored;
-      every match (plus its ancestors) appears, no `(N)` suffixes.
-- [ ] Clear the filter → the previous expand state is back.
-- [ ] `:config tui` → `default_expand_depth: 3` → save → the tree renders
-      with the new depth immediately (via the reload pipeline).
-- [ ] Restart the TUI: the expand state is **not** persisted; the tree is
-      back at `default_expand_depth`.
-- [ ] The list sub-view (`vl`) shows neither glyphs nor `(N)` — list mode
-      is untouched.
-- [ ] Trackings tab → the tree (`t`) shows **no** glyphs and **no** `(N)`
-      suffixes (the trackings tree is not configured as expandable).
-- [ ] The action bar (in the tree sub-view) shows the hint
-      `↵ expand/collapse`.
-- [ ] The default for `dismiss_notifications` is now `Z` (formerly `z`,
-      which collided with `zr`/`zm`). Trigger a notification (an
-      erroneous command, say), press `Z` in normal mode → the
-      notification disappears. `:dismiss-notifications` without an
-      argument does the same. `:dismiss-notifications foo` → the modal
+- [x] `enter` on an expanded parent → it collapses, the glyph switches to
+      `▶`, the children disappear.
+- [x] `enter` on a leaf node → no-op (the cursor stays, no modal, no
+      notification).
+- [x] `backspace` (`content.tree_collapse`) on a child row → the parent
+      branch closes and the cursor moves up onto the parent row.
+- [x] `zr` → the cascade expands everything, loading missing children on
+      the way; every parent shows `▼`.
+- [x] `zm` → the tree goes back to `expand_depth`. It is purely
+      subtractive: it drops every expansion deeper than the configured
+      depth but does **not** re-open a node the user collapsed by hand.
+      If nothing changes the cursor stays where it is; otherwise it lands
+      on the first visible row.
+- [x] `expand_depth: 0` (or the key left out) → after a reload only the
+      roots are visible, and `zm` is the vim-style full collapse onto the
+      roots.
+- [x] Fuzzy filter `f f`: even with an empty input the whole tree is
+      open; with text, the matches plus their ancestor chains stay
+      visible and expanded.
+- [x] First `Esc` clears the filter input — the tree returns to its
+      previous expand state immediately; second `Esc` closes the input.
+- [x] `:config tasks` → the picker opens `views/tasks.yaml` directly;
+      changing `expand_depth` from 2 to 3 and saving re-renders the tree
+      with four levels at once (the reload pipeline re-runs the cascade).
+- [x] Restart the TUI: the expand state is **not** persisted; the tree is
+      back at `expand_depth`.
+- [x] The flat list (`t l`) shows neither glyphs nor indentation; rows
+      are in depth-first order. Its status bar drops `⌫ collapse` and
+      `↵/l open` but still offers `z Fold …`, although `zm`/`zr` are
+      silent no-ops there.
+- [x] Trackings tab (`t r`) → the tree draws `├──`/`└──` connectors but
+      **no** `▶`/`▼` (its `tree_markers.enabled` is false) and no `(N)`;
+      with `expand_depth: all` it is always fully open.
+- [x] Notifications: the default for `dismiss_notifications` is `z c`
+      (not `Z`). Trigger a notification, press `z c` → the notification
+      bar is cleared. `:dismiss-notifications` without an argument does
+      the same; `:dismiss-notifications foo` → the modal
       ":dismiss-notifications takes no arguments".
+- [x] Dismissing is not deleting: `z c` clears the bars only
+      (notification bar, alert bar, event notices, sticky notification,
+      query error). The notification page (`z l`) still lists the same
+      history before and after.
 
-### `/` search through collapsed branches
+### `/` in the tree: superseded by the tree-find action
 
-In the tree sub-view, `/` now searches **all** tasks (hidden ones
-included). If the cursor jumps to a match in a collapsed branch with
-`n`/`N`, only the ancestor chain of the current hit expands. On the next
-`n`/`N` the previous path collapses again; any other key (`j`, `k`,
-`<space>`, Enter to close, …) "commits" the current path — it stays open,
-and the next `n` is a fresh auto-expansion again.
+The built-in incremental `/` search with `n`/`N` and transient ancestor
+expansion no longer exists — there is no `common.search` binding and no
+transient expand state in the code. `/` is bound to the **tree find**
+action (`type: tree_find`) instead, which searches the whole tree and
+opens the path to a hit permanently.
 
-- [ ] A tree with `default_expand_depth: 2` and sub-tasks deeper than 2.
-      `/` plus typing a string that only occurs in a deep sub-task → the
-      path to the hit opens automatically, the cursor lands on the match.
-- [ ] Keep typing (append letters) → on every query change the old path
-      collapses and the new path to the first match opens.
-- [ ] Several hits in different sub-branches: `n` jumps to the next
-      match → the previous branch collapses again, the new branch opens.
-      `N` likewise, backwards.
-- [ ] During an `n`/`N` sequence: `j` (or any other key) → the currently
-      open path **stays** open. Then press `n` again → the new branch
-      opens and the path just "pinned" stays open too (two visible
-      paths).
-- [ ] `Enter` (accept the search) commits the currently open path as
-      well.
-- [ ] `Esc` (cancel the search, empty query) → the auto-expansion is
-      discarded, the tree falls back to the previous expand state.
-- [ ] `Esc` with a non-empty query → the query is cleared, the
-      auto-expansion is discarded, the search stays active.
-- [ ] Fuzzy filter active (`f` plus text) plus a `/` search → the search
-      only covers the tasks made visible by the fuzzy filter (no
-      auto-expansion needed, everything is visible already).
-- [ ] Before `/`: collapse a top-level branch manually with `enter`. `/`
-      matches a task in that branch → the branch opens transiently.
-      Commit → the branch stays open, `enter` on it closes it normally
-      again (the transient state was promoted into `flipped` cleanly, not
-      flipped twice).
+- [x] Its behaviour is covered by the CT-1 … CT-14 sections further
+      down ("tree find"); nothing of the old transient-expansion
+      mechanism remains to test here.
 
 ## Tasks tree cut / paste (`:cut-node` / `:paste-node`)
 

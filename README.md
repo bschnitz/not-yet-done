@@ -92,10 +92,10 @@ adapter-backed **`Tasks`** content tab (`views/tasks.yaml`); see
 [`docs/examples/views/tasks.yaml`](docs/examples/views/tasks.yaml) for a
 fully-commented reference. It has two sub-views:
 
-| Sub-view | Key | Description                                            |
-| -------- | --- | ------------------------------------------------------ |
-| Tree     | `t` | Hierarchical tree view with indentation and connectors |
-| List     | `v` | Flat list of all tasks matching the active filter      |
+| Sub-view | Key   | Description                                            |
+| -------- | ----- | ------------------------------------------------------ |
+| Tree     | `t t` | Hierarchical tree view with indentation and connectors |
+| List     | `t l` | Flat list of all tasks matching the active filter      |
 
 <!-- screenshot: tasks tab in tree view showing nested tasks with priority, status, notes indicator -->
 
@@ -105,20 +105,25 @@ fully-commented reference. It has two sub-views:
 
 In tree view, branches can be folded individually:
 
-| Key     | Action                                           |
-| ------- | ------------------------------------------------ |
-| `enter` | Toggle expand/collapse on cursor                 |
-| `zr`    | Expand all branches                              |
-| `zm`    | Collapse to the view's configured `expand_depth` |
+| Key         | Action                                           |
+| ----------- | ------------------------------------------------ |
+| `enter`     | Toggle expand/collapse on cursor                 |
+| `backspace` | Collapse the cursor node's parent branch         |
+| `zr`        | Expand all branches                              |
+| `zm`        | Collapse to the view's configured `expand_depth` |
 
-Collapsed parents render with a `▶` glyph and a trailing `(N)` count
-showing how many direct children are hidden. Expanded parents render
-with `▼`. The default number of visible levels is the `expand_depth` of
-the tree view in `views/tasks.yaml`:
+`zm` is purely subtractive: it drops expansions below the configured
+depth, but never re-opens a branch that was collapsed by hand.
+
+Collapsed parents render with a `▶` glyph, expanded ones with `▼`. Both
+glyphs are configurable per view under `tree_markers:` (`enabled`,
+`collapsed`, `expanded`) — the trackings tree, for instance, turns them
+off entirely. The default number of visible levels is the `expand_depth`
+of the tree view in `views/tasks.yaml`:
 
 ```yaml
 # views/tasks.yaml — on the tree view
-expand_depth: 2 # 0 = only roots, 1 = roots + their children, ...
+expand_depth: 2 # 0 = only roots, N = N levels, all = expand everything
 ```
 
 The expand state is per-session — it is not persisted across
