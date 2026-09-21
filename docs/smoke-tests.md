@@ -359,12 +359,15 @@ Every tick below was read that way, not from a screenshot.
       `tracking_ids` + `filter_min_date` + `filter_max_date` as before)
 - [x] Type a name with no match + Enter → opens an editor on a new script
       under the matching scripts directory
-- [ ] The new-script template follows the scope of the level: on a
-      `scope: filtered_set` level it shows the batch shape
-      (`tracking_ids` + the date bounds), on a `scope: table` level the
-      table shape, and a view's own `script_template` still wins over
-      all three. (Implemented — `script.batch_template` /
-      `script.table_template` in `tui.yaml`; not yet driven live.)
+- [x] The new-script template follows the scope of the level: on a
+      `scope: filtered_set` level (Trackings) the editor opens on the batch
+      scaffold (`tracking_ids` + the date bounds), on a `scope: table` level
+      (a SQLite table's rows) on the table scaffold (`rows` / `query` /
+      `selected_index` / `selected_field`), and a `script_template:` set on
+      the level itself still beats both. Discarding with `:q!` writes no
+      file. The fallbacks are `script.batch_template` /
+      `script.table_template` in `tui.yaml`, both defaulted in code, so a
+      config that never heard of them gets the right scaffold anyway.
 - [x] `+name` as input + Enter → forces CreateNew even when `name`
       matches an existing script (the editor then holds the template, not
       the file — saving overwrites)
@@ -453,7 +456,7 @@ Every tick below was read that way, not from a screenshot.
   - If the parent path (`/work/.../<slug>/tickets`) does not exist at
     all: a modal error from the script (stderr).
 - [x] `:tree-find` directly (without a script): `:tree-find "Tasks"
-  <text>` (a description substring) jumps to tasks and parks on the
+<text>` (a description substring) jumps to tasks and parks on the
       first match; `n`/`N` cycle through the others (the status bar
       counts them, e.g. `n/N Tree find "…": 2/4`). The same command
       with `id:<uuid>` instead of the text parks exactly on that node.

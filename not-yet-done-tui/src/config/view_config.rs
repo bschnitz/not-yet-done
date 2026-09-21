@@ -1122,10 +1122,13 @@ pub struct ViewDef {
     #[serde(default)]
     pub retries: u32,
     /// Scaffold inserted into a new script created via the `:script`
-    /// menu on this view. When `None`, falls back to
-    /// `script.template`. Use this for views whose JSON node shape
-    /// benefits from a tailored starter (e.g. a Taiga-item template
-    /// that pre-references `fields.ref` and `fields.assignee`).
+    /// menu on this view. When `None`, falls back to the scaffold for the
+    /// scope the level's script action carries — `script.template` for
+    /// `node`, `script.batch_template` for `filtered_set`,
+    /// `script.table_template` for `table`. Set this for views whose JSON
+    /// node shape benefits from a tailored starter (e.g. a Taiga-item
+    /// template that pre-references `fields.ref` and `fields.assignee`);
+    /// being written by hand for one level, it wins over all three.
     #[serde(default)]
     pub script_template: Option<String>,
     /// Name of a sibling view (same tab) whose script source this view
