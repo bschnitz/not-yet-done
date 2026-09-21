@@ -312,6 +312,15 @@ impl DataTable {
         self.filter_text = self.fuzzy_query.clone();
     }
 
+    /// A fuzzy filter is *in effect* — the displayed row set is narrowed.
+    /// Not the same question as [`Self::fuzzy_active`], which only says the
+    /// input box is open: closing the box with enter keeps the filter in
+    /// `filter_text` and clears `fuzzy_active`. Anything asking "what does
+    /// the user actually see?" has to ask this one.
+    pub fn fuzzy_filter_in_effect(&self) -> bool {
+        !self.filter_text.is_empty()
+    }
+
     pub fn fuzzy_insert(&mut self, c: char) {
         let byte_pos = self
             .fuzzy_query
