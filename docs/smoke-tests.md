@@ -466,32 +466,46 @@ Every tick below was read that way, not from a screenshot.
 
 ## `:query apply` — saved-query activation via cmdline
 
-- [ ] On a content tab with at least one saved query defined in YAML,
-      `:query apply <name>` (without `-t`) → the named query becomes
-      active in the current view (the action bar shows
-      `Filter: <name>`), rows are reloaded; losing the previous cursor
-      is fine.
-- [ ] `:query apply foo bar baz` with whitespace in the name → the name
-      is interpreted as one whole token (whitespace stays part of the
-      match string, compared case-insensitively).
-- [ ] `:query apply -t Taiga:items <name>` from another tab → switches
-      to Taiga:items first, then activates the query and reloads. If
-      `<name>` is only a YAML default, this also works for a tab that
-      has never been visited.
-- [ ] `:query apply -t Taiga:nonexistent foo` → modal error "unknown
-      view 'nonexistent' for tab 'Taiga' (available: …)", no tab switch.
-- [ ] `:query apply unknown-name` → modal error listing the available
-      saved queries.
-- [ ] On a tasks or trackings tab without `-t`: modal error "not on a
-      content tab".
-- [ ] Command chain from a `# mode: commands` script:
-      `query apply -t Taiga:items <q>` followed by
-      `focus-node -i Taiga:items /ref|<slug>#<num>` → the saved query is
-      already active at the `focus-node` step and the cursor parks on
-      the ticket (synchronous reload between the two steps).
-- [ ] `:query` without a subcommand → modal error pointing at
-      `:query apply`. `:query foo` → modal error "unknown subcommand
-      'foo'".
+Saved queries come from the adapter's store, not from the view YAML —
+`q m` on Trackings creates one (`+name` + Enter opens the body in an
+editor). A login-free pair named `probeone` and `probe two words` is
+enough for the whole block.
+
+- [x] On a content tab with at least one saved query, `:query apply
+    <name>` (without `-t`) → the named query becomes active in the
+      current view and the rows are reloaded. The action bar does not say
+      `Filter: <name>`; it appends `│ <name>` after the last action hint.
+- [x] `:query apply probe two words` with whitespace in the name → the
+      whole remainder after the subcommand is the name (compared
+      case-insensitively), so the spaces stay part of it.
+- [x] `:query apply -t Trackings:condensed probeone` from the Tasks tab →
+      switches to the Trackings tab AND to its `condensed` subview, then
+      activates the query and reloads. Works for a view that has never
+      been opened in this session.
+- [x] `:query apply -t Stunden:nonexistent foo` → modal error
+      ":query apply — unknown view 'nonexistent' for tab 'Stunden'
+      (available: databases, tables, views)". The tab switch happens
+      _before_ the view is validated, so a wrong view name leaves you on
+      the target tab rather than where you started.
+- [x] `:query apply unknown-name` → modal error ":query apply — no saved
+      query named 'unknown-name' (available: probe two words, probeone)".
+- [x] An unknown tab in `-t` → modal error ":query apply — 'Nonsense' is
+      not a content tab". (Every tab is a content tab now, tasks and
+      trackings included, so this is the only way to reach that message.)
+- [ ] Command chain from a `# mode: commands` script (writes
+      `$NYD_OUTPUT_FILE` as `{"commands": [...]}`):
+      `query apply -t <Tab>:<view> <q>` followed by
+      `focus-node -i <Tab>:<view> /<col>|<pattern>` → the saved query is
+      already active at the `focus-node` step and the cursor parks on the
+      row. **The first half is confirmed**, the second is not: the cursor
+      stays put and nothing is reported. `:focus-node -i
+    Trackings:condensed /task|Besprechung` typed by hand behaves the
+      same way, so the chain is not the culprit — either the column key,
+      the match, or `focus-node` on a grouped/flat view is broken, and
+      either way it fails silently.
+- [x] `:query` without a subcommand → modal error ":query expects a
+      subcommand (apply | edit | new | delete)". `:query foo` → ":query —
+      unknown subcommand 'foo' (apply | edit | new | delete)".
 
 ## `:query edit/new/delete` — saved-query body management
 
