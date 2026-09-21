@@ -122,10 +122,15 @@ asks the user to fill any missing required values via a popup, and
 passes the bindings back through `render_query(raw, &vars)` right
 before the load. The `${name:default}` syntax (no default → required)
 is implemented as an adapter-agnostic helper in
-`not_yet_done_content::query_vars`; the Taiga and Jira adapters both
-delegate to it (Taiga structured filters, Jira JQL — e.g. a `By Key`
-saved query `key = ${key}`). Adapters that don't implement the methods
-get the identity defaults and the popup is never opened.
+`not_yet_done_content::query_vars`; the Taiga, Jira, tasks and
+trackings adapters all delegate to it (Taiga structured filters, Jira
+JQL — e.g. a `By Key` saved query `key = ${key}` —, and the YAML filter
+documents of the local adapters, where a placeholder may stand wherever
+a literal value may: `[started_at, gt, "${from:2026-01-01}"]` turns a
+fixed date window into one the user is asked for). Substitution is
+textual and happens before the body is parsed. Adapters that don't
+implement the methods get the identity defaults and the popup is never
+opened.
 
 **Lifecycle hooks.** `hooks()` lets an adapter declare named points in its
 lifetime that a front-end can bind work to — purely through config, no

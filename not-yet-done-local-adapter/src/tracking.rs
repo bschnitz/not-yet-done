@@ -84,7 +84,7 @@ use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket,
     GroupSpec, HostContext, HostEvent, InputSpec, Invalidation, MarkedNode, Metadata,
-    MetadataField, Node, NodeAction, NodeSummary, NodeType, Result, SavedQueryStore, SortDirection,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, QueryVariable, Result, SavedQueryStore, SortDirection,
     SortKey, Subtree, SubtreeNode, TypedAdapterFactory, apply_sort, grouping,
 };
 use not_yet_done_task_core::entity::granularity::Granularity;
@@ -3206,6 +3206,22 @@ impl ContentAdapter for TrackingAdapter {
         Some(&self.saved_queries)
     }
 
+    /// Saved queries here carry the shared `${name:default}` placeholders.
+    /// A body is parsed into a filter *after* substitution, so a placeholder
+    /// may stand wherever a literal value may — `[started_at, gt, ${from}]`
+    /// is a window the user is asked for when the query is applied.
+    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
+        not_yet_done_content::query_vars::parse_variables(query)
+    }
+
+    fn render_query(
+        &self,
+        query: &str,
+        vars: &std::collections::HashMap<String, String>,
+    ) -> String {
+        not_yet_done_content::query_vars::render(query, vars)
+    }
+
     async fn live_rows(&self) -> Vec<NodeSummary> {
         let Ok(snapshot) = self.snapshot().await else {
             return Vec::new();
@@ -5110,9 +5126,10 @@ mod tests {
     }
 }
 
-/// DB-backed regression tests for the query-scoping of `restore-all`: the
-/// list-wide restore must act **only** on the pane's active-query set, never
-/// on the whole include-deleted universe. Isolated in its own module so the
+/// DB-backed regression tests — everything that needs a real adapter rather
+/// than a snapshot. Chiefly the query-scoping of `restore-all`: the list-wide
+/// restore must act **only** on the pane's active-query set, never on the
+/// whole include-deleted universe. Isolated in its own module so the
 /// `sea-orm` test harness imports stay out of the pure snapshot tests above.
 #[cfg(test)]
 mod restore_scope_tests {
@@ -5509,6 +5526,33 @@ mod restore_scope_tests {
             .expect("invalid gravity");
         assert!(format!("{err}").contains("invalid gravity"));
         assert!(!is_deleted(&handle, original).await, "original untouched");
+    }
+
+    /// The two saved-query seam methods are what make a trackings query
+    /// parameterisable at all: without them the frontend reads an empty
+    /// variable list, never opens its popup, and hands the raw
+    /// `${...}` text to the filter parser.
+    #[tokio::test]
+    async fn saved_query_variables_are_parsed_and_rendered() {
+        let (handle, _db) = setup().await;
+        let adapter = TrackingAdapter::new("test", handle);
+
+        let body = "query:\n  and:\n    - [started_at, gt, \"${from:2026-01-01}\"]\n";
+        let vars = adapter.query_variables(body);
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].name, "from");
+        assert_eq!(vars[0].default.as_deref(), Some("2026-01-01"));
+
+        let mut bound = HashMap::new();
+        bound.insert("from".to_string(), "2026-03-22".to_string());
+        assert!(adapter.render_query(body, &bound).contains("\"2026-03-22\""));
+        // No binding falls back to the inline default, so a shortcut that
+        // skips the popup still renders a valid document.
+        assert!(
+            adapter
+                .render_query(body, &HashMap::new())
+                .contains("\"2026-01-01\"")
+        );
     }
 
     #[tokio::test]

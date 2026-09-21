@@ -57,7 +57,7 @@ use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec,
     Invalidation, Metadata, MetadataField, Node, NodeAction, NodeHit, NodeSummary, NodeType,
-    ParamSpec, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode, TypedAdapterFactory,
+    ParamSpec, QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode, TypedAdapterFactory,
     apply_sort,
 };
 use not_yet_done_task_core::entity::task;
@@ -2631,6 +2631,21 @@ impl ContentAdapter for TaskAdapter {
 
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         Some(&self.saved_queries)
+    }
+
+    /// Saved queries here carry the shared `${name:default}` placeholders,
+    /// substituted before the body is parsed into a filter (see the tracking
+    /// adapter for the reasoning).
+    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
+        not_yet_done_content::query_vars::parse_variables(query)
+    }
+
+    fn render_query(
+        &self,
+        query: &str,
+        vars: &std::collections::HashMap<String, String>,
+    ) -> String {
+        not_yet_done_content::query_vars::render(query, vars)
     }
 
     /// Ancestor chain for a task id, so a link can be followed into a

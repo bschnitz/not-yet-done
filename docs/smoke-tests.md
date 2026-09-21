@@ -548,39 +548,60 @@ foo` → `$EDITOR` opens on an empty buffer with the suffix `.yaml`.
 
 ## `:query apply` — variables + popup
 
-- [ ] Taiga saved query with `project=${proj:alpha}` as the YAML
-      default: shortcut key (e.g. `1`) → the popup opens with a `proj`
-      field pre-filled with `alpha`. Enter → reload with
-      `project=alpha`. Esc → no reload, the popup closes, the old rows
-      remain.
-- [ ] Same query: open the popup, change the value to `beta`, Enter →
-      reload with `project=beta`. The action bar shows `Filter: <name>`
-      as before.
-- [ ] Query with `${proj}` (no default, therefore required): shortcut →
-      the popup shows the label `proj (required)` and an empty field.
-      Enter on the empty field → inline error "'proj' is required", the
-      popup stays open. Enter a value + Enter → reload.
-- [ ] The `Apply` action of the query menu on a query with variables →
-      the same popup, the same behaviour as the shortcut (always a
-      popup).
-- [ ] `:query apply --var proj=alpha -t Taiga:items <name>` on the same
-      query → no popup, a direct reload with `project=alpha`. Suitable
-      for scripts.
-- [ ] The same command with two `--var` arguments (e.g.
-      `--var proj=alpha --var x=42`) → all of them are pre-filled. The
-      order of `--var` and `-t` does not matter.
-- [ ] `:query apply -t Taiga:items <name>` without `--var` on a query
-      with only optional variables (all have defaults) → no popup (CLI
-      path), reload with the defaults.
-- [ ] `:query apply -t Taiga:items <name>` on a query with one required
-      variable and without a `--var` for it → the popup opens, because
-      at least one required variable is not covered.
-- [ ] `:query apply --var=oops -t ...` (no `=` in the value) → modal
-      error "--var expects k=v".
-- [ ] Saved query without variables (no `${...}`) → behaviour unchanged,
-      no popup, direct reload.
-- [ ] Tab switching and other popups: the query-var popup behaves like
-      other modals — while open it swallows all keys except Esc.
+Measured on **Trackings**, not Taiga. `${name}` / `${name:default}` lives in
+the shared `not-yet-done-content/src/query_vars.rs`; an adapter opts into it
+with two four-line methods (`query_variables`, `render_query`). Jira and
+Taiga had them, the local adapters (Tasks, Trackings) got them in the same
+piece of work — which makes the whole chain measurable without a login and
+parameterises trackings queries on the way. The queries used below are of the
+shape `[started_at, gt, "${from:<date>}"]`.
+
+- [x] Saved query with a defaulted variable (`${from:<date>}`) behind a
+      shortcut key (bound with `ctrl+s` in the `q m` menu — `1` is
+      refused as a conflict with the tab switch, `f5` takes it): the key
+      opens the popup with the `from` field pre-filled from the YAML
+      default, and it does so right after binding, without a restart.
+      Enter → reload with that value. Esc → no reload, the popup closes,
+      the rows and the bar marker stay as they were.
+- [x] Same query, the value changed in the field → reload with the new
+      value (measured as a narrower day window on the grouped list). The
+      action bar carries the active query as `│ <name>`, and once a
+      shortcut is bound as `│ <name> [f5]` — not `Filter: <name>`, as
+      this box used to claim. Enter and Ctrl+Enter both submit; the
+      form's own hint line advertises `[ Ctrl+↵ → Apply ]`.
+- [x] Query with `${from}` (no default, therefore required): the label
+      reads `from (required)` and the field is empty. Submitting it empty
+      keeps the popup open and puts the inline error `⚠ This field is
+    required` where the submit hint was — the form driver's own
+      wording, not `'from' is required`. A value plus Enter → reload.
+- [x] `Apply` from the `q m` query menu on a query with variables → the
+      same popup and the same behaviour as the shortcut; both are
+      `force_popup` entry points, so the popup appears even when every
+      variable has a default. It is pre-filled from the query's own
+      defaults, not from the values used the last time it ran.
+- [x] `:query apply --var from=<date> -t Trackings:trackings <name>` → no
+      popup, a direct reload bound to that value. Suitable for scripts.
+- [x] Two `--var` arguments on a query with two variables → both are
+      bound, and neither has to precede `-t`:
+      `--var until=<date> -t Trackings:trackings --var from=<date> <name>`
+      binds both. `parse_query_apply_args` loops over the leading flags
+      in any order and takes the remainder as the query name.
+- [x] `:query apply -t Trackings:trackings <name>` without `--var` on a
+      query whose variables all carry defaults → no popup, reload with
+      the defaults.
+- [x] The same command on a query with one required variable and no
+      `--var` for it → the popup opens: `needs_popup` also fires when a
+      variable without a default is unbound.
+- [x] `--var` without a `k=v` pair → modal error, and the two spellings
+      differ: `--var oops` → `:query apply — --var expects k=v`, while
+      `--var=oops` → `:query apply — --var key is empty` (the `=` stays
+      in the token, so the key parses as empty rather than the pair as
+      missing).
+- [x] Saved query without `${...}` → unchanged: no popup, direct reload.
+- [x] While the popup is open it swallows the keys that would otherwise
+      act on the tab: `2` and `q` land in the text field as characters
+      instead of switching tab and opening which-key, `f10` does nothing,
+      and only Esc closes it — without a reload.
 
 ## EditSession — query menu (all three tabs)
 
