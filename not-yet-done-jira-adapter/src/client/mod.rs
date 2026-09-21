@@ -1,7 +1,8 @@
 //! Jira REST API client — fetches issues via JQL.
 //!
 //! Split into submodules by concern: `search` (issues + JQL), `comments`,
-//! `attachments`, `projects`, `transitions`, `users`. The client itself
+//! `attachments`, `projects` (projects, their issue types and versions),
+//! `transitions`, `users`. The client itself
 //! (struct + auth + `current_user`) lives in this file along with private
 //! DTOs shared across submodules (`Assignee`, `NameField`).
 
@@ -29,7 +30,7 @@ pub use comments::JiraComment;
 pub use create::CreateIssueFields;
 use fields::CustomField;
 pub use links::{JiraIssueLink, JiraLinkType};
-pub use projects::JiraIssueType;
+pub use projects::{JiraIssueType, JiraProject, JiraVersion};
 pub use search::{JiraIssueDetail, JiraTicket};
 pub use transitions::JiraTransition;
 pub use users::JiraUser;

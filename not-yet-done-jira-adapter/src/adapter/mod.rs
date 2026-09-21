@@ -39,7 +39,10 @@ use cache::{JiraCache, fetch_comments, fetch_issue, hydrate_from_db};
 use comment::JiraCommentNode;
 use issue::JiraIssueNode;
 use link::JiraLinkNode;
-use types::{bookmark_node_type, issue_node_type, label_node_type, user_node_type};
+use project::{JiraProjectNode, JiraVersionNode};
+use types::{
+    bookmark_node_type, issue_node_type, label_node_type, project_node_type, user_node_type,
+};
 use util::other_err;
 
 /// File-name suffix for a saved-query body: Jira queries are JQL.
@@ -198,6 +201,24 @@ impl ContentAdapter for JiraAdapter {
                     issue_key.to_string(),
                 )));
             }
+            if let Some(version_id) = rest.strip_prefix("version/") {
+                // `{project key}/version/{id}` — the composite the version
+                // rows carry. The head is a project, not an issue, so this
+                // arm comes before the issue-level ones would misread it.
+                let version = client
+                    .project_versions(issue_key)
+                    .await
+                    .map_err(other_err)?
+                    .into_iter()
+                    .find(|v| v.id == version_id)
+                    .ok_or_else(|| {
+                        other_err(format!("Version {version_id} not found in {issue_key}"))
+                    })?;
+                return Ok(Box::new(JiraVersionNode::new(
+                    issue_key.to_string(),
+                    version,
+                )));
+            }
             if let Some(link_id) = rest.strip_prefix("link/") {
                 let links = client.get_issue_links(issue_key).await.map_err(other_err)?;
                 let link = links
@@ -210,6 +231,13 @@ impl ContentAdapter for JiraAdapter {
                     issue_key.to_string(),
                 )));
             }
+        }
+        // A bare id is either an issue key or a project key, and the hyphen
+        // tells them apart (see `project::looks_like_project_key`). A
+        // project node costs no call — its versions are fetched only when
+        // something is listed under it.
+        if project::looks_like_project_key(id) {
+            return Ok(Box::new(JiraProjectNode::from_key(client, id.to_string())));
         }
         // Lazy: build the node with the key only. The full detail is
         // fetched on first `detail()` await — child operations like
@@ -229,8 +257,9 @@ impl ContentAdapter for JiraAdapter {
 
     /// The single source of truth about what lives under a Jira node: the
     /// root lists `jira:issue` / `jira:bookmark` / `jira:label` / `jira:user`
-    /// rows; an issue lists `jira:comment` / `jira:attachment` / `jira:link`
-    /// children; those three are leaves. Each `list` callback fetches lazily
+    /// / `jira:project` rows; a project lists its `jira:version` children;
+    /// an issue lists `jira:comment` / `jira:attachment` / `jira:link`
+    /// children; those four are leaves. Each `list` callback fetches lazily
     /// through the same free functions the legacy per-node `list` delegates to,
     /// reconstructing state from adapter fields (`auth`/`cache`/`bookmarks`/
     /// `bookmark_marker`) plus `node.id()` (the issue key for a `jira:issue`),
@@ -285,7 +314,33 @@ impl ContentAdapter for JiraAdapter {
                         })
                     }),
                 },
+                Child {
+                    node_type: project_node_type(),
+                    columns: project::project_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let (client, _busy) = self.fetching("Loading projects").await?;
+                            project::list_projects(&client, params).await
+                        })
+                    }),
+                },
             ],
+            // A project's children are its versions — the level that knows
+            // whether a release has shipped. The project key is the node's
+            // id, so nothing but the client is needed to fetch them.
+            "jira:project" => {
+                let key = node.id().to_string();
+                vec![Child {
+                    node_type: types::version_node_type(),
+                    columns: project::version_columns(),
+                    list: Box::new(move |params| {
+                        Box::pin(async move {
+                            let (client, _busy) = self.fetching("Loading versions").await?;
+                            project::list_versions(&client, &key, params).await
+                        })
+                    }),
+                }]
+            }
             "jira:issue" => {
                 // The issue key is the node's id (a `get_by_id`/`get_child`
                 // node carries it directly); the comment/attachment listings
