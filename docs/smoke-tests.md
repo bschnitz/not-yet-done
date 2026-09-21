@@ -361,9 +361,10 @@ Every tick below was read that way, not from a screenshot.
       under the matching scripts directory
 - [ ] The new-script template follows the scope of the level: on a
       `scope: filtered_set` level it shows the batch shape
-      (`tracking_ids` + the date bounds), not the node shape. **Known
-      deviation:** the generic `{"node": …}` template is used everywhere,
-      and no shipped view sets `script_template`.
+      (`tracking_ids` + the date bounds), on a `scope: table` level the
+      table shape, and a view's own `script_template` still wins over
+      all three. (Implemented — `script.batch_template` /
+      `script.table_template` in `tui.yaml`; not yet driven live.)
 - [x] `+name` as input + Enter → forces CreateNew even when `name`
       matches an existing script (the editor then holds the template, not
       the file — saving overwrites)
@@ -452,7 +453,7 @@ Every tick below was read that way, not from a screenshot.
   - If the parent path (`/work/.../<slug>/tickets`) does not exist at
     all: a modal error from the script (stderr).
 - [x] `:tree-find` directly (without a script): `:tree-find "Tasks"
-    <text>` (a description substring) jumps to tasks and parks on the
+  <text>` (a description substring) jumps to tasks and parks on the
       first match; `n`/`N` cycle through the others (the status bar
       counts them, e.g. `n/N Tree find "…": 2/4`). The same command
       with `id:<uuid>` instead of the text parks exactly on that node.
