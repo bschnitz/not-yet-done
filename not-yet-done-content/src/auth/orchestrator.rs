@@ -734,9 +734,13 @@ impl AuthOrchestrator {
                         .collect());
                 }
                 PluginSaid::Failed(message) => {
+                    // The plugin's own sentence, and where the rest of the
+                    // story is: what it printed on the way is in its log,
+                    // and a login that failed is exactly when that matters.
+                    let log = session.log_path().display().to_string();
                     session.finish().await;
                     return Err(AuthError::Credential(CredentialError::ProviderError(
-                        format!("auth plugin `{name}`: {message}"),
+                        format!("auth plugin `{name}`: {message}; see {log}"),
                     )));
                 }
             }

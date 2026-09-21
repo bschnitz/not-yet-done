@@ -148,10 +148,11 @@ and lists.
 One JSON object per line, both ways. **stdout is the protocol, stderr is the
 log**, and they are never mixed — a plugin that prints a diagnostic to stdout
 breaks the conversation, which is why it has somewhere else to print it.
-Unlike a credential script's, that stderr is inherited rather than captured
-and quoted back on failure: a long-lived process writing into a pipe nobody
-drains until it exits would eventually block on a full one. A plugin that
-wants something shown to the user says `error`.
+Unlike a credential script's, that stderr is not captured and quoted back on
+failure: a long-lived process writing into a pipe nobody drains until it
+exits would eventually block on a full one. It goes to a file of the plugin's
+own instead — see the amendment below, which is also why it is not simply
+inherited. A plugin that wants something shown to the user says `error`.
 
 nyd writes:
 
@@ -174,8 +175,8 @@ The plugin writes:
 
 `protocol: 1` is in `start` rather than in a handshake round-trip: a plugin
 that cannot speak the version answers `error` and costs no extra exchange.
-A non-zero exit before `result` aborts with stderr as the message, as it does
-for a credential script.
+A non-zero exit before `result` aborts, naming the plugin's log file — not
+quoting its stderr, as a credential script's abort does.
 
 ```mermaid
 sequenceDiagram
@@ -322,3 +323,34 @@ share one script.
 - **A plugin that reports nothing behaves like today's script**: one opaque
   step, one deadline, `result` at the end. Everything the protocol adds is
   something a plugin may decline to use.
+
+## Amendment (2026-09-21) — a plugin's stderr goes to a file, not to the terminal
+
+"stderr is inherited" is true of every process by default and was never a
+decision; it became one the first time the process at the top of the chain
+owned the screen. nyd's TUI runs in the alternate screen buffer, an auth
+plugin starts a browser, and the browser is Chromium: its warnings went up the
+inherited stderr and landed across the task tree, which redraws nothing back.
+The user saw lines like
+`WARNING:net/extras/sqlite/sqlite_persistent_store_backend_base.cc:179` spliced
+between their tasks.
+
+The fix belongs at the top hop, and only there. nyd starts the plugin, so nyd
+decides where the plugin's log goes: `<log dir>/plugin-<name>.log`, in the
+directory `logging.directory` already names (`NYD_LOG_DIR` and the temp
+directory as the fallbacks — the same resolution nyd's own daily log uses, now
+`http_log::log_directory`). The plugin then inherits _that_, and everything it
+starts inherits it in turn, so the whole chain writes to one file without a
+second rule anywhere below.
+
+A file, rather than a pipe, for the reason the protocol section already gives:
+a pipe nobody drains blocks the child that fills it, and the parent here is
+busy waiting for that very child. A file needs no reader, can be tailed while
+the login runs, outlives the process, and has a path that can be named — which
+is what a failing plugin's message now does, so "the login failed" comes with
+somewhere to look.
+
+The mechanics — roll the file over before a child starts, keep exactly one
+previous generation, fall back to `/dev/null` when it cannot be opened — are
+in `child-log`, a crate of its own: `not-yet-done-office365-web` had already
+written them once for the browser it starts, and this was the second caller.

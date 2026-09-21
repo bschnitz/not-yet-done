@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use child_log::ChildLog;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -49,12 +50,6 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long a freshly started browser gets to open its socket.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How large `browser.log` may be before a starting browser sets it aside. The browser's
-/// stderr is append-only and nobody trims it, so without this one run's noise is kept
-/// forever; one previous generation is kept as `browser.log.1`, so a crash that happened
-/// just before a restart is still readable.
-const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How long, after `flow_run` was answered, the run has to actually start. A run that the
 /// pre-flight check refused — a value nobody can produce — answers with the refusal and
@@ -450,15 +445,9 @@ impl Browser {
         std::fs::create_dir_all(&config.profile_dir).ok();
 
         // The browser logs to stderr. Into a file in the profile directory — inheriting it
-        // would corrupt a TUI's alternate screen, and a file can be tailed.
-        let log_path = config.profile_dir.join("browser.log");
-        roll_over(&log_path);
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map(std::process::Stdio::from)
-            .unwrap_or_else(|_| std::process::Stdio::null());
+        // would corrupt a TUI's alternate screen, and a file can be tailed. See `child_log`
+        // for the whole of that argument.
+        let log = ChildLog::at(config.profile_dir.join("browser.log"));
 
         let mut cmd = Command::new(&config.browser.bin);
         if config.headless {
@@ -469,7 +458,7 @@ impl Browser {
             .env("DRUNKEN_BROWSER_DATA", &config.profile_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(log)
+            .stderr(log.stdio())
             // Its own process group, so teardown can reach the browser and every process
             // it spawned in one signal.
             .process_group(0);
@@ -482,7 +471,7 @@ impl Browser {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(MsOfficeError::Browser(format!(
                     "the browser exited before opening its socket ({status}); see {}",
-                    log_path.display()
+                    log.path().display()
                 )));
             }
             if let Ok(link) = Link::connect(&socket).await {
@@ -621,19 +610,6 @@ fn said(answer: &Value) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Null) | None => String::new(),
         Some(other) => other.to_string(),
-    }
-}
-
-/// Set `path` aside if it has grown past `MAX_LOG_BYTES`, so the browser about to start
-/// appends to an empty file. Exactly one generation is kept: `browser.log.1` is overwritten,
-/// never chained, because the interesting window is always the last two runs.
-///
-/// Every step is best-effort. A log that cannot be rotated is not a reason to refuse to
-/// start a browser — the caller falls back to `Stdio::null()` if even opening it fails.
-fn roll_over(path: &Path) {
-    let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG_BYTES);
-    if too_big {
-        let _ = std::fs::rename(path, path.with_extension("log.1"));
     }
 }
 
@@ -845,37 +821,6 @@ mod tests {
 
     fn line(message: &str) -> Value {
         serde_json::from_str(message).expect("a JSON line")
-    }
-
-    // --- the log the browser writes ---
-
-    #[test]
-    fn a_small_log_is_left_alone_and_a_large_one_is_set_aside() {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let log = dir.path().join("browser.log");
-        let kept = dir.path().join("browser.log.1");
-
-        std::fs::write(&log, b"short").expect("write");
-        roll_over(&log);
-        assert_eq!(std::fs::read(&log).expect("still there"), b"short");
-        assert!(!kept.exists(), "nothing to keep yet");
-
-        std::fs::write(&log, vec![b'x'; MAX_LOG_BYTES as usize + 1]).expect("write");
-        roll_over(&log);
-        assert!(!log.exists(), "the oversized log was moved out of the way");
-        assert_eq!(std::fs::metadata(&kept).expect("kept").len(), MAX_LOG_BYTES + 1);
-
-        // A second rotation overwrites the kept generation instead of chaining.
-        std::fs::write(&log, vec![b'y'; MAX_LOG_BYTES as usize + 2]).expect("write");
-        roll_over(&log);
-        assert_eq!(std::fs::metadata(&kept).expect("kept").len(), MAX_LOG_BYTES + 2);
-        assert!(!dir.path().join("browser.log.1.1").exists());
-    }
-
-    #[test]
-    fn rotating_a_log_that_is_not_there_is_not_an_error() {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        roll_over(&dir.path().join("browser.log"));
     }
 
     // --- sorting lines ---

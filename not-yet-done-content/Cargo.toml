@@ -8,6 +8,7 @@ mock = []
 
 [dependencies]
 async-trait = { workspace = true }
+child-log = { workspace = true }
 chrono = { workspace = true }
 fieldsmith = { workspace = true }
 dirs = { workspace = true }

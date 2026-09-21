@@ -22,11 +22,14 @@
 //! - `error` — give up, here is why.
 //!
 //! **stdout is the protocol, stderr is the log.** A plugin's diagnostics go
-//! to stderr, which it inherits from the process it runs in; unlike a
-//! credential script's, they are not collected and quoted back on failure,
-//! because a long-lived process writing into a pipe nobody drains until it
-//! exits would eventually block on a full one. A plugin that wants something
-//! shown to the user says `error`.
+//! to stderr, and from there into a file of its own in nyd's log directory
+//! (`<log dir>/plugin-<name>.log`) — not, unlike a credential script's, into
+//! a pipe quoted back on failure: a long-lived process writing into a pipe
+//! nobody drains until it exits would eventually block on a full one, and
+//! the terminal nyd inherited may be a TUI's alternate screen, where a
+//! child's line lands across the drawing and stays there. The file is named
+//! in the error when a plugin fails, and can be tailed while one runs. A
+//! plugin that wants something shown to the user says `error`.
 //!
 //! Secrets travel in `result` and nowhere else: `step`, `attention` and
 //! `form` reach the status channel, the log and possibly a desktop
@@ -36,6 +39,8 @@
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
+
+use child_log::ChildLog;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -211,6 +216,8 @@ pub struct PluginSession {
     /// How the plugin is named in messages — configured by hand, so which
     /// one is misbehaving is the useful half.
     who: String,
+    /// Where the plugin's stderr went, so a failure can say where to look.
+    log: ChildLog,
     request: Vec<String>,
     child: Child,
     stdin: ChildStdin,
@@ -226,14 +233,16 @@ impl PluginSession {
         session: Option<&str>,
     ) -> Result<Self, CredentialError> {
         let who = format!("auth plugin `{name}`");
+        // See the module doc: the log is not the protocol, a pipe nobody
+        // drains is a pipe that eventually blocks, and the stderr this
+        // process inherited may belong to a TUI holding the screen.
+        let log = ChildLog::named(crate::http_log::log_directory(), &format!("plugin-{name}"));
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
             .arg(command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // See the module doc: the log is not the protocol, and a pipe
-            // nobody drains is a pipe that eventually blocks.
-            .stderr(Stdio::inherit())
+            .stderr(log.stdio())
             // A backstop for the paths that cannot await a shutdown — a
             // dropped session must not leave a browser running.
             .kill_on_drop(true);
@@ -251,6 +260,7 @@ impl PluginSession {
 
         let mut me = Self {
             who,
+            log,
             request: request.iter().map(|f| (*f).to_string()).collect(),
             child,
             stdin,
@@ -263,6 +273,12 @@ impl PluginSession {
         })
         .await?;
         Ok(me)
+    }
+
+    /// Where the plugin's own diagnostics went — the file to point somebody
+    /// at when what it said is not enough.
+    pub fn log_path(&self) -> &std::path::Path {
+        self.log.path()
     }
 
     /// The plugin's next word, waited for no longer than `patience`.
@@ -283,9 +299,10 @@ impl PluginSession {
                 }
                 Err(_) => {
                     return Err(CredentialError::ProviderError(format!(
-                        "{} said nothing for {}s",
+                        "{} said nothing for {}s; what it was doing is in {}",
                         self.who,
-                        patience.as_secs()
+                        patience.as_secs(),
+                        self.log.path().display()
                     )));
                 }
             };
@@ -363,8 +380,10 @@ impl PluginSession {
             _ => String::new(),
         };
         CredentialError::ProviderError(format!(
-            "{} stopped talking before it said `result` or `error`{status}",
-            self.who
+            "{} stopped talking before it said `result` or `error`{status}; \
+             its own account of it is in {}",
+            self.who,
+            self.log.path().display()
         ))
     }
 }

@@ -21,6 +21,7 @@ edition = "2024"
 # yielded — so the Rust side holds no browser automation at all.
 
 [dependencies]
+child-log  = { workspace = true }
 chrono     = { workspace = true, features = ["serde"] }
 serde      = { workspace = true }
 serde_json = { workspace = true }

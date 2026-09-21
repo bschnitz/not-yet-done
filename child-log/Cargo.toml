@@ -1,0 +1,12 @@
+[package]
+name = "child-log"
+version = "0.1.0"
+edition = "2024"
+description = "Give a child process's stderr a file it can be tailed in, rolled over when it grows too large."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bschnitz/not-yet-done"
+keywords = ["process", "stderr", "log", "rotate", "stdio"]
+categories = ["command-line-interface", "filesystem"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -224,10 +224,7 @@ fn resolve_logger() -> Option<Logger> {
         return Some(Logger::new(Target::Fixed(PathBuf::from(path)), verbose));
     }
 
-    let dir = std::env::var_os("NYD_LOG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| cfg.map(|c| c.directory.clone()))
-        .unwrap_or_else(std::env::temp_dir);
+    let dir = log_directory();
     let retention_days = std::env::var("NYD_LOG_RETENTION_DAYS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -240,6 +237,21 @@ fn resolve_logger() -> Option<Logger> {
         },
         verbose,
     ))
+}
+
+/// Where nyd writes what somebody may want to read afterwards: its own daily
+/// log files, and the stderr of the child processes it starts.
+///
+/// `NYD_LOG_DIR` first, then what the host configured at startup, then the
+/// temp directory — the same precedence the logger itself resolves with, and
+/// public because a child's log has to land in the same place whether or not
+/// nyd is logging at all. A child writing across a TUI's alternate screen is
+/// a problem that does not wait for `logging.enabled`.
+pub fn log_directory() -> PathBuf {
+    std::env::var_os("NYD_LOG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| CONFIGURED.get().map(|c| c.directory.clone()))
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Delete rotating log files older than the retention window (`retention_days`

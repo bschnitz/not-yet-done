@@ -76,9 +76,11 @@ impl Browser {
             .arg("-c")
             .arg(&line)
             .stdin(Stdio::null())
-            // Its log is our log is nyd's log, all on the stderr this
-            // process inherited. A pipe would have to be drained by
-            // somebody, and nobody here is free to.
+            // Its log is our log, on the stderr this process inherited --
+            // which nyd points at a file of this plugin's own, so the two
+            // logs land in one readable place and neither reaches a
+            // terminal. A pipe would have to be drained by somebody, and
+            // nobody here is free to.
             //
             // Not stdout, though, whatever the browser puts there: this
             // process's stdout IS the line protocol nyd reads, and a child
@@ -117,7 +119,7 @@ impl Browser {
                     "`{line}` exited ({status}) without opening a socket \
                      -- another browser may already be holding the profile \
                      (a login of its own still running?); its reason is on \
-                     nyd's stderr"
+                     this plugin's stderr"
                 ));
             }
             if tokio::time::Instant::now() >= deadline {
