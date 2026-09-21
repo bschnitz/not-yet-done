@@ -18428,6 +18428,46 @@ mod tests {
     }
 
     #[test]
+    fn focus_node_parks_by_display_row_not_items_index() {
+        // A grouped flat view interleaves `── <group>` header rows with its
+        // data rows, so the display row and the `items` index drift apart by
+        // one per group above the match. The grouped build already records
+        // that mapping in `filtered_indices` (`usize::MAX` on a header row),
+        // and the cursor is a display-row cursor — parking by `items` index
+        // would land it short of the match on every grouped view.
+        let config = uniform_recursive_config();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane_id = view.active_pane_id();
+        let pane = view.active_pane_mut();
+        pane.tree = None;
+        pane.items = vec![
+            tnode_val("a", "Alpha", "1"),
+            tnode_val("b", "Beta", "2"),
+            tnode_val("c", "Gamma", "3"),
+        ];
+        // `── G1 ─ | a | ── G2 ─ | b | c` — "Gamma" is item 2 but row 4.
+        pane.filtered_indices = vec![usize::MAX, 0, usize::MAX, 1, 2];
+        let rows: Vec<TableWidgetRow> = (0..pane.filtered_indices.len())
+            .map(|_| TableWidgetRow::new(vec![TableWidgetCell::plain("x".to_string())]))
+            .collect();
+        pane.table.set_data(
+            rows,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            ColumnStyles::default(),
+            TableStyle::new(),
+            StyleMap::default(),
+            "  ",
+        );
+
+        let segments = crate::views::focus_node::parse_path("/label|Gamma", false).unwrap();
+        assert!(view.focus_node_in_pane(pane_id, &segments).is_ok());
+        assert_eq!(view.active_pane().table.selected_row(), 4);
+        assert_eq!(view.active_pane().selected_item_id(), Some("c"));
+    }
+
+    #[test]
     fn focus_node_queued_on_a_pane_fires_once() {
         // The command queues its path when the target pane has no rows
         // yet; the load handler takes it exactly once.
