@@ -4,11 +4,17 @@
 //!
 //! This crate is the single source of truth for **where** a view level's
 //! scripts live on disk and the flat create/read/update/delete/rename kernel
-//! over them. It deliberately knows nothing about *how* a script is executed
-//! (external process, `# mode:` header, JSON payload) or *how* a chord is
-//! bound to it — those stay with the embedder (the TUI). Keeping the storage
-//! kernel here lets the TUI menu and the CLI adapter-action share one
-//! implementation instead of each re-deriving the path scheme.
+//! over them, and for the **execution kernel**: reading the `# key: value`
+//! header ([`header`]) and driving a form script's rounds ([`form_run`]) —
+//! payload file, process, `$NYD_OUTPUT_FILE`. Keeping both here lets the TUI
+//! menu and the CLI share one implementation instead of each re-deriving the
+//! path scheme and rebuilding the round loop beside the other's copy.
+//!
+//! What stays with the embedder is everything *around* a run: which menu or
+//! chord started it, whether the terminal is yielded, what is done with a
+//! `commands` answer, and who shows the form. The kernel runs a script; it
+//! does not decide when or why, and it waits for no user — [`form_run`]
+//! hands one round back at a time so an event loop keeps turning.
 //!
 //! # The path scheme (must match the historical TUI layout)
 //!
@@ -37,6 +43,9 @@ use std::path::{Path, PathBuf};
 
 mod decorator;
 pub use decorator::*;
+
+pub mod form_run;
+pub mod header;
 
 /// Filesystem-safe form of one raw view-path segment: `/` and `:` → `_`. The
 /// single source of truth for how a node type becomes a directory name, shared

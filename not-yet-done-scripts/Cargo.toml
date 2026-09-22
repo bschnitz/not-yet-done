@@ -9,6 +9,8 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 fieldsmith = { path = "../fieldsmith" }
 not-yet-done-content = { path = "../not-yet-done-content" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

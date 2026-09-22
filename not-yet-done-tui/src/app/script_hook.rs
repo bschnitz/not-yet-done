@@ -711,7 +711,8 @@ fn apply_row_order(
 
 /// Why `path` cannot run as a hook, or `None` when it can. Hooks run
 /// unattended while a load lands, so only the two modes that need neither
-/// the terminal nor an editor are allowed: `background` and `commands`.
+/// the terminal, an editor nor a user are allowed: `background` and
+/// `commands`.
 fn hook_mode_rejection(path: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let mode = parse_script_mode(&content);
@@ -720,6 +721,11 @@ fn hook_mode_rejection(path: &str) -> Option<String> {
     }
     if mode.captures_output() {
         return Some("capture-mode scripts cannot run as a hook".to_string());
+    }
+    if mode.is_form() {
+        // A form is a conversation, and a hook fires while a load lands —
+        // there is nobody at the other end of it.
+        return Some("form scripts cannot run as a hook".to_string());
     }
     None
 }

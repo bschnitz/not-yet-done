@@ -1074,6 +1074,17 @@ impl App {
         let output_suffix = parse_script_output_suffix(&script_content);
         let stdin_json = ctx.build_json();
 
+        if mode.is_form() {
+            // Wiring the round loop to the form popup is its own step; until
+            // then, running it as a background script would start the
+            // conversation and throw away the form it answered with.
+            self.notify_error(format!(
+                "{} is a form script, which the TUI cannot show yet",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            return EditorRequest::None;
+        }
+
         let child_env = self.child_env_for_script(ctx);
         if mode.is_interactive() {
             let interactive_cmd = self.config.script.interactive_command.clone();

@@ -4664,7 +4664,9 @@ dependencies = [
  "dirs",
  "fieldsmith",
  "not-yet-done-content",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
 ]
 

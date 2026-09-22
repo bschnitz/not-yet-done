@@ -116,80 +116,12 @@ impl EditorRequest {
     }
 }
 
-/// How a tracking script interacts with the terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScriptMode {
-    /// No terminal output. Stderr shown in notification bar.
-    Background,
-    /// Output captured and shown in editor afterwards.
-    Capture,
-    /// TUI yields terminal to script (interactive).
-    Interactive,
-    /// Interactive + output captured in editor.
-    InteractiveCapture,
-    /// Background-style execution that, after the script exits, reads
-    /// `$NYD_OUTPUT_FILE` as JSON `{ "commands": [".."], … }` and feeds
-    /// each entry to [`crate::app::App::execute_cmdline`]. Extra JSON
-    /// keys are tolerated for forward-compatibility.
-    Commands,
-    /// Interactive variant of [`ScriptMode::Commands`] — TUI yields the
-    /// terminal, and post-exit the output file is parsed as commands.
-    InteractiveCommands,
-}
-
-impl ScriptMode {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.trim() {
-            "background" => Some(Self::Background),
-            "capture" => Some(Self::Capture),
-            "interactive" => Some(Self::Interactive),
-            "interactive+capture" => Some(Self::InteractiveCapture),
-            "commands" => Some(Self::Commands),
-            "interactive+commands" => Some(Self::InteractiveCommands),
-            _ => None,
-        }
-    }
-
-    pub fn is_interactive(self) -> bool {
-        matches!(
-            self,
-            Self::Interactive | Self::InteractiveCapture | Self::InteractiveCommands
-        )
-    }
-
-    pub fn captures_output(self) -> bool {
-        matches!(self, Self::Capture | Self::InteractiveCapture)
-    }
-
-    /// True when the script's output file should be parsed as a JSON
-    /// command list rather than displayed as text.
-    pub fn emits_commands(self) -> bool {
-        matches!(self, Self::Commands | Self::InteractiveCommands)
-    }
-}
-
-/// The value of a `# <key>: <value>` header line, searched in the first few
-/// lines of a script and accepting every comment prefix the supported script
-/// languages use. The one place the header syntax is defined; the typed
-/// parsers below differ only in the key they ask for.
-fn script_header_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
-    content.lines().take(10).find_map(|line| {
-        let trimmed = line.trim();
-        let after = trimmed
-            .strip_prefix('#')
-            .or_else(|| trimmed.strip_prefix("//"))
-            .or_else(|| trimmed.strip_prefix("--"))
-            .or_else(|| trimmed.strip_prefix(";;"))?;
-        after.trim().strip_prefix(key).map(str::trim)
-    })
-}
-
-/// Parse `# mode: <mode>` from the first few lines of a script.
-pub fn parse_script_mode(content: &str) -> ScriptMode {
-    script_header_value(content, "mode:")
-        .and_then(ScriptMode::from_str)
-        .unwrap_or(ScriptMode::Background)
-}
+// The header syntax, `ScriptMode` and the parsers that do not need a TUI type
+// live in `not-yet-done-scripts`, so the CLI reads a script the same way. They
+// are re-exported here because the modes are handled all over this module.
+pub use not_yet_done_scripts::header::{
+    ScriptMode, header_value, parse_output_suffix as parse_script_output_suffix, parse_script_mode,
+};
 
 /// Parse `# scope: <node|filtered_set|table>` from the script header — the
 /// payload the script wants.
@@ -204,26 +136,12 @@ pub fn parse_script_mode(content: &str) -> ScriptMode {
 /// `None` when the script declares nothing, which keeps the action's setting
 /// authoritative for every script written before this existed.
 pub fn parse_script_scope(content: &str) -> Option<ScriptScope> {
-    match script_header_value(content, "scope:")? {
+    match header_value(content, "scope:")? {
         "node" => Some(ScriptScope::Node),
         "filtered_set" => Some(ScriptScope::FilteredSet),
         "table" => Some(ScriptScope::Table),
         _ => None,
     }
-}
-
-/// Parse `# output: <ext>` from the script header — the file extension the
-/// captured-output viewer should use for its temp buffer. The extension drives
-/// syntax highlighting and Markdown preview, so a report-style script that
-/// emits Markdown declares `# output: md` to be rendered as Markdown rather
-/// than plain text. The leading dot is optional (`md` and `.md` both work).
-/// Defaults to `.txt`. Only meaningful for capture-mode scripts.
-pub fn parse_script_output_suffix(content: &str) -> String {
-    script_header_value(content, "output:")
-        .map(|ext| ext.trim_start_matches('.'))
-        .filter(|ext| !ext.is_empty())
-        .map(|ext| format!(".{ext}"))
-        .unwrap_or_else(|| ".txt".to_string())
 }
 
 // ---------------------------------------------------------------------------
