@@ -6405,12 +6405,14 @@ level, running the same ascent `Backspace` runs.
       and `Backspace` and `h` are equally dead; with `back: null` removed from
       the copy the same crumb turns accent-coloured and climbs — into exactly
       the two-identical-panes state the guard exists to prevent.
-- [ ] **Open:** the mail message list guards the same thing with
-      `action_chains: { backspace: [window.close] }` instead of
-      `keybindings: { back: null }`. That shadows the _key_, not the action, so
-      the level still counts as climbable and its crumbs stay live. Either the
-      level says `back: null` as well, or the guard has to read action chains
-      too — a config question, not a code one.
+- [ ] **Login-blocked:** the same on the mail message list, the other level
+      that must not be climbed. It guards itself twice over — its action chains
+      send `backspace` and `h` to `window.close`, _and_ it sets
+      `keybindings: { back: null }` — so the rule measured on the SQLite level
+      applies unchanged and its crumbs have to be dim. Only the confirmation on
+      screen is missing, and that needs a reachable account. (An action chain on
+      its own would not be enough: it shadows the _key_, not the action, and the
+      climb gate reads the binding.)
 - [x] Click the **last** crumb (the level you are on) and the child-type crumb
       behind it: nothing happens, nothing reloads.
 - [x] Click a **separator** (`›`) between two crumbs: nothing happens.
