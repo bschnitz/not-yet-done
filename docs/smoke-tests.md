@@ -6324,14 +6324,24 @@ connectors and the `▶` / `▼` arrow. A single click there is the same toggle
 - [x] Fold a row whose subtree is long, so the rows below jump up, and click the
       marker of the row now under the pointer: it toggles that row — the
       geometry is the one of the frame you are looking at.
-- [ ] Scroll horizontally (`h` / `l` with a column cursor, or a narrow window)
-      so the label column moves: the marker still sits on the arrow you see,
-      not at the old x.
-- [ ] With **smooth scrolling** on, scroll so a tree row's top line is cut off
-      by the top edge: clicking where its arrow would be selects rather than
-      folds — no connector is visible there.
-- [ ] In a view with **multiline rows**, click the second line of a foldable
-      row at the marker's x: it selects, it does not fold.
+- [x] Move the label column sideways so the arrow lands on a different x: the
+      marker goes with it. Measured by hiding, in the column popup, the four
+      columns that sit in front of the tree column — the connector run slid
+      seventeen cells to the left, the arrow folds at its new x, and a click at
+      the old one lands in the label text and only selects. Horizontal
+      **scrolling** cannot be used for this: it is gated on the column cursor,
+      which no tree level turns on, and narrowing the window shrinks the
+      columns instead of panning them.
+- [x] A foldable row is always exactly one line high, so neither way of
+      producing a half-row can arise on it: multi-line rendering — a
+      `row_layout`, a `card:` block, long-text mode (`v`) — is refused in tree
+      mode, and smooth scrolling can only clip a row that is taller than one
+      line. Measured on the tree with a `long_source` wired onto the label
+      column: the hint flips to `v short`, and every row stays one line; with a
+      `card:` block on the same level the toggle is not offered at all. The hit
+      test is written for the case anyway — it asks the painted geometry
+      whether the line is a row's first — so the guarantee does not rest on
+      the configuration alone.
 - [x] Double-click a fold marker fast: the row toggles **once** and stays that
       way — it does not spring back.
 
@@ -6354,7 +6364,7 @@ level, running the same ascent `Backspace` runs.
       the same reason: a coupled split pane _is_ the parent row's list, so
       walking it one level up would turn it into a second copy of the list it
       hangs off. The SQLite row level therefore sets `keybindings: { back:
-    null }`, and the mail message list puts
+  null }`, and the mail message list puts
       `action_chains: { backspace: [window.close] }` on top of it. The back key
       honours both — on the row level it does nothing at all. The crumb climbs
       anyway and leaves exactly the state the config forbids: two panes on the
