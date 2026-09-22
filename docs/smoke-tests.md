@@ -6225,10 +6225,15 @@ one line tall or not flush with the top edge.
       flickers.
 - [x] In a **tree** view with folded and expanded nodes, click a row far down:
       the cursor lands on that row, not on a row counted off the top edge.
-- [ ] In a view with **multiline rows** (a chat log, a long-text column), click
-      the _second_ line of a row: it selects that row, not its neighbour.
-- [ ] With **smooth scrolling** on, scroll so the top row is half cut off, then
-      click the row below it: still the right row.
+- [x] In a view with **multiline rows** (a chat log, a long-text column), click
+      the _second_ line of a row: it selects that row, not its neighbour. The
+      cursor **band**, though, is only ever the row's first line: a click on a
+      continuation line moves the highlight to the line above it, which reads
+      like a miss until you notice the row is the one you clicked.
+- [x] With **smooth scrolling** on, scroll so the top row is half cut off, then
+      click the row below it: still the right row — the clipped lines above
+      are not counted twice. The cut row itself still answers a click on the
+      one line of it you can see, and selecting it pulls it back in whole.
 - [x] Click a **group header** row (a grouped view): the cursor lands on the
       nearest selectable row, the same place `j` stops — it never sits on the
       header.
@@ -6247,8 +6252,9 @@ one line tall or not flush with the top edge.
       sort menu (`c s`). Open `c s` afterwards and it shows both.
 - [x] Click a header of a column the adapter cannot sort on: nothing happens —
       in particular the cursor does not jump to a row.
-- [ ] In **card mode** (no header row), click anywhere in a card: the card is
-      selected, nothing tries to sort.
+- [x] In **card mode** (no header row), click anywhere in a card: the card is
+      selected, nothing tries to sort — including the topmost line on screen,
+      the one a table would have spent on its header.
 
 ### Word and line selection
 
@@ -6364,7 +6370,7 @@ level, running the same ascent `Backspace` runs.
       the same reason: a coupled split pane _is_ the parent row's list, so
       walking it one level up would turn it into a second copy of the list it
       hangs off. The SQLite row level therefore sets `keybindings: { back:
-  null }`, and the mail message list puts
+null }`, and the mail message list puts
       `action_chains: { backspace: [window.close] }` on top of it. The back key
       honours both — on the row level it does nothing at all. The crumb climbs
       anyway and leaves exactly the state the config forbids: two panes on the
