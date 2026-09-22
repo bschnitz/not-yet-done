@@ -6340,21 +6340,35 @@ connectors and the `▶` / `▼` arrow. A single click there is the same toggle
 Only shown once you are drilled into a level. Each crumb goes back to that
 level, running the same ascent `Backspace` runs.
 
-- [ ] Drill two levels deep (twice `Enter` on a row that has children). Click
-      the **root** crumb: you are back at the top level, with the cursor and
-      the scroll position the level had when you left it — the same state the
-      back key restores.
-- [ ] Drill two levels again and click the **middle** crumb: exactly one level
-      up, not all the way out.
-- [ ] Click the **last** crumb (the level you are on) and the child-type crumb
+- [x] Drill two levels deep (twice `Enter` on a row that has children) and
+      click the **middle** crumb: exactly one level up, not all the way out,
+      and the cursor sits on the row you drilled from again. What comes back
+      with it is the selection, not the view: a level the wheel had panned
+      down reopens at whatever offset the restored selection implies, not at
+      the offset you left. The back key restores exactly as much and no more,
+      which is the promise the crumb has to keep.
+- [ ] Click the **root** crumb: you are back at the top level, in the state the
+      back key leaves it in. **Deviation:** the crumb pops the drill frames
+      itself instead of running the level's `content.back`, so a level that
+      redefines back is ignored. The mail message list sets `back: null` and
+      `action_chains: { backspace: [window.close] }` precisely because walking
+      that pane one level up would turn it into a second folder list beside
+      the folder tree — and that is exactly what the crumb does: two panes,
+      both showing the root level, and the back key can close neither. Only
+      `w q` clears it. It happens from one level deep as well, so it is the
+      crumb path as such, not the multi-level climb.
+- [x] Click the **last** crumb (the level you are on) and the child-type crumb
       behind it: nothing happens, nothing reloads.
-- [ ] Click a **separator** (`›`) between two crumbs: nothing happens.
-- [ ] Drag across the whole path and release: the breadcrumb text is copied and
+- [x] Click a **separator** (`›`) between two crumbs: nothing happens.
+- [x] Drag across the whole path and release: the breadcrumb text is copied and
       the selection stays on that line — it is not trapped in one crumb and
-      does not reach into the table below.
+      does not reach into the table below. Dragging on past the last crumb
+      adds no trailing spaces to what is copied.
 - [ ] Narrow the terminal until the path is cut off: the crumbs still on screen
-      work, and clicking past the end of the line does nothing.
-- [ ] At the top level there is no breadcrumb line at all — clicking that row
+      work, and clicking past the end of the line does nothing. (The second
+      half holds at full width — a click past the last crumb leaves the screen
+      byte for byte unchanged.)
+- [x] At the top level there is no breadcrumb line at all — clicking that row
       hits whatever is drawn there instead.
 
 ### Popup modality
