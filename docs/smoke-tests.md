@@ -5347,16 +5347,38 @@ The same branch as in the Postgres tab (shared code in `sql-core`), just with
 `sqlite:` types — so the point here is mainly to check that it hangs there **at
 all** and points at the right file.
 
-- [ ] `DB Scripts` sits next to `Tables` and `Views` under every database,
-      even when no script exists yet.
-- [ ] `a` creates a script, `A` a folder; folders nest to any depth.
-- [ ] Filesystem check:
+- [x] `DB Scripts` sits next to `Tables` and `Views` under every database,
+      even when no script exists yet. Two fresh `.db` files, no script
+      anywhere: both carry the branch.
+- [x] `a a` creates a script, `A` a folder; folders nest to any depth. The
+      key is the chord **`a a`**, not `a` — `a` is the action leader on this
+      level. Both open a one-field form saved with `ctrl+↵`; a folder created
+      on a folder nests (`daily/weekly`), and `a a` on that nested folder
+      writes its script there. After either the cursor leaves the branch and
+      lands back on the database's first child.
+- [x] Filesystem check:
       `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…` —
-      `<key>` is the hashed file key, not the path.
+      `<key>` is the hashed file key, not the path. Measured: the instance id
+      of a single-instance adapter is its own type (`sqlite/sqlite/`), and the
+      key is `<file stem>-<8 hex>`. Folders are real directories under it.
 - [ ] `e` edits in place (a temp file with the `.nyd_tmp_` prefix **inside**
       the script directory), `r` renames (keeping the extension), `M` moves.
-- [ ] `d` on a non-empty folder refuses with "not empty".
-- [ ] **`x` runs and paginates via LIMIT/OFFSET** — that is the deviation from
+      `e` opens the script and `:wq` writes it back to its own file; `r` on
+      `report.sql` renamed to a name typed **without** an extension keeps the
+      `.sql`; `M` with a target folder moves the file and says so. Two things
+      still open. The temp file belongs to the **external** editor path only
+      (`open_editor` writes it; `editor_in_place: true` just puts it next to
+      the script instead of in `$TMPDIR`) — with the builtin editor forced in
+      the smoke config there is none to see, so that half needs a run with
+      `command:` + `inline: true`. And **`M` cannot move anything back to the
+      root**: the field says `Target folder (empty = root)`, but submitting it
+      empty answers `⚠ This field is required` and does nothing.
+- [x] `d` on a non-empty folder refuses with "not empty". It first asks
+      `Delete 'daily'? (y/n)`; `y` then answers
+      `Delete failed: not empty (2 entries)` and the folder is still there.
+- [ ] **`X` runs and paginates via LIMIT/OFFSET** (the config binds `X`, not
+      `x` — the row levels take `x` for the view scripts tab-wide; `↵` runs it
+      too) — that is the deviation from
       Postgres: the result pane is set to `pagination: mode: server`. No error
       such as "sqlite has no cursor pagination"; `>`/`<` page through.
 - [ ] A script under file A accesses a table that only exists in file B → an
