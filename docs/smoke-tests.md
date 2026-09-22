@@ -6165,25 +6165,25 @@ Build and install the default binary — the feature is on by default.
 The point of this part is the **clipping**: a drag must never leave the box it
 started in.
 
-- [ ] Open any popup with enough text in it (the shortcut overview on `o s`,
+- [x] Open any popup with enough text in it (the shortcut overview on `o s`,
       the saved-filter picker on `q`, a script menu). Drag the mouse from
       inside the popup **out over the table behind it** and release: the
       highlight stays inside the popup's frame, no row of the table behind it
       is tinted, and the copied text contains popup lines only.
-- [ ] Same drag, but drag _upwards/backwards_ past the anchor: the same text
+- [x] Same drag, but drag _upwards/backwards_ past the anchor: the same text
       is selected, in the same order.
-- [ ] Drag inside a content pane in a split layout: the selection stops at the
+- [x] Drag inside a content pane in a split layout: the selection stops at the
       pane's focus border and does not bleed into the neighbouring pane.
-- [ ] The copied text has no panel padding on it — paste it somewhere and
+- [x] The copied text has no panel padding on it — paste it somewhere and
       check that the lines start at the first real character and carry no
       trailing spaces. Blank rows at the end of the selection are dropped.
-- [ ] Hold `Alt` while dragging: the selection is a **rectangle** (a column
+- [x] Hold `Alt` while dragging: the selection is a **rectangle** (a column
       block), not flowing text. Useful for taking one table column.
-- [ ] A row with a wide character in it (a tree glyph, an emoji, a CJK title)
+- [x] A row with a wide character in it (a tree glyph, an emoji, a CJK title)
       survives the round trip — pasted, it looks like what was on screen.
-- [ ] Press any key after selecting: the highlight disappears. (A highlight
+- [x] Press any key after selecting: the highlight disappears. (A highlight
       left behind over a list that has since scrolled would be a lie.)
-- [ ] Click once somewhere outside every panel: the old selection is dropped
+- [x] Click once somewhere outside every panel: the old selection is dropped
       without anything else happening.
 - [ ] Over SSH (no system clipboard reachable on the remote): the selection
       still lands in the clipboard of the machine you are sitting at, via
@@ -6194,21 +6194,23 @@ started in.
 
 One button does two jobs, so the first thing to check is that they stay apart.
 
-- [ ] Click a **main tab** label: the tab switches, exactly as its number key
+- [x] Click a **main tab** label: the tab switches, exactly as its number key
       would — same view, same focus, same bars.
-- [ ] Click the **active** tab: nothing happens, no reload, no flicker.
-- [ ] Click a **sub-tab** of the active view: it switches and, if that view has
+- [x] Click the **active** tab: nothing happens, no reload, no flicker.
+- [x] Click a **sub-tab** of the active view: it switches and, if that view has
       not been loaded yet, it loads — the same thing its key does.
-- [ ] Click in the **gap between two tab labels** (and in the empty stretch
-      after the last one): nothing switches. The bar is not one big button.
-- [ ] A tab whose label carries an icon or an emoji: clicking the label's last
+- [x] Click the **padding** around a tab label: the two spaces a label is drawn
+      with belong to its button, so this still switches to that tab — there is
+      no dead gap between two labels. Only past the **last** label is the bar
+      dead: nothing switches there. Either way it is not one big button.
+- [x] A tab whose label carries an icon or an emoji: clicking the label's last
       character still hits that tab and not its neighbour.
-- [ ] In a split layout, click into an **unfocused pane**: it takes the focus,
+- [x] In a split layout, click into an **unfocused pane**: it takes the focus,
       the focus border moves, and the action bar switches to that pane's
       shortcuts. The keys then act on it.
-- [ ] Press the mouse inside a pane, drag a few cells, release: that is a
+- [x] Press the mouse inside a pane, drag a few cells, release: that is a
       **selection**, not a click — the focus does not jump and no tab changes.
-- [ ] Open a popup (`o s`), then click a tab behind it: the popup keeps the
+- [x] Open a popup (`o s`), then click a tab behind it: the popup keeps the
       input and nothing switches — the same refusal the number key gets.
 
 ### Clicking rows and column headers
@@ -6217,30 +6219,33 @@ The row a click lands on has to be the row that was drawn there — the geometry
 comes from the paint, so the interesting cases are the ones where a row is not
 one line tall or not flush with the top edge.
 
-- [ ] Click a row in a plain table: the cursor moves there and the preview /
+- [x] Click a row in a plain table: the cursor moves there and the preview /
       record detail follows, exactly as walking to it with `j` would.
-- [ ] Click the row the cursor is already on: nothing reloads and nothing
+- [x] Click the row the cursor is already on: nothing reloads and nothing
       flickers.
-- [ ] In a **tree** view with folded and expanded nodes, click a row far down:
+- [x] In a **tree** view with folded and expanded nodes, click a row far down:
       the cursor lands on that row, not on a row counted off the top edge.
 - [ ] In a view with **multiline rows** (a chat log, a long-text column), click
       the _second_ line of a row: it selects that row, not its neighbour.
 - [ ] With **smooth scrolling** on, scroll so the top row is half cut off, then
       click the row below it: still the right row.
-- [ ] Click a **group header** row (a grouped view): the cursor lands on the
+- [x] Click a **group header** row (a grouped view): the cursor lands on the
       nearest selectable row, the same place `j` stops — it never sits on the
       header.
-- [ ] Click into the **empty space** below the last row: nothing moves.
-- [ ] **Double-click** a row: it does what `Enter` does there — drills into a
+- [x] Click into the **empty space** below the last row: nothing moves.
+- [x] **Double-click** a row: it does what `Enter` does there — drills into a
       tree node, opens a message, whatever the view binds. A slow second click
       (over ~0.4 s) does not; three fast clicks activate once, not twice.
-- [ ] Click a **column header**: the table sorts by it ascending, a
-      notification names the column, and the header shows the arrow. Click it
-      again: descending. A third time: the sort is cleared.
-- [ ] Sort by one column via header click, then by a second: the second is
+- [x] Click a **column header**: the table sorts by it ascending, a
+      notification names the column — by its column name, which can differ from
+      the header label — and the header shows the arrow. Click it again:
+      descending. A third time: the sort is cleared and the row order is the one
+      from before. Note that the arrow widens the header cell, so the hit zones
+      of the headers beside it shift by a column.
+- [x] Sort by one column via header click, then by a second: the second is
       added, the first is kept — the same additive behaviour as `S` and the
       sort menu (`c s`). Open `c s` afterwards and it shows both.
-- [ ] Click a header of a column the adapter cannot sort on: nothing happens —
+- [x] Click a header of a column the adapter cannot sort on: nothing happens —
       in particular the cursor does not jump to a row.
 - [ ] In **card mode** (no header row), click anywhere in a card: the card is
       selected, nothing tries to sort.
@@ -6251,49 +6256,54 @@ What the terminal used to do with a double and a triple click, now done by the
 app — and clipped to the window under the pointer like every other selection
 here.
 
-- [ ] Double-click a word in a preview or detail pane: the word is highlighted
+- [x] Double-click a word in a preview or detail pane: the word is highlighted
       and on the clipboard, ready to paste elsewhere.
-- [ ] Double-click a ticket key / a path / a URL: it comes out **whole**, not
+- [x] Double-click a ticket key / a path / a URL: it comes out **whole**, not
       cut at the `-`, the `/` or the `:`.
-- [ ] Double-click a word inside quotes or brackets: the quotes and brackets
+- [x] Double-click a word inside quotes or brackets: the quotes and brackets
       stay behind.
-- [ ] Double-click a blank cell or a tree connector: nothing is selected and
-      nothing is copied.
-- [ ] Double-click a word near a popup's edge: the selection stops at the
+- [x] Double-click a blank cell or a tree connector: nothing is selected and
+      nothing is copied. On a foldable tree row the connector is part of the
+      fold zone, so the row toggles once — that is the marker's doing, not a
+      selection.
+- [x] Double-click a word near a popup's edge: the selection stops at the
       edge — it does not read on into the table behind the popup.
-- [ ] **Triple-click** any line: the whole line is selected without the panel's
+- [x] **Triple-click** any line: the whole line is selected without the panel's
       padding, and copied.
-- [ ] Triple-click a **table row**: the row's text is selected — the third
+- [x] Triple-click a **table row**: the row's text is selected — the third
       click selects even where the second one opens.
 - [ ] Double-click a table row: it still opens (`Enter`), it does not select a
       word. Same for a popup entry: it is still picked.
-- [ ] Click once somewhere else afterwards: the highlight goes away.
-- [ ] Click four times fast on the same cell: the run starts over at a single
+- [x] Click once somewhere else afterwards: the highlight goes away.
+- [x] Click four times fast on the same cell: the run starts over at a single
       click instead of escalating further.
 
 Holding a multi-click shows its unit, and dragging out of it keeps that unit:
 
-- [ ] **Double-click and hold** in a preview or detail pane, without moving:
+- [x] **Double-click and hold** in a preview or detail pane, without moving:
       the word is highlighted while the button is down.
-- [ ] **Triple-click and hold** there: the whole line is highlighted.
-- [ ] Double-click and hold on a **blank** cell: nothing is highlighted, no
+- [x] **Triple-click and hold** there: the whole line is highlighted.
+- [x] Double-click and hold on a **blank** cell: nothing is highlighted, no
       stray tinted cell.
 - [ ] Double-click a **table row** fast: it opens as before, with no word
       flashing up first. Same for a popup entry.
-- [ ] **Double-click and hold**, then drag sideways: the selection grows word by
+- [x] **Double-click and hold**, then drag sideways: the selection grows word by
       word — the word you pressed in stays whole, and so does the one under the
       pointer, even with the pointer in the middle of it.
-- [ ] Keep dragging back past where you started: the selection shrinks the same
+- [x] Keep dragging back past where you started: the selection shrinks the same
       way and ends up exactly where it began, still whole words.
-- [ ] Drag onto a blank gap between two words: the selection ends at the last
-      word, without a trailing space.
-- [ ] **Triple-click and hold**, then drag down a few rows: whole lines are
-      taken, edge to edge of the pane, not a ragged block.
-- [ ] Release either drag: the text is on the clipboard, in the shape that was
+- [x] Drag onto a blank gap between two words: the copied text ends at the last
+      word, without a trailing space. The highlight tints the gap cell the
+      pointer sits on, so it reads one cell wider than what is copied.
+- [x] **Triple-click and hold**, then drag down a few rows: whole lines are
+      taken, edge to edge of the pane, not a ragged block. The anchor row grows
+      with the first drag: standing still it is trimmed to its text, dragged it
+      runs the full panel width like every other line of the block.
+- [x] Release either drag: the text is on the clipboard, in the shape that was
       highlighted.
-- [ ] Press once and drag as usual: still character by character — the plain
+- [x] Press once and drag as usual: still character by character — the plain
       drag is unchanged.
-- [ ] Right after releasing a word drag, click once: it counts as a single
+- [x] Right after releasing a word drag, click once: it counts as a single
       click again (it does not escalate to a line).
 
 ### The fold marker
@@ -6302,16 +6312,16 @@ Only the run in front of a foldable row's label folds it: indentation, box
 connectors and the `▶` / `▼` arrow. A single click there is the same toggle
 `Enter` performs on that row.
 
-- [ ] Click the `▶` of a collapsed tree row: it unfolds, and the cursor is on
+- [x] Click the `▶` of a collapsed tree row: it unfolds, and the cursor is on
       it afterwards — including when it was not the selected row before.
-- [ ] Click the `▼` of the row you just unfolded: it folds again.
-- [ ] Click the box connector (`└──`) or the indentation in front of a **child**
+- [x] Click the `▼` of the row you just unfolded: it folds again.
+- [x] Click the box connector (`└──`) or the indentation in front of a **child**
       row's arrow: it toggles too — the whole run counts, not just the arrow.
-- [ ] Click the label **text** next to the arrow: the row is only selected, it
+- [x] Click the label **text** next to the arrow: the row is only selected, it
       does not fold.
-- [ ] Click the indentation in front of a **leaf** (a row that cannot expand):
+- [x] Click the indentation in front of a **leaf** (a row that cannot expand):
       the row is selected, nothing folds and nothing flickers.
-- [ ] Fold a row whose subtree is long, so the rows below jump up, and click the
+- [x] Fold a row whose subtree is long, so the rows below jump up, and click the
       marker of the row now under the pointer: it toggles that row — the
       geometry is the one of the frame you are looking at.
 - [ ] Scroll horizontally (`h` / `l` with a column cursor, or a narrow window)
@@ -6322,7 +6332,7 @@ connectors and the `▶` / `▼` arrow. A single click there is the same toggle
       folds — no connector is visible there.
 - [ ] In a view with **multiline rows**, click the second line of a foldable
       row at the marker's x: it selects, it does not fold.
-- [ ] Double-click a fold marker fast: the row toggles **once** and stays that
+- [x] Double-click a fold marker fast: the row toggles **once** and stays that
       way — it does not spring back.
 
 ### The breadcrumb line
@@ -6352,96 +6362,114 @@ level, running the same ascent `Backspace` runs.
 A popup owns the input. For the mouse that means the same refusal the keys
 already get, everywhere outside the panel.
 
-- [ ] Open a popup (`o s`, `q`, the sort menu `c s`) and click a **tab** behind
+- [x] Open a popup (`o s`, `q`, the sort menu `c s`) and click a **tab** behind
       it: nothing switches.
-- [ ] Click a **row of the table** behind it: the cursor does not move, no
+- [x] Click a **row of the table** behind it: the cursor does not move, no
       preview loads, nothing drills.
-- [ ] Click a **column header** behind it: nothing sorts.
+- [x] Click a **column header** behind it: nothing sorts.
 - [ ] Click an **unfocused pane** behind it in a split layout: the focus stays
       where it is.
 - [ ] Click a **breadcrumb** behind it: the level does not change.
-- [ ] Wheel over the table behind it: the popup's own list scrolls; in
+- [x] Wheel over the table behind it: the popup's own list scrolls; in
       particular the pane under the pointer does not take the focus.
-- [ ] Wheel over the **tab bar** behind it: the tabs do not walk.
-- [ ] Selecting still works: drag across the table behind the popup and
+- [x] Wheel over the **tab bar** behind it: the tabs do not walk.
+- [x] Selecting still works: drag across the table behind the popup and
       release — the text is copied. Double-click a word there: it is selected
       (behind a popup even the second click is free, since nothing there acts).
 - [ ] The popup itself is unaffected: its entries still take a click, a double
       click still picks.
-- [ ] Close the popup (`Esc`) and click the same spot again: now it acts.
+- [x] Close the popup (`Esc`) and click the same spot again: now it acts.
       Clicking outside is _not_ a way to close the popup.
-- [ ] Hold a chord until the **which-key** panel appears and click the table:
+- [x] Hold a chord until the **which-key** panel appears and click the table:
       nothing happens there either — the chord is still waiting for a key.
 
 ### Clicking popup entries
 
 The cursor is walked to the clicked row with the popup's own arrow keys, so
 what has to hold is that it lands on the row under the pointer no matter what
-sits above the list.
+sits above the list. Take a popup that _has_ a cursor — the shortcut menu
+(`o k`), a filter picker, the sort menu. The shortcut overview (`o s`) is a
+read-only panel: it has no cursor, and a click inside it does nothing.
 
-- [ ] Open the shortcut overview (`o s`) and click an entry well below the
-      cursor: the cursor lands on that entry, not one offset by the heading.
-- [ ] Type into the popup's filter first, then click a row of the narrowed
+- [x] Open the shortcut menu (`o k`) and click an entry well below the cursor:
+      the cursor lands on that entry, not one offset by the heading.
+- [x] Type into the popup's filter first, then click a row of the narrowed
       list: it selects the row you clicked, counted in the _filtered_ list.
-- [ ] Scroll a long popup list down a page, then click the top row: that row,
+- [x] Scroll a long popup list down a page, then click the top row: that row,
       not the first entry of the unscrolled list.
 - [ ] **Double-click** an entry: it is picked, exactly as `Enter` would.
-- [ ] Click the entry the cursor is already on: nothing happens.
-- [ ] Hold a chord (`o`, `w`, …) until the **which-key** panel appears and
+- [x] Click the entry the cursor is already on: nothing happens.
+- [x] Hold a chord (`o`, `w`, …) until the **which-key** panel appears and
       click one of its rows: nothing happens — and in particular the table
       behind the panel does not move its cursor.
-- [ ] Drag across two entries of a popup list: the selection spans both lines
+- [x] Drag across two entries of a popup list: the selection spans both lines
       and stays inside the popup — it is not trapped in the single row the
       drag started on.
 
 ### The wheel
 
-- [ ] Wheel over an **unfocused** pane in a split layout: that pane scrolls and
+- [x] Wheel over an **unfocused** pane in a split layout: that pane scrolls and
       takes the focus with it, so the arrow keys carry on where the wheel
       stopped.
-- [ ] Wheel over the **tab bar**: it walks through the tabs, down = next, and
+- [x] Wheel over the **tab bar**: it walks through the tabs, down = next, and
       wraps the way the tab keys do.
-- [ ] Wheel over a popup: the popup's list scrolls, not the table behind it.
+- [x] Wheel over a popup: the popup's list scrolls, not the table behind it.
 
 The wheel pans the view (`mouse.wheel: view`, the default) — take a table
 longer than the pane for these:
 
-- [ ] Put the cursor on a row in the middle, wheel **down** one notch: the
+- [x] Put the cursor on a row in the middle, wheel **down** one notch: the
       content moves up by three rows and the **highlight stays on its row** —
       it slides up the screen with the row, it does not walk down the list.
-- [ ] Keep wheeling down: once the row would leave the top edge the highlight
+- [x] Keep wheeling down: once the row would leave the top edge the highlight
       comes along and rides the **top** edge from then on. Wheel back up and it
       rides the **bottom** edge the same way.
-- [ ] Wheel down until the last row rests on the bottom edge: scrolling stops
+- [x] Wheel down until the last row rests on the bottom edge: scrolling stops
       there (no empty space scrolled in). Keep wheeling: now the **cursor**
       walks on and reaches the very last row. Same at the top.
-- [ ] After panning, press `j` once: it continues from the highlighted row, not
+- [x] After panning, press `j` once: it continues from the highlighted row, not
       from wherever the cursor was before the wheel — pane focus and cursor
       agree.
-- [ ] Pan, then let a reload happen (or hit the reload key): the view stays
+- [x] Pan, then let a reload happen (or hit the reload key): the view stays
       where it was panned to instead of jumping back to the cursor's old
       position.
-- [ ] Wheel over a table whose rows all fit in the pane: nothing scrolls, and
+- [x] Wheel over a table whose rows all fit in the pane: nothing scrolls, and
       the cursor walks instead of standing still.
-- [ ] In a **tree** with group headers, pan so the top edge lands on a header
+- [x] In a **tree** with group headers, pan so the top edge lands on a header
       row: the highlight lands on the first selectable row below it, not on the
       header.
 - [ ] In the **chat** view (smooth scrolling): a notch moves three _physical
       lines_, so a long message glides rather than jumping, exactly as `j`/`k`
       do there.
-- [ ] Set `mouse.wheel: cursor` in `tui.yaml`, restart: the wheel walks the
+- [x] Set `mouse.wheel: cursor` in `tui.yaml`, restart: the wheel walks the
       cursor again like `j`/`k` and the view only follows at the edge.
-- [ ] Set `mouse.wheel_rows: 1`, restart: one row (one line in the chat) per
+- [x] Set `mouse.wheel_rows: 1`, restart: one row (one line in the chat) per
       notch, in both modes.
+- [ ] Still with `mouse.wheel_rows: 1`, press `gg` so the cursor sits on the
+      **first** selectable row, then wheel down: the view pans. (It does not
+      today — while the cursor sits there no notch moves anything, and a single
+      `j` frees it. A one-row pan leaves the selection visible, and the discrete
+      view derives its offset from the selection on every rebuild, so the offset
+      snaps straight back. Not reproducible at the bottom edge, and never seen
+      with `wheel_rows: 3`.)
+- [x] Rebind `common.list_prev` / `list_next` to `k` / `j` alone, with no arrow
+      left in the list, and restart: the cursor fallback still works. At the
+      edges and in `cursor` mode the wheel presses the **bound** key, not the
+      arrow — otherwise the promise above would lapse for every vim-style
+      configuration.
 
 Regressions to rule out, because mouse reporting takes things away from the
 terminal:
 
-- [ ] The wheel still scrolls the focused list, three rows per notch, up and
+- [x] The wheel still scrolls the focused list, three rows per notch, up and
       down. (Without reporting the terminal turned the wheel into arrow keys;
       the app now has to do that itself.)
-- [ ] Wheel **sideways** (if the mouse has it) and wheel inside the editor
-      overlay: unchanged — those still go through the arrow keys.
+- [x] Wheel **sideways** (if the mouse has it): it presses
+      `common.column_left` / `column_right`. Those carry no default binding, so
+      outside a leaf with `column_cursor: true` nothing moves — and nothing else
+      is disturbed either.
+- [ ] Wheel inside the **editor overlay**, with a buffer longer than the
+      overlay: the buffer scrolls and the table behind the overlay stays put.
 - [ ] `Shift` + drag still gives the **terminal's own** selection — spanning
       panes, whole rows, its own colours. This is the escape hatch and needs
       no configuration.
@@ -6454,23 +6482,23 @@ terminal:
 
 Colours, settings and the off switch:
 
-- [ ] Click anywhere once, slowly: **no coloured block** appears under the
+- [x] Click anywhere once, slowly: **no coloured block** appears under the
       pointer while the button is down, and none is left behind afterwards.
       (This is `mouse.highlight_press`, off by default.)
-- [ ] Set `mouse.highlight_press: true` in `tui.yaml`, restart: now the cell
+- [x] Set `mouse.highlight_press: true` in `tui.yaml`, restart: now the cell
       under a press is tinted while the button is down, which shows where a
       drag is anchored. A drag and a double click look the same as before in
       both settings.
-- [ ] Set `theme.mouse.selection` / `theme.mouse.selection_bg` in
-      `tui-theme.yaml`, restart, select: the highlight uses them. Remove them
-      again and the selection falls back to background-on-accent.
+- [x] Set `theme.mouse.selection` / `theme.mouse.selection_bg` in the `theme:`
+      block of `tui.yaml` (the `tui-theme_<name>.yaml` files are presets),
+      restart, select: the highlight uses them. Remove them again and the
+      selection falls back to background-on-accent.
 - [ ] Build without the feature
       (`cargo build --release -p not-yet-done-tui --no-default-features --features clipboard`),
       install and start it: dragging selects the way the terminal always did
       (across the popup border, whole rows), no key or wheel behaviour has
-      changed, and a `tui-theme.yaml` that still carries a `mouse:` block —
-      or a `tui.yaml` with a `mouse.highlight_press` in it — loads without a
-      warning.
+      changed, and a `tui.yaml` that still carries a `theme.mouse:` block — or
+      a `mouse.highlight_press` in it — loads without a warning.
 
 ## Jira: the linked tickets of an issue (`jira:link`, `o l`)
 
