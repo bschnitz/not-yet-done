@@ -20,6 +20,10 @@ use crate::widgets::select_list::{ATTR_SELECTED as SL_ATTR_SELECTED, SelectList}
 use crate::widgets::text_input::{CMD_END, CMD_HOME, TextInput};
 use crate::widgets::toggle::Toggle;
 
+use super::numeric::{
+    decimal_in_progress, format_duration, number_in_progress, parse_duration_minutes, to_canonical,
+    to_display,
+};
 use super::options::{FormOptions, SelectStyle};
 use super::spec::{FieldCondition, FormFieldKind, FormFieldSpec};
 use super::style::FormStyle;
@@ -84,6 +88,37 @@ enum FieldWidget {
         widget: TextInput,
         with_time: bool,
     },
+    /// Whole number: a text input that only takes digits (and a minus sign
+    /// where the range allows one), stepped with up/down.
+    Number {
+        widget: TextInput,
+        min: Option<i64>,
+        max: Option<i64>,
+        /// What up/down add and subtract; never zero.
+        step: i64,
+    },
+    /// Fractional number. `separator` is what the user types and sees; the
+    /// value handed out is always dot-canonical.
+    Decimal {
+        widget: TextInput,
+        min: Option<f64>,
+        max: Option<f64>,
+        precision: Option<u8>,
+        separator: char,
+    },
+    /// Time span in free spelling, with a preview line saying what it was
+    /// understood as, because the value submitted (whole minutes) is not what
+    /// the user typed.
+    Duration {
+        widget: TextInput,
+    },
+    /// Any number of options at once. The same dropdown as a single-choice
+    /// select, in multi mode with checkboxes: `space` picks and unpicks, and
+    /// the cursor no longer drags the selection along with it.
+    MultiSelect {
+        widget: MultiChoice,
+        options: Vec<String>,
+    },
 }
 
 struct FieldEntry {
@@ -126,7 +161,9 @@ pub struct Form {
     title_style: Style,
     footer_style: Style,
     error_style: Style,
-    #[cfg(feature = "natural-date")]
+    /// Colour of the line a field writes under itself to say how it read what
+    /// was typed — the duration a span came to, and with the `natural-date`
+    /// feature the day a phrase resolved to.
     preview_color: Color,
     // --- layout ---
     columns: usize,
@@ -170,36 +207,76 @@ impl Form {
             let condition = spec.visible_when.clone();
 
             let widget = match spec.kind {
-                FormFieldKind::Text => {
-                    let mut ti = TextInput::default()
-                        .with_title(spec.label.clone())
-                        .with_masked(spec.masked)
-                        .with_inactive_style(style.text_inactive.clone())
-                        .with_active_style(style.text_active.clone());
-                    if let Some(v) = &value {
-                        ti.attr(Attribute::Value, AttrValue::String(v.clone()));
-                    }
-                    FieldWidget::Text(ti)
-                }
+                FormFieldKind::Text => FieldWidget::Text(text_widget(
+                    &spec.label,
+                    "",
+                    value.as_deref(),
+                    spec.masked,
+                    style,
+                )),
                 FormFieldKind::DateTime { with_time } => {
                     let placeholder = if with_time {
                         "e.g. tomorrow 9am"
                     } else {
                         "e.g. next monday"
                     };
-                    let mut ti = TextInput::default()
-                        .with_title(spec.label.clone())
-                        .with_placeholder(placeholder)
-                        .with_inactive_style(style.text_inactive.clone())
-                        .with_active_style(style.text_active.clone());
-                    if let Some(v) = &value {
-                        ti.attr(Attribute::Value, AttrValue::String(v.clone()));
-                    }
                     FieldWidget::DateTime {
-                        widget: ti,
+                        widget: text_widget(
+                            &spec.label,
+                            placeholder,
+                            value.as_deref(),
+                            false,
+                            style,
+                        ),
                         with_time,
                     }
                 }
+                FormFieldKind::Number { min, max, step } => FieldWidget::Number {
+                    widget: text_widget(
+                        &spec.label,
+                        &range_placeholder(min, max),
+                        value.as_deref(),
+                        false,
+                        style,
+                    ),
+                    min,
+                    max,
+                    // A zero step would make up/down look broken; one is what
+                    // a caller that names no step means anyway.
+                    step: step.filter(|s| *s != 0).unwrap_or(1),
+                },
+                FormFieldKind::Decimal {
+                    min,
+                    max,
+                    precision,
+                } => {
+                    let separator = options.decimal_separator;
+                    // The caller's default is dot-canonical like every value
+                    // crossing this boundary; only the screen uses `separator`.
+                    let shown = value.as_deref().map(|v| to_display(v, separator));
+                    FieldWidget::Decimal {
+                        widget: text_widget(
+                            &spec.label,
+                            &to_display(&range_placeholder(min, max), separator),
+                            shown.as_deref(),
+                            false,
+                            style,
+                        ),
+                        min,
+                        max,
+                        precision,
+                        separator,
+                    }
+                }
+                FormFieldKind::Duration => FieldWidget::Duration {
+                    widget: text_widget(
+                        &spec.label,
+                        "e.g. 1:30, 90m, 1h30",
+                        value.as_deref(),
+                        false,
+                        style,
+                    ),
+                },
                 FormFieldKind::Select { options: opts } => {
                     let selected = value
                         .as_ref()
@@ -264,6 +341,36 @@ impl Form {
                         }
                     }
                 }
+                FormFieldKind::MultiSelect { options: opts } => {
+                    // The prefill is the submitted form, newline-joined; an
+                    // entry naming no option is dropped rather than guessed at.
+                    let chosen: Vec<PropValue> = value
+                        .as_deref()
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|line| opts.iter().position(|o| o == line))
+                        .map(PropValue::Usize)
+                        .collect();
+                    let mut mc = MultiChoice::default()
+                        .with_title(spec.label.clone())
+                        .with_choices(opts.clone())
+                        .with_mode(SelectionMode::Multi)
+                        .with_marker(SelectionMarker::Checkbox)
+                        .with_max_height(MAX_VISIBLE)
+                        .with_placeholder("(none)")
+                        .with_inactive_style(style.select_inactive.clone())
+                        .with_active_style(style.select_active.clone());
+                    if !chosen.is_empty() {
+                        mc.attr(
+                            Attribute::Custom(MC_ATTR_SELECTED),
+                            AttrValue::Payload(PropPayload::Vec(chosen)),
+                        );
+                    }
+                    FieldWidget::MultiSelect {
+                        widget: mc,
+                        options: opts,
+                    }
+                }
                 FormFieldKind::Toggle => {
                     let on = matches!(value.as_deref(), Some("true") | Some("1") | Some("yes"));
                     let t = Toggle::default()
@@ -298,7 +405,6 @@ impl Form {
             title_style: style.title,
             footer_style: style.footer,
             error_style: style.error,
-            #[cfg(feature = "natural-date")]
             preview_color: style.preview,
             columns,
             column_of,
@@ -563,10 +669,10 @@ impl Form {
             _ => {}
         }
 
-        // up/down navigate fields, unless the focused field is a select (there
-        // they move the option cursor).
+        // up/down navigate fields, unless the focused field has its own use
+        // for them (moving a select's option cursor, stepping a number).
         if key == "up" || key == "down" {
-            if !self.focused_is_select() {
+            if !self.focused_takes_vertical() {
                 if key == "up" {
                     self.focus_prev();
                 } else {
@@ -637,9 +743,56 @@ impl Form {
                     }
                 }
             }
+            // Multi-choice: unlike the single-choice select the cursor moves
+            // without picking anything, because with several picks allowed
+            // "wherever you stopped is chosen" would be a trap.
+            FieldWidget::MultiSelect { widget, .. } => {
+                if let Some(cmd) = multi_select_cmd(key) {
+                    widget.perform(cmd);
+                }
+            }
             FieldWidget::Toggle(w) => {
                 if key == " " || key == "space" {
                     w.perform(Cmd::Toggle);
+                }
+            }
+            FieldWidget::Number {
+                widget,
+                min,
+                max,
+                step,
+            } => {
+                if key == "up" || key == "down" {
+                    step_number(widget, if key == "up" { *step } else { -*step }, *min, *max);
+                    return;
+                }
+                // Only typing can turn a value into one the field does not
+                // take: deleting and moving leave a prefix of what was there,
+                // and every prefix of an acceptable number is acceptable.
+                let allow_negative = min.is_none_or(|m| m < 0);
+                type_filtered(widget, key, |candidate| {
+                    number_in_progress(candidate, allow_negative)
+                });
+            }
+            FieldWidget::Decimal {
+                widget,
+                min,
+                precision,
+                separator,
+                ..
+            } => {
+                let (allow_negative, precision, separator) =
+                    (min.is_none_or(|m| m < 0.0), *precision, *separator);
+                type_filtered(widget, key, |candidate| {
+                    decimal_in_progress(candidate, separator, precision, allow_negative)
+                });
+            }
+            // No filter: `1h30` and `1:30` are words as much as numbers, and
+            // what a half-typed span looks like is not worth guessing. The
+            // preview line says whether it was understood, submit insists.
+            FieldWidget::Duration { widget } => {
+                if let Some(cmd) = text_cmd(key) {
+                    widget.perform(cmd);
                 }
             }
         }
@@ -648,14 +801,24 @@ impl Form {
     fn submit(&mut self) -> FormEvent {
         // Only visible fields are validated: a required field gated off by a
         // condition must not block submission.
-        let invalid = self.fields.iter().enumerate().position(|(i, e)| {
-            self.is_visible(i) && e.required && field_value(&e.widget).trim().is_empty()
+        let invalid = self.fields.iter().enumerate().find_map(|(i, e)| {
+            if !self.is_visible(i) {
+                return None;
+            }
+            let empty = field_value(&e.widget).trim().is_empty();
+            if empty {
+                // An optional field the user left alone is finished, not wrong:
+                // there is no value for a format check to object to.
+                return e
+                    .required
+                    .then(|| (i, "This field is required".to_string()));
+            }
+            value_error(&e.widget).map(|msg| (i, msg))
         });
-        if let Some(idx) = invalid {
+        if let Some((idx, msg)) = invalid {
             self.focus_to(idx);
             if let Some(key) = self.fields.get(idx).map(|e| e.key.clone()) {
-                self.field_errors
-                    .insert(key, "This field is required".to_string());
+                self.field_errors.insert(key, msg);
             }
             return FormEvent::Consumed;
         }
@@ -664,10 +827,15 @@ impl Form {
 
     // --- focus ------------------------------------------------------------
 
-    fn focused_is_select(&self) -> bool {
+    /// Whether the focused field consumes `up`/`down` itself instead of
+    /// letting them move between fields.
+    fn focused_takes_vertical(&self) -> bool {
         matches!(
             self.fields.get(self.focused).map(|e| &e.widget),
-            Some(FieldWidget::Select { .. }) | Some(FieldWidget::SelectInline { .. })
+            Some(FieldWidget::Select { .. })
+                | Some(FieldWidget::SelectInline { .. })
+                | Some(FieldWidget::MultiSelect { .. })
+                | Some(FieldWidget::Number { .. })
         )
     }
 
@@ -678,9 +846,14 @@ impl Form {
                 FieldWidget::Text(w) | FieldWidget::DateTime { widget: w, .. } => {
                     w.attr(Attribute::Focus, flag)
                 }
-                FieldWidget::Select { widget, .. } => widget.attr(Attribute::Focus, flag),
+                FieldWidget::Select { widget, .. } | FieldWidget::MultiSelect { widget, .. } => {
+                    widget.attr(Attribute::Focus, flag)
+                }
                 FieldWidget::SelectInline { widget, .. } => widget.attr(Attribute::Focus, flag),
                 FieldWidget::Toggle(w) => w.attr(Attribute::Focus, flag),
+                FieldWidget::Number { widget, .. }
+                | FieldWidget::Decimal { widget, .. }
+                | FieldWidget::Duration { widget } => widget.attr(Attribute::Focus, flag),
             }
         }
     }
@@ -774,7 +947,6 @@ impl Form {
         let fields_bottom = footer_y; // exclusive bound for field rows
 
         let focused_idx = self.focused;
-        #[cfg(feature = "natural-date")]
         let preview_color = self.preview_color;
         let accent = self.accent;
         let label_idle = self.label_idle;
@@ -821,7 +993,6 @@ impl Form {
                 accent,
                 label_idle,
                 field_bg,
-                #[cfg(feature = "natural-date")]
                 preview_color,
             );
             // A field the caller (or the required-check) objected to wears the
@@ -944,7 +1115,6 @@ impl Form {
         let accent = self.accent;
         let label_idle = self.label_idle;
         let field_bg = self.field_bg;
-        #[cfg(feature = "natural-date")]
         let preview_color = self.preview_color;
         let marked = self.marked_fields();
         let error_fg = self.error_style.fg;
@@ -981,7 +1151,6 @@ impl Form {
                 accent,
                 label_idle,
                 field_bg,
-                #[cfg(feature = "natural-date")]
                 preview_color,
             );
             // A field the caller (or the required-check) objected to wears the
@@ -1063,6 +1232,131 @@ fn resolve_columns(fields: &[FieldEntry], cols: usize, explicit: &[usize]) -> Ve
     out
 }
 
+/// A [`TextInput`] wearing the form's chrome — the shared build step behind
+/// every text-backed field kind.
+fn text_widget(
+    label: &str,
+    placeholder: &str,
+    value: Option<&str>,
+    masked: bool,
+    style: &FormStyle,
+) -> TextInput {
+    let mut ti = TextInput::default()
+        .with_title(label.to_string())
+        .with_placeholder(placeholder.to_string())
+        .with_masked(masked)
+        .with_inactive_style(style.text_inactive.clone())
+        .with_active_style(style.text_active.clone());
+    if let Some(v) = value {
+        ti.attr(Attribute::Value, AttrValue::String(v.to_string()));
+    }
+    ti
+}
+
+/// The bounds of a numeric field as its placeholder, so the range is on screen
+/// before a submit rejects a value for missing it. Empty when unbounded.
+fn range_placeholder<T: std::fmt::Display>(min: Option<T>, max: Option<T>) -> String {
+    match (min, max) {
+        (Some(lo), Some(hi)) => format!("{lo} \u{2013} {hi}"),
+        (Some(lo), None) => format!("\u{2265} {lo}"),
+        (None, Some(hi)) => format!("\u{2264} {hi}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// The current text of a [`TextInput`].
+fn text_of(ti: &TextInput) -> String {
+    match ti.state() {
+        State::Single(StateValue::String(s)) => s,
+        _ => String::new(),
+    }
+}
+
+/// Feeds `key` to a text input, but lets a *typed character* through only when
+/// the value it would produce is one `accept` still recognises.
+///
+/// The candidate is the whole prospective value rather than the character
+/// alone, because what makes a character wrong is where it lands: a second
+/// separator, a minus sign in the middle, one digit too many after the point.
+fn type_filtered(widget: &mut TextInput, key: &str, accept: impl Fn(&str) -> bool) {
+    let Some(cmd) = text_cmd(key) else {
+        return;
+    };
+    if let Cmd::Type(c) = cmd {
+        let mut candidate = widget.value.clone();
+        candidate.insert(widget.cursor, c);
+        if !accept(&candidate) {
+            return;
+        }
+    }
+    widget.perform(cmd);
+}
+
+/// Adds `delta` to a whole-number field, clamped into its range.
+///
+/// Stepping clamps where typing does not: pressing `up` on a bounded field is
+/// an unambiguous "the next allowed value", while a typed digit is one keystroke
+/// of a number that is not finished yet.
+fn step_number(widget: &mut TextInput, delta: i64, min: Option<i64>, max: Option<i64>) {
+    let current: i64 = text_of(widget).trim().parse().unwrap_or(0);
+    let mut next = current.saturating_add(delta);
+    if let Some(lo) = min {
+        next = next.max(lo);
+    }
+    if let Some(hi) = max {
+        next = next.min(hi);
+    }
+    widget.attr(Attribute::Value, AttrValue::String(next.to_string()));
+}
+
+/// What is wrong with a field's *finished* value, if anything.
+///
+/// Only the checks that cannot be made while typing live here: a range would
+/// reject every prefix of the number on its way in, and a duration is not a
+/// span until the last character of it has been typed. The required-check is
+/// separate — an empty field never reaches this.
+fn value_error(widget: &FieldWidget) -> Option<String> {
+    match widget {
+        FieldWidget::Number { min, max, .. } => {
+            let value = field_value(widget);
+            let Ok(n) = value.parse::<i64>() else {
+                return Some("Enter a whole number".to_string());
+            };
+            range_error(n, *min, *max)
+        }
+        FieldWidget::Decimal { min, max, .. } => {
+            let value = field_value(widget);
+            let Ok(n) = value.parse::<f64>() else {
+                return Some("Enter a number".to_string());
+            };
+            range_error(n, *min, *max)
+        }
+        FieldWidget::Duration { widget } => parse_duration_minutes(&text_of(widget))
+            .is_none()
+            .then(|| "Enter a duration like 1:30, 90m or 1h30".to_string()),
+        _ => None,
+    }
+}
+
+/// Whether `value` sits inside the bounds, and which one it misses.
+fn range_error<T: PartialOrd + std::fmt::Display>(
+    value: T,
+    min: Option<T>,
+    max: Option<T>,
+) -> Option<String> {
+    if let Some(lo) = min {
+        if value < lo {
+            return Some(format!("Must be at least {lo}"));
+        }
+    }
+    if let Some(hi) = max {
+        if value > hi {
+            return Some(format!("Must be at most {hi}"));
+        }
+    }
+    None
+}
+
 fn text_cmd(key: &str) -> Option<Cmd> {
     match key {
         "backspace" => Some(Cmd::Delete),
@@ -1092,6 +1386,18 @@ fn select_cmd(key: &str) -> Option<Cmd> {
     }
 }
 
+/// Movement *and* picking for a multi-choice dropdown: here `space` is the
+/// pick, because the cursor has to be able to pass over an option without
+/// taking it.
+fn multi_select_cmd(key: &str) -> Option<Cmd> {
+    match key {
+        "up" => Some(Cmd::Move(Direction::Up)),
+        "down" => Some(Cmd::Move(Direction::Down)),
+        " " | "space" => Some(Cmd::Toggle),
+        _ => None,
+    }
+}
+
 /// Movement for an inline [`SelectList`]. Like [`select_cmd`], no `space` pick —
 /// the selection tracks the cursor.
 fn select_inline_cmd(key: &str) -> Option<Cmd> {
@@ -1104,10 +1410,21 @@ fn select_inline_cmd(key: &str) -> Option<Cmd> {
 
 fn field_value(widget: &FieldWidget) -> String {
     match widget {
-        FieldWidget::Text(ti) | FieldWidget::DateTime { widget: ti, .. } => match ti.state() {
-            State::Single(StateValue::String(s)) => s,
-            _ => String::new(),
-        },
+        FieldWidget::Text(ti) | FieldWidget::DateTime { widget: ti, .. } => text_of(ti),
+        FieldWidget::Number { widget, .. } => text_of(widget).trim().to_string(),
+        FieldWidget::Decimal {
+            widget, separator, ..
+        } => to_canonical(&text_of(widget), *separator),
+        // Whole minutes once the span is understood, and otherwise what the
+        // user typed — which is not a value anyone gets, because submit stops
+        // on it with a message.
+        FieldWidget::Duration { widget } => {
+            let raw = text_of(widget);
+            match parse_duration_minutes(&raw) {
+                Some(minutes) => minutes.to_string(),
+                None => raw.trim().to_string(),
+            }
+        }
         FieldWidget::Select { widget, options } => match widget.state() {
             State::Vec(vals) => vals
                 .into_iter()
@@ -1126,6 +1443,20 @@ fn field_value(widget: &FieldWidget) -> String {
                     _ => None,
                 })
                 .unwrap_or_default(),
+            _ => String::new(),
+        },
+        // Newline-joined in option order (the widget reports its picks by
+        // ascending index), so a value with a comma or a space in it survives
+        // the round trip.
+        FieldWidget::MultiSelect { widget, options } => match widget.state() {
+            State::Vec(vals) => vals
+                .into_iter()
+                .filter_map(|v| match v {
+                    StateValue::Usize(i) => options.get(i).cloned(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
             _ => String::new(),
         },
         FieldWidget::Toggle(t) => {
@@ -1154,7 +1485,10 @@ fn field_height(widget: &FieldWidget, focused: bool) -> u16 {
         }
         FieldWidget::DateTime { .. } => datetime_height(),
         FieldWidget::Toggle(_) => 2,
-        FieldWidget::Select { options, .. } => {
+        FieldWidget::Number { .. } | FieldWidget::Decimal { .. } => 2,
+        // Label, input, and the line that reads the span back.
+        FieldWidget::Duration { .. } => 3,
+        FieldWidget::Select { options, .. } | FieldWidget::MultiSelect { options, .. } => {
             if focused {
                 2 + (options.len() as u16).min(MAX_VISIBLE)
             } else {
@@ -1185,13 +1519,47 @@ fn render_field(
     accent: Color,
     label_idle: Color,
     field_bg: Option<Color>,
-    #[cfg(feature = "natural-date")] preview_color: Color,
+    preview_fg: Color,
 ) {
     let label = entry.label.clone();
     match &mut entry.widget {
         FieldWidget::Text(w) => w.view(frame, area),
         FieldWidget::Toggle(w) => w.view(frame, area),
-        FieldWidget::Select { widget, .. } => widget.view(frame, area),
+        FieldWidget::Number { widget, .. } | FieldWidget::Decimal { widget, .. } => {
+            widget.view(frame, area)
+        }
+        FieldWidget::Duration { widget } => {
+            // Two rows for the input, so the third is the preview rather than
+            // the text input's own (unused) error row.
+            widget.view(
+                frame,
+                Rect {
+                    height: area.height.min(2),
+                    ..area
+                },
+            );
+            if area.height > 2 {
+                let text = match parse_duration_minutes(&text_of(widget)) {
+                    Some(minutes) => format!("\u{21b3} {}", format_duration(minutes)),
+                    None => String::new(),
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        text,
+                        Style::default().fg(preview_fg),
+                    ))),
+                    Rect {
+                        x: area.x,
+                        y: area.y + 2,
+                        width: area.width,
+                        height: 1,
+                    },
+                );
+            }
+        }
+        FieldWidget::Select { widget, .. } | FieldWidget::MultiSelect { widget, .. } => {
+            widget.view(frame, area)
+        }
         FieldWidget::SelectInline { widget, options } => {
             render_inline_select(
                 frame,
@@ -1230,7 +1598,7 @@ fn render_field(
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             text,
-                            Style::default().fg(preview_color),
+                            Style::default().fg(preview_fg),
                         ))),
                         Rect {
                             x: area.x,

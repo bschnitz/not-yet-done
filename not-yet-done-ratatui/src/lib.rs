@@ -29,7 +29,7 @@ pub use widgets::toggle::{Toggle, ToggleStyle, ToggleStyleType};
 pub use widgets::form::datetime_preview;
 pub use widgets::form::{
     FieldCondition, Form, FormEvent, FormFieldKind, FormFieldSpec, FormNotice, FormOptions,
-    FormPalette, FormStyle, SelectStyle,
+    FormPalette, FormStyle, SelectStyle, format_duration, parse_duration_minutes,
 };
 
 // --- select_list ---

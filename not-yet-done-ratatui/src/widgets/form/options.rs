@@ -36,6 +36,11 @@ pub struct FormOptions {
     /// Verb on the panel look's submit bar. `None` → "Save". A form that does
     /// not save anything ("Log in", "Apply") says so here.
     pub submit_label: Option<String>,
+    /// The character a decimal field accepts and displays between the whole
+    /// and the fractional part. Display only: the value a form hands back is
+    /// always dot-canonical, so no consumer of a form depends on the
+    /// configuration of whoever filled it in.
+    pub decimal_separator: char,
 }
 
 impl Default for FormOptions {
@@ -46,6 +51,7 @@ impl Default for FormOptions {
             field_bar: false,
             select_style: SelectStyle::Dropdown,
             submit_label: None,
+            decimal_separator: '.',
         }
     }
 }

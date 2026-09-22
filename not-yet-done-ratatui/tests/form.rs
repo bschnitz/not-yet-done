@@ -667,3 +667,148 @@ fn the_discard_prompt_is_rendered_over_the_form() {
     assert!(screen.contains("y discard"), "{screen}");
     assert!(screen.contains("Work item"), "the form stays behind it");
 }
+
+// --- numeric, duration and multi-choice fields ----------------------------
+
+/// A whole-number field refuses anything that could never become a number, and
+/// up/down step it instead of moving between fields.
+#[test]
+fn a_number_field_takes_digits_only_and_steps_with_up_down() {
+    let specs = vec![
+        FormFieldSpec::number("n", "Count").with_step(5),
+        FormFieldSpec::text("other", "Other"),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    type_str(&mut form, "12a3.");
+    assert_eq!(form.values().get("n").unwrap(), "123");
+
+    // Unbounded below, so a minus is a legal start; with the cursor inside the
+    // number it is not, because no number looks like that.
+    form.handle_key("home");
+    type_str(&mut form, "-");
+    assert_eq!(form.values().get("n").unwrap(), "-123");
+    form.handle_key("end");
+    type_str(&mut form, "-");
+    assert_eq!(form.values().get("n").unwrap(), "-123");
+
+    // up/down belong to the field, so the text field next to it keeps its
+    // distance.
+    form.handle_key("up");
+    assert_eq!(form.values().get("n").unwrap(), "-118");
+    form.handle_key("down");
+    form.handle_key("down");
+    assert_eq!(form.values().get("n").unwrap(), "-128");
+    assert!(form.values().get("other").unwrap().is_empty());
+    type_str(&mut form, "x");
+    assert_eq!(
+        form.values().get("other").unwrap(),
+        "",
+        "up/down must not have moved the focus"
+    );
+}
+
+/// A range is checked when the value is finished, not while it is being typed:
+/// every number on the way to a legal one would fail it.
+#[test]
+fn a_number_outside_its_range_is_refused_on_submit_only() {
+    let specs = vec![FormFieldSpec::number("n", "Count").with_range(Some(10.0), Some(20.0))];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    // `1` is below the minimum but is also the first keystroke of `15`.
+    type_str(&mut form, "1");
+    assert_eq!(form.values().get("n").unwrap(), "1");
+    assert_eq!(submit(&mut form), FormEvent::Consumed);
+    assert_eq!(
+        form.field_errors().get("n").map(String::as_str),
+        Some("Must be at least 10")
+    );
+
+    type_str(&mut form, "00");
+    assert_eq!(submit(&mut form), FormEvent::Consumed);
+    assert_eq!(
+        form.field_errors().get("n").map(String::as_str),
+        Some("Must be at most 20")
+    );
+
+    // Stepping, unlike typing, is an unambiguous "the next allowed value" and
+    // lands inside the range.
+    form.handle_key("up");
+    assert_eq!(form.values().get("n").unwrap(), "20");
+    assert!(matches!(submit(&mut form), FormEvent::Submitted(_)));
+}
+
+/// The separator is what the user types and sees; what comes out of the form
+/// is dot-canonical, so no consumer depends on the display setting.
+#[test]
+fn a_decimal_field_shows_its_separator_and_submits_a_dot() {
+    let german = FormOptions {
+        decimal_separator: ',',
+        ..FormOptions::default()
+    };
+    let specs = vec![FormFieldSpec::decimal("d", "Hours").with_precision(2)];
+    let prefill = HashMap::from([("d".to_string(), "2.5".to_string())]);
+    let mut form = Form::new("T", specs, &prefill, &style(), &german);
+
+    let screen = rows_of(&mut form, 40, 10, ratatui::layout::Rect::new(0, 0, 40, 10)).join("\n");
+    assert!(screen.contains("2,5"), "the prefill is shown German-style");
+    assert_eq!(form.values().get("d").unwrap(), "2.5");
+
+    // The dot is not this form's separator, so it never lands; the comma does,
+    // and precision stops the third decimal.
+    form.handle_key("end");
+    type_str(&mut form, "5");
+    assert_eq!(form.values().get("d").unwrap(), "2.55");
+    type_str(&mut form, "5");
+    assert_eq!(form.values().get("d").unwrap(), "2.55");
+    type_str(&mut form, ".");
+    assert_eq!(form.values().get("d").unwrap(), "2.55");
+    assert!(matches!(submit(&mut form), FormEvent::Submitted(_)));
+}
+
+/// A span is typed the way people say it and submitted the way a backend can
+/// use it; the line under the field says which of the two it understood.
+#[test]
+fn a_duration_is_submitted_in_minutes_and_read_back_in_hours() {
+    let specs = vec![FormFieldSpec::duration("d", "Effort")];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    type_str(&mut form, "1h30");
+    assert_eq!(form.values().get("d").unwrap(), "90");
+    let screen = rows_of(&mut form, 40, 10, ratatui::layout::Rect::new(0, 0, 40, 10)).join("\n");
+    assert!(screen.contains("1 h 30 min"), "{screen}");
+
+    // A span that is not one stops the submit and says so, rather than being
+    // guessed at.
+    type_str(&mut form, "x");
+    assert_eq!(submit(&mut form), FormEvent::Consumed);
+    assert_eq!(
+        form.field_errors().get("d").map(String::as_str),
+        Some("Enter a duration like 1:30, 90m or 1h30")
+    );
+}
+
+/// Several options at once: the cursor moves without picking, `space` picks,
+/// and the value is newline-joined so an option with a comma in it survives.
+#[test]
+fn a_multiselect_picks_with_space_and_joins_with_newlines() {
+    let options = vec![
+        "alpha".to_string(),
+        "beta, second".to_string(),
+        "gamma".to_string(),
+    ];
+    let specs = vec![FormFieldSpec::multiselect("tags", "Tags", options)];
+    let prefill = HashMap::from([("tags".to_string(), "gamma".to_string())]);
+    let mut form = Form::new("T", specs, &prefill, &style(), &opts());
+
+    assert_eq!(form.values().get("tags").unwrap(), "gamma");
+
+    // Moving down twice leaves the cursor on the third option without taking
+    // anything with it; space is the pick.
+    form.handle_key("down");
+    assert_eq!(form.values().get("tags").unwrap(), "gamma");
+    form.handle_key(" ");
+    assert_eq!(form.values().get("tags").unwrap(), "beta, second\ngamma");
+    form.handle_key(" ");
+    assert_eq!(form.values().get("tags").unwrap(), "gamma");
+}

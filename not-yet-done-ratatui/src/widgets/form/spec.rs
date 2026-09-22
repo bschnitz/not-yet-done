@@ -14,6 +14,33 @@ pub enum FormFieldKind {
     /// live resolved-preview line is shown below the input. The submitted value
     /// is always the raw phrase, so the consumer keeps control of resolution.
     DateTime { with_time: bool },
+    /// Whole number. `min`/`max` are checked on submit rather than while
+    /// typing — a range that rejects every prefix of the number the user is
+    /// about to enter would make the field unusable. `step` is what the
+    /// up/down keys add and subtract (`None` → one).
+    Number {
+        min: Option<i64>,
+        max: Option<i64>,
+        step: Option<i64>,
+    },
+    /// Fractional number. `precision` caps the digits after the separator and
+    /// *is* enforced while typing, because every prefix of a too-precise number
+    /// is already too precise. Which separator the user types is a display
+    /// setting ([`FormOptions::decimal_separator`](super::FormOptions)); the
+    /// submitted value always uses a dot, so no consumer depends on it.
+    Decimal {
+        min: Option<f64>,
+        max: Option<f64>,
+        precision: Option<u8>,
+    },
+    /// A span of time. The field takes the usual spellings (`1:30`, `90m`,
+    /// `1h30`, `1.5h`), shows what it made of them, and submits **whole
+    /// minutes** as a decimal string — unlike a date there is no ambiguity
+    /// worth deferring to the consumer.
+    Duration,
+    /// Any number of choices out of `options`, submitted newline-joined in
+    /// option order.
+    MultiSelect { options: Vec<String> },
 }
 
 /// A predicate over another field's current value, gating a field's visibility.
@@ -94,6 +121,90 @@ impl FormFieldSpec {
     /// A required natural-language date/time field.
     pub fn datetime(key: impl Into<String>, label: impl Into<String>, with_time: bool) -> Self {
         Self::new(key, label, FormFieldKind::DateTime { with_time }, true)
+    }
+
+    /// A required whole-number field, unbounded until
+    /// [`with_range`](Self::with_range) says otherwise.
+    pub fn number(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(
+            key,
+            label,
+            FormFieldKind::Number {
+                min: None,
+                max: None,
+                step: None,
+            },
+            true,
+        )
+    }
+
+    /// A required fractional-number field.
+    pub fn decimal(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(
+            key,
+            label,
+            FormFieldKind::Decimal {
+                min: None,
+                max: None,
+                precision: None,
+            },
+            true,
+        )
+    }
+
+    /// A required duration field (submits whole minutes).
+    pub fn duration(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, FormFieldKind::Duration, true)
+    }
+
+    /// A required multiple-choice field.
+    pub fn multiselect(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        options: Vec<String>,
+    ) -> Self {
+        Self::new(key, label, FormFieldKind::MultiSelect { options }, true)
+    }
+
+    /// Bounds a numeric field. Both ends are optional and the values are read
+    /// in the field's own arithmetic: rounded to whole numbers for a
+    /// [`FormFieldKind::Number`], taken as they are for a
+    /// [`FormFieldKind::Decimal`]. No-op for any other kind.
+    pub fn with_range(mut self, min: Option<f64>, max: Option<f64>) -> Self {
+        match &mut self.kind {
+            FormFieldKind::Number {
+                min: lo, max: hi, ..
+            } => {
+                *lo = min.map(|v| v.round() as i64);
+                *hi = max.map(|v| v.round() as i64);
+            }
+            FormFieldKind::Decimal {
+                min: lo, max: hi, ..
+            } => {
+                *lo = min;
+                *hi = max;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// Sets what the up/down keys add and subtract on a
+    /// [`FormFieldKind::Number`]. No-op for any other kind.
+    pub fn with_step(mut self, step: i64) -> Self {
+        if let FormFieldKind::Number { step: s, .. } = &mut self.kind {
+            *s = Some(step);
+        }
+        self
+    }
+
+    /// Caps the digits after the separator on a [`FormFieldKind::Decimal`],
+    /// enforced while typing. No-op for any other kind.
+    pub fn with_precision(mut self, precision: u8) -> Self {
+        if let FormFieldKind::Decimal { precision: p, .. } = &mut self.kind {
+            *p = Some(precision);
+        }
+        self
     }
 
     /// Marks the field as optional (submit no longer blocks on an empty value).
