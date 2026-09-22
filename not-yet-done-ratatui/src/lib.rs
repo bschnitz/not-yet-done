@@ -8,7 +8,9 @@ pub use utils::open_editor::{
 };
 
 // --- shared primitives ---
-pub use widgets::common::{Keys, SelectionMarker, SelectionMode, hex_color};
+pub use widgets::common::{
+    Keys, SelectionMarker, SelectionMode, hex_color, key_string_to_tuirealm,
+};
 
 // --- text_area ---
 pub use widgets::text_area::{TextArea, TextAreaEvent, TextAreaKeymap};

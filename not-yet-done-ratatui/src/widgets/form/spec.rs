@@ -41,6 +41,11 @@ pub enum FormFieldKind {
     /// Any number of choices out of `options`, submitted newline-joined in
     /// option order.
     MultiSelect { options: Vec<String> },
+    /// One or more paths, chosen in a file picker that opens over the form.
+    /// `multi` decides whether the field keeps a list (newline-joined, like a
+    /// multi-select) or a single path — the picker itself always lets the user
+    /// mark several, so a single-valued field keeps the first of them.
+    File { multi: bool },
     /// Free text over several lines, submitted with the newlines in it.
     /// `lines` is how many rows the box is given; the text scrolls beyond
     /// that. It is a field to fill in, not an editing session — that is what
@@ -175,6 +180,12 @@ impl FormFieldSpec {
     /// [`with_lines`](Self::with_lines) says otherwise.
     pub fn multiline(key: impl Into<String>, label: impl Into<String>) -> Self {
         Self::new(key, label, FormFieldKind::Multiline { lines: None }, true)
+    }
+
+    /// A required file field. `multi` makes it a list of paths rather than a
+    /// single one.
+    pub fn file(key: impl Into<String>, label: impl Into<String>, multi: bool) -> Self {
+        Self::new(key, label, FormFieldKind::File { multi }, true)
     }
 
     /// Sets how many rows a [`FormFieldKind::Multiline`] box is given. No-op

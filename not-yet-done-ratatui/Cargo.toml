@@ -39,6 +39,8 @@ path = "examples/leader_list_demo.rs"
 
 [dev-dependencies]
 arboard = { workspace = true }
+# The file field's integration tests pick real files out of a real directory.
+tempfile = "3.27.0"
 
 [dependencies]
 not-yet-done-grid-core = { path = "../not-yet-done-grid-core" }

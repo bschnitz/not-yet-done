@@ -167,68 +167,9 @@ pub fn key_event_to_string(key: KeyEvent) -> String {
     }
 }
 
-/// Inverse of [`key_event_to_string`]: turn the canonical key string back
-/// into a tuirealm `KeyEvent` so widgets that consume tuirealm events
-/// (e.g. `FilePicker`) can be driven from the App's `&str` key pipeline.
-/// Returns `None` for unrecognised strings.
-pub fn key_string_to_tuirealm(key: &str) -> Option<tuirealm::event::KeyEvent> {
-    use tuirealm::event::{Key, KeyEvent as TuiKeyEvent, KeyModifiers as TuiMods};
-    let mut mods = TuiMods::NONE;
-    let mut rest = key;
-    loop {
-        if let Some(r) = rest.strip_prefix("ctrl+") {
-            mods |= TuiMods::CONTROL;
-            rest = r;
-        } else if let Some(r) = rest.strip_prefix("alt+") {
-            mods |= TuiMods::ALT;
-            rest = r;
-        } else if let Some(r) = rest.strip_prefix("shift+") {
-            mods |= TuiMods::SHIFT;
-            rest = r;
-        } else {
-            break;
-        }
-    }
-    let code = match rest {
-        "enter" => Key::Enter,
-        "esc" => Key::Esc,
-        "tab" => Key::Tab,
-        "backspace" => Key::Backspace,
-        "delete" => Key::Delete,
-        "up" => Key::Up,
-        "down" => Key::Down,
-        "left" => Key::Left,
-        "right" => Key::Right,
-        "home" => Key::Home,
-        "end" => Key::End,
-        "pageup" => Key::PageUp,
-        "pagedown" => Key::PageDown,
-        "space" => Key::Char(' '),
-        // Function keys `f1`..`f12` — needs at least one digit, else a bare
-        // `f` would match here, fail to parse, and drop the whole key (a plain
-        // letter must fall through to the char arm below).
-        s if s.len() > 1 && s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
-            s[1..].parse::<u8>().ok().map(Key::Function)?
-        }
-        s => {
-            let mut chars = s.chars();
-            let c = chars.next()?;
-            if chars.next().is_some() {
-                return None;
-            }
-            // Plain upper-case letters carry their shift in the case, not
-            // the modifier (matches the encoder's behaviour).
-            if c.is_ascii_uppercase() {
-                mods.remove(TuiMods::SHIFT);
-            }
-            Key::Char(c)
-        }
-    };
-    Some(TuiKeyEvent {
-        code,
-        modifiers: mods,
-    })
-}
+/// The decoder lives in `not-yet-done-ratatui` now, beside the widgets it
+/// feeds; re-exported here because the App's key pipeline is this module.
+pub use not_yet_done_ratatui::key_string_to_tuirealm;
 
 /// Map a crossterm [`Event`] delivered by the async `EventStream` to the
 /// canonical key string used in tui-keybindings.yaml. Returns `None` for
@@ -263,34 +204,5 @@ fn debug_log_key(key: &KeyEvent, emitted: &str) {
         .open("/tmp/nyd-keys.log")
     {
         let _ = writeln!(f, "{:?} {:?} -> {}", key.modifiers, key.code, emitted);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::key_string_to_tuirealm;
-    use tuirealm::event::{Key, KeyModifiers};
-
-    #[test]
-    fn bare_f_maps_to_a_char_not_a_dropped_function_key() {
-        // Regression: `"f"` used to match the `f1`..`f12` arm (empty digit
-        // suffix parses `all(is_ascii_digit)` vacuously true), fail to parse,
-        // and drop the whole key — so `f` never reached a text input (e.g. the
-        // shortcut-menu search).
-        let ev = key_string_to_tuirealm("f").expect("f must decode");
-        assert_eq!(ev.code, Key::Char('f'));
-        assert_eq!(ev.modifiers, KeyModifiers::NONE);
-    }
-
-    #[test]
-    fn function_keys_still_decode() {
-        assert_eq!(
-            key_string_to_tuirealm("f1").map(|e| e.code),
-            Some(Key::Function(1))
-        );
-        assert_eq!(
-            key_string_to_tuirealm("f12").map(|e| e.code),
-            Some(Key::Function(12))
-        );
     }
 }

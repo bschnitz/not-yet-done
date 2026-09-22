@@ -879,3 +879,139 @@ fn a_multiline_box_scrolls_instead_of_growing() {
         "the next field kept its place:\n{screen}"
     );
 }
+
+// --- file fields ----------------------------------------------------------
+
+/// A directory with two files in it, plus the order the picker will list them
+/// in — the walk is filesystem-ordered, so a test that wants to move the cursor
+/// onto a particular file has to ask rather than assume.
+fn dir_with_two_files() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    use not_yet_done_ratatui::{EnumerationOptions, enumerate};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
+    let listed = enumerate(dir.path(), "", &EnumerationOptions::default());
+    assert_eq!(listed.len(), 2, "both files are listed");
+    let (first, second) = (listed[0].clone(), listed[1].clone());
+    (dir, first, second)
+}
+
+/// `enter` on a file field opens the picker instead of submitting; what the
+/// picker confirms becomes the field's value, newline-joined like any other
+/// multi-valued field.
+#[test]
+fn a_multi_file_field_takes_every_path_the_picker_confirms() {
+    use ratatui::layout::Rect;
+
+    let (_dir, first, second) = dir_with_two_files();
+    let specs = vec![
+        FormFieldSpec::file("docs", "Documents", true).with_default(first.display().to_string()),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    // The picker opens beside the path the field already holds, with that path
+    // already marked and the cursor on the first listed file.
+    assert_eq!(form.handle_key("enter"), FormEvent::Consumed);
+    let screen = rows_of(&mut form, 80, 30, Rect::new(0, 0, 80, 30)).join("\n");
+    assert!(
+        screen.contains("Directory") && screen.contains("Documents"),
+        "the picker is up over the form:\n{screen}"
+    );
+
+    // The picker's lists move with `ctrl+j`/`ctrl+k`, toggle with `enter` and
+    // confirm with `ctrl+o` — its own bindings, not the form's.
+    form.handle_key("ctrl+j");
+    form.handle_key("enter");
+    form.handle_key("ctrl+o");
+
+    let value = form.values().get("docs").cloned().unwrap_or_default();
+    let picked: Vec<&str> = value.lines().collect();
+    assert_eq!(
+        picked,
+        vec![
+            first.display().to_string().as_str(),
+            second.display().to_string().as_str()
+        ],
+        "both paths, in the order they were picked"
+    );
+
+    // The field itself has one line to say it in, so it counts and names.
+    let screen = rows_of(&mut form, 80, 30, Rect::new(0, 0, 80, 30)).join("\n");
+    assert!(
+        screen.contains("2 files:"),
+        "the field summarises the list:\n{screen}"
+    );
+}
+
+/// A single-valued file field keeps the first path even when the picker (which
+/// always lets the user mark several) hands back more.
+#[test]
+fn a_single_file_field_keeps_one_of_what_the_picker_confirms() {
+    let (_dir, first, _second) = dir_with_two_files();
+    let specs = vec![
+        FormFieldSpec::file("doc", "Document", false).with_default(first.display().to_string()),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    form.handle_key("enter");
+    form.handle_key("ctrl+j");
+    form.handle_key("enter");
+    form.handle_key("ctrl+o");
+
+    assert_eq!(
+        form.values().get("doc").unwrap(),
+        &first.display().to_string()
+    );
+}
+
+/// While the picker is up it owns every key: `esc` closes the dialog and leaves
+/// the form standing, rather than cancelling the form underneath it.
+#[test]
+fn esc_closes_the_picker_and_not_the_form() {
+    use ratatui::layout::Rect;
+
+    let (_dir, first, _second) = dir_with_two_files();
+    let specs = vec![
+        FormFieldSpec::file("doc", "Document", false).with_default(first.display().to_string()),
+        FormFieldSpec::text("note", "Note").optional(),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    form.handle_key("enter");
+    // `tab` would move the form's focus; inside the dialog it is the picker's.
+    assert_eq!(form.handle_key("tab"), FormEvent::Consumed);
+    assert_eq!(form.handle_key("esc"), FormEvent::Consumed);
+
+    let screen = rows_of(&mut form, 80, 30, Rect::new(0, 0, 80, 30)).join("\n");
+    assert!(
+        !screen.contains("Files in Directory"),
+        "the dialog is gone:\n{screen}"
+    );
+    assert_eq!(
+        form.values().get("doc").unwrap(),
+        &first.display().to_string(),
+        "and the field kept what it had"
+    );
+    // The form is still taking keys, and `tab` never reached it.
+    type_str(&mut form, "x");
+    assert_eq!(form.values().get("note").unwrap(), "");
+}
+
+/// Nothing is typed into a file field, but it can be emptied — `ctrl+u` clears
+/// it the same way it clears a text field.
+#[test]
+fn ctrl_u_clears_a_file_field() {
+    let (_dir, first, _second) = dir_with_two_files();
+    let specs = vec![
+        FormFieldSpec::file("doc", "Document", false).with_default(first.display().to_string()),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    assert_eq!(
+        form.values().get("doc").unwrap(),
+        &first.display().to_string()
+    );
+    form.handle_key("ctrl+u");
+    assert_eq!(form.values().get("doc").unwrap(), "");
+}

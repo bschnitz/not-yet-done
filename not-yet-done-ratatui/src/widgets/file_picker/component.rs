@@ -248,6 +248,28 @@ impl FilePicker {
         self
     }
 
+    /// Open the picker on an existing selection — what a field already
+    /// holding paths needs when the user reopens it, so the dialog shows
+    /// what is in the field instead of an empty Selected pane. The
+    /// Directory input is left alone: where to browse is
+    /// [`with_initial_directory`](Self::with_initial_directory)'s job,
+    /// and a caller that wants to land beside the first path passes its
+    /// parent there.
+    pub fn with_selected_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.set_selected_paths(paths);
+        self
+    }
+
+    /// Replace the selection of an already-built picker. Both panes are
+    /// brought back in step: the Selected list is refilled and the marks
+    /// in the Files list follow, so a path that is also on screen shows
+    /// as picked.
+    pub fn set_selected_paths(&mut self, paths: Vec<PathBuf>) {
+        self.selected_paths = paths;
+        self.sync_files_marks_from_selected();
+        self.refresh_selected_pane();
+    }
+
     pub fn with_enumeration_options(mut self, opts: EnumerationOptions) -> Self {
         self.enum_opts = opts;
         self.reload();

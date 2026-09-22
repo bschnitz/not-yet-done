@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use ratatui::style::Color;
 use ratatui::{
@@ -9,12 +10,16 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use tuirealm::command::{Cmd, CmdResult, Direction};
-use tuirealm::component::Component;
+use tuirealm::component::{AppComponent, Component};
+use tuirealm::event::{Event, NoUserEvent};
 use tuirealm::props::{AttrValue, Attribute, PropPayload, PropValue};
 use tuirealm::state::{State, StateValue};
 use unicode_width::UnicodeWidthChar;
 
-use crate::widgets::common::{PREFIX_LEN, SelectionMarker, SelectionMode, truncate_to_width};
+use crate::widgets::common::{
+    PREFIX_LEN, SelectionMarker, SelectionMode, key_string_to_tuirealm, truncate_to_width,
+};
+use crate::widgets::file_picker::{FilePicker, FilePickerEvent, FilePickerStyle};
 use crate::widgets::multi_choice::{ATTR_SELECTED as MC_ATTR_SELECTED, MultiChoice};
 use crate::widgets::select_list::{ATTR_SELECTED as SL_ATTR_SELECTED, SelectList};
 use crate::widgets::text_area::{self, TextArea};
@@ -120,12 +125,29 @@ enum FieldWidget {
         widget: MultiChoice,
         options: Vec<String>,
     },
+    /// One or more paths, picked in a dialog rather than typed. The text input
+    /// only *shows* what is picked (a single path, or a count and the names for
+    /// a list); the value lives in `paths`, because a list joined with newlines
+    /// does not fit in a single line.
+    File {
+        widget: TextInput,
+        paths: Vec<PathBuf>,
+        multi: bool,
+    },
     /// Free text over several rows. `enter` puts a newline in it rather than
     /// submitting the form, so the field the user is writing in decides what
     /// the key means — submitting is `ctrl+enter` while it has focus.
     Multiline {
         widget: TextArea,
     },
+}
+
+/// The file picker while it stands open over the form: which field it was
+/// opened for, and the dialog itself (boxed — it is by far the largest widget
+/// here, and a form that never opens one should not carry its bulk).
+struct PickerOverlay {
+    field: usize,
+    picker: Box<FilePicker>,
 }
 
 struct FieldEntry {
@@ -165,6 +187,12 @@ pub struct Form {
     initial_values: HashMap<String, String>,
     /// Whether the `Discard your input?` prompt is currently up.
     discard_pending: bool,
+    /// The file picker of a [`FieldWidget::File`] while it is open. It owns the
+    /// keyboard and is drawn over everything else.
+    picker: Option<PickerOverlay>,
+    /// What an opened picker is dressed in, derived once from the form's own
+    /// style so the dialog belongs to the form it came out of.
+    picker_style: FilePickerStyle,
     title_style: Style,
     footer_style: Style,
     error_style: Style,
@@ -378,6 +406,28 @@ impl Form {
                         options: opts,
                     }
                 }
+                FormFieldKind::File { multi } => {
+                    let paths: Vec<PathBuf> = value
+                        .as_deref()
+                        .unwrap_or_default()
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(PathBuf::from)
+                        .take(if multi { usize::MAX } else { 1 })
+                        .collect();
+                    let widget = text_widget(
+                        &spec.label,
+                        "enter opens the picker",
+                        Some(&file_display(&paths)),
+                        false,
+                        &style,
+                    );
+                    FieldWidget::File {
+                        widget,
+                        paths,
+                        multi,
+                    }
+                }
                 FormFieldKind::Multiline { lines } => {
                     let mut ta = TextArea::default()
                         .with_title(spec.label.clone())
@@ -420,6 +470,8 @@ impl Form {
             notice: None,
             initial_values: HashMap::new(),
             discard_pending: false,
+            picker: None,
+            picker_style: picker_style(&style),
             title_style: style.title,
             footer_style: style.footer,
             error_style: style.error,
@@ -648,6 +700,11 @@ impl Form {
 
     /// Feeds one normalized key string and returns the resulting [`FormEvent`].
     pub fn handle_key(&mut self, key: &str) -> FormEvent {
+        // An open file picker is a dialog over the form: every key is its own
+        // until it confirms or cancels, `esc` included.
+        if self.picker.is_some() {
+            return self.picker_key(key);
+        }
         // While the discard prompt is up it owns every key: the form underneath
         // must not take another character on the way out.
         if self.discard_pending {
@@ -670,6 +727,12 @@ impl Form {
                     return FormEvent::Consumed;
                 }
                 return FormEvent::Cancelled;
+            }
+            // A file field is filled in the picker, so `enter` opens it rather
+            // than submitting a form the user has not finished.
+            "enter" if self.focused_is_file() => {
+                self.open_picker();
+                return FormEvent::Consumed;
             }
             // A field that has its own use for `enter` gets it (see
             // `focused_takes_enter`); the key then falls through to dispatch.
@@ -808,6 +871,18 @@ impl Form {
                     decimal_in_progress(candidate, separator, precision, allow_negative)
                 });
             }
+            // Nothing is typed into a file field — the picker writes it. The
+            // one key it does take is the one that empties it again.
+            FieldWidget::File {
+                widget,
+                paths,
+                multi: _,
+            } => {
+                if key == "ctrl+u" {
+                    paths.clear();
+                    widget.attr(Attribute::Value, AttrValue::String(String::new()));
+                }
+            }
             FieldWidget::Multiline { widget } => {
                 if let Some(cmd) = text_area_cmd(key) {
                     widget.perform(cmd);
@@ -869,6 +944,100 @@ impl Form {
     /// Whether the focused field makes `enter` its own — a multi-line box, in
     /// which a newline is the obvious reading of the key. The form is then
     /// submitted with `ctrl+enter`, which works on every field.
+    /// Whether the focused field is a file field — the one kind where `enter`
+    /// opens a dialog instead of submitting.
+    fn focused_is_file(&self) -> bool {
+        matches!(
+            self.fields.get(self.focused).map(|e| &e.widget),
+            Some(FieldWidget::File { .. })
+        )
+    }
+
+    /// Opens the picker for the focused file field, showing what the field
+    /// already holds and browsing beside it.
+    fn open_picker(&mut self) {
+        let Some(entry) = self.fields.get(self.focused) else {
+            return;
+        };
+        let FieldWidget::File { paths, multi, .. } = &entry.widget else {
+            return;
+        };
+        // Land where the first path lives, so reopening a filled field shows
+        // its neighbourhood rather than starting the search over.
+        let directory = paths
+            .first()
+            .and_then(|p| p.parent())
+            .map(|p| p.display().to_string())
+            .filter(|s| !s.is_empty())
+            // `~` rather than the process's working directory: a form is not
+            // run from where the user keeps their files. The picker expands it.
+            .unwrap_or_else(|| "~".to_string());
+        let title = if *multi {
+            format!("{} (any number)", entry.label)
+        } else {
+            entry.label.clone()
+        };
+        let mut picker = FilePicker::default()
+            .with_style(self.picker_style.clone())
+            .with_title(title)
+            .with_initial_directory(directory)
+            .with_selected_paths(paths.clone());
+        picker.attr(Attribute::Focus, AttrValue::Flag(true));
+        self.picker = Some(PickerOverlay {
+            field: self.focused,
+            picker: Box::new(picker),
+        });
+    }
+
+    /// Feeds one key to the open picker. A key it does not understand is
+    /// swallowed rather than reaching the form behind it — a dialog that let
+    /// `tab` move the focus underneath it would be a trap.
+    fn picker_key(&mut self, key: &str) -> FormEvent {
+        let Some(overlay) = self.picker.as_mut() else {
+            return FormEvent::Consumed;
+        };
+        let Some(ev) = key_string_to_tuirealm(key) else {
+            return FormEvent::Consumed;
+        };
+        let field = overlay.field;
+        let event: Event<NoUserEvent> = Event::Keyboard(ev);
+        match overlay.picker.on(&event) {
+            Some(FilePickerEvent::Confirmed(paths)) => {
+                self.picker = None;
+                self.set_file_paths(field, paths);
+            }
+            Some(FilePickerEvent::Cancelled) => self.picker = None,
+            _ => {}
+        }
+        FormEvent::Consumed
+    }
+
+    /// Writes what the picker came back with into the field it was opened for.
+    fn set_file_paths(&mut self, idx: usize, paths: Vec<PathBuf>) {
+        let Some(entry) = self.fields.get_mut(idx) else {
+            return;
+        };
+        let key = entry.key.clone();
+        if let FieldWidget::File {
+            widget,
+            paths: held,
+            multi,
+        } = &mut entry.widget
+        {
+            let mut paths = paths;
+            if !*multi {
+                paths.truncate(1);
+            }
+            *held = paths;
+            widget.attr(Attribute::Value, AttrValue::String(file_display(held)));
+        }
+        // Picking a file answers whatever the field was being complained at
+        // for, the same way typing into a text field does.
+        self.clear_field_error(&key);
+        // A file value can gate another field the same as any other.
+        self.ensure_focus_visible();
+    }
+
     fn focused_takes_enter(&self) -> bool {
         matches!(
             self.fields.get(self.focused).map(|e| &e.widget),
@@ -892,6 +1061,7 @@ impl Form {
                 | FieldWidget::Decimal { widget, .. }
                 | FieldWidget::Duration { widget } => widget.attr(Attribute::Focus, flag),
                 FieldWidget::Multiline { widget } => widget.attr(Attribute::Focus, flag),
+                FieldWidget::File { widget, .. } => widget.attr(Attribute::Focus, flag),
             }
         }
     }
@@ -965,6 +1135,9 @@ impl Form {
                 self.footer_style,
                 self.panel_bg,
             );
+        }
+        if let Some(overlay) = self.picker.as_mut() {
+            render_picker_overlay(frame, area, &mut overlay.picker);
         }
     }
 
@@ -1291,6 +1464,62 @@ fn text_widget(
     ti
 }
 
+/// What a file field shows: nothing while it is empty, the path itself while
+/// it holds one, and a count with the names once it holds several — the full
+/// paths of a list would be unreadable on one line, and the names are what
+/// tells them apart.
+fn file_display(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => String::new(),
+        [one] => one.display().to_string(),
+        many => {
+            let names: Vec<String> = many
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.display().to_string())
+                })
+                .collect();
+            format!("{} files: {}", many.len(), names.join(", "))
+        }
+    }
+}
+
+/// Dress the picker in the form's own style, so the dialog is recognisably
+/// part of the form it opened out of rather than a second look.
+fn picker_style(style: &FormStyle) -> FilePickerStyle {
+    let mut s = FilePickerStyle::new()
+        .with_text_input_inactive(style.text_inactive.clone())
+        .with_text_input_active(style.text_active.clone())
+        .with_select_list_inactive(style.select_inline_inactive.clone())
+        .with_select_list_active(style.select_inline_active.clone())
+        .with_title_style(style.title)
+        .with_help_keys_style(Style::default().fg(style.accent))
+        .with_help_labels_style(style.footer)
+        .with_paste_error_style(style.error);
+    if let Some(bg) = style.panel_bg {
+        s = s.with_panel_bg(bg);
+    }
+    s
+}
+
+/// Centres the picker over the form and clears the ground under it. Sized like
+/// every other picker overlay in the application: big enough for two panes,
+/// never edge to edge.
+fn render_picker_overlay(frame: &mut Frame, area: Rect, picker: &mut FilePicker) {
+    let w = area.width.saturating_sub(8).clamp(40, 96).min(area.width);
+    let h = area.height.saturating_sub(4).clamp(18, 32).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    frame.render_widget(Clear, popup);
+    picker.view(frame, popup);
+}
+
 /// The bounds of a numeric field as its placeholder, so the range is on screen
 /// before a submit rejects a value for missing it. Empty when unbounded.
 fn range_placeholder<T: std::fmt::Display>(min: Option<T>, max: Option<T>) -> String {
@@ -1525,6 +1754,12 @@ fn field_value(widget: &FieldWidget) -> String {
             _ => String::new(),
         },
         FieldWidget::Multiline { widget } => widget.value(),
+        // The joined list is the value; what the input shows is a summary.
+        FieldWidget::File { paths, .. } => paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
         FieldWidget::Toggle(t) => {
             if t.is_on() {
                 "true".into()
@@ -1552,6 +1787,9 @@ fn field_height(widget: &FieldWidget, focused: bool) -> u16 {
         FieldWidget::DateTime { .. } => datetime_height(),
         FieldWidget::Toggle(_) => 2,
         FieldWidget::Number { .. } | FieldWidget::Decimal { .. } => 2,
+        // Label and the line saying what is picked; the picking happens in a
+        // dialog, so the field itself never grows.
+        FieldWidget::File { .. } => 2,
         // Label, input, and the line that reads the span back.
         FieldWidget::Duration { .. } => 3,
         // Label plus the box itself; the text scrolls inside it, so the height
@@ -1598,6 +1836,7 @@ fn render_field(
             widget.view(frame, area)
         }
         FieldWidget::Multiline { widget } => widget.view(frame, area),
+        FieldWidget::File { widget, .. } => widget.view(frame, area),
         FieldWidget::Duration { widget } => {
             // Two rows for the input, so the third is the preview rather than
             // the text input's own (unused) error row.
