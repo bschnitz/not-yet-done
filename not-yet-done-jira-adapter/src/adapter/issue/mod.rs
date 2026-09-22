@@ -108,6 +108,12 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
                         "Story points, a number (blank: keep, '-': clear)",
                     )
                     .optional(),
+                    FormFieldSpec::text(
+                        "fix_versions",
+                        "Fix versions, comma-separated, replacing all \
+                         (blank: keep, '-': clear)",
+                    )
+                    .optional(),
                 ],
             },
         ),

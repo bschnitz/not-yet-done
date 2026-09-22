@@ -177,6 +177,23 @@ impl JiraClient {
 
         Ok(raw.into_iter().map(version_from_raw).collect())
     }
+
+    /// Write the `fixVersions` of an issue; an empty slice clears them.
+    ///
+    /// Names, not ids: that is what an issue carries and what a caller
+    /// reads back, and it keeps the round-trip symmetric. Jira refuses a
+    /// name the project does not know, so a caller that wants a helpful
+    /// message asks [`JiraClient::project_versions`] first -- the check
+    /// does not belong here, where the only job is the PUT.
+    pub async fn set_fix_versions(&self, key: &str, names: &[String]) -> Result<(), String> {
+        let arr: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect();
+        let mut fields = serde_json::Map::new();
+        fields.insert("fixVersions".into(), serde_json::Value::Array(arr));
+        self.update_fields(key, fields).await
+    }
 }
 
 fn project_from_raw(p: RawProject) -> JiraProject {

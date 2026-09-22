@@ -1,5 +1,5 @@
 //! `set_fields` action — write the header fields of an issue (summary,
-//! labels, assignee, story points) on their own.
+//! labels, assignee, story points, fix versions) on their own.
 //!
 //! The editor actions (`edit_full`, `from_markdown`) can set these too, but
 //! only as part of a round-trip that rewrites the description along with
@@ -11,7 +11,8 @@
 //! Every field is optional; what is absent stays as it is. The one thing
 //! absence cannot express is *emptying* a field, so a lone `-` says that:
 //! `labels=-` removes every label, `assignee=-` unassigns the issue,
-//! `story_points=-` takes the estimate off.
+//! `story_points=-` takes the estimate off, `fix_versions=-` takes the
+//! issue out of every release.
 
 use std::collections::HashMap;
 
@@ -61,6 +62,25 @@ fn split_labels(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Read the fix-version list: `Some(empty)` clears it, `Some(names)` sets
+/// it, `None` leaves it alone. Split like labels — a version name never
+/// carries a comma, and one spelling for both lists is one thing less to
+/// remember.
+fn given_fix_versions(values: &HashMap<String, String>) -> Option<Vec<String>> {
+    given(values, "fix_versions").map(|raw| {
+        if raw == CLEAR {
+            Vec::new()
+        } else {
+            split_labels(&raw)
+        }
+    })
+}
+
+/// The project an issue key belongs to (`PROJ-12` → `PROJ`).
+fn project_of(key: &str) -> &str {
+    key.split('-').next().unwrap_or(key)
+}
+
 impl JiraIssueNode {
     pub(super) async fn execute_set_fields(
         &self,
@@ -84,13 +104,28 @@ impl JiraIssueNode {
         });
 
         let points = given_points(values, "story_points")?;
+        let fix_versions = given_fix_versions(values);
 
-        if summary.is_none() && labels.is_none() && assignee.is_none() && points.is_none() {
+        if summary.is_none()
+            && labels.is_none()
+            && assignee.is_none()
+            && points.is_none()
+            && fix_versions.is_none()
+        {
             return Err(other_err(
-                "nothing to set — pass at least one of summary, labels, assignee, story_points"
+                "nothing to set — pass at least one of summary, labels, assignee, \
+                 story_points, fix_versions"
                     .to_string(),
             ));
         }
+
+        // Checked before anything is written: Jira answers an unknown
+        // version with a bare 400, and a caller that named one release of
+        // four must not find the other three already gone.
+        let fix_versions = match &fix_versions {
+            Some(names) if !names.is_empty() => Some(self.known_versions(names).await?),
+            other => other.clone(),
+        };
 
         // Skipped entirely when only the estimate was named, so a
         // story-points write does not send an empty header update.
@@ -112,6 +147,13 @@ impl JiraIssueNode {
         if let Some(p) = points {
             self.client
                 .set_story_points(&self.key, p)
+                .await
+                .map_err(other_err)?;
+        }
+
+        if let Some(names) = &fix_versions {
+            self.client
+                .set_fix_versions(&self.key, names)
                 .await
                 .map_err(other_err)?;
         }
@@ -141,10 +183,58 @@ impl JiraIssueNode {
                 Some(n) => format!("story_points={n}"),
             });
         }
+        if let Some(vs) = &fix_versions {
+            wrote.push(if vs.is_empty() {
+                "fix versions cleared".to_string()
+            } else {
+                format!("fix_versions={}", vs.join(","))
+            });
+        }
 
         Ok(ActionOutcome::Done {
             message: Some(format!("{}: {}", self.key, wrote.join(", "))),
         })
+    }
+
+    /// Resolve the named versions against the project's own list, and
+    /// answer with the project's spelling of each.
+    ///
+    /// Case is forgiven because the name is typed by a human; an unknown
+    /// name is not, and the error names what the project does have —
+    /// a release is misspelled far more often than it is missing.
+    async fn known_versions(&self, names: &[String]) -> Result<Vec<String>> {
+        let project = project_of(&self.key);
+        let known = self
+            .client
+            .project_versions(project)
+            .await
+            .map_err(other_err)?;
+
+        let mut resolved = Vec::with_capacity(names.len());
+        for name in names {
+            match known
+                .iter()
+                .find(|v| v.name.eq_ignore_ascii_case(name.trim()))
+            {
+                Some(v) => resolved.push(v.name.clone()),
+                None => {
+                    let open: Vec<&str> = known
+                        .iter()
+                        .filter(|v| !v.released && !v.archived)
+                        .map(|v| v.name.as_str())
+                        .collect();
+                    return Err(other_err(format!(
+                        "{project} has no version '{name}' — open ones: {}",
+                        if open.is_empty() {
+                            "none".to_string()
+                        } else {
+                            open.join(", ")
+                        }
+                    )));
+                }
+            }
+        }
+        Ok(resolved)
     }
 }
 
@@ -197,6 +287,29 @@ mod tests {
     fn a_non_number_is_refused_rather_than_written() {
         let err = given_points(&form(&[("story_points", "viele")]), "story_points");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn fix_versions_read_the_three_cases() {
+        let clear = given_fix_versions(&form(&[("fix_versions", "-")]));
+        assert_eq!(clear, Some(Vec::new()));
+
+        let set = given_fix_versions(&form(&[("fix_versions", "v14-2026, v15-2026")]));
+        assert_eq!(
+            set,
+            Some(vec!["v14-2026".to_string(), "v15-2026".to_string()])
+        );
+
+        let keep = given_fix_versions(&form(&[("fix_versions", "  ")]));
+        assert_eq!(keep, None);
+    }
+
+    /// A release name carries dashes of its own, so only the FIRST one
+    /// separates the project from the number.
+    #[test]
+    fn the_project_is_the_first_segment_of_the_key() {
+        assert_eq!(project_of("ACMEOPS-1234"), "ACMEOPS");
+        assert_eq!(project_of("PROJ"), "PROJ");
     }
 
     #[test]
