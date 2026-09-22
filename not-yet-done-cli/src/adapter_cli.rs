@@ -1659,6 +1659,21 @@ fn report_outcome(outcome: ActionOutcome, action_id: &str) -> Result<()> {
         ActionOutcome::Reopen { content, .. } => {
             Err(anyhow!("'{action_id}' rejected the input:\n{content}"))
         }
+        ActionOutcome::ReopenForm { errors } => {
+            // Nothing to reopen without a terminal to ask on, so the rejection
+            // is reported the way any other failure is — but with each message
+            // still tied to the field it belongs to, which is the whole point
+            // of the outcome.
+            let detail = errors
+                .iter()
+                .map(|e| match &e.field {
+                    Some(f) => format!("  {f}: {}", e.message),
+                    None => format!("  {}", e.message),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(anyhow!("'{action_id}' rejected the input:\n{detail}"))
+        }
         ActionOutcome::OpenEditor { action_id: next } => Err(anyhow!(
             "'{action_id}' opens an interactive editor for '{next}' — use the TUI"
         )),

@@ -115,6 +115,18 @@ fn to_field_spec(f: FormFieldSpec) -> RFormSpec {
             },
             FormFieldKind::Toggle => RFormKind::Toggle,
             FormFieldKind::DateTime { with_time } => RFormKind::DateTime { with_time },
+            // Kinds whose widgets are not built yet: rendered as the closest
+            // thing that exists so the popup stays usable. Nothing constructs
+            // them today — the script-form protocol that will is not wired up
+            // yet (see docs/plan-script-forms.md, phase 3).
+            FormFieldKind::MultiSelect { allowed_values } => RFormKind::Select {
+                options: allowed_values,
+            },
+            FormFieldKind::Number { .. }
+            | FormFieldKind::Decimal { .. }
+            | FormFieldKind::Duration
+            | FormFieldKind::Multiline { .. }
+            | FormFieldKind::File { .. } => RFormKind::Text,
         },
     }
 }

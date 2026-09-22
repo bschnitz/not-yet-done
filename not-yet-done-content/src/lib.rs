@@ -1186,7 +1186,7 @@ pub enum InputSpec {
 /// [`ActionInput::Form`] values (and required-checks). Comparison is against the
 /// controller's current value string (a toggle yields `"true"`/`"false"`; a
 /// select yields the option label).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldCondition {
     /// [`FormFieldSpec::key`] of the field whose value is tested.
     pub field: String,
@@ -1197,7 +1197,7 @@ pub struct FieldCondition {
 }
 
 /// One field in an [`InputSpec::Form`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FormFieldSpec {
     /// Stable key the value is returned under in [`ActionInput::Form`] and
     /// the key [`Node::form_prep`] uses to prefill an initial value.
@@ -1335,10 +1335,111 @@ impl FormFieldSpec {
         });
         self
     }
+
+    /// A required whole-number field.
+    pub fn number(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::of_kind(key, label, FormFieldKind::Number {
+            min: None,
+            max: None,
+            step: None,
+        })
+    }
+
+    /// A required fractional-number field.
+    pub fn decimal(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::of_kind(key, label, FormFieldKind::Decimal {
+            min: None,
+            max: None,
+            precision: None,
+        })
+    }
+
+    /// A required duration field (submitted as whole minutes).
+    pub fn duration(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::of_kind(key, label, FormFieldKind::Duration)
+    }
+
+    /// A required multi-line text field.
+    pub fn multiline(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::of_kind(key, label, FormFieldKind::Multiline { lines: None })
+    }
+
+    /// A required multiple-choice field over a fixed option list.
+    pub fn multiselect(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        allowed_values: Vec<String>,
+    ) -> Self {
+        Self::of_kind(key, label, FormFieldKind::MultiSelect { allowed_values })
+    }
+
+    /// A required file-picker field.
+    pub fn file(key: impl Into<String>, label: impl Into<String>, multi: bool) -> Self {
+        Self::of_kind(key, label, FormFieldKind::File { multi })
+    }
+
+    /// Shared body of the kind constructors: required, unmasked, no default.
+    fn of_kind(key: impl Into<String>, label: impl Into<String>, kind: FormFieldKind) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind,
+            required: true,
+            default: None,
+            masked: false,
+            visible_when: None,
+        }
+    }
+}
+
+/// One validation message, optionally tied to a single form field.
+///
+/// A message **with** a `field` belongs to that input — a front-end marks the
+/// field and shows the text there. One **without** is about the submission as
+/// a whole ("the tracker rejected the request") and belongs wherever the form
+/// shows its general notice.
+///
+/// It exists because a form that can only report one sentence forces every
+/// producer to flatten "these two of your six fields are wrong" into prose the
+/// user then has to map back onto the inputs themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldError {
+    /// [`FormFieldSpec::key`] the message belongs to, or `None` for a general
+    /// message.
+    pub field: Option<String>,
+    /// What is wrong, phrased for the user.
+    pub message: String,
+}
+
+impl FieldError {
+    /// A message about one field.
+    pub fn field(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: Some(key.into()),
+            message: message.into(),
+        }
+    }
+
+    /// A message about the submission as a whole.
+    pub fn general(message: impl Into<String>) -> Self {
+        Self {
+            field: None,
+            message: message.into(),
+        }
+    }
 }
 
 /// Widget kind for a [`FormFieldSpec`].
-#[derive(Clone, Debug)]
+///
+/// # Multi-valued fields
+///
+/// Form values travel as plain strings ([`ActionInput::Form`]), so the kinds
+/// that carry more than one value — [`FormFieldKind::MultiSelect`] and a
+/// multi-file [`FormFieldKind::File`] — join their entries with a **newline**.
+/// Comma would be ambiguous: option labels and file names contain commas all
+/// the time, newlines practically never. An empty string means "nothing
+/// chosen".
+#[derive(Clone, Debug, PartialEq)]
 pub enum FormFieldKind {
     /// Single-line free text.
     Text,
@@ -1350,6 +1451,37 @@ pub enum FormFieldKind {
     /// day-only field from one that also carries a time-of-day. The value is
     /// the raw phrase the user typed; the backend resolves it.
     DateTime { with_time: bool },
+    /// Whole number, optionally bounded. `step` is the increment a front-end
+    /// applies to its up/down keys, not a divisibility constraint.
+    Number {
+        min: Option<i64>,
+        max: Option<i64>,
+        step: Option<i64>,
+    },
+    /// Fractional number, optionally bounded. `precision` caps the digits
+    /// after the separator. The submitted value always uses a **dot**,
+    /// whatever separator the front-end lets the user type — otherwise a
+    /// backend would depend on the display settings of whoever ran the form.
+    Decimal {
+        min: Option<f64>,
+        max: Option<f64>,
+        precision: Option<u8>,
+    },
+    /// A span of time. The front-end accepts the usual spellings (`1:30`,
+    /// `90m`, `1h30`) and submits **whole minutes** as a decimal string, so no
+    /// backend has to parse duration syntax. Unlike a date there is no
+    /// ambiguity to defer: ninety minutes is ninety minutes in every context.
+    Duration,
+    /// Multi-line free text. `lines` is the visible height a front-end should
+    /// give it; the content scrolls beyond that. Deliberately not an editor
+    /// session — that is [`InputSpec::Editor`], a different flow.
+    Multiline { lines: Option<u16> },
+    /// Any number of choices out of a fixed list, newline-joined (see the
+    /// enum docs).
+    MultiSelect { allowed_values: Vec<String> },
+    /// One or more file paths picked by the front-end, newline-joined when
+    /// `multi` (see the enum docs).
+    File { multi: bool },
 }
 
 /// The user's input for an action invocation.
@@ -1416,6 +1548,14 @@ pub enum ActionOutcome {
         content: String,
         new_version: Option<String>,
     },
+    /// The form's values were rejected. The front-end reopens the **same**
+    /// form with the values the user typed still in place and shows `errors`
+    /// where they belong — per field, or as a general notice.
+    ///
+    /// The form counterpart of [`ActionOutcome::Reopen`], which serves the
+    /// editor flow only. Without it an adapter can report a rejected form only
+    /// as one flat sentence, leaving the user to work out which input it meant.
+    ReopenForm { errors: Vec<FieldError> },
     /// Nothing changed — no roundtrip needed.
     NoChanges,
     /// The action created or surfaced a new node — caller may navigate.

@@ -209,6 +209,18 @@ impl EditSession for NodeActionEditSession {
                 self.template = content.clone();
                 CommitOutcome::Reopen { content }
             }
+            // An editor action answered with a *form* outcome — the two flows
+            // are not interchangeable, and there is no form on screen to
+            // reopen. Report it rather than swallowing it; the adapter is
+            // wrong, and staying silent would look like a successful save.
+            Ok(ActionOutcome::ReopenForm { errors }) => CommitOutcome::Cancelled {
+                message: Some(format!(
+                    "{}: action '{}' answered an editor with form errors ({})",
+                    self.node_id,
+                    self.action_id,
+                    errors.len()
+                )),
+            },
             Ok(ActionOutcome::NoChanges) => {
                 // Record the buffer so a follow-up identical save is a no-op
                 // rather than another round-trip to the backend.
