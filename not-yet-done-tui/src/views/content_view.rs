@@ -8669,7 +8669,19 @@ impl ContentView {
     /// scripts. Used to decide whether `q` (scripts menu) and `Q` (SQL
     /// editor) should be claimed.
     fn displays_node_scripts(&self) -> bool {
-        match self.active_pane().active_child.as_ref() {
+        let pane = self.active_pane();
+        // A tree pane has no `active_child` — the level the cursor
+        // stands on is the one its node-type chain names. Without this
+        // the lookup only ever saw the root ViewDef, so a
+        // `node_scripts: true` on a child level (the SQLite tab puts it
+        // on `Table` and `View`) never counted and `q` was not claimed
+        // anywhere in the tree.
+        if pane.tree.is_some() {
+            if let Some(child) = pane.tree_active_child_def(&self.view_defs) {
+                return child.node_scripts;
+            }
+        }
+        match pane.active_child.as_ref() {
             Some(child) => child.node_scripts,
             None => self
                 .active_view_def()

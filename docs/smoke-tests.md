@@ -5291,18 +5291,19 @@ a silent no-op — no editor, no error, no log line. Fixed by the arms on
       to reload the level: the key path carried its own copy of the reload
       call, while the custom-query branch that re-runs the query lived only in
       the helper the action chain used. Both keys now go through that helper.
-- [ ] `q` after the first save → the script is in the menu. _Measured
-      2026-09-22: `q` opens no script menu anywhere in this tab._ In the tree
-      subtab it is not even claimed — `displays_node_scripts()` asks the flat
-      `active_child` (or, at depth 0, the root `ViewDef`), and in tree mode
-      both say `databases`, which sets no `node_scripts`. The `node_scripts:
-    true` that the `Table` child carries is never read, because nothing maps
-      the tree cursor onto its level. In the flat `tables` subtab, where the
-      claim _is_ made, `q` opens the **saved-query** menu instead: the per-view
-      `query.menu_key` defaults to `q` as well, and it wins. `Q` survives only
-      because `sqlite.yaml` binds it a second time as a forced node action. So
-      this box needs a decision (which key the per-node script menu gets) on
-      top of the fix.
+- [x] `q` after the first save → the script is in the menu. Fixed on
+      2026-09-22: in a tree the key was not claimed at all.
+      `displays_node_scripts()` asked the flat `active_child` (or, at depth 0,
+      the root `ViewDef`), and in tree mode both answer `databases`, which sets
+      no `node_scripts` — so the `node_scripts: true` that the `Table` and
+      `View` children carry was never read. It now maps the cursor onto its
+      level via `tree_active_child_def`, the same lookup the action chains use.
+      `Q` had survived the gap only because `sqlite.yaml` binds it a second
+      time as a forced node action. **Reading the popup:** the node-script menu
+      reuses the saved-query popup, chrome and `✦ Queries` title included. The
+      one visible difference is the footer — the script menu opens without
+      default-query semantics, so its last line lacks `[ctrl+t] default`. The
+      two are easy to mistake for one another.
 - [x] `Q` one level deeper (in `Rows`) still addresses the table above, not
       the row. The editor opens with `SELECT * FROM "orders";` while the cursor
       stands on a row of the coupled `Rows` pane.
@@ -5313,9 +5314,9 @@ a silent no-op — no editor, no error, no log line. Fixed by the arms on
 - [x] An `UPDATE` → fails with the hint about `read_only: false`. The editor
       stays open and writes the failure into the buffer as comment lines above
       the offending statement: `error returned from database: (code: 8) attempt
-    to write a readonly database (this adapter runs read_only; set read_only:
-    false in its config to allow writes)`. With the shipped `read_only:
-    false` the same statement answers `1 row affected` and the row really
+  to write a readonly database (this adapter runs read_only; set read_only:
+  false in its config to allow writes)`. With the shipped `read_only:
+  false` the same statement answers `1 row affected` and the row really
       changes on disk.
 
 ### The script branch below the database (`DB Scripts`)
