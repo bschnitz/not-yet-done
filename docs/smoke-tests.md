@@ -5361,49 +5361,75 @@ all** and points at the right file.
       `<key>` is the hashed file key, not the path. Measured: the instance id
       of a single-instance adapter is its own type (`sqlite/sqlite/`), and the
       key is `<file stem>-<8 hex>`. Folders are real directories under it.
-- [ ] `e` edits in place (a temp file with the `.nyd_tmp_` prefix **inside**
+- [x] `e` edits in place (a temp file with the `.nyd_tmp_` prefix **inside**
       the script directory), `r` renames (keeping the extension), `M` moves.
       `e` opens the script and `:wq` writes it back to its own file; `r` on
       `report.sql` renamed to a name typed **without** an extension keeps the
-      `.sql`; `M` with a target folder moves the file and says so. Two things
-      still open. The temp file belongs to the **external** editor path only
-      (`open_editor` writes it; `editor_in_place: true` just puts it next to
-      the script instead of in `$TMPDIR`) — with the builtin editor forced in
-      the smoke config there is none to see, so that half needs a run with
-      `command:` + `inline: true`. And **`M` cannot move anything back to the
-      root**: the field says `Target folder (empty = root)`, but submitting it
+      `.sql`; `M` with a target folder moves the file and says so. The temp
+      file belongs to the **external** editor path only (`open_editor` writes
+      it; `editor_in_place: true` just puts it next to the script instead of
+      in `$TMPDIR`), so it takes a profile with `command:` + `inline: true` to
+      see — measured there: the editor opens
+      `<script dir>/.nyd_tmp_<6 chars><ext>` (same extension as the script,
+      and inside the **folder** the script lives in, not the branch root),
+      `:wq` writes the text back into the script's own file and the temp file
+      is gone afterwards. Still open: **`M` cannot move anything back to the
+      root**. The field says `Target folder (empty = root)`, but submitting it
       empty answers `⚠ This field is required` and does nothing.
 - [x] `d` on a non-empty folder refuses with "not empty". It first asks
       `Delete 'daily'? (y/n)`; `y` then answers
       `Delete failed: not empty (2 entries)` and the folder is still there.
-- [ ] **`X` runs and paginates via LIMIT/OFFSET** (the config binds `X`, not
+- [x] **`X` runs and paginates via LIMIT/OFFSET** (the config binds `X`, not
       `x` — the row levels take `x` for the view scripts tab-wide; `↵` runs it
-      too) — that is the deviation from
-      Postgres: the result pane is set to `pagination: mode: server`. No error
-      such as "sqlite has no cursor pagination"; `>`/`<` page through.
-- [ ] A script under file A accesses a table that only exists in file B → an
+      too) — that is the deviation from Postgres: the result pane is set to
+      `pagination: mode: server`. No error such as "sqlite has no cursor
+      pagination"; `>`/`<` page through. Measured over a 240-row table:
+      `X` opens the result as a coupled split to the right, the footer reads
+      `Items 1–100 · Page 1`, `>` walks to `Items 101–200 · Page 2` and then
+      to `Items 201–240 · Page 3` (the last page is clamped to the rows that
+      exist, not to the window asked for), a further `>` stays there, and `<`
+      walks back. The result pane keeps the focus, so `w h` is the way back
+      into the tree — this level sets `back: null`, `Esc` does nothing.
+- [x] A script under file A accesses a table that only exists in file B → an
       error from SQLite (proof that it runs against the right file, not against
-      the most recently opened one).
+      the most recently opened one). With the other file's result still on
+      screen from the previous run, a script under `other.db` selecting a
+      table that only exists in `shop.db` answers
+      `Query error: error returned from database: (code: 1) no such table: …`
+      and leaves the old result untouched.
 
 ### Table completions in the SQLite script editor
 
 The mechanism is the same as in the Postgres tab (see TC-1 … TC-5), but with
 **single-stage** tokens — a file has no schema namespace.
 
-- [ ] `e` on a `.sql` script → the last line is
+Reading them takes the **external** editor profile (`command:` +
+`inline: true` + `pause_tui: true`): the completion line is appended to the
+editor's temp file, so the builtin editor never shows one.
+
+- [x] `e` on a `.sql` script → the last line is
       `-- table completions: tt_<table>, …` with **all** tables _and views_ of
-      the file, without the `sqlite_` internals.
-- [ ] Use a token: `SELECT * FROM tt_<table>;` → `x` returns rows (it expands
-      to `"<table>"`).
-- [ ] Save, then `cat` the script under
+      the file, without the `sqlite_` internals. Measured on a file holding
+      four tables, one view and an `sqlite_sequence` (from an `AUTOINCREMENT`
+      column): the line lists the view alongside the tables, alphabetically,
+      and leaves `sqlite_sequence` out. It sits one blank line below the
+      script text.
+- [x] Use a token: `SELECT * FROM tt_<table>;` → `x` returns rows (it expands
+      to `"<table>"`). On this tab the key is `X` (see above); the 240-row
+      table comes back paginated as it does for the literal name.
+- [x] Save, then `cat` the script under
       `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…`:
       **no** completion line on disk. Another `e` shows it again, exactly once
       (not stacked).
-- [ ] `e` on a `.py` script in the same branch → no completion line.
-- [ ] Two files with a table of the same name: the line under file A lists A's
-      tables (proof that the key comes from the node ID).
-- [ ] An unknown token (`tt_doesnotexist`) → the SQLite error names the
-      literal token, no silent substitution.
+- [x] `e` on a `.py` script in the same branch → no completion line. A freshly
+      created `.py` opens completely empty.
+- [x] Two files with a table of the same name: the line under file A lists A's
+      tables (proof that the key comes from the node ID). With `parts` in both
+      files, the script under the second file still lists only that file's
+      two tables — even right after running a script against the first one.
+- [x] An unknown token (`tt_doesnotexist`) → the SQLite error names the
+      literal token, no silent substitution:
+      `no such table: tt_doesnotexist`.
 
 ## Editing database views (`E` → `edit_view`, SQLite + Postgres)
 
