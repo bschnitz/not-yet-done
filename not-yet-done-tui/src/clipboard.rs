@@ -32,7 +32,7 @@ pub fn copy(text: &str) -> bool {
             return true;
         }
     }
-    osc52_copy(text).is_ok()
+    osc52_copy(text, &mut io::stdout()).is_ok()
 }
 
 /// Read text from the system clipboard. `None` when the `clipboard` feature
@@ -50,9 +50,14 @@ pub fn paste() -> Option<String> {
 }
 
 /// Hand the text to the terminal emulator with an OSC 52 sequence.
+///
+/// The sink is a parameter rather than `io::stdout()` because this is the
+/// last path there is: when it fails the copy is lost and the caller has to
+/// say so, and a terminal that refuses the write cannot be arranged around a
+/// running TUI. With the writer passed in, that case is a test instead of a
+/// thought experiment.
 #[cfg_attr(not(feature = "mouse"), allow(dead_code))]
-fn osc52_copy(text: &str) -> io::Result<()> {
-    let mut out = io::stdout();
+fn osc52_copy<W: Write>(text: &str, out: &mut W) -> io::Result<()> {
     out.write_all(b"\x1b]52;c;")?;
     out.write_all(base64(text.as_bytes()).as_bytes())?;
     out.write_all(b"\x07")?;
@@ -88,7 +93,8 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, osc52_copy};
+    use std::io::{self, Write};
 
     #[test]
     fn base64_matches_the_rfc_examples() {
@@ -106,5 +112,34 @@ mod tests {
     #[test]
     fn base64_encodes_utf8_bytes() {
         assert_eq!(base64("├─ ✓".as_bytes()), "4pSc4pSAIOKckw==");
+    }
+
+    /// A terminal that is no longer listening: every write refuses.
+    struct Deaf;
+
+    impl Write for Deaf {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("no terminal"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn osc52_wraps_the_payload_the_way_terminals_expect() {
+        let mut out = Vec::new();
+        osc52_copy("foobar", &mut out).expect("a plain buffer takes the write");
+        assert_eq!(out, b"\x1b]52;c;Zm9vYmFy\x07");
+    }
+
+    /// The path of last resort: when the terminal refuses the write there is
+    /// nothing left to try, and `copy` has to report the loss rather than
+    /// swallow it. Only its caller can tell the user, and it does so exactly
+    /// once — both call sites act on `Some(false)` alone.
+    #[test]
+    fn a_terminal_that_refuses_the_write_fails_the_copy() {
+        assert!(osc52_copy("foobar", &mut Deaf).is_err());
     }
 }

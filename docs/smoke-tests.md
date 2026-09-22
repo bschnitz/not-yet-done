@@ -6195,11 +6195,17 @@ started in.
       included. The order is visible in the same two runs — with a desktop
       clipboard in reach not a single OSC 52 goes out, because the first path
       already succeeded.
-- [ ] If **no** path works at all, exactly one notification appears —
-      `Could not reach the clipboard` — and nothing else. Not reachable from
-      here: the OSC 52 fallback only fails when the write to the terminal
-      itself fails, so short of taking stdout away from a running TUI there is
-      no way to make both paths refuse.
+- [x] If **no** path works at all, exactly one notification appears —
+      `Could not reach the clipboard` — and nothing else. Half measured, half
+      tested, because the second half cannot be arranged around a running TUI:
+      the OSC 52 fallback only fails when the write to the terminal itself
+      fails. The first half is the box above — with no desktop clipboard in
+      reach the copy still succeeds over OSC 52 and stays silent. For the
+      second, `osc52_copy` now takes its sink as a parameter, so a writer that
+      refuses everything stands in for a terminal that is gone: the copy then
+      reports the loss instead of swallowing it. That it is reported once and
+      only once is the wiring — both call sites act on `Some(false)` alone,
+      and success is silent by design.
 
 ### Clicking tabs and panes
 
