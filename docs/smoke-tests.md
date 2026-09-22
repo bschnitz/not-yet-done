@@ -6534,13 +6534,21 @@ longer than the pane for these:
       cursor again like `j`/`k` and the view only follows at the edge.
 - [x] Set `mouse.wheel_rows: 1`, restart: one row (one line in the chat) per
       notch, in both modes.
-- [ ] Still with `mouse.wheel_rows: 1`, press `gg` so the cursor sits on the
-      **first** selectable row, then wheel down: the view pans. (It does not
-      today — while the cursor sits there no notch moves anything, and a single
-      `j` frees it. A one-row pan leaves the selection visible, and the discrete
-      view derives its offset from the selection on every rebuild, so the offset
-      snaps straight back. Not reproducible at the bottom edge, and never seen
-      with `wheel_rows: 3`.)
+- [x] Still with `mouse.wheel_rows: 1`, press `gg` so the cursor sits on the
+      **first** selectable row, then wheel down: the view pans, one row per
+      notch, in both directions and across group boundaries. This is where the
+      wheel used to look dead, and the cause was not the first row but a **group
+      header directly above the cursor**: the pan put that header one line above
+      the window, and the rebuild — which shows the header the selection belongs
+      to — pulled the offset straight back. Hence both of the old side notes: a
+      single `j` moved the cursor off that row and freed it, and `wheel_rows: 3`
+      threw the selection far enough out of the window that it was re-entered
+      cleanly. A row is now read through the header that belongs to it on both
+      sides of the scroll, so a selection whose header has been panned away
+      counts as fallen out and the cursor rides down with the view. Measured on
+      the grouped trackings list before and after; walking the cursor back up to
+      the first row of a group still brings the header on screen, and the
+      default three-row notch is unchanged.
 - [x] Rebind `common.list_prev` / `list_next` to `k` / `j` alone, with no arrow
       left in the list, and restart: the cursor fallback still works. At the
       edges and in `cursor` mode the wheel presses the **bound** key, not the

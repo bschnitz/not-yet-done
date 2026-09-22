@@ -931,11 +931,31 @@ impl Table {
         first.min(self.rows.len() - 1)
     }
 
+    /// The first row that has to be on screen for `row` to be shown in its
+    /// context: the row itself, preceded by the run of non-selectable rows
+    /// (group headers) that belongs to it. Scrolling reads a row through this
+    /// index rather than through the row number, which is what keeps a header
+    /// and the first row under it together.
+    fn context_start(&self, row: usize) -> usize {
+        let mut start = row;
+        while start > 0 && !self.rows[start - 1].selectable {
+            start -= 1;
+        }
+        start
+    }
+
     /// Move the selection to the nearest selectable row inside the current
     /// viewport, entering from the side it fell off. A window that holds no
     /// selectable row at all (nothing but group headers) leaves the selection
     /// where it is — the next rebuild then scrolls it back into view, which is
     /// preferable to dropping the cursor somewhere unrelated.
+    ///
+    /// "Inside" is judged by [`context_start`](Self::context_start), not by the
+    /// row number: a selection whose group header has just been panned off the
+    /// top counts as fallen out even though its own line is still on screen.
+    /// Otherwise the pan would stand for one frame and the next rebuild — which
+    /// pulls that header back in — would undo it, and a one-row wheel notch on
+    /// the top row of a group would look like a dead wheel.
     fn clamp_selection_into_view(&mut self, line_budget: usize) {
         let visible = self.visible_row_count_from(self.scroll_offset, line_budget);
         if visible == 0 {
@@ -943,13 +963,19 @@ impl Table {
         }
         let top = self.scroll_offset;
         let bottom = top + visible - 1;
-        if self.selected_row >= top && self.selected_row <= bottom {
+        let above = self.context_start(self.selected_row) < top;
+        if !above && self.selected_row <= bottom {
             return;
         }
-        let target = if self.selected_row < top {
-            (top..=bottom).find(|&i| self.rows[i].selectable)
-        } else {
-            (top..=bottom).rev().find(|&i| self.rows[i].selectable)
+        let target = {
+            // Only a row the window can show *with* its header is a place the
+            // cursor may land; anything else would be pulled back out again.
+            let fits = |i: usize| self.rows[i].selectable && self.context_start(i) >= top;
+            if above {
+                (top..=bottom).find(|&i| fits(i))
+            } else {
+                (top..=bottom).rev().find(|&i| fits(i))
+            }
         };
         if let Some(row) = target {
             self.selected_row = row;
@@ -1128,10 +1154,7 @@ impl Table {
     fn adjust_scroll(&mut self) {
         // When scrolling up, also show any preceding non-selectable rows
         // (group headers) that belong to the selected row.
-        let mut target = self.selected_row;
-        while target > 0 && !self.rows[target - 1].selectable {
-            target -= 1;
-        }
+        let target = self.context_start(self.selected_row);
         if target < self.scroll_offset {
             self.scroll_offset = target;
         }
@@ -1194,10 +1217,7 @@ impl Component for Table {
             // Scroll up first so the selected row — and any preceding
             // non-selectable rows (group headers) belonging to it — are
             // visible.
-            let mut target = self.selected_row;
-            while target > 0 && !self.rows[target - 1].selectable {
-                target -= 1;
-            }
+            let target = self.context_start(self.selected_row);
             if target < self.scroll_offset {
                 self.scroll_offset = target;
             }
@@ -1869,5 +1889,37 @@ mod tests {
         // Window 3..7; row 3 is a header, so the cursor lands on row 4.
         assert!(t.scroll_view(3));
         assert_eq!(t.selected_row, 4);
+    }
+
+    #[test]
+    fn a_notch_off_the_top_row_of_a_group_survives_the_rebuild() {
+        // The regression: with one row per notch and the cursor on the first
+        // row under a group header, the pan put the header one line above the
+        // window — and the rebuild, which shows the header a selection belongs
+        // to, pulled the offset straight back. The wheel looked dead until a
+        // single `j` moved the cursor off that row.
+        let mut rows: Vec<TableWidgetRow> = (0..12)
+            .map(|i| TableWidgetRow::new(vec![TableWidgetCell::plain(format!("Row {i}"))]))
+            .collect();
+        rows[0].selectable = false;
+        let mut t = Table::default().with_rows(rows);
+        t.last_line_budget = 5;
+        t.last_visible_data_rows = 5;
+        t.set_selected(1);
+
+        assert!(t.scroll_view(1));
+        assert_eq!(t.scroll_offset, 1);
+        assert_eq!(
+            t.selected_row, 2,
+            "row 1 cannot be shown with its header any more, so the cursor \
+             moves down with the view"
+        );
+        t.restore_selected(t.selected_row);
+        assert_eq!(t.scroll_offset, 1, "the pan holds");
+
+        // And from there the wheel keeps going one row at a time.
+        assert!(t.scroll_view(1));
+        t.restore_selected(t.selected_row);
+        assert_eq!(t.scroll_offset, 2);
     }
 }
