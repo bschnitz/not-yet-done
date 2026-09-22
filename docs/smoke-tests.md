@@ -6488,9 +6488,12 @@ longer than the pane for these:
 - [x] In a **tree** with group headers, pan so the top edge lands on a header
       row: the highlight lands on the first selectable row below it, not on the
       header.
-- [ ] In the **chat** view (smooth scrolling): a notch moves three _physical
-      lines_, so a long message glides rather than jumping, exactly as `j`/`k`
-      do there.
+- [x] In a view with **smooth scrolling** (the chat is one): a notch moves
+      three _physical lines_, not three rows, so a long message glides rather
+      than jumping. Measured on a level with `smooth_scroll: true` and long
+      text on: each notch shifts the picture by exactly three screen lines, in
+      both directions, and after one of them the top line on screen is the
+      continuation of a row whose first line has already left.
 - [x] Set `mouse.wheel: cursor` in `tui.yaml`, restart: the wheel walks the
       cursor again like `j`/`k` and the view only follows at the edge.
 - [x] Set `mouse.wheel_rows: 1`, restart: one row (one line in the chat) per
@@ -6518,17 +6521,35 @@ terminal:
       `common.column_left` / `column_right`. Those carry no default binding, so
       outside a leaf with `column_cursor: true` nothing moves — and nothing else
       is disturbed either.
-- [ ] Wheel inside the **editor overlay**, with a buffer longer than the
+- [x] Wheel inside the **editor overlay**, with a buffer longer than the
       overlay: the buffer scrolls and the table behind the overlay stays put.
+      There is nothing to pan over an editor, so the wheel falls back to the
+      keys — three synthetic `down` presses per notch. The first notches
+      therefore only walk the editor's own cursor down the text that is
+      already visible; the buffer starts moving once the cursor reaches the
+      bottom edge, and comes back the same way. The table behind it never
+      moves a line, in either direction.
 - [ ] `Shift` + drag still gives the **terminal's own** selection — spanning
       panes, whole rows, its own colours. This is the escape hatch and needs
       no configuration.
-- [ ] Launch an external editor (`e` on a row) and quit it again: back in the
-      TUI, both selection and the wheel still work — the editor suspend/resume
-      path has to restore mouse reporting along with the keyboard protocol.
-- [ ] Run an interactive script and return: same check.
-- [ ] Quit the TUI: the terminal is not left in mouse-reporting mode —
-      selecting in the shell afterwards behaves normally.
+- [x] Launch an external editor (`e` on a row) and quit it again: back in the
+      TUI, clicking, dragging and the wheel all still work — the editor
+      suspend/resume path has to restore mouse reporting along with the
+      keyboard protocol. It does because the two travel as one call
+      (`suspend_input_modes` / `resume_input_modes`), which is what keeps the
+      seven-odd suspend sites from drifting apart. Only an editor that runs
+      **in** the TUI's terminal exercises this: a profile that opens its own
+      window never suspends anything.
+- [x] Run an interactive script and return: same check, same result. Same
+      caveat, too — with a `scripts.interactive_command` that launches a
+      terminal of its own the TUI keeps the screen and the path is never
+      taken.
+- [x] Quit the TUI: the terminal is not left in mouse-reporting mode —
+      selecting in the shell afterwards behaves normally. Measured from the
+      outside, on the terminal's own record of the modes the app asked for:
+      while the TUI runs, reporting, button tracking and SGR encoding are all
+      on and the alternate screen with them; after the quit key all four are
+      off again.
 
 Colours, settings and the off switch:
 
