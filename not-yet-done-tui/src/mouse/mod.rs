@@ -44,6 +44,7 @@ use crate::views::content_view::PaneId;
 #[cfg(feature = "mouse")]
 use {
     crate::app::EditorRequest,
+    crate::config::keybindings::CommonAction,
     crate::config::tui_config::WheelMode,
     crate::ui::theme::Theme,
     crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
@@ -423,8 +424,14 @@ pub fn handle(app: &mut crate::app::App, ev: MouseEvent) -> EditorRequest {
         // the cursor it leaves behind would belong to another pane.
         MouseEventKind::ScrollDown => scroll(app, x, y, "down", true),
         MouseEventKind::ScrollUp => scroll(app, x, y, "up", false),
-        MouseEventKind::ScrollRight => wheel(app, "right"),
-        MouseEventKind::ScrollLeft => wheel(app, "left"),
+        MouseEventKind::ScrollRight => {
+            let key = fallback_key(app, "right");
+            wheel(app, &key)
+        }
+        MouseEventKind::ScrollLeft => {
+            let key = fallback_key(app, "left");
+            wheel(app, &key)
+        }
 
         _ => EditorRequest::None,
     }
@@ -594,7 +601,8 @@ fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -
         Some(Region::ContentPane(id)) => {
             app.focus_content_pane(id);
             if app.config.mouse.wheel == WheelMode::Cursor {
-                return wheel(app, key);
+                let key = fallback_key(app, key);
+                return wheel(app, &key);
             }
             let rows = app.config.mouse.wheel_rows.max(1) as isize;
             let delta = if forward { rows } else { -rows };
@@ -603,7 +611,10 @@ fn scroll(app: &mut crate::app::App, x: u16, y: u16, key: &str, forward: bool) -
             // row reachable with the wheel alone.
             match app.wheel_content_pane(id, delta) {
                 Some(req) => req,
-                None => wheel(app, key),
+                None => {
+                    let key = fallback_key(app, key);
+                    wheel(app, &key)
+                }
             }
         }
         _ => wheel(app, key),
@@ -623,6 +634,35 @@ fn finish_copy(app: &mut crate::app::App) -> Option<bool> {
         return None;
     }
     Some(crate::clipboard::copy(&text))
+}
+
+/// Which key the wheel sends when it moves the cursor instead of the view.
+///
+/// The cursor is moved by pressing a key, so the wheel has to press the key
+/// the configuration binds. `common.list_prev` / `list_next` *replace* their
+/// default `["up", "k"]` rather than extending it, so a vim-style
+/// `list_prev: k` leaves the arrow bound to nothing at all — and with it the
+/// promise that the first and last row stay reachable with the wheel alone.
+/// The arrow wins whenever it is still bound, so the default configuration
+/// keeps taking exactly the path it always did; sideways the arrows are the
+/// only fallback there is, because `column_left`/`column_right` carry no
+/// default binding.
+#[cfg(feature = "mouse")]
+fn fallback_key(app: &crate::app::App, arrow: &str) -> String {
+    let action = match arrow {
+        "up" => CommonAction::ListPrev,
+        "down" => CommonAction::ListNext,
+        "left" => CommonAction::ColumnLeft,
+        "right" => CommonAction::ColumnRight,
+        _ => return arrow.to_string(),
+    };
+    let Some(binding) = app.keybindings.common.get(&action) else {
+        return arrow.to_string();
+    };
+    if binding.0.iter().any(|k| k == arrow) {
+        return arrow.to_string();
+    }
+    binding.single_step().unwrap_or_else(|| arrow.to_string())
 }
 
 /// Feed synthetic arrow keys through the normal key pipeline, so the wheel

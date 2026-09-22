@@ -243,7 +243,9 @@ all move the cursor and let the view follow). The cursor only comes along when
 the window would leave it behind, and then it rides the edge the content
 scrolls away from, so it never drops off-screen. Once the view sits at the top
 or bottom the notch falls back to the cursor, which keeps the very first and
-last row reachable with the wheel alone. Set `mouse.wheel: cursor` to get the
+last row reachable with the wheel alone; the fallback presses whatever
+`common.list_prev` / `list_next` bind, so it also works where the arrows have
+been rebound away. Set `mouse.wheel: cursor` to get the
 old behaviour back (the wheel then walks the cursor like `j`/`k`), and
 `mouse.wheel_rows` for how far one notch goes:
 

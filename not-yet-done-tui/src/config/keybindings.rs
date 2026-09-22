@@ -121,6 +121,17 @@ impl KeyBinding {
         self.0.iter().map(|s| binding_steps(s)).collect()
     }
 
+    /// The single key a synthetic press can send for this binding, if there
+    /// is one: the first alternative that completes in one step. Chords are
+    /// skipped — they arrive key by key, so handing one to `handle_key` would
+    /// leave a pending prefix behind instead of firing the action.
+    pub fn single_step(&self) -> Option<String> {
+        self.step_lists()
+            .into_iter()
+            .find(|steps| steps.len() == 1)
+            .map(|mut steps| steps.remove(0))
+    }
+
     /// Whether a fully-pressed sequence of canonical step tokens exactly
     /// equals one of the bound alternatives. This is the single entry point
     /// the dispatcher uses to decide "does this completed key sequence fire
@@ -1530,6 +1541,25 @@ mod tests {
         check!(ScriptMenuAction, 8);
         check!(PopupAction, 5);
         check!(FormAction, 4);
+    }
+
+    #[test]
+    fn single_step_skips_chords_and_reports_the_first_pressable_key() {
+        // What the wheel needs: one key it can hand to `handle_key`.
+        assert_eq!(
+            KeyBinding::multi(vec!["up", "k"]).single_step().as_deref(),
+            Some("up")
+        );
+        assert_eq!(KeyBinding::new("k").single_step().as_deref(), Some("k"));
+        // A chord arrives key by key, so it is skipped in favour of a later
+        // alternative — and a binding that holds nothing else has none.
+        assert_eq!(
+            KeyBinding::multi(vec!["g g", "k"]).single_step().as_deref(),
+            Some("k")
+        );
+        assert_eq!(KeyBinding::new("zr").single_step(), None);
+        // Aliases come back canonicalized, the way a key event spells them.
+        assert_eq!(KeyBinding::new("space").single_step().as_deref(), Some(" "));
     }
 
     #[test]
