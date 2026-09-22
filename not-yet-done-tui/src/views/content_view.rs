@@ -7407,15 +7407,23 @@ impl ContentPane {
                     child_def: Box::new(child_def),
                 })
             }
+            // Both paging keys go through the same helpers the action
+            // chain uses. They carry the custom-query branch: a pane
+            // showing a query result must re-run the query for the next
+            // page, not reload its level — reloading drops the result
+            // and puts the level back, which is what an inline copy of
+            // the reload call did here until 2026-09-22.
             KeySource::Content(ContentAction::NextPage) => {
-                let req = self.next_page_request()?;
-                self.set_current_page(Some(req));
-                Some(self.reload_current_level(view_index, pane_id))
+                match self.try_next_page(view_index, pane_id) {
+                    SubViewMessage::Unhandled => None,
+                    msg => Some(msg),
+                }
             }
             KeySource::Content(ContentAction::PrevPage) => {
-                let req = self.prev_page_request()?;
-                self.set_current_page(Some(req));
-                Some(self.reload_current_level(view_index, pane_id))
+                match self.try_prev_page(view_index, pane_id) {
+                    SubViewMessage::Unhandled => None,
+                    msg => Some(msg),
+                }
             }
             KeySource::Content(ContentAction::EditQuery) => Some(SubViewMessage::Request(
                 ViewRequest::OpenContentQueryEditor {
@@ -21813,6 +21821,52 @@ mod tests {
         assert!(matches!(
             msg,
             SubViewMessage::Request(ViewRequest::RunAdapterQuery { cursor: None, .. })
+        ));
+    }
+
+    #[test]
+    fn next_page_key_reruns_the_custom_query_instead_of_reloading() {
+        // The key path had its own copy of the reload call and never
+        // looked at `active_custom_query`, so `>` on a query result
+        // dropped the result and put the level back.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let info = PageInfo {
+            offset: 0,
+            limit: 100,
+            total: None,
+            has_next: true,
+            has_prev: false,
+        };
+        let pane_id = view.active_pane_id();
+        view.apply_custom_query_result(
+            pane_id,
+            Vec::new(),
+            Some(info),
+            Some(CustomQueryRunState {
+                query: "SELECT 1".into(),
+                node_id: "db/schemas/public/tables/t".into(),
+                mode: PaginationMode::Server,
+                cursor_id: None,
+            }),
+        );
+        let view_index = view.view_index;
+        let view_defs = view.view_defs.clone();
+        let msg = view.active_pane_mut().dispatch_claim(
+            &KeySource::Content(ContentAction::NextPage),
+            view_index,
+            pane_id,
+            &view_defs,
+        );
+        assert!(matches!(
+            msg,
+            Some(SubViewMessage::Request(ViewRequest::RunAdapterQuery {
+                page: PageRequest {
+                    offset: 100,
+                    limit: 100
+                },
+                ..
+            }))
         ));
     }
 

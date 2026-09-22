@@ -5269,39 +5269,63 @@ fail is the globbing and the addressing.
 ### Per-table scripts (`q` / `Q`)
 
 Until 2026-09-22 none of this could be measured: the adapter advertised
-`edit_sql` (so the action bar offered `Q sql` on every table and view) but no
+`edit_sql` (so the status bar offered `Q sql` on every table and view) but no
 node dispatched it, and the trait's default `invoke_action` turned the key into
 a silent no-op — no editor, no error, no log line. Fixed by the arms on
 `TableNode` and `ViewNode`; the boxes below start from there.
 
-- [ ] `Q` on a table → the editor with the template `SELECT * FROM "t";`.
-      Save it, run it, page through it. _Half measured:_ everything up to the
-      paging keys now holds. The editor opens with the right template, saving
-      runs the query, and the result renders **with its own columns** — a
-      `SELECT id, name … WHERE price < 50` over a 24-row table leaves five rows
-      under `id / name`, and `r` puts the tree back with its fold state intact.
-      Until 2026-09-22 the level rendered empty under the root's
+- [x] `Q` on a table → the editor with the template `SELECT * FROM "t";`.
+      Save it, run it, page through it. The editor opens with the right
+      template, saving runs the query, and the result renders **with its own
+      columns** — a `SELECT id, name … WHERE price < 50` over a 24-row table
+      leaves five rows under `id / name`. Over a 240-row table the footer reads
+      `Items 1–100 · Page 1`, `>` goes on to `101–200` and `201–240` (the last
+      page counts the rows it got), a further `>` is refused and its hint is
+      gone from the status bar, `<` walks back to page 1, and `r` puts the tree
+      back with its fold state intact. Two bugs were in the way until
+      2026-09-22. The level rendered **empty** under the root's
       `Name / Size / Path`: the rows did arrive (the bar counted them), but a
       pane that is a tree takes its columns from the cursor's _configured_
-      level, and a query result belongs to no level. A pane now renders flat
-      for as long as a custom query is its content. Still open: `>` on a
-      240-row result does not fetch page 2 — it drops the result and reloads
-      the level, so the pane falls back to the tree.
-- [ ] `q` after the first save → the script is in the menu.
-- [ ] `Q` one level deeper (in `Rows`) still addresses the table above, not
-      the row.
-- [ ] A multi-statement script → it runs, but without page information (a
-      non-paginatable form).
-- [ ] An `UPDATE` → fails with the hint about `read_only: false`.
+      level, and a query result belongs to no level — a pane now renders flat
+      for as long as a custom query is its content. And `>` dropped the result
+      to reload the level: the key path carried its own copy of the reload
+      call, while the custom-query branch that re-runs the query lived only in
+      the helper the action chain used. Both keys now go through that helper.
+- [ ] `q` after the first save → the script is in the menu. _Measured
+      2026-09-22: `q` opens no script menu anywhere in this tab._ In the tree
+      subtab it is not even claimed — `displays_node_scripts()` asks the flat
+      `active_child` (or, at depth 0, the root `ViewDef`), and in tree mode
+      both say `databases`, which sets no `node_scripts`. The `node_scripts:
+    true` that the `Table` child carries is never read, because nothing maps
+      the tree cursor onto its level. In the flat `tables` subtab, where the
+      claim _is_ made, `q` opens the **saved-query** menu instead: the per-view
+      `query.menu_key` defaults to `q` as well, and it wins. `Q` survives only
+      because `sqlite.yaml` binds it a second time as a forced node action. So
+      this box needs a decision (which key the per-node script menu gets) on
+      top of the fix.
+- [x] `Q` one level deeper (in `Rows`) still addresses the table above, not
+      the row. The editor opens with `SELECT * FROM "orders";` while the cursor
+      stands on a row of the coupled `Rows` pane.
+- [x] A multi-statement script → it runs, but without page information (a
+      non-paginatable form). `SELECT 1 AS a; SELECT 2 AS b` leaves one row
+      under the single column `b`; the `Items … · Page …` footer and the
+      `> next page` hint are both gone.
+- [x] An `UPDATE` → fails with the hint about `read_only: false`. The editor
+      stays open and writes the failure into the buffer as comment lines above
+      the offending statement: `error returned from database: (code: 8) attempt
+    to write a readonly database (this adapter runs read_only; set read_only:
+    false in its config to allow writes)`. With the shipped `read_only:
+    false` the same statement answers `1 row affected` and the row really
+      changes on disk.
 
-### The script branch below the database (`Scripts`)
+### The script branch below the database (`DB Scripts`)
 
 The same branch as in the Postgres tab (shared code in `sql-core`), just with
 `sqlite:` types — so the point here is mainly to check that it hangs there **at
 all** and points at the right file.
 
-- [ ] `Scripts` sits next to `Tables` under every database, even when no
-      script exists yet.
+- [ ] `DB Scripts` sits next to `Tables` and `Views` under every database,
+      even when no script exists yet.
 - [ ] `a` creates a script, `A` a folder; folders nest to any depth.
 - [ ] Filesystem check:
       `<data_local>/not_yet_done/sqlite/<instance_id>/db_scripts/<key>/…` —
