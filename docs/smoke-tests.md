@@ -5237,21 +5237,51 @@ fail is the globbing and the addressing.
 
 ### Files and rows (the `sources:` globs)
 
-- [ ] Open the tab → one row per matched file, with its size and path.
-- [ ] A `**` pattern picks up files from subdirectories; a pattern without
-      matches is not an error, it simply yields nothing.
-- [ ] Two files with the same name in different folders appear as **two** rows
+- [x] Open the tab → one row per matched file, with its size and path. Four
+      patterns over a scratch directory of throwaway databases produced three
+      rows with the columns Name, Size and Path, the sizes matching what the
+      filesystem reports.
+- [x] A `**` pattern picks up files from subdirectories; a pattern without
+      matches is not an error, it simply yields nothing. The `**` pattern
+      brought up a file two directories down, and the pattern aimed at an
+      empty directory matched nothing without a banner or a log line — the
+      notification page (`z l`) listed only errors from other adapters.
+- [x] Two files with the same name in different folders appear as **two** rows
       (the key carries the path hash) and share neither their tables nor their
-      script directory.
-- [ ] Create a new `.db` file → `r` → it is there, without a restart.
-- [ ] Drill down to `Rows`, page through (`>`/`<`), `o` opens the
+      script directory. Both rows are called `data.db`, and each expands to
+      its own tables. A script created under each landed in its own directory
+      below `db_scripts/`, named `<file stem>-<hash>`: same stem, different
+      hash.
+- [x] Create a new `.db` file → `r` → it is there, without a restart. A file
+      created in an already matched directory while the TUI was running
+      appeared after one `r`, in sort position, and the nodes that were
+      expanded stayed expanded.
+- [x] Drill down to `Rows`, page through (`>`/`<`), `o` opens the
       record-detail pane; a table with a BLOB column renders readably instead
-      of breaking.
+      of breaking. `Enter` on a 240-row table opened `Rows` in the coupled
+      split and the footer read `Items 1–100 · Page 1`; `>` went on to
+      `101–200` and then `201–240` — the last page counts the rows it got, not
+      the window it asked for — and `<` came back. `o d` added the record pane
+      as a third column, where the BLOB column reads `<blob, 5 bytes>`; in the
+      narrower table column the same cell is truncated to `<blob, 5 b…`, not
+      broken.
 
 ### Per-table scripts (`q` / `Q`)
 
+Until 2026-09-22 none of this could be measured: the adapter advertised
+`edit_sql` (so the action bar offered `Q sql` on every table and view) but no
+node dispatched it, and the trait's default `invoke_action` turned the key into
+a silent no-op — no editor, no error, no log line. Fixed by the arms on
+`TableNode` and `ViewNode`; the boxes below start from there.
+
 - [ ] `Q` on a table → the editor with the template `SELECT * FROM "t";`.
-      Save it, run it, page through it.
+      Save it, run it, page through it. _Half measured:_ the editor opens with
+      the right template, and saving runs the query (the bar reports the row
+      count and the footer switches to `Items 1–100 · Page 1`) — but the level
+      then renders **empty**, still under the root's `Name / Size / Path`
+      columns instead of the result's. Next question: whether the custom-query
+      result reaches the pane at all, or reaches it and is rendered against the
+      wrong column set.
 - [ ] `q` after the first save → the script is in the menu.
 - [ ] `Q` one level deeper (in `Rows`) still addresses the table above, not
       the row.

@@ -31,9 +31,10 @@ use async_trait::async_trait;
 
 use not_yet_done_content::script_buffer;
 use not_yet_done_content::{
-    ActionArgs, ActionInput, ActionOutcome, AdapterCapabilities, AdapterStatus, ContentAdapter,
-    ContentError, CustomQueryContext, CustomQueryResult, EditorPrep, ListParams, ListResult,
-    Metadata, MetadataField, Node, NodeRef, NodeSummary, NodeType, PageInfo, Result,
+    ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
+    AdapterStatus, ContentAdapter, ContentError, CustomQueryContext, CustomQueryResult, EditorPrep,
+    ListParams, ListResult, Metadata, MetadataField, Node, NodeRef, NodeSummary, NodeType, PageInfo,
+    Result,
 };
 
 use not_yet_done_sql_core::db_script_nodes::{DB_SCRIPTS_GROUP_ID, DbScriptTree};
@@ -65,6 +66,13 @@ const EDIT_ROW_ACTION: &str = "edit_row";
 /// (`actions: [{type: edit, id: new_row}]`), and offered on a table as
 /// well as on its rows — see [`NewRow`].
 const NEW_ROW_ACTION: &str = "new_row";
+/// Action id of the per-node SQL script editor. Unlike the three above it
+/// is not an `InputSpec::Editor` action: it is dispatched, not prepared,
+/// so it arrives at [`Node::invoke_action`] rather than `prepare`.
+const EDIT_SQL_ACTION: &str = "edit_sql";
+/// The editor session the host opens for [`EDIT_SQL_ACTION`]. The name is
+/// the host's, shared with the Postgres adapter.
+const QUERY_EDITOR_SESSION: &str = "query_editor";
 /// `sqlite_master.type` of the two catalogue objects this adapter lists.
 const KIND_TABLE: &str = "table";
 const KIND_VIEW: &str = "view";
@@ -277,7 +285,11 @@ fn field(key: &str, label: &str, value: &str) -> MetadataField {
 /// `sqlite:table` level, `{ key: Q, id: edit_sql, target: parent }` on
 /// `sqlite:row` so the key keeps working one level deeper.
 fn sql_action() -> not_yet_done_content::NodeAction {
-    not_yet_done_content::NodeAction::new("edit_sql", "sql", not_yet_done_content::InputSpec::None)
+    not_yet_done_content::NodeAction::new(
+        EDIT_SQL_ACTION,
+        "sql",
+        not_yet_done_content::InputSpec::None,
+    )
 }
 
 /// Actions a table offers: the query editor, and adding a row.
@@ -1086,9 +1098,28 @@ impl Node for TableNode {
         )
     }
 
+    /// `Q` on a table: the per-node SQL script, opened in the query
+    /// editor. The args are informational — the host addresses the editor
+    /// by this node's id, which is also what seeds the buffer with
+    /// `SELECT * FROM "<table>";`.
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            EDIT_SQL_ACTION => Ok(ActionDispatch::OpenEditor {
+                session_kind: QUERY_EDITOR_SESSION.into(),
+                args: ActionArgs::new()
+                    .with("database", self.database.clone())
+                    .with("table", self.name.clone()),
+            }),
+            other => Err(ContentError::NotSupported(format!(
+                "table node action `{other}` is not supported"
+            ))),
+        }
+    }
+
     /// A table's one editor action is adding a row — the key works here
     /// as well as on the rows so that an empty table can be filled at
-    /// all. See [`NewRow`].
+    /// all. See [`NewRow`]. The query editor is `edit_sql` and goes
+    /// through [`Node::invoke_action`] above instead.
     async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
         if action_id != NEW_ROW_ACTION {
             return Err(ContentError::NotSupported(format!(
@@ -1281,6 +1312,24 @@ impl Node for ViewNode {
     /// works exactly as under a table.
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
         rows_group_child(id, &self.database, VIEWS_GROUP_ID, &self.name, &self.client)
+    }
+
+    /// A view is queryable exactly like a table, so `Q` has to reach the
+    /// same per-node script editor here.
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            EDIT_SQL_ACTION => Ok(ActionDispatch::OpenEditor {
+                session_kind: QUERY_EDITOR_SESSION.into(),
+                args: ActionArgs::new()
+                    .with("database", self.database.clone())
+                    .with("table", self.name.clone()),
+            }),
+            // `edit_view` is an `InputSpec::Editor` action and never
+            // arrives here: it goes through `prepare`/`execute` below.
+            other => Err(ContentError::NotSupported(format!(
+                "view node action `{other}` is not supported"
+            ))),
+        }
     }
 
     /// The buffer is the stored statement verbatim, and `version` is that
@@ -1904,6 +1953,35 @@ mod tests {
         assert_eq!(format_size(Some(512)), "512 B");
         assert_eq!(format_size(Some(2048)), "2.0 KiB");
         assert_eq!(format_size(Some(5 * 1024 * 1024)), "5.0 MiB");
+    }
+
+    /// `Q` is a *dispatched* action, not a prepared one: it reaches
+    /// `invoke_action`, never `prepare`. Without an arm there the trait's
+    /// default `Noop` applied — the action bar offered `Q sql` on every
+    /// table and view, and the key did nothing at all: no editor, no
+    /// error, no log line.
+    #[tokio::test]
+    async fn q_opens_the_query_editor_on_a_table_and_on_a_view() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (adapter, key) = adapter_for(tmp.path()).await;
+        let ctx = not_yet_done_content::ActionContext::default();
+
+        for (id, object) in [
+            (format!("{key}/tables/notes"), "notes"),
+            (format!("{key}/views/recent"), "recent"),
+        ] {
+            let node = adapter.get_by_id(&id).await.expect("node");
+            match node.invoke_action(EDIT_SQL_ACTION, &ctx).await.unwrap() {
+                ActionDispatch::OpenEditor { session_kind, args } => {
+                    assert_eq!(session_kind, QUERY_EDITOR_SESSION);
+                    assert_eq!(args.text("table").as_deref(), Some(object), "{id}");
+                    assert_eq!(args.text("database").as_deref(), Some(key.as_str()));
+                }
+                other => panic!("expected OpenEditor for {id}, got {other:?}"),
+            }
+            // An id the node does not own is refused rather than swallowed.
+            assert!(node.invoke_action("nonsense", &ctx).await.is_err(), "{id}");
+        }
     }
 
     #[tokio::test]
