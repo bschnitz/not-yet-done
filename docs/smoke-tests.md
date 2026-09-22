@@ -6350,13 +6350,17 @@ level, running the same ascent `Backspace` runs.
 - [ ] Click the **root** crumb: you are back at the top level, in the state the
       back key leaves it in. **Deviation:** the crumb pops the drill frames
       itself instead of running the level's `content.back`, so a level that
-      redefines back is ignored. The mail message list sets `back: null` and
-      `action_chains: { backspace: [window.close] }` precisely because walking
-      that pane one level up would turn it into a second folder list beside
-      the folder tree — and that is exactly what the crumb does: two panes,
-      both showing the root level, and the back key can close neither. Only
-      `w q` clears it. It happens from one level deep as well, so it is the
-      crumb path as such, not the multi-level climb.
+      redefines or disables back is ignored. Two levels do exactly that, for
+      the same reason: a coupled split pane _is_ the parent row's list, so
+      walking it one level up would turn it into a second copy of the list it
+      hangs off. The SQLite row level therefore sets `keybindings: { back:
+    null }`, and the mail message list puts
+      `action_chains: { backspace: [window.close] }` on top of it. The back key
+      honours both — on the row level it does nothing at all. The crumb climbs
+      anyway and leaves exactly the state the config forbids: two panes on the
+      same level, with back now dead in both. Only `w q` clears it. It happens
+      from one level deep as well, so it is the crumb path as such, not the
+      multi-level climb.
 - [x] Click the **last** crumb (the level you are on) and the child-type crumb
       behind it: nothing happens, nothing reloads.
 - [x] Click a **separator** (`›`) between two crumbs: nothing happens.
@@ -6364,10 +6368,13 @@ level, running the same ascent `Backspace` runs.
       the selection stays on that line — it is not trapped in one crumb and
       does not reach into the table below. Dragging on past the last crumb
       adds no trailing spaces to what is copied.
-- [ ] Narrow the terminal until the path is cut off: the crumbs still on screen
-      work, and clicking past the end of the line does nothing. (The second
-      half holds at full width — a click past the last crumb leaves the screen
-      byte for byte unchanged.)
+- [x] Narrow the terminal until the path is cut off: the crumbs still on screen
+      work, and clicking past the end of the line does nothing. Measured down
+      to a twelve-column window, where only the root crumb survives whole: it
+      still climbs, while the crumb the cut runs through stays as inert as any
+      other `up = 0` crumb. The second half holds at full width — a click past
+      the last crumb leaves the screen byte for byte unchanged; once the path
+      is cut there is no past-the-end left to click.
 - [x] At the top level there is no breadcrumb line at all — clicking that row
       hits whatever is drawn there instead.
 
@@ -6381,17 +6388,23 @@ already get, everywhere outside the panel.
 - [x] Click a **row of the table** behind it: the cursor does not move, no
       preview loads, nothing drills.
 - [x] Click a **column header** behind it: nothing sorts.
-- [ ] Click an **unfocused pane** behind it in a split layout: the focus stays
-      where it is.
-- [ ] Click a **breadcrumb** behind it: the level does not change.
+- [x] Click an **unfocused pane** behind it in a split layout: the focus stays
+      where it is. Nothing on screen moves, and after the popup closes the next
+      `j` still walks the pane that had the focus before it opened.
+- [x] Click a **breadcrumb** behind it: the level does not change — not even
+      the root crumb, the one crumb that would act.
 - [x] Wheel over the table behind it: the popup's own list scrolls; in
       particular the pane under the pointer does not take the focus.
 - [x] Wheel over the **tab bar** behind it: the tabs do not walk.
 - [x] Selecting still works: drag across the table behind the popup and
       release — the text is copied. Double-click a word there: it is selected
       (behind a popup even the second click is free, since nothing there acts).
-- [ ] The popup itself is unaffected: its entries still take a click, a double
-      click still picks.
+- [x] The popup itself is unaffected: its entries still take a click, a double
+      click still picks. **Not everywhere, though:** the sort menu (`c s`)
+      registers no clickable regions at all. Its cursor never leaves the first
+      column however often you click an entry, and a double click there selects
+      the word as text instead of picking it. The popups built on the menu list
+      — the shortcut menu, the tag picker — take both.
 - [x] Close the popup (`Esc`) and click the same spot again: now it acts.
       Clicking outside is _not_ a way to close the popup.
 - [x] Hold a chord until the **which-key** panel appears and click the table:
@@ -6402,8 +6415,9 @@ already get, everywhere outside the panel.
 The cursor is walked to the clicked row with the popup's own arrow keys, so
 what has to hold is that it lands on the row under the pointer no matter what
 sits above the list. Take a popup that _has_ a cursor — the shortcut menu
-(`o k`), a filter picker, the sort menu. The shortcut overview (`o s`) is a
-read-only panel: it has no cursor, and a click inside it does nothing.
+(`o k`), the tag picker (`T`), a filter picker. The sort menu (`c s`) looks
+like one of them but answers no click at all, and the shortcut overview
+(`o s`) is a read-only panel: it has no cursor either.
 
 - [x] Open the shortcut menu (`o k`) and click an entry well below the cursor:
       the cursor lands on that entry, not one offset by the heading.
@@ -6411,7 +6425,13 @@ read-only panel: it has no cursor, and a click inside it does nothing.
       list: it selects the row you clicked, counted in the _filtered_ list.
 - [x] Scroll a long popup list down a page, then click the top row: that row,
       not the first entry of the unscrolled list.
-- [ ] **Double-click** an entry: it is picked, exactly as `Enter` would.
+- [x] **Double-click** an entry: it is picked, exactly as `Enter` would — an
+      entry the cursor was not on included, where the first click walks the
+      cursor there and the second picks it. Take a popup that has something to
+      pick: the tag picker toggles the tag, and the row behind the popup grows
+      the marker. The shortcut menu is not one of those — it binds keys
+      (`C-n bind`, `C-u replace`) and has no `Enter` action, so nothing there
+      is picked by key or by mouse.
 - [x] Click the entry the cursor is already on: nothing happens.
 - [x] Hold a chord (`o`, `w`, …) until the **which-key** panel appears and
       click one of its rows: nothing happens — and in particular the table
