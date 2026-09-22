@@ -1223,11 +1223,20 @@ async fn prepare_edit(
 /// `execute` for the `add` action. `parent_default` seeds the parent for a
 /// create initiated on a container node; the buffer's `parent:` field (if
 /// the user sets one) wins via the parser.
+///
+/// The default is applied *here* rather than being left to the `parent:`
+/// line [`prepare_add`] writes into the template, because that line only
+/// survives a round trip through an editor. A caller that supplies the text
+/// outright — `nyd adapter tasks:item <id> add -m TEXT`, and every script
+/// built on it — replaces the whole buffer, frontmatter included, and the
+/// task would silently land at the top level even though the action was
+/// dispatched on a parent.
 async fn execute_add(
     handle: &CoreHandle,
     snapshot: &ForestSnapshot,
     text: &str,
     original: &str,
+    parent_default: Option<Uuid>,
 ) -> Result<ActionOutcome> {
     match editor_templates::parse_new_task(text, original) {
         ParseResult::Aborted => Ok(ActionOutcome::NoChanges),
@@ -1241,12 +1250,15 @@ async fn execute_add(
         ParseResult::Ok(parsed) => {
             let wants_tracking = parsed.tracking;
             let notes_text = editor_templates::parse_notes(text);
+            let parent_id = parsed
+                .parent_id
+                .or_else(|| parent_default.map(|id| id.to_string()));
             let created = match handle
                 .task_service
                 .add_task(
                     parsed.description,
                     None,
-                    parsed.parent_id,
+                    parent_id,
                     None,
                     parsed.status,
                     parsed.priority,
@@ -1894,7 +1906,7 @@ impl Node for TaskRootNode {
     ) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
             ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
-                execute_add(&self.handle, &self.snapshot, &text, &original).await
+                execute_add(&self.handle, &self.snapshot, &text, &original, None).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the task root"
@@ -2037,8 +2049,13 @@ impl Node for TaskItemNode {
         _args: &ActionArgs,
     ) -> Result<ActionOutcome> {
         let outcome = match (action_id, input) {
-            ("add" | "add-sibling", ActionInput::Edited { text, original, .. }) => {
-                execute_add(&self.handle, &self.snapshot, &text, &original).await
+            (action @ ("add" | "add-sibling"), ActionInput::Edited { text, original, .. }) => {
+                let parent_default = if action == "add" {
+                    Some(self.id)
+                } else {
+                    self.snapshot.by_id.get(&self.id).and_then(|r| r.parent)
+                };
+                execute_add(&self.handle, &self.snapshot, &text, &original, parent_default).await
             }
             ("edit", ActionInput::Edited { text, original, .. }) => {
                 execute_edit(&self.handle, &self.snapshot, self.id, &text, &original).await

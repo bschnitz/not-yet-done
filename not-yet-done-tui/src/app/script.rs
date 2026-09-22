@@ -396,6 +396,22 @@ pub(super) fn json_string(s: &str) -> String {
     out
 }
 
+/// The notification text for a script that exited non-zero.
+///
+/// The script's own stderr belongs in the *error* notification rather than
+/// in a separate informational one: only errors are written to the log, so
+/// a diagnosis that is merely notified is gone the moment the bar clears —
+/// which is exactly what a failing script needs to leave behind.
+fn script_failure_message(status: &std::process::ExitStatus, stderr: &str) -> String {
+    let message = format!("Script exited with {status}");
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        message
+    } else {
+        format!("{message}: {stderr}")
+    }
+}
+
 impl App {
     /// Dispatch `:script` based on the active tab.
     pub fn open_script_menu_from_current_tab(&mut self) {
@@ -1328,18 +1344,20 @@ impl App {
                         // stdout is ignored here so scripts can freely
                         // use it for debug-printing without it ending
                         // up in the user's face.
-                        if !stderr.trim().is_empty() {
-                            self.notify(stderr.trim().to_string());
+                        if output.status.success() {
+                            if !stderr.trim().is_empty() {
+                                self.notify(stderr.trim().to_string());
+                            }
+                            if let Some(ref op) = commands_output_path {
+                                self.run_script_output_commands(op);
+                            }
+                        } else {
+                            self.notify_error(script_failure_message(&output.status, &stderr));
                         }
-                        if !output.status.success() {
-                            self.notify_error(format!("Script exited with {}", output.status));
-                        } else if let Some(ref op) = commands_output_path {
-                            self.run_script_output_commands(op);
-                        }
+                    } else if !output.status.success() {
+                        self.notify_error(script_failure_message(&output.status, &stderr));
                     } else if !stderr.trim().is_empty() {
                         self.notify(stderr.trim().to_string());
-                    } else if !output.status.success() {
-                        self.notify_error(format!("Script exited with {}", output.status));
                     } else {
                         self.notify("Script finished".to_string());
                     }

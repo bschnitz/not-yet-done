@@ -843,6 +843,111 @@ async fn adapter_delete_single_leaves_children() {
     );
 }
 
+/// `add` on an item node parents the new task under that node even when the
+/// supplied buffer carries no frontmatter at all.
+///
+/// The `parent:` line [`prepare_add`] writes into the template only survives
+/// a round trip through an editor. `nyd adapter tasks:item <id> add -m TEXT`
+/// — the CLI form every view script uses — replaces the whole buffer, so a
+/// parent that lives in the template alone is lost and the task lands at the
+/// top level. That is silent: the create succeeds, just in the wrong place.
+#[tokio::test]
+async fn adapter_add_parents_under_the_node_without_frontmatter() {
+    use not_yet_done_content::{ActionInput, ActionOutcome};
+    let (service, tracking, tag_service, db) = setup().await;
+    let grandparent = insert_task(&db, "Grandparent", None, TaskStatus::Todo, 0).await;
+    let parent = insert_task(
+        &db,
+        "Parent",
+        Some(grandparent.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
+
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
+    );
+    let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
+    let prep = node.prepare("add", &Default::default()).await.unwrap();
+
+    let outcome = node
+        .execute(
+            "add",
+            ActionInput::Edited {
+                text: "Bare description".to_string(),
+                original: prep.template,
+                version: prep.version,
+            },
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ActionOutcome::Navigate { .. }));
+
+    let tasks = all_tasks(&db).await;
+    assert_eq!(
+        find_by_desc(&tasks, "Bare description").parent_id,
+        Some(parent.id),
+        "the node the action was dispatched on is the parent"
+    );
+}
+
+/// `add-sibling` with the same frontmatter-less buffer parents the new task
+/// under the node's own parent, not under the node.
+#[tokio::test]
+async fn adapter_add_sibling_parents_under_the_nodes_parent() {
+    use not_yet_done_content::ActionInput;
+    let (service, tracking, tag_service, db) = setup().await;
+    let grandparent = insert_task(&db, "Grandparent", None, TaskStatus::Todo, 0).await;
+    let parent = insert_task(
+        &db,
+        "Parent",
+        Some(grandparent.id),
+        TaskStatus::Todo,
+        0,
+    )
+    .await;
+
+    let adapter = build_task_adapter(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
+    );
+    let mut node = adapter.get_by_id(&parent.id.to_string()).await.unwrap();
+    let prep = node
+        .prepare("add-sibling", &Default::default())
+        .await
+        .unwrap();
+
+    node.execute(
+        "add-sibling",
+        ActionInput::Edited {
+            text: "Bare sibling".to_string(),
+            original: prep.template,
+            version: prep.version,
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    let tasks = all_tasks(&db).await;
+    assert_eq!(
+        find_by_desc(&tasks, "Bare sibling").parent_id,
+        Some(grandparent.id),
+        "a sibling hangs off the node's own parent"
+    );
+}
+
 /// Tree `delete`: recursive — the whole subtree is soft-deleted, and the
 /// confirm prompt spells out the cascade with the descendant count.
 #[tokio::test]
