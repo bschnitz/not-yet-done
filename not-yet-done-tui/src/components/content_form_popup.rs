@@ -14,6 +14,7 @@
 //! widget places the terminal cursor itself).
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +24,7 @@ use not_yet_done_ratatui::{
     FormFieldSpec as RFormSpec, FormNotice, FormOptions, FormPalette, FormStyle,
 };
 
-use not_yet_done_content::{FormFieldKind, FormFieldSpec};
+use not_yet_done_content::{FieldError, FormFieldKind, FormFieldSpec};
 
 use crate::ui::theme::Theme;
 
@@ -82,6 +83,51 @@ impl ContentFormPopup {
         self.form.set_notice(notice);
     }
 
+    /// Show one round of complaints: each message beside the field it names,
+    /// everything unattributed joined into the notice line under the fields.
+    ///
+    /// The single seam for both sources of rejection — an adapter answering
+    /// [`ActionOutcome::ReopenForm`](not_yet_done_content::ActionOutcome::ReopenForm)
+    /// and a form script sending `errors` in its next round — so a refused
+    /// value looks the same wherever it was refused.
+    ///
+    /// A general message shares the one footer row with the focused field's
+    /// own, which outranks it (see [`Form::set_notice`]); it becomes visible
+    /// as soon as the user steps off a field that was complained about.
+    pub fn show_errors(&mut self, errors: &[FieldError]) {
+        let mut per_field: HashMap<String, String> = HashMap::new();
+        let mut general: Vec<&str> = Vec::new();
+        for error in errors {
+            match &error.field {
+                Some(key) => match per_field.entry(key.clone()) {
+                    Entry::Occupied(mut e) => {
+                        // Which of two complaints about one value matters is
+                        // not ours to decide, so both stay.
+                        let joined = format!("{}; {}", e.get(), error.message);
+                        e.insert(joined);
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(error.message.clone());
+                    }
+                },
+                None => general.push(&error.message),
+            }
+        }
+        // Land on the first field that was complained about: which input was
+        // meant is the whole point of a per-field rejection, and a form that
+        // reopens on its first field makes the user look for it.
+        let first_marked = errors.iter().find_map(|e| e.field.as_deref());
+        self.form.set_field_errors(per_field);
+        self.set_notice(if general.is_empty() {
+            None
+        } else {
+            Some(FormNotice::Alert(general.join("; ")))
+        });
+        if let Some(key) = first_marked {
+            self.focus_field(key);
+        }
+    }
+
     /// Open on the field with `key` instead of the first one. Silently does
     /// nothing when there is no such (visible) field.
     pub fn focus_field(&mut self, key: &str) {
@@ -115,18 +161,22 @@ fn to_field_spec(f: FormFieldSpec) -> RFormSpec {
             },
             FormFieldKind::Toggle => RFormKind::Toggle,
             FormFieldKind::DateTime { with_time } => RFormKind::DateTime { with_time },
-            // Kinds whose widgets are not built yet: rendered as the closest
-            // thing that exists so the popup stays usable. Nothing constructs
-            // them today — the script-form protocol that will is not wired up
-            // yet (see docs/plan-script-forms.md, phase 3).
-            FormFieldKind::MultiSelect { allowed_values } => RFormKind::Select {
+            FormFieldKind::MultiSelect { allowed_values } => RFormKind::MultiSelect {
                 options: allowed_values,
             },
-            FormFieldKind::Number { .. }
-            | FormFieldKind::Decimal { .. }
-            | FormFieldKind::Duration
-            | FormFieldKind::Multiline { .. }
-            | FormFieldKind::File { .. } => RFormKind::Text,
+            FormFieldKind::Number { min, max, step } => RFormKind::Number { min, max, step },
+            FormFieldKind::Decimal {
+                min,
+                max,
+                precision,
+            } => RFormKind::Decimal {
+                min,
+                max,
+                precision,
+            },
+            FormFieldKind::Duration => RFormKind::Duration,
+            FormFieldKind::Multiline { lines } => RFormKind::Multiline { lines },
+            FormFieldKind::File { multi } => RFormKind::File { multi },
         },
     }
 }
@@ -216,6 +266,84 @@ mod tests {
         );
         type_str(&mut p, "tomorrow 9am");
         assert_eq!(p.values().get("when").unwrap(), "tomorrow 9am");
+    }
+
+    #[test]
+    fn every_protocol_kind_reaches_its_own_widget() {
+        // The conversion used to fall back to a text box for the kinds whose
+        // widgets did not exist yet; each of them now has one, and a duration
+        // that submits whole minutes proves it is not a text box any more.
+        let fields = vec![
+            FormFieldSpec::duration("spent", "Spent"),
+            FormFieldSpec::number("count", "Count"),
+        ];
+        let mut p = ContentFormPopup::new(
+            "t",
+            fields,
+            &HashMap::new(),
+            &theme(),
+            &FormOptions::default(),
+        );
+        type_str(&mut p, "1h30");
+        assert_eq!(p.values().get("spent").unwrap(), "90");
+    }
+
+    #[test]
+    fn show_errors_puts_each_message_where_it_belongs() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut p = ContentFormPopup::new(
+            "t",
+            sample_fields(),
+            &HashMap::new(),
+            &theme(),
+            &FormOptions::default(),
+        );
+        p.show_errors(&[
+            FieldError::field("title", "already taken"),
+            FieldError::general("the board is read-only"),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|f| p.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("already taken"),
+            "the complained-about field is focused, so its message is the one \
+             on the footer row: {text}"
+        );
+
+        // The general message waits behind it, and shows as soon as the focus
+        // leaves the field that has one of its own.
+        p.handle_key("down");
+        terminal.draw(|f| p.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains("the board is read-only"),
+            "general message missing: {text}"
+        );
+    }
+
+    #[test]
+    fn two_messages_about_one_field_are_both_kept() {
+        let mut p = ContentFormPopup::new(
+            "t",
+            sample_fields(),
+            &HashMap::new(),
+            &theme(),
+            &FormOptions::default(),
+        );
+        p.show_errors(&[
+            FieldError::field("title", "too long"),
+            FieldError::field("title", "already taken"),
+        ]);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|f| p.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("too long; already taken"), "{text}");
     }
 
     #[test]

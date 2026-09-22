@@ -1075,14 +1075,10 @@ impl App {
         let stdin_json = ctx.build_json();
 
         if mode.is_form() {
-            // Wiring the round loop to the form popup is its own step; until
-            // then, running it as a background script would start the
-            // conversation and throw away the form it answered with.
-            self.notify_error(format!(
-                "{} is a form script, which the TUI cannot show yet",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            return EditorRequest::None;
+            // Not a run but a conversation: the round loop puts a dialog on
+            // screen and comes back here only when the script answers with a
+            // result. See [`crate::app::script_form`].
+            return self.start_form_script(ctx, script_path);
         }
 
         let child_env = self.child_env_for_script(ctx);
@@ -1117,8 +1113,17 @@ impl App {
             &output_suffix,
             &child_env,
         );
-        // Batch / table scripts may mutate the underlying data (e.g. a period
-        // equalizer, a bulk edit); reload the pane so the change is visible.
+        self.reload_after_script(ctx);
+        result
+    }
+
+    /// Batch / table scripts may mutate the underlying data (e.g. a period
+    /// equalizer, a bulk edit); reload the pane so the change is visible. A
+    /// node script acts on one row and the adapter tells us about that itself.
+    ///
+    /// Shared with the form path, which reloads when the conversation ends
+    /// rather than when the process does.
+    pub(super) fn reload_after_script(&mut self, ctx: &ScriptContext) {
         match ctx {
             ScriptContext::ContentBatch {
                 view_index,
@@ -1134,7 +1139,6 @@ impl App {
             }
             ScriptContext::ContentNode { .. } => {}
         }
-        result
     }
 
     /// Detached interactive launch via the configured
@@ -1503,6 +1507,18 @@ impl App {
                 return;
             }
         };
+        self.apply_script_answer(parsed);
+    }
+
+    /// Act on a script's answer: run its `commands`, refuse what belongs to a
+    /// different hook.
+    ///
+    /// Separate from [`Self::run_script_output_commands`] because a form
+    /// script's answer never touches a file on this side — it arrives as the
+    /// parsed `result` of its last round — and both must be acted on
+    /// identically: a `# mode: form` script ends in exactly the answer a
+    /// `# mode: commands` script gives in one go.
+    pub(super) fn apply_script_answer(&mut self, parsed: serde_json::Value) {
         // The one refusal this seam has to make. Everything arriving here is
         // either a manual run or a `reload` hook, and both land *after* the
         // table was built from the rows — there is nothing left to colour and

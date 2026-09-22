@@ -42,6 +42,44 @@ enum AuthInvalidate {
     Credentials,
 }
 
+/// How an action submitted from the generic form popup came back.
+///
+/// Three outcomes rather than a `Result` because a *rejected* form is neither:
+/// nothing was written, but nothing went wrong either — the adapter read the
+/// values and said which of them it cannot use. Flattening that into an error
+/// would cost exactly the part that makes it useful, namely which field each
+/// complaint belongs to.
+pub enum FormActionAnswer {
+    /// Persisted. The popup closes and the message goes to the notification
+    /// bar, exactly like [`LoadMsg::ContentActionDone`].
+    Done(String),
+    /// The values were refused
+    /// ([`ActionOutcome::ReopenForm`](not_yet_done_content::ActionOutcome::ReopenForm)).
+    /// The form stays open with what the user typed still in it and each
+    /// message beside the field it names, so a refused entry is corrected in
+    /// place instead of retyped.
+    Rejected(Vec<not_yet_done_content::FieldError>),
+    /// The call itself failed. The form also stays open, with the adapter's
+    /// own sentence under the fields — which of the values it was about is
+    /// more than a failing call knows.
+    Failed(String),
+}
+
+/// A rejection as one sentence, for the paths that have no form left to put
+/// the messages back into (the log, the notification bar). Each field's name
+/// is kept in front of its message — without it a list of complaints about a
+/// form nobody can see says nothing.
+fn flatten_field_errors(errors: &[not_yet_done_content::FieldError]) -> String {
+    errors
+        .iter()
+        .map(|e| match &e.field {
+            Some(field) => format!("{field}: {}", e.message),
+            None => e.message.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// What a tree-find round-trip brought back — the frontend's own view of
 /// an [`ActionDispatch::Nodes`](not_yet_done_content::ActionDispatch::Nodes)
 /// payload, kept here (not in the content crate) because deciding how to
@@ -146,15 +184,12 @@ pub enum LoadMsg {
         result: Result<String, String>,
     },
     /// The same, but for an action submitted from the generic form popup —
-    /// which is still on screen, frozen, waiting for this answer. `Ok` closes
-    /// it and finishes exactly like `ContentActionDone`; `Err` hands the form
-    /// back to the user with its values intact and the adapter's own sentence
-    /// as a [`FormNotice::Alert`], so
-    /// a refused entry can be corrected in place instead of being retyped.
+    /// which is still on screen, frozen, waiting for this answer. See
+    /// [`FormActionAnswer`] for the three ways it can go.
     ContentFormActionDone {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
-        result: Result<String, String>,
+        answer: FormActionAnswer,
     },
     /// An inline picture referenced by a `markdown: true` body finished
     /// downloading and decoding. `image` is `None` when either step failed —
@@ -571,6 +606,7 @@ pub mod node_actions;
 pub mod option_menu;
 pub mod row_change;
 pub mod script;
+pub mod script_form;
 pub mod script_hook;
 
 pub use editor::EditorRequest;
@@ -1352,6 +1388,11 @@ pub struct App {
     pub content_action_popup: Option<ContentActionPopupState>,
     pub content_file_picker_popup: Option<ContentFilePickerPopupState>,
     pub content_form_popup: Option<ContentFormPopupState>,
+    /// The dialog of a running `# mode: form` script, with the conversation
+    /// behind it. Its own slot rather than the one above: that one belongs to
+    /// an adapter action on one node, this one to a script that may ask again
+    /// and again, and neither can stand in for the other.
+    pub script_form_popup: Option<crate::app::script_form::ScriptFormPopupState>,
 
     /// Global overlay for an adapter-initiated mid-operation prompt (e.g. an
     /// MFA challenge). At most one is shown at a time; concurrent requests wait
@@ -1623,6 +1664,7 @@ impl App {
             pending_confirmation: None,
             content_views,
             content_form_popup: None,
+            script_form_popup: None,
             content_action_popup: None,
             content_file_picker_popup: None,
             tab_bar,
@@ -4861,14 +4903,14 @@ impl App {
                 LoadMsg::ContentFormActionDone {
                     view_index,
                     pane_id,
-                    result,
+                    answer,
                 } => {
                     let pending = self
                         .content_form_popup
                         .as_ref()
                         .is_some_and(|state| state.pending);
-                    match result {
-                        Err(msg) if pending => {
+                    match answer {
+                        FormActionAnswer::Failed(msg) if pending => {
                             // Hand the form back with what the user typed and
                             // the adapter's own sentence under the fields. It
                             // is logged and remembered as the last error (so a
@@ -4882,10 +4924,33 @@ impl App {
                             not_yet_done_content::http_log::log_error("form", &msg);
                             self.last_error = Some(msg);
                         }
-                        result => {
+                        FormActionAnswer::Rejected(errors) if pending => {
+                            // Same stretch of screen, finer aim: each message
+                            // beside the field it was written about.
+                            let state = self.content_form_popup.as_mut().unwrap();
+                            state.popup.show_errors(&errors);
+                            state.pending = false;
+                            not_yet_done_content::http_log::log_error(
+                                "form",
+                                &flatten_field_errors(&errors),
+                            );
+                        }
+                        // Either the form is gone (the user pressed Esc while
+                        // the write was in flight) or the write succeeded;
+                        // both end in the ordinary action-done path. A
+                        // rejection that finds no form left to reopen is still
+                        // worth saying, so it is flattened into one sentence.
+                        answer => {
                             if pending {
                                 self.content_form_popup = None;
                             }
+                            let result = match answer {
+                                FormActionAnswer::Done(msg) => Ok(msg),
+                                FormActionAnswer::Failed(msg) => Err(msg),
+                                FormActionAnswer::Rejected(errors) => {
+                                    Err(flatten_field_errors(&errors))
+                                }
+                            };
                             self.content_action_done(view_index, pane_id, result);
                         }
                     }
@@ -5708,6 +5773,15 @@ impl App {
             return EditorRequest::None;
         }
 
+        // A form script's dialog — every key while it is open, on whatever
+        // tab the script was started from. Ahead of the action form below
+        // because it is the one that can open over the other: a script bound
+        // on a level may be started while that level's own form is up.
+        if self.handle_script_form_key(key) {
+            self.sync_components();
+            return EditorRequest::None;
+        }
+
         // Content form popup (generic `InputSpec::Form` actions) — intercepts
         // every key while open. The popup owns its field focus + in-field
         // editing; we only act on Submitted/Cancelled.
@@ -6021,6 +6095,7 @@ impl App {
             || self.content_action_popup.is_some()
             || self.content_file_picker_popup.is_some()
             || self.content_form_popup.is_some()
+            || self.script_form_popup.is_some()
             || self.link_popup.is_some()
             || self.config_picker_popup.is_some()
             || self.shortcut_menu.is_open()
@@ -11069,20 +11144,27 @@ impl App {
                 node.execute(&action_id, input, &Default::default()).await
             }
             .await;
-            let result = match outcome {
+            let answer = match outcome {
                 Ok(not_yet_done_content::ActionOutcome::Done { message }) => {
-                    Ok(message.unwrap_or_else(|| format!("{aid_for_msg} executed")))
+                    FormActionAnswer::Done(
+                        message.unwrap_or_else(|| format!("{aid_for_msg} executed")),
+                    )
                 }
-                Ok(_) => Ok(format!("{aid_for_msg} executed")),
+                // The outcome written for exactly this popup: the values were
+                // read and found wanting, field by field.
+                Ok(not_yet_done_content::ActionOutcome::ReopenForm { errors }) => {
+                    FormActionAnswer::Rejected(errors)
+                }
+                Ok(_) => FormActionAnswer::Done(format!("{aid_for_msg} executed")),
                 // The adapter's own sentence, unprefixed: when the form is
                 // still open this is what goes under its fields, and the form's
                 // heading already names the action.
-                Err(e) => Err(e.to_string()),
+                Err(e) => FormActionAnswer::Failed(e.to_string()),
             };
             let _ = tx.send(LoadMsg::ContentFormActionDone {
                 view_index: vi,
                 pane_id: pid,
-                result,
+                answer,
             });
         });
     }
@@ -13633,10 +13715,21 @@ fn load_content_views(
 #[cfg(test)]
 mod tests {
     use super::{
-        App, credential_form_allowed, credential_form_title, image_temp_filename,
-        load_error_notice, notification_bar_hint, parse_query_apply_args, render_payload_template,
-        split_leading_token, which_key_filter, which_key_prefix_allowed,
+        App, credential_form_allowed, credential_form_title, flatten_field_errors,
+        image_temp_filename, load_error_notice, notification_bar_hint, parse_query_apply_args,
+        render_payload_template, split_leading_token, which_key_filter, which_key_prefix_allowed,
     };
+
+    #[test]
+    fn a_flattened_rejection_keeps_each_field_in_front_of_its_message() {
+        use not_yet_done_content::FieldError;
+
+        let flat = flatten_field_errors(&[
+            FieldError::field("title", "already taken"),
+            FieldError::general("the board is read-only"),
+        ]);
+        assert_eq!(flat, "title: already taken; the board is read-only");
+    }
 
     #[test]
     fn the_active_tab_may_always_ask_for_credentials() {

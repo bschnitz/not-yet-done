@@ -199,6 +199,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         state.popup.render(frame, popup_area);
     }
 
+    // Overlay: the current round of a `# mode: form` script. Drawn after the
+    // action form because it is the one that can open over the other.
+    if let Some(ref mut state) = app.script_form_popup {
+        state.popup.render(frame, popup_area);
+    }
+
     // Overlay: column config popup.
     if let Some(popup) = &mut app.column_config_popup {
         popup.view(frame, popup_area);
