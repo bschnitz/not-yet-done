@@ -8084,52 +8084,63 @@ and the same script without `when:` in `tasks.yaml`.
 
 - [ ] Jira: `e e` on a ticket → `edit_markdown prepare <key> <summary>` at
       once (before the editor opens); saving adds `edit_markdown execute …`;
-      quitting without a save adds nothing more
+      quitting without a save adds nothing more _(login-blocked; the Tasks
+      box below shows the same prepare/discard behaviour on `edit`)_
 - [ ] Jira: `o p` → `script:html_preview.py script <key> <summary>`; `o b`
-      (not in the list) writes nothing
-- [ ] Tasks: `s` (toggle) writes `toggle-tracking invoke …`, `e e` writes
+      (not in the list) writes nothing _(login-blocked)_
+- [x] Tasks: `s` (toggle) writes `toggle-tracking invoke …`, `e e` writes
       `edit prepare …`, `x` + a script writes `script:<name> script …`
-- [ ] Tasks: an action that asks `(y/n)` writes nothing on the question and
-      one line on `y`
-- [ ] Tasks: an alias (`toggle-tracking-solo`) is reported under the **real**
-      id (`toggle-tracking`)
-- [ ] `nyd tasks <id> do toggle-tracking` → one line with `execute`, no
-      label, before the command returns
-- [ ] `when: { action: edit }` (a single id) parses; `when: { action: nope }`
+- [x] Tasks: an action that asks `(y/n)` writes **one** line on the question
+      (`delete invoke …` — it _was_ invoked) and a second one on `y`
+      (`delete execute …`); `n` adds nothing more. Phases are the whole
+      point: a sink can tell "asked" from "did".
+- [x] Tasks: an alias (`toggle-tracking-solo`) is reported under the **real**
+      id (`toggle-tracking`); `label` stays the node's, not the alias'
+- [x] `nyd adapter tasks <id> toggle-tracking` → one line before the command
+      returns (the runner is awaited). Phase is `invoke`, same as from the
+      TUI, and the label is there — the CLI resolves the node too.
+- [x] `when: { action: edit }` (a single id) parses; `when: { action: nope }`
       never fires and reports nothing
-- [ ] A hook script that runs `nyd tasks … do …` itself triggers no second
-      `action_invoked` (depth guard)
-- [ ] Batch/table scripts (`scope: filtered_set` / `table`) write nothing
+- [x] A hook script that runs `nyd adapter tasks … <action>` itself triggers
+      no second `action_invoked` (depth guard) — the nested call succeeds,
+      it just publishes nothing
+- [x] Batch/table scripts (`scope: filtered_set` / `table`) write nothing
 
 Tracking toggles are the case the autotrack scripts live on, so check them
 against the grouped-tracking tree above (a toggle carries no task path — the
 script resolves `node_id` against the tree itself):
 
-- [ ] `s` on `A` → one `toggle-tracking invoke` line appears within a second,
+- [x] `s` on `A` → one `toggle-tracking invoke` line appears within a second,
       the TUI stays responsive
-- [ ] `s` on `B` → one line for `B`; the implicit stop of `A` the policy
+- [x] `s` on `B` → one line for `B`; the implicit stop of `A` the policy
       performs is **not** a second line (only the invoked action reports)
-- [ ] The same from the trackings tab writes the same line, with the
-      trackings instance in the payload's `instance`
-- [ ] A stop made past the adapter
+- [x] The same from the trackings tab writes the same line, with the
+      trackings instance in the payload's `instance` (and `node_type`
+      `tracking:entry`)
+- [x] A stop made past the adapter
       (`cargo run -p not-yet-done-task-cli -- track stop`) writes nothing
-- [ ] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
+- [x] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
       the JSON carries `hook`, `instance`, `action`, `phase`, `node_id`,
       `node_type`, `label`
 
 And the runner itself, whichever hook drives it:
 
-- [ ] Make the script exit 1 → the TUI keeps working, the failure lands in
+- [x] Make the script exit 1 → the TUI keeps working, the failure lands in
       `~/.local/state/not_yet_done/hooks/runner.log` naming the log file; the
       CLI prints it on stderr, exit code unchanged
-- [ ] Make the script `sleep 70` → after 60 s it is killed and reported as
-      timed out; later actions fire again
-- [ ] Bind `script: nope.py` → each fire logs `script … not found`, the
+- [x] Make the script `sleep 70` → after 60 s it is killed and reported as
+      timed out; later actions fire again. The bindings behind it only run
+      once it is gone — they are sequential.
+- [x] Bind `script: nope.py` → each fire logs `script … not found`, the
       action itself still succeeds
-- [ ] A binding with both `run:` and `script:` (or neither) is reported per
+- [x] A binding with both `run:` and `script:` (or neither) is reported per
       fire, the other bindings of the hook still run
-- [ ] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
-      next action fires the hook **once**, not twice
+- [x] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
+      next action fires the hook **once**, not twice. This used to fire
+      **zero** times: the single-view reload rebuilt the adapter past
+      `decorate_instance`, so the reloaded tab lost its `aliases:`, stopped
+      publishing `action_invoked` and had no runner. Fixed; two reloads in a
+      row still give exactly one line (the runner holds the adapter weakly).
 
 ## Tree predicates — path values (`[in_tree, /Root]`)
 

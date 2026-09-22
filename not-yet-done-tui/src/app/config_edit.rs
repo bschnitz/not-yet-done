@@ -424,8 +424,21 @@ impl App {
                 &self.host_ctx,
             )
             .map_err(|e| format!("adapter init: {e}"))?;
+        // Same wiring the startup loader does around `create` — without it a
+        // reloaded tab loses its `aliases:` and stops publishing
+        // `action_invoked` (the decorators), and nothing would run its event
+        // hooks (the runner).
+        let adapter = not_yet_done_host::decorate_instance(adapter, &config.adapter, &self.host_ctx)
+            .map_err(|e| format!("adapter init: {e}"))?;
         let adapter: std::sync::Arc<dyn not_yet_done_content::ContentAdapter> =
             std::sync::Arc::from(adapter);
+        // One runner per built adapter; it holds the adapter weakly, so the
+        // runner of the view being replaced retires on its own.
+        not_yet_done_host::spawn_event_hook_runner(
+            std::sync::Arc::downgrade(&adapter),
+            config.adapter.effective_instance_id(),
+            self.host_ctx.event_bus.as_ref(),
+        );
 
         let mut view = crate::views::content_view::ContentView::new(
             std::sync::Arc::clone(&self.shared_theme),
