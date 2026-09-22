@@ -6387,19 +6387,20 @@ level, running the same ascent `Backspace` runs.
       the offset you left. The back key restores exactly as much and no more,
       which is the promise the crumb has to keep.
 - [ ] Click the **root** crumb: you are back at the top level, in the state the
-      back key leaves it in. **Deviation:** the crumb pops the drill frames
-      itself instead of running the level's `content.back`, so a level that
-      redefines or disables back is ignored. Two levels do exactly that, for
-      the same reason: a coupled split pane _is_ the parent row's list, so
-      walking it one level up would turn it into a second copy of the list it
-      hangs off. The SQLite row level therefore sets `keybindings: { back:
-null }`, and the mail message list puts
-      `action_chains: { backspace: [window.close] }` on top of it. The back key
-      honours both — on the row level it does nothing at all. The crumb climbs
-      anyway and leaves exactly the state the config forbids: two panes on the
-      same level, with back now dead in both. Only `w q` clears it. It happens
-      from one level deep as well, so it is the crumb path as such, not the
-      multi-level climb.
+      back key leaves it in.
+- [ ] Drill into a level that sets `keybindings: { back: null }` — the SQLite
+      row level is one — and look at the path: every crumb above the level on
+      screen is **dim**, and clicking one does nothing. A level the back key
+      cannot leave must not be left by a click either: a coupled split pane
+      _is_ the parent row's list, so walking it one level up turns it into a
+      second copy of the list it hangs off, with back dead in both panes and
+      only `w q` to clear it.
+- [ ] **Open:** the mail message list guards the same thing with
+      `action_chains: { backspace: [window.close] }` instead of
+      `keybindings: { back: null }`. That shadows the _key_, not the action, so
+      the level still counts as climbable and its crumbs stay live. Either the
+      level says `back: null` as well, or the guard has to read action chains
+      too — a config question, not a code one.
 - [x] Click the **last** crumb (the level you are on) and the child-type crumb
       behind it: nothing happens, nothing reloads.
 - [x] Click a **separator** (`›`) between two crumbs: nothing happens.

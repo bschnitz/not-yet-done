@@ -5311,7 +5311,18 @@ impl ContentPane {
     /// asked about it. The trailing crumbs — the deepest item and the child
     /// level named after it — describe where the cursor already is, so they
     /// carry 0 and clicking them does nothing.
-    fn render_breadcrumbs(&self, frame: &mut Frame, area: Rect, view_defs: &[ViewDef]) {
+    ///
+    /// A crumb the climb cannot reach — because some level on the way out
+    /// disables `back` — is painted dim and registers no region at all, so
+    /// the path says where a click can still take you instead of swallowing
+    /// it silently.
+    fn render_breadcrumbs(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        view_defs: &[ViewDef],
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) {
         use unicode_width::UnicodeWidthStr;
 
         let t = &*self.theme;
@@ -5336,6 +5347,9 @@ impl ContentPane {
             crumbs.push((&child.name, Style::default().fg(t.text_high()), 0));
         }
 
+        // How far out a click may actually get from here.
+        let climbable = self.climbable_levels(depth as usize, content_kb) as u16;
+
         const SEP: &str = " › ";
         let mut spans = Vec::new();
         let mut x = area.x;
@@ -5345,13 +5359,25 @@ impl ContentPane {
                 x = x.saturating_add(SEP.width() as u16);
             }
             let width = label.width() as u16;
-            // A crumb the terminal is too narrow to show is not there to be
-            // clicked either; `push` drops the empty rect on its own.
-            crate::mouse::push(
-                Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
-                crate::mouse::Region::Crumb(up),
-            );
+            // `up == 0` stays registered: it is the level on screen, an
+            // explicit no-op rather than an unreachable one, and keeping it
+            // out of the line region is what stops a click there from being
+            // read as a drag across the path.
+            let out_of_reach = up > climbable;
+            if !out_of_reach {
+                // A crumb the terminal is too narrow to show is not there to
+                // be clicked either; `push` drops the empty rect on its own.
+                crate::mouse::push(
+                    Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
+                    crate::mouse::Region::Crumb(up),
+                );
+            }
             x = x.saturating_add(width);
+            let style = if out_of_reach {
+                Style::default().fg(t.text_dim())
+            } else {
+                style
+            };
             spans.push(Span::styled(label, style));
         }
 
@@ -5606,6 +5632,77 @@ impl ContentPane {
             offset: prev_offset,
             limit: info.limit,
         })
+    }
+
+    /// Whether `back` can leave the drill level whose producing
+    /// [`ChildDef`] is `child` (`None` = the root level).
+    ///
+    /// The same lookup [`Self::level_binding`] makes, reduced to the yes/no
+    /// a *climb* needs. A level that sets `back: null` keeps the key from
+    /// leaving it, and then nothing else may leave it either — least of all
+    /// a breadcrumb click, which would otherwise be a back door around a
+    /// deliberate piece of config.
+    fn back_leaves_level(
+        child: Option<&ChildDef>,
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) -> bool {
+        match child.and_then(|c| c.keybindings.get(&ContentAction::Back)) {
+            Some(over) => over.is_some(),
+            None => content_kb.get(&ContentAction::Back).is_some(),
+        }
+    }
+
+    /// How many of the `levels` a breadcrumb asks for may actually be
+    /// climbed from here, given each level's own `back` binding.
+    ///
+    /// Walks outward from the level on screen: step 1 leaves it, step 2
+    /// leaves the level the top frame restores, and so on. The first level
+    /// that refuses ends the walk — everything above it is out of reach
+    /// too, because the only way past it is through it.
+    fn climbable_levels(
+        &self,
+        levels: usize,
+        content_kb: &KeyBindingSection<ContentAction>,
+    ) -> usize {
+        let mut child = self.active_child.as_ref();
+        let mut climbable = 0;
+        for k in 0..levels.min(self.nav_stack.len()) {
+            if !Self::back_leaves_level(child, content_kb) {
+                break;
+            }
+            climbable = k + 1;
+            child = self.nav_stack[self.nav_stack.len() - 1 - k]
+                .active_child
+                .as_ref();
+        }
+        climbable
+    }
+
+    /// Climb `levels` drill levels at once — what a breadcrumb click asks
+    /// for. Answers how many levels it managed.
+    ///
+    /// One [`Self::nav_back`] per level rather than a shortcut through the
+    /// stack: that is the one ascent the back key runs too, and each level
+    /// restores its own snapshot (items, cursor, preview, tree state) on the
+    /// way out. Gated per step by [`Self::back_leaves_level`], so the climb
+    /// stops exactly where the key would stop.
+    fn climb_back(
+        &mut self,
+        levels: usize,
+        content_kb: &KeyBindingSection<ContentAction>,
+        view_defs: &[ViewDef],
+    ) -> usize {
+        let mut climbed = 0;
+        for _ in 0..levels {
+            if !Self::back_leaves_level(self.active_child.as_ref(), content_kb) {
+                break;
+            }
+            if !self.nav_back(view_defs) {
+                break;
+            }
+            climbed += 1;
+        }
+        climbed
     }
 
     /// Effective binding for `action` at the current drill level.
@@ -9565,23 +9662,16 @@ impl ContentView {
     }
 
     /// Climb `levels` drill-down levels out of the active pane at once — what
-    /// clicking a breadcrumb asks for.
+    /// clicking a breadcrumb asks for. `None` when there was nothing to climb.
     ///
-    /// One [`ContentPane::nav_back`] per level rather than a shortcut through
-    /// the stack: that is the one ascent the back key runs too, and each level
-    /// restores its own snapshot (items, cursor, preview, tree state) on the
-    /// way out. `None` when there was nothing to climb.
+    /// The work — and the per-level gate that keeps the click from escaping a
+    /// level whose `back` is disabled — lives in [`ContentPane::climb_back`].
     pub(crate) fn nav_back_levels(&mut self, levels: usize) -> Option<SubViewMessage> {
         let view_defs = self.view_defs.clone();
+        let content_kb = self.content_kb.clone();
         let pane = self.active_pane_mut();
-        let mut moved = false;
-        for _ in 0..levels {
-            if !pane.nav_back(&view_defs) {
-                break;
-            }
-            moved = true;
-        }
-        moved.then_some(SubViewMessage::SelectionChanged(None))
+        (pane.climb_back(levels, &content_kb, &view_defs) > 0)
+            .then_some(SubViewMessage::SelectionChanged(None))
     }
 
     pub fn parent_node_id(&self) -> Option<&str> {
@@ -12888,7 +12978,7 @@ impl Component for ContentView {
         // Render breadcrumbs.
         if let Some(bc_area) = breadcrumb_area {
             self.active_pane()
-                .render_breadcrumbs(frame, bc_area, &self.view_defs);
+                .render_breadcrumbs(frame, bc_area, &self.view_defs, &self.content_kb);
         }
 
         // Reserve one line at the bottom for the pagination footer when set.
@@ -16869,6 +16959,54 @@ mod tests {
         assert_eq!(crumbs[1], "Comments");
     }
 
+    /// A level that disables `back` cannot be left by the key — and must not
+    /// be left by a breadcrumb click either. The crumbs above it register no
+    /// region at all, so the click lands on the line, not on a climb.
+    #[cfg(feature = "mouse")]
+    #[test]
+    fn a_level_that_disables_back_registers_no_climbable_crumb() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut config = test_config_with_children();
+        config.views[0].children[0]
+            .keybindings
+            .insert(ContentAction::Back, None);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-2", "Second issue", &child_def, &view_defs);
+
+        let content_kb = view.content_kb.clone();
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        crate::mouse::begin_frame();
+        terminal
+            .draw(|frame| {
+                view.active_pane()
+                    .render_breadcrumbs(frame, frame.area(), &view_defs, &content_kb)
+            })
+            .unwrap();
+
+        // No crumb offers a climb; only the level on screen (distance 0,
+        // an explicit no-op) is still registered.
+        for x in 0..60u16 {
+            assert!(
+                !matches!(
+                    crate::mouse::hit(x, 0).map(|(_, r)| r),
+                    Some(crate::mouse::Region::Crumb(n)) if n > 0
+                ),
+                "column {x} registered a climb out of a level that disables back"
+            );
+        }
+
+        // And the climb itself refuses, however many levels it is asked for.
+        assert!(view.nav_back_levels(2).is_none());
+        assert_eq!(view.breadcrumbs().len(), 3, "still two levels deep");
+    }
+
     /// Two levels deep, so the distance a crumb carries is more than "root or
     /// not": clicking the middle one has to climb exactly one level.
     #[cfg(feature = "mouse")]
@@ -16886,12 +17024,13 @@ mod tests {
         view.active_pane_mut()
             .drill_down_prepare("ISS-2", "Second issue", &child_def, &view_defs);
 
+        let content_kb = view.content_kb.clone();
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
         crate::mouse::begin_frame();
         terminal
             .draw(|frame| {
                 view.active_pane()
-                    .render_breadcrumbs(frame, frame.area(), &view_defs)
+                    .render_breadcrumbs(frame, frame.area(), &view_defs, &content_kb)
             })
             .unwrap();
 
