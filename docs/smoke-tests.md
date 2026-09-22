@@ -6185,10 +6185,21 @@ started in.
       left behind over a list that has since scrolled would be a lie.)
 - [x] Click once somewhere outside every panel: the old selection is dropped
       without anything else happening.
-- [ ] Over SSH (no system clipboard reachable on the remote): the selection
+- [x] Over SSH (no system clipboard reachable on the remote): the selection
       still lands in the clipboard of the machine you are sitting at, via
-      OSC 52. If **no** path works at all, exactly one notification appears —
-      `Could not reach the clipboard` — and nothing else.
+      OSC 52. Measured without an SSH hop by starting the TUI with no desktop
+      connection at all, and recording what the program writes to its
+      terminal: the same drag that fills the desktop clipboard on a normal
+      start emits nothing there and instead sends one `OSC 52` sequence whose
+      payload decodes to exactly the selected text, wide tree glyphs
+      included. The order is visible in the same two runs — with a desktop
+      clipboard in reach not a single OSC 52 goes out, because the first path
+      already succeeded.
+- [ ] If **no** path works at all, exactly one notification appears —
+      `Could not reach the clipboard` — and nothing else. Not reachable from
+      here: the OSC 52 fallback only fails when the write to the terminal
+      itself fails, so short of taking stdout away from a running TUI there is
+      no way to make both paths refuse.
 
 ### Clicking tabs and panes
 
@@ -6278,8 +6289,15 @@ here.
       padding, and copied.
 - [x] Triple-click a **table row**: the row's text is selected — the third
       click selects even where the second one opens.
-- [ ] Double-click a table row: it still opens (`Enter`), it does not select a
-      word. Same for a popup entry: it is still picked.
+- [x] Double-click a table row: it still opens (`Enter`), it does not select a
+      word. Same for a popup entry: it is still picked — the first click walks
+      the popup's cursor to the row under the pointer, the second presses
+      Enter on it, and the clipboard is untouched either way. Which popups
+      this covers is worth knowing: only the three that register their rows
+      (the searchable popup, which-key and the shortcut menu). A popup that
+      registers none — the sort menu is one — is hit as chrome, where the
+      second click is deliberately left to the text, so an entry there is
+      **not** picked by a double click.
 - [x] Click once somewhere else afterwards: the highlight goes away.
 - [x] Click four times fast on the same cell: the run starts over at a single
       click instead of escalating further.
@@ -6291,8 +6309,13 @@ Holding a multi-click shows its unit, and dragging out of it keeps that unit:
 - [x] **Triple-click and hold** there: the whole line is highlighted.
 - [x] Double-click and hold on a **blank** cell: nothing is highlighted, no
       stray tinted cell.
-- [ ] Double-click a **table row** fast: it opens as before, with no word
-      flashing up first. Same for a popup entry.
+- [x] Double-click a **table row** fast: it opens as before, with no word
+      flashing up first. Same for a popup entry. Measured by holding the
+      second press down and reading the screen while it is: exactly one cell
+      carries the press tint — the one under the pointer — and no word-shaped
+      run anywhere. On release the row opens and the entry is picked, with the
+      clipboard still holding what it held before. With `highlight_press` at
+      its default there is not even that one cell.
 - [x] **Double-click and hold**, then drag sideways: the selection grows word by
       word — the word you pressed in stays whole, and so does the one under the
       pointer, even with the pointer in the middle of it.
@@ -6564,12 +6587,25 @@ Colours, settings and the off switch:
       block of `tui.yaml` (the `tui-theme_<name>.yaml` files are presets),
       restart, select: the highlight uses them. Remove them again and the
       selection falls back to background-on-accent.
-- [ ] Build without the feature
+- [x] Build without the feature
       (`cargo build --release -p not-yet-done-tui --no-default-features --features clipboard`),
       install and start it: dragging selects the way the terminal always did
       (across the popup border, whole rows), no key or wheel behaviour has
       changed, and a `tui.yaml` that still carries a `theme.mouse:` block — or
-      a `mouse.highlight_press` in it — loads without a warning.
+      a `mouse.highlight_press` in it — loads without a warning. The pointer
+      goes back to the terminal because nothing ever asks for it: the binary
+      carries none of the three mode sequences the normal build emits
+      (`1000h`, `1002h`, `1006h` — neither build has `1003h`), and the
+      terminal's own record of the modes the app switched on stays empty while
+      the TUI runs, with only the alternate screen set. Reports that reach it
+      anyway are inert — a click, a drag across four rows and three wheel
+      notches injected into the running build leave the screen byte for byte
+      unchanged, cursor and offset included, and type nothing. Keys are
+      untouched in the strict sense: the full binding dump of both builds
+      against the same config is identical line for line. A `tui.yaml`
+      carrying both the `mouse:` block and a `theme.mouse:` one parses without
+      a word of complaint, which is the point of keeping `MouseConfig` and
+      `MouseThemeConfig` outside the cargo feature.
 
 ## Jira: the linked tickets of an issue (`jira:link`, `o l`)
 
