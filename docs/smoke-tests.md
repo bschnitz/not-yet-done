@@ -5275,13 +5275,18 @@ a silent no-op — no editor, no error, no log line. Fixed by the arms on
 `TableNode` and `ViewNode`; the boxes below start from there.
 
 - [ ] `Q` on a table → the editor with the template `SELECT * FROM "t";`.
-      Save it, run it, page through it. _Half measured:_ the editor opens with
-      the right template, and saving runs the query (the bar reports the row
-      count and the footer switches to `Items 1–100 · Page 1`) — but the level
-      then renders **empty**, still under the root's `Name / Size / Path`
-      columns instead of the result's. Next question: whether the custom-query
-      result reaches the pane at all, or reaches it and is rendered against the
-      wrong column set.
+      Save it, run it, page through it. _Half measured:_ everything up to the
+      paging keys now holds. The editor opens with the right template, saving
+      runs the query, and the result renders **with its own columns** — a
+      `SELECT id, name … WHERE price < 50` over a 24-row table leaves five rows
+      under `id / name`, and `r` puts the tree back with its fold state intact.
+      Until 2026-09-22 the level rendered empty under the root's
+      `Name / Size / Path`: the rows did arrive (the bar counted them), but a
+      pane that is a tree takes its columns from the cursor's _configured_
+      level, and a query result belongs to no level. A pane now renders flat
+      for as long as a custom query is its content. Still open: `>` on a
+      240-row result does not fetch page 2 — it drops the result and reloads
+      the level, so the pane falls back to the tree.
 - [ ] `q` after the first save → the script is in the menu.
 - [ ] `Q` one level deeper (in `Rows`) still addresses the table above, not
       the row.

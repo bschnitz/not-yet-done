@@ -2519,6 +2519,19 @@ impl ContentPane {
         slots.into_styles()
     }
 
+    /// Whether the pane renders as a tree right now.
+    ///
+    /// A pane keeps its tree state while it shows the result of a custom
+    /// query, but the result is not that tree: its rows belong to no
+    /// configured level, so neither the level's columns nor the tree's
+    /// entry walk describe them. Both the column set and the row build
+    /// therefore fall back to the flat path for as long as the query is
+    /// the pane's content — `r` (or any normal load) clears
+    /// `active_custom_query` and the tree renders again.
+    fn renders_as_tree(&self) -> bool {
+        self.tree.is_some() && self.active_custom_query.is_none()
+    }
+
     fn current_columns(&self, view_defs: &[ViewDef]) -> Vec<ColumnDef> {
         // Record-detail follower: always the synthetic field|value pair,
         // regardless of what the source level configures. The width of
@@ -2539,7 +2552,7 @@ impl ContentPane {
                 .unwrap_or(content_detail::FIELD_COL_MIN);
             return content_detail::detail_columns(field_width);
         }
-        if self.tree.is_some() {
+        if self.renders_as_tree() {
             // Chain-based: the cursor row's own branch decides the column
             // set, so a multi-branch tree shows the right columns at a
             // given depth instead of the first branch's. When the cursor
@@ -2576,7 +2589,10 @@ impl ContentPane {
         } else {
             &[]
         };
-        if !configured.is_empty() {
+        // A custom query answers with its own columns; the level's
+        // configured set describes the level, not the result, so it is
+        // skipped in favour of the metadata-derived fallback below.
+        if !configured.is_empty() && self.active_custom_query.is_none() {
             let mut cols = configured.to_vec();
             if let Some(visible) = self
                 .column_level_key(view_defs)
@@ -6038,7 +6054,7 @@ impl ContentPane {
         // immutably — `current_columns` reads them (active depth lookup
         // goes through the visible map) and the build below needs them
         // primed too.
-        if self.tree.is_some() {
+        if self.renders_as_tree() {
             self.refresh_tree_visible_indices(view_defs);
             // The entries may have shrunk under the cursor (a new query
             // rebuilt the tree from scratch): clamp the selection so the
@@ -6136,7 +6152,7 @@ impl ContentPane {
         }
 
         self.filtered_indices.clear();
-        let data_rows: Vec<TRow<u32>> = if self.tree.is_some() {
+        let data_rows: Vec<TRow<u32>> = if self.renders_as_tree() {
             // Tree mode renders from `tree.entries` through
             // `tree_visible_indices` (refreshed above). Fuzzy filter
             // only narrows entries at `tree_filter_depth`; `/`-search
@@ -10526,6 +10542,11 @@ impl ContentView {
                 cq.mode = mode;
                 cq
             });
+            // The flag decides whether the pane renders as a tree, and
+            // `set_items` rebuilt the table while it was still cleared —
+            // so a tree pane would paint the result against its level's
+            // columns. Rebuild once the flag is back.
+            leaf.pane.rebuild_table(view_defs);
         }
         self.sync_action_bar_hints();
     }
