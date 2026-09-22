@@ -26,6 +26,7 @@ pub mod node_ref;
 pub mod query_vars;
 pub mod scaffold;
 pub mod script_buffer;
+pub mod script_form;
 pub mod slug;
 pub mod sort_serde;
 pub mod status_reporter;
