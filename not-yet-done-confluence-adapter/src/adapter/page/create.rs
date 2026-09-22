@@ -165,6 +165,7 @@ mod tests {
             ActionOutcome::OpenExternal { .. } => "OpenExternal",
             ActionOutcome::OpenEditor { .. } => "OpenEditor",
             ActionOutcome::OpenPicker { .. } => "OpenPicker",
+            ActionOutcome::ReopenForm { .. } => "ReopenForm",
         }
     }
 

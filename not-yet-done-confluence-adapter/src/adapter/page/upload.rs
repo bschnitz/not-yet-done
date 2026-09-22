@@ -101,7 +101,7 @@ mod tests {
             Ok(ActionOutcome::Done { .. }) => {
                 panic!("expected NoChanges for empty selection, got Done")
             }
-            Ok(ActionOutcome::Reopen { .. }) => {
+            Ok(ActionOutcome::Reopen { .. }) | Ok(ActionOutcome::ReopenForm { .. }) => {
                 panic!("expected NoChanges for empty selection, got Reopen")
             }
             Ok(ActionOutcome::Navigate { .. }) => {

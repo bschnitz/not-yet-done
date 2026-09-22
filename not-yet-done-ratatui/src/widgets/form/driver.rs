@@ -12,8 +12,9 @@ use tuirealm::command::{Cmd, CmdResult, Direction};
 use tuirealm::component::Component;
 use tuirealm::props::{AttrValue, Attribute, PropPayload, PropValue};
 use tuirealm::state::{State, StateValue};
+use unicode_width::UnicodeWidthChar;
 
-use crate::widgets::common::{SelectionMarker, SelectionMode};
+use crate::widgets::common::{PREFIX_LEN, SelectionMarker, SelectionMode, truncate_to_width};
 use crate::widgets::multi_choice::{ATTR_SELECTED as MC_ATTR_SELECTED, MultiChoice};
 use crate::widgets::select_list::{ATTR_SELECTED as SL_ATTR_SELECTED, SelectList};
 use crate::widgets::text_input::{CMD_END, CMD_HOME, TextInput};
@@ -28,6 +29,13 @@ const MAX_VISIBLE: u16 = 6;
 
 /// The `▍ ` gutter drawn left of an inline select's options.
 const GUTTER: u16 = 2;
+
+/// How many rows a field message may take when it is too long for the footer.
+/// Three is enough for a sentence a script is likely to write and still leaves
+/// the form readable behind it; beyond that the last row is cut with an
+/// ellipsis, because a message nobody reads to the end is not worth hiding the
+/// whole form for.
+const ERROR_EXPAND_ROWS: u16 = 3;
 
 /// Outcome of feeding a normalized key string to [`Form::handle_key`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,9 +111,18 @@ pub struct Form {
     title: String,
     fields: Vec<FieldEntry>,
     focused: usize,
-    error: Option<String>,
-    /// Caller-owned message (see [`FormNotice`]); outranked by `error`.
+    /// Per-field messages, keyed by field key: the form's own required-check and
+    /// whatever the caller attached to a field. Each one marks its field and is
+    /// shown in the footer while that field is focused; it survives a focus
+    /// change and is dropped when the field's value changes.
+    field_errors: HashMap<String, String>,
+    /// Caller-owned message (see [`FormNotice`]); outranked by a field error.
     notice: Option<FormNotice>,
+    /// Value of every field (visible or not) as the form was built, against
+    /// which `esc` decides whether anything is worth a discard prompt.
+    initial_values: HashMap<String, String>,
+    /// Whether the `Discard your input?` prompt is currently up.
+    discard_pending: bool,
     title_style: Style,
     footer_style: Style,
     error_style: Style,
@@ -274,8 +291,10 @@ impl Form {
             title: title.into(),
             fields,
             focused: 0,
-            error: None,
+            field_errors: HashMap::new(),
             notice: None,
+            initial_values: HashMap::new(),
+            discard_pending: false,
             title_style: style.title,
             footer_style: style.footer,
             error_style: style.error,
@@ -298,6 +317,7 @@ impl Form {
         // the start by its default/prefill values).
         form.focused = form.first_visible().unwrap_or(0);
         form.set_focus(form.focused, true);
+        form.initial_values = form.all_values();
         form
     }
 
@@ -321,17 +341,117 @@ impl Form {
         true
     }
 
-    /// The line shown below the fields: the live validation error first, then
-    /// the caller's notice, else `None` so the chrome falls back to its hints
-    /// or submit bar.
+    /// Attaches per-field messages, replacing every message the form currently
+    /// carries — including its own required-check. A round answers with the
+    /// full set of errors, so merging would keep messages the script has already
+    /// dropped. Keys naming no field are ignored: what to do with those is the
+    /// caller's decision (the round protocol promotes them to the general
+    /// message rather than swallowing them).
+    pub fn set_field_errors(&mut self, errors: HashMap<String, String>) {
+        self.field_errors = errors
+            .into_iter()
+            .filter(|(k, _)| self.fields.iter().any(|e| &e.key == k))
+            .collect();
+    }
+
+    /// Drops the message on one field. Called automatically when that field's
+    /// value changes, because the message was about the value that is now gone.
+    pub fn clear_field_error(&mut self, key: &str) {
+        self.field_errors.remove(key);
+    }
+
+    /// The messages currently attached to fields, keyed by field key.
+    pub fn field_errors(&self) -> &HashMap<String, String> {
+        &self.field_errors
+    }
+
+    /// Whether any field's value differs from the one the form was built with.
+    /// This is what `esc` asks before throwing the form away; moving the focus
+    /// around does not count, because it changes no value.
+    pub fn is_dirty(&self) -> bool {
+        self.initial_values != self.all_values()
+    }
+
+    /// Whether the `Discard your input?` prompt is up. While it is, every key
+    /// goes to the prompt and none to the fields.
+    pub fn discard_pending(&self) -> bool {
+        self.discard_pending
+    }
+
+    /// The line shown below the fields: the focused field's message first, then
+    /// the caller's notice, else `None` so the chrome falls back to its hints or
+    /// submit bar.
+    ///
+    /// A field message outranks the notice while it stands, because it is about
+    /// the field the user is looking at; the notice is about the form as a whole
+    /// and stays until the caller replaces it.
     fn status_line(&self) -> Option<(String, Style)> {
-        if let Some(e) = &self.error {
+        if let Some(e) = self.focused_error() {
             return Some((format!("⚠ {e}"), self.error_style));
         }
         match &self.notice {
             Some(FormNotice::Alert(t)) => Some((format!("⚠ {t}"), self.error_style)),
             Some(FormNotice::Info(t)) => Some((t.clone(), self.footer_style)),
             None => None,
+        }
+    }
+
+    /// The message on the focused field, if it has one.
+    fn focused_error(&self) -> Option<&str> {
+        let key = &self.fields.get(self.focused)?.key;
+        self.field_errors.get(key).map(String::as_str)
+    }
+
+    /// Per field, whether it carries a message — precomputed so the render
+    /// loops, which hold the fields mutably, can consult it without borrowing
+    /// `self` again.
+    fn marked_fields(&self) -> Vec<bool> {
+        self.fields
+            .iter()
+            .map(|e| self.field_errors.contains_key(&e.key))
+            .collect()
+    }
+
+    /// Writes the focused field's message out in full under `footer` when it is
+    /// too long for that one row, wrapped over at most [`ERROR_EXPAND_ROWS`]
+    /// rows and overlapping whatever sits below — the border, the help line,
+    /// the pane behind the popup.
+    ///
+    /// Overlapping is the point: the alternative is a message the user can only
+    /// read half of, and a form that grows a row whenever a script complains
+    /// would move every field under the user's hands. The expansion is tied to
+    /// the focus, so it disappears the moment the user steps to another field.
+    fn render_error_expansion(&self, frame: &mut Frame, footer: Rect) {
+        let Some(text) = self.focused_error() else {
+            return;
+        };
+        let text = format!("⚠ {text}");
+        let width = footer.width as usize;
+        if width == 0 || display_width(&text) <= width {
+            return;
+        }
+
+        let rows = wrap_to_width(&text, width, ERROR_EXPAND_ROWS as usize);
+        let bounds = frame.area();
+        for (i, row) in rows.iter().enumerate() {
+            let y = footer.y + i as u16;
+            if y >= bounds.y + bounds.height {
+                break;
+            }
+            let rect = Rect {
+                x: footer.x,
+                y,
+                width: footer.width.min(bounds.x + bounds.width - footer.x),
+                height: 1,
+            };
+            frame.render_widget(Clear, rect);
+            if let Some(bg) = self.panel_bg {
+                frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(row.clone(), self.error_style))),
+                rect,
+            );
         }
     }
 
@@ -404,8 +524,29 @@ impl Form {
 
     /// Feeds one normalized key string and returns the resulting [`FormEvent`].
     pub fn handle_key(&mut self, key: &str) -> FormEvent {
+        // While the discard prompt is up it owns every key: the form underneath
+        // must not take another character on the way out.
+        if self.discard_pending {
+            return match key {
+                "y" | "Y" => FormEvent::Cancelled,
+                // `n` and `esc` both mean "back to the form", so `esc esc` can
+                // never throw work away — the second one answers the prompt.
+                _ => {
+                    self.discard_pending = false;
+                    FormEvent::Consumed
+                }
+            };
+        }
+
         match key {
-            "esc" => return FormEvent::Cancelled,
+            // Cancelling outright is only free while nothing has been entered.
+            "esc" => {
+                if self.is_dirty() {
+                    self.discard_pending = true;
+                    return FormEvent::Consumed;
+                }
+                return FormEvent::Cancelled;
+            }
             // `ctrl+enter` is the panel look's submit; plain `enter` stays a
             // submit too (classic forms, and a harmless convenience).
             "enter" | "ctrl+enter" => return self.submit(),
@@ -435,11 +576,29 @@ impl Form {
             }
         }
 
+        // A field's message is about the value it was raised against. Compare
+        // the value across the dispatch rather than guessing from the key:
+        // `left` and `home` change nothing, a paste changes everything, and
+        // only the widget knows which is which.
+        let before = self.focused_value();
         self.dispatch(key);
+        if self.focused_value() != before {
+            if let Some(key) = self.fields.get(self.focused).map(|e| e.key.clone()) {
+                self.clear_field_error(&key);
+            }
+        }
         // The change may have flipped another field's visibility condition; if
         // it hid the focused field, move focus to one still on screen.
         self.ensure_focus_visible();
         FormEvent::Consumed
+    }
+
+    /// The focused field's current value (empty when there is no field).
+    fn focused_value(&self) -> String {
+        self.fields
+            .get(self.focused)
+            .map(|e| field_value(&e.widget))
+            .unwrap_or_default()
     }
 
     fn dispatch(&mut self, key: &str) {
@@ -494,7 +653,10 @@ impl Form {
         });
         if let Some(idx) = invalid {
             self.focus_to(idx);
-            self.error = Some("This field is required".to_string());
+            if let Some(key) = self.fields.get(idx).map(|e| e.key.clone()) {
+                self.field_errors
+                    .insert(key, "This field is required".to_string());
+            }
             return FormEvent::Consumed;
         }
         FormEvent::Submitted(self.values())
@@ -530,7 +692,6 @@ impl Form {
         self.set_focus(self.focused, false);
         self.focused = idx % self.fields.len();
         self.set_focus(self.focused, true);
-        self.error = None;
     }
 
     fn focus_next(&mut self) {
@@ -560,6 +721,16 @@ impl Form {
             .collect()
     }
 
+    /// Every field's value, hidden ones included. Only the dirty check uses
+    /// this: a value typed into a field that a later toggle hid is still the
+    /// user's work, and `esc` must not drop it without asking.
+    fn all_values(&self) -> HashMap<String, String> {
+        self.fields
+            .iter()
+            .map(|e| (e.key.clone(), field_value(&e.widget)))
+            .collect()
+    }
+
     // --- rendering --------------------------------------------------------
 
     /// Renders the form into `area`. With `field_bar` set this is a centred,
@@ -574,6 +745,15 @@ impl Form {
             self.render_panel(frame, area);
         } else {
             self.render_classic(frame, area);
+        }
+        if self.discard_pending {
+            render_discard_prompt(
+                frame,
+                area,
+                self.error_style,
+                self.footer_style,
+                self.panel_bg,
+            );
         }
     }
 
@@ -613,6 +793,8 @@ impl Form {
         let mut col_y = [inner.y; 2];
 
         let visible = self.visibility();
+        let marked = self.marked_fields();
+        let error_fg = self.error_style.fg;
         for (i, entry) in self.fields.iter_mut().enumerate() {
             if !visible[i] {
                 continue;
@@ -642,6 +824,16 @@ impl Form {
                 #[cfg(feature = "natural-date")]
                 preview_color,
             );
+            // A field the caller (or the required-check) objected to wears the
+            // error colour on its label and gutter. Restyling the cells the
+            // widget just drew keeps the marking one rule for every field kind
+            // and leaves the height alone — the text itself is in the footer,
+            // so nothing on screen moves when a message arrives.
+            if marked[i] {
+                if let Some(c) = error_fg {
+                    mark_error_field(frame, rect, c);
+                }
+            }
             col_y[c.min(1)] = y + rect.height + 1; // one-row gap between fields
         }
 
@@ -653,15 +845,23 @@ impl Form {
                 self.footer_style,
             )
         });
+        let footer_rect = Rect {
+            x: inner.x,
+            y: footer_y,
+            width: inner.width,
+            height: 1,
+        };
+        // One row, so a message wider than the form is cut with an ellipsis
+        // rather than silently halved. A *field* message says more than that:
+        // it is written out below (see `render_error_expansion`).
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(text, fstyle))),
-            Rect {
-                x: inner.x,
-                y: footer_y,
-                width: inner.width,
-                height: 1,
-            },
+            Paragraph::new(Line::from(Span::styled(
+                truncate_to_width(&text, footer_rect.width as usize),
+                fstyle,
+            ))),
+            footer_rect,
         );
+        self.render_error_expansion(frame, footer_rect);
     }
 
     /// The `event_form` look: a centred, borderless, content-sized panel filled
@@ -746,6 +946,8 @@ impl Form {
         let field_bg = self.field_bg;
         #[cfg(feature = "natural-date")]
         let preview_color = self.preview_color;
+        let marked = self.marked_fields();
+        let error_fg = self.error_style.fg;
 
         for (i, entry) in self.fields.iter_mut().enumerate() {
             if !visible[i] {
@@ -782,6 +984,16 @@ impl Form {
                 #[cfg(feature = "natural-date")]
                 preview_color,
             );
+            // A field the caller (or the required-check) objected to wears the
+            // error colour on its label and gutter. Restyling the cells the
+            // widget just drew keeps the marking one rule for every field kind
+            // and leaves the height alone — the text itself is in the footer,
+            // so nothing on screen moves when a message arrives.
+            if marked[i] {
+                if let Some(c) = error_fg {
+                    mark_error_field(frame, rect, c);
+                }
+            }
             col_y[c] = y + rect.height + 1;
         }
 
@@ -789,7 +1001,10 @@ impl Form {
         // caller has to say about the last attempt.
         match self.status_line() {
             Some((text, style)) => frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(format!("  {text}  "), style))),
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_to_width(&format!("  {text}  "), inner.width as usize),
+                    style,
+                ))),
                 Rect::new(inner.x, submit_y, inner.width, 1),
             ),
             None => frame.render_widget(
@@ -801,6 +1016,7 @@ impl Form {
                 Rect::new(inner.x, submit_y, inner.width, 1),
             ),
         }
+        self.render_error_expansion(frame, Rect::new(inner.x, submit_y, inner.width, 1));
 
         // Compact help line.
         let key = Style::default().fg(accent).add_modifier(Modifier::BOLD);
@@ -1099,6 +1315,131 @@ fn render_inline_select(
             },
         );
     }
+}
+
+/// Display width of `s` in terminal columns (wide characters count double).
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// Wraps `s` into at most `max_rows` rows of `width` columns, breaking on
+/// spaces and only inside a word when a single word is wider than the row. When
+/// the text does not fit in `max_rows`, the last row is cut with an ellipsis, so
+/// a run-on message is visibly truncated rather than silently halved.
+fn wrap_to_width(s: &str, width: usize, max_rows: usize) -> Vec<String> {
+    if width == 0 || max_rows == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+
+    let mut push_row = |row: &mut String, w: &mut usize| {
+        rows.push(std::mem::take(row));
+        *w = 0;
+    };
+
+    for word in s.split(' ') {
+        let word_w = display_width(word);
+        if current_w > 0 && current_w + 1 + word_w > width {
+            push_row(&mut current, &mut current_w);
+        }
+        if word_w > width {
+            // A single word wider than the row: fill the row, then carry the
+            // rest into the next one.
+            for ch in word.chars() {
+                let cw = ch.width().unwrap_or(0);
+                if current_w + cw > width {
+                    push_row(&mut current, &mut current_w);
+                }
+                current.push(ch);
+                current_w += cw;
+            }
+            continue;
+        }
+        if current_w > 0 {
+            current.push(' ');
+            current_w += 1;
+        }
+        current.push_str(word);
+        current_w += word_w;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+        if let Some(last) = rows.last_mut() {
+            *last = truncate_to_width(&format!("{last} "), width);
+        }
+    }
+    rows
+}
+
+/// Repaints a field's label row and its `▍` gutter in `color`.
+///
+/// Restyling the cells the widget has just drawn — rather than re-rendering the
+/// field with a second set of styles — keeps the marking to one rule for every
+/// field kind, including the hand-drawn inline select, and cannot drift out of
+/// step with what a widget actually put on screen.
+fn mark_error_field(frame: &mut Frame, area: Rect, color: Color) {
+    let buf = frame.buffer_mut();
+    for dx in 0..area.width {
+        if let Some(cell) = buf.cell_mut((area.x + dx, area.y)) {
+            cell.set_fg(color);
+        }
+    }
+    for dy in 1..area.height {
+        for dx in 0..PREFIX_LEN.min(area.width) {
+            if let Some(cell) = buf.cell_mut((area.x + dx, area.y + dy)) {
+                cell.set_fg(color);
+            }
+        }
+    }
+}
+
+/// Draws the `Discard your input?` prompt as a small centred box over the form.
+///
+/// It defaults to keeping the input: anything but `y` returns to the form, so
+/// `esc esc` — the reflex for "get me out of here" — can never throw work away.
+fn render_discard_prompt(
+    frame: &mut Frame,
+    area: Rect,
+    error_style: Style,
+    footer_style: Style,
+    panel_bg: Option<Color>,
+) {
+    const QUESTION: &str = "Discard your input?";
+    const HINT: &str = "y discard · any other key keep";
+
+    let want_w = (display_width(HINT).max(display_width(QUESTION)) + 4) as u16;
+    let w = want_w.min(area.width);
+    let h = 3u16.min(area.height);
+    if w < 4 || h < 3 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    );
+
+    frame.render_widget(Clear, rect);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(error_style)
+        .title(Line::from(Span::styled(QUESTION, error_style)));
+    if let Some(bg) = panel_bg {
+        block = block.style(Style::default().bg(bg));
+    }
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(HINT, footer_style))),
+        inner,
+    );
 }
 
 #[cfg(test)]

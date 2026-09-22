@@ -358,10 +358,10 @@ fn the_panel_does_not_pad_a_small_form() {
     );
 }
 
-/// The caller's notice outranks the key hints, a validation error outranks the
+/// The caller's notice outranks the key hints, a field message outranks the
 /// notice, and neither survives into the collected values.
 #[test]
-fn notice_and_validation_error_share_the_footer() {
+fn notice_and_field_message_share_the_footer() {
     use not_yet_done_ratatui::FormNotice;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -393,10 +393,277 @@ fn notice_and_validation_error_share_the_footer() {
     assert!(screen.contains("This field is required"));
     assert!(!screen.contains("wrong passphrase"));
 
-    // The notice survives the validation error being cleared by navigation —
-    // it explains why the form is on screen at all, so only the caller drops it.
+    // The field message is about a value that is still there, so navigating
+    // away no longer wipes it; editing the field does, because the value it
+    // objected to is gone. The notice explains why the form is on screen at
+    // all and only the caller drops it.
     form.handle_key("tab");
-    assert!(render(&mut form).contains("wrong passphrase"));
+    assert!(render(&mut form).contains("This field is required"));
+    type_str(&mut form, "t");
+    let screen = render(&mut form);
+    assert!(
+        !screen.contains("This field is required"),
+        "editing the field must drop its message"
+    );
+    assert!(screen.contains("wrong passphrase"));
     form.set_notice(None);
     assert!(!render(&mut form).contains("wrong passphrase"));
+}
+
+// --- field messages -------------------------------------------------------
+
+/// Helper: renders `form` into `area` of a fresh test terminal and returns the
+/// screen row by row, trailing blanks trimmed.
+fn rows_of(form: &mut Form, w: u16, h: u16, area: ratatui::layout::Rect) -> Vec<String> {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|frame| form.render(frame, area)).unwrap();
+    let buf = terminal.backend().buffer();
+    (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// A message attached to a field paints that field's label in the theme's error
+/// colour and puts its text in the footer — no extra row per field, so nothing
+/// on screen moves when a script complains.
+#[test]
+fn field_message_marks_the_label_and_fills_the_footer() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    let specs = vec![
+        FormFieldSpec::text("title", "Title"),
+        FormFieldSpec::text("hours", "Hours"),
+    ];
+    let mut form = Form::new("Work item", specs, &no_prefill(), &style(), &opts());
+    form.set_field_errors(HashMap::from([(
+        "hours".to_string(),
+        "must be a number".to_string(),
+    )]));
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+    terminal
+        .draw(|frame| form.render(frame, frame.area()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+
+    let row_of = |needle: &str| {
+        (0..buf.area.height)
+            .find(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains(needle)
+            })
+            .unwrap_or_else(|| panic!("no row contains {needle:?}"))
+    };
+
+    // The marked label wears the palette's error colour; the untouched one does
+    // not — the colour comes from the style, never from a literal in the driver.
+    let marked = row_of("Hours");
+    let untouched = row_of("Title");
+    let fg_at = |x: u16, y: u16| buf[(x, y)].fg;
+    assert_eq!(fg_at(2, marked), Color::Red, "marked label");
+    assert_eq!(fg_at(1, marked), Color::Red, "marked gutter");
+    assert_ne!(fg_at(2, untouched), Color::Red, "untouched label");
+
+    // The text itself is in the footer, and only while its field is focused.
+    let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(
+        !screen.contains("must be a number"),
+        "the message belongs to the unfocused field, so the footer stays quiet"
+    );
+    form.handle_key("tab");
+    let rows = rows_of(&mut form, 60, 14, ratatui::layout::Rect::new(0, 0, 60, 14));
+    assert!(
+        rows.iter().any(|r| r.contains("must be a number")),
+        "focusing the field puts its message in the footer:\n{}",
+        rows.join("\n")
+    );
+}
+
+/// `set_field_errors` replaces the whole set — a round answers with every
+/// message it still stands by — and quietly drops keys that name no field, so
+/// a typo in a script cannot conjure a message onto nothing.
+#[test]
+fn set_field_errors_replaces_the_set_and_ignores_unknown_keys() {
+    let specs = vec![FormFieldSpec::text("a", "A"), FormFieldSpec::text("b", "B")];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    form.set_field_errors(HashMap::from([
+        ("a".to_string(), "first".to_string()),
+        ("nope".to_string(), "typo".to_string()),
+    ]));
+    assert_eq!(form.field_errors().len(), 1);
+    assert_eq!(form.field_errors().get("a").unwrap(), "first");
+
+    form.set_field_errors(HashMap::from([("b".to_string(), "second".to_string())]));
+    assert!(
+        form.field_errors().get("a").is_none(),
+        "the previous round's message must not linger"
+    );
+    assert_eq!(form.field_errors().get("b").unwrap(), "second");
+}
+
+/// A field's message dies when *that* field's value changes, and only then:
+/// moving the cursor inside it or stepping to another field changes no value.
+#[test]
+fn a_field_message_dies_only_when_its_value_changes() {
+    let specs = vec![FormFieldSpec::text("a", "A"), FormFieldSpec::text("b", "B")];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+    type_str(&mut form, "x");
+    form.set_field_errors(HashMap::from([("a".to_string(), "bad".to_string())]));
+
+    form.handle_key("home");
+    form.handle_key("end");
+    assert!(form.field_errors().contains_key("a"), "cursor keys");
+
+    form.handle_key("tab");
+    type_str(&mut form, "z");
+    assert!(
+        form.field_errors().contains_key("a"),
+        "typing into another field leaves this one's message alone"
+    );
+
+    form.handle_key("shift+tab");
+    form.handle_key("backspace");
+    assert!(!form.field_errors().contains_key("a"), "value changed");
+}
+
+/// A message too long for the footer row is written out below it, over the
+/// border and whatever is behind the form; past three rows it is cut with an
+/// ellipsis. A *notice*, which belongs to no field and cannot be focused, just
+/// gets the ellipsis.
+#[test]
+fn a_long_field_message_is_written_out_below_the_footer() {
+    use not_yet_done_ratatui::FormNotice;
+    use ratatui::layout::Rect;
+
+    let long = "the tracker rejected this value because the sprint it names was \
+                closed last friday and will not take new work items any more, so \
+                pick one of the open sprints instead or leave the field empty";
+
+    let specs = vec![FormFieldSpec::text("sprint", "Sprint")];
+    let mut form = Form::new("Work item", specs, &no_prefill(), &style(), &opts());
+
+    // The notice is truncated in place: there is no field to focus, so there is
+    // nothing the user could do to see the rest.
+    form.set_notice(Some(FormNotice::Alert(long.to_string())));
+    // The form is drawn into the top ten rows, so its bordered block ends on
+    // row 9 and everything below is the bare terminal — exactly what the
+    // expansion is allowed to paint over.
+    let rows = rows_of(&mut form, 44, 16, Rect::new(0, 0, 44, 10));
+    assert!(rows[8].contains('…'), "truncated notice: {:?}", rows[8]);
+    assert!(
+        rows[10].trim().is_empty(),
+        "a notice does not expand past the form: {:?}",
+        rows[10]
+    );
+
+    // The field message does expand, over the border and the rows beneath it.
+    form.set_notice(None);
+    form.set_field_errors(HashMap::from([("sprint".to_string(), long.to_string())]));
+    let rows = rows_of(&mut form, 44, 16, Rect::new(0, 0, 44, 10));
+    assert!(
+        rows[8].contains("⚠ the tracker rejected"),
+        "the expansion starts on the footer row: {:?}",
+        rows[8]
+    );
+    for y in 9..=10 {
+        assert!(
+            rows[y].trim_matches(['│', ' ']).len() > 10,
+            "row {y} should carry the message, got {:?} in:\n{}",
+            rows[y],
+            rows.join("\n")
+        );
+    }
+    assert!(
+        rows[10].ends_with('…'),
+        "the last row is cut: {:?}",
+        rows[10]
+    );
+    assert!(
+        rows[11].trim().is_empty(),
+        "the expansion stops after three rows: {:?}",
+        rows[11]
+    );
+}
+
+// --- the discard prompt ---------------------------------------------------
+
+/// `esc` only throws the form away while nothing has been entered; once a value
+/// differs from the one it started with, it asks first — and anything but `y`
+/// goes back to the form, so `esc esc` can never lose work.
+#[test]
+fn esc_asks_before_discarding_typed_input() {
+    let specs = vec![FormFieldSpec::text("title", "Title")];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    // Moving the focus around changes no value, so `esc` is still free.
+    form.handle_key("tab");
+    assert!(!form.is_dirty());
+
+    type_str(&mut form, "a");
+    assert!(form.is_dirty());
+    assert_eq!(form.handle_key("esc"), FormEvent::Consumed);
+    assert!(form.discard_pending());
+
+    // Esc answers "keep" — the reflex must not be the destructive one.
+    assert_eq!(form.handle_key("esc"), FormEvent::Consumed);
+    assert!(!form.discard_pending());
+    assert_eq!(form.values().get("title").unwrap(), "a");
+
+    // ... and neither does the key reach the form underneath.
+    form.handle_key("esc");
+    assert_eq!(form.handle_key("n"), FormEvent::Consumed);
+    assert_eq!(
+        form.values().get("title").unwrap(),
+        "a",
+        "the answer must not be typed into the field"
+    );
+
+    form.handle_key("esc");
+    assert_eq!(form.handle_key("y"), FormEvent::Cancelled);
+}
+
+/// Typing a value back to what it was leaves nothing to discard: the prompt
+/// asks about the input, not about whether keys were pressed.
+#[test]
+fn retyping_the_original_value_is_not_dirty() {
+    let specs = vec![FormFieldSpec::text("title", "Title").with_default("ab")];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    form.handle_key("end");
+    form.handle_key("backspace");
+    assert!(form.is_dirty());
+    type_str(&mut form, "b");
+    assert!(!form.is_dirty());
+    assert_eq!(form.handle_key("esc"), FormEvent::Cancelled);
+}
+
+/// The prompt is on screen, and the form is still behind it.
+#[test]
+fn the_discard_prompt_is_rendered_over_the_form() {
+    use ratatui::layout::Rect;
+
+    let specs = vec![FormFieldSpec::text("title", "Title")];
+    let mut form = Form::new("Work item", specs, &no_prefill(), &style(), &opts());
+    type_str(&mut form, "draft");
+    form.handle_key("esc");
+
+    let rows = rows_of(&mut form, 60, 14, Rect::new(0, 0, 60, 14));
+    let screen = rows.join("\n");
+    assert!(screen.contains("Discard your input?"), "{screen}");
+    assert!(screen.contains("y discard"), "{screen}");
+    assert!(screen.contains("Work item"), "the form stays behind it");
 }

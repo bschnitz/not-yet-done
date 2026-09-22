@@ -145,7 +145,8 @@ mod tests {
             }
             ActionOutcome::OpenExternal { .. }
             | ActionOutcome::OpenEditor { .. }
-            | ActionOutcome::OpenPicker { .. } => {
+            | ActionOutcome::OpenPicker { .. }
+            | ActionOutcome::ReopenForm { .. } => {
                 panic!("expected Reopen for empty body, got a menu/external outcome")
             }
         }

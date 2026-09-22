@@ -169,7 +169,8 @@ mod tests {
             ActionOutcome::Navigate { .. } => panic!("expected Reopen, got Navigate"),
             ActionOutcome::OpenExternal { .. }
             | ActionOutcome::OpenEditor { .. }
-            | ActionOutcome::OpenPicker { .. } => {
+            | ActionOutcome::OpenPicker { .. }
+            | ActionOutcome::ReopenForm { .. } => {
                 panic!("expected Reopen, got a menu/external outcome")
             }
         }

@@ -3406,6 +3406,7 @@ mod db_script_tree_tests {
             ActionOutcome::OpenExternal { .. } => "OpenExternal",
             ActionOutcome::OpenEditor { .. } => "OpenEditor",
             ActionOutcome::OpenPicker { .. } => "OpenPicker",
+            ActionOutcome::ReopenForm { .. } => "ReopenForm",
         }
     }
 }
