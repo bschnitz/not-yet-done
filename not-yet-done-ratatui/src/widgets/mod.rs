@@ -6,5 +6,6 @@ pub mod leader_list;
 pub mod multi_choice;
 pub mod select_list;
 pub mod table;
+pub mod text_area;
 pub mod text_input;
 pub mod toggle;

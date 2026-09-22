@@ -10,6 +10,9 @@ pub use utils::open_editor::{
 // --- shared primitives ---
 pub use widgets::common::{Keys, SelectionMarker, SelectionMode, hex_color};
 
+// --- text_area ---
+pub use widgets::text_area::{TextArea, TextAreaEvent, TextAreaKeymap};
+
 // --- text_input ---
 pub use widgets::text_input::{
     ATTR_ERROR, TextInput, TextInputEvent, TextInputKeymap, TextInputStyle, TextInputStyleType,

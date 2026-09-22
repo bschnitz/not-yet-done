@@ -41,6 +41,11 @@ pub enum FormFieldKind {
     /// Any number of choices out of `options`, submitted newline-joined in
     /// option order.
     MultiSelect { options: Vec<String> },
+    /// Free text over several lines, submitted with the newlines in it.
+    /// `lines` is how many rows the box is given; the text scrolls beyond
+    /// that. It is a field to fill in, not an editing session — that is what
+    /// opening an editor is for.
+    Multiline { lines: Option<u16> },
 }
 
 /// A predicate over another field's current value, gating a field's visibility.
@@ -164,6 +169,21 @@ impl FormFieldSpec {
         options: Vec<String>,
     ) -> Self {
         Self::new(key, label, FormFieldKind::MultiSelect { options }, true)
+    }
+
+    /// A required multi-line text field, four rows tall until
+    /// [`with_lines`](Self::with_lines) says otherwise.
+    pub fn multiline(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(key, label, FormFieldKind::Multiline { lines: None }, true)
+    }
+
+    /// Sets how many rows a [`FormFieldKind::Multiline`] box is given. No-op
+    /// for any other kind.
+    pub fn with_lines(mut self, lines: u16) -> Self {
+        if let FormFieldKind::Multiline { lines: l } = &mut self.kind {
+            *l = Some(lines);
+        }
+        self
     }
 
     /// Bounds a numeric field. Both ends are optional and the values are read

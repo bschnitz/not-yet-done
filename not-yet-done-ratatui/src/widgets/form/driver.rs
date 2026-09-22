@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::widgets::common::{PREFIX_LEN, SelectionMarker, SelectionMode, truncate_to_width};
 use crate::widgets::multi_choice::{ATTR_SELECTED as MC_ATTR_SELECTED, MultiChoice};
 use crate::widgets::select_list::{ATTR_SELECTED as SL_ATTR_SELECTED, SelectList};
+use crate::widgets::text_area::{self, TextArea};
 use crate::widgets::text_input::{CMD_END, CMD_HOME, TextInput};
 use crate::widgets::toggle::Toggle;
 
@@ -118,6 +119,12 @@ enum FieldWidget {
     MultiSelect {
         widget: MultiChoice,
         options: Vec<String>,
+    },
+    /// Free text over several rows. `enter` puts a newline in it rather than
+    /// submitting the form, so the field the user is writing in decides what
+    /// the key means — submitting is `ctrl+enter` while it has focus.
+    Multiline {
+        widget: TextArea,
     },
 }
 
@@ -370,6 +377,17 @@ impl Form {
                         widget: mc,
                         options: opts,
                     }
+                }
+                FormFieldKind::Multiline { lines } => {
+                    let mut ta = TextArea::default()
+                        .with_title(spec.label.clone())
+                        .with_rows(lines.unwrap_or(text_area::DEFAULT_ROWS))
+                        .with_inactive_style(style.text_inactive.clone())
+                        .with_active_style(style.text_active.clone());
+                    if let Some(v) = value.as_deref() {
+                        ta.set_value(v);
+                    }
+                    FieldWidget::Multiline { widget: ta }
                 }
                 FormFieldKind::Toggle => {
                     let on = matches!(value.as_deref(), Some("true") | Some("1") | Some("yes"));
@@ -653,6 +671,9 @@ impl Form {
                 }
                 return FormEvent::Cancelled;
             }
+            // A field that has its own use for `enter` gets it (see
+            // `focused_takes_enter`); the key then falls through to dispatch.
+            "enter" if self.focused_takes_enter() => {}
             // `ctrl+enter` is the panel look's submit; plain `enter` stays a
             // submit too (classic forms, and a harmless convenience).
             "enter" | "ctrl+enter" => return self.submit(),
@@ -787,6 +808,11 @@ impl Form {
                     decimal_in_progress(candidate, separator, precision, allow_negative)
                 });
             }
+            FieldWidget::Multiline { widget } => {
+                if let Some(cmd) = text_area_cmd(key) {
+                    widget.perform(cmd);
+                }
+            }
             // No filter: `1h30` and `1:30` are words as much as numbers, and
             // what a half-typed span looks like is not worth guessing. The
             // preview line says whether it was understood, submit insists.
@@ -836,6 +862,17 @@ impl Form {
                 | Some(FieldWidget::SelectInline { .. })
                 | Some(FieldWidget::MultiSelect { .. })
                 | Some(FieldWidget::Number { .. })
+                | Some(FieldWidget::Multiline { .. })
+        )
+    }
+
+    /// Whether the focused field makes `enter` its own — a multi-line box, in
+    /// which a newline is the obvious reading of the key. The form is then
+    /// submitted with `ctrl+enter`, which works on every field.
+    fn focused_takes_enter(&self) -> bool {
+        matches!(
+            self.fields.get(self.focused).map(|e| &e.widget),
+            Some(FieldWidget::Multiline { .. })
         )
     }
 
@@ -854,6 +891,7 @@ impl Form {
                 FieldWidget::Number { widget, .. }
                 | FieldWidget::Decimal { widget, .. }
                 | FieldWidget::Duration { widget } => widget.attr(Attribute::Focus, flag),
+                FieldWidget::Multiline { widget } => widget.attr(Attribute::Focus, flag),
             }
         }
     }
@@ -1375,6 +1413,33 @@ fn text_cmd(key: &str) -> Option<Cmd> {
     }
 }
 
+/// Keys of a multi-line text box. Everything [`text_cmd`] knows, plus the two
+/// that only make sense with more than one line: `enter` for a newline and
+/// up/down for the line above and below.
+fn text_area_cmd(key: &str) -> Option<Cmd> {
+    match key {
+        "enter" => Some(Cmd::Custom(text_area::CMD_NEWLINE)),
+        "up" => Some(Cmd::Move(Direction::Up)),
+        "down" => Some(Cmd::Move(Direction::Down)),
+        "backspace" => Some(Cmd::Delete),
+        "delete" => Some(Cmd::Custom(text_area::CMD_DELETE_FWD)),
+        "left" => Some(Cmd::Move(Direction::Left)),
+        "right" => Some(Cmd::Move(Direction::Right)),
+        "home" => Some(Cmd::Custom(text_area::CMD_HOME)),
+        "end" => Some(Cmd::Custom(text_area::CMD_END)),
+        // Not the single-line input's "wipe the value": a description is too
+        // much work to lose to one keystroke, so it clears the line only.
+        "ctrl+u" => Some(Cmd::Custom(text_area::CMD_KILL_TO_START)),
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(Cmd::Type(c)),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Movement for a single-choice dropdown. There is intentionally no `space`
 /// pick: the selection follows the cursor (see [`Form::dispatch`]), so a
 /// `Cmd::Toggle` here would only ever *deselect* the highlighted option.
@@ -1459,6 +1524,7 @@ fn field_value(widget: &FieldWidget) -> String {
                 .join("\n"),
             _ => String::new(),
         },
+        FieldWidget::Multiline { widget } => widget.value(),
         FieldWidget::Toggle(t) => {
             if t.is_on() {
                 "true".into()
@@ -1488,6 +1554,9 @@ fn field_height(widget: &FieldWidget, focused: bool) -> u16 {
         FieldWidget::Number { .. } | FieldWidget::Decimal { .. } => 2,
         // Label, input, and the line that reads the span back.
         FieldWidget::Duration { .. } => 3,
+        // Label plus the box itself; the text scrolls inside it, so the height
+        // does not follow how much was written.
+        FieldWidget::Multiline { widget } => 1 + widget.rows(),
         FieldWidget::Select { options, .. } | FieldWidget::MultiSelect { options, .. } => {
             if focused {
                 2 + (options.len() as u16).min(MAX_VISIBLE)
@@ -1528,6 +1597,7 @@ fn render_field(
         FieldWidget::Number { widget, .. } | FieldWidget::Decimal { widget, .. } => {
             widget.view(frame, area)
         }
+        FieldWidget::Multiline { widget } => widget.view(frame, area),
         FieldWidget::Duration { widget } => {
             // Two rows for the input, so the third is the preview rather than
             // the text input's own (unused) error row.

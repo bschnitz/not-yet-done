@@ -812,3 +812,70 @@ fn a_multiselect_picks_with_space_and_joins_with_newlines() {
     form.handle_key(" ");
     assert_eq!(form.values().get("tags").unwrap(), "gamma");
 }
+
+/// In a multi-line box `enter` is a newline, not a submit — the field the user
+/// is writing in decides what the key means. Submitting is `ctrl+enter`, which
+/// works on every field, and the value keeps its line breaks.
+#[test]
+fn a_multiline_field_takes_enter_as_a_newline() {
+    let specs = vec![
+        FormFieldSpec::multiline("body", "Body").with_lines(3),
+        FormFieldSpec::text("title", "Title").optional(),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    type_str(&mut form, "first");
+    assert_eq!(form.handle_key("enter"), FormEvent::Consumed);
+    type_str(&mut form, "second");
+    assert_eq!(form.values().get("body").unwrap(), "first\nsecond");
+
+    // `up` and `down` move inside the box instead of leaving the field, so the
+    // cursor can reach the first line again.
+    form.handle_key("up");
+    form.handle_key("home");
+    type_str(&mut form, "> ");
+    assert_eq!(form.values().get("body").unwrap(), "> first\nsecond");
+
+    match form.handle_key("ctrl+enter") {
+        FormEvent::Submitted(values) => {
+            assert_eq!(values.get("body").unwrap(), "> first\nsecond")
+        }
+        other => panic!("ctrl+enter submits, got {other:?}"),
+    }
+}
+
+/// The box is a window: it stays the height it was given and scrolls, so a
+/// long text never pushes the rest of the form off the screen.
+#[test]
+fn a_multiline_box_scrolls_instead_of_growing() {
+    use ratatui::layout::Rect;
+
+    let specs = vec![
+        FormFieldSpec::multiline("body", "Body").with_lines(2),
+        FormFieldSpec::text("title", "Title").optional(),
+    ];
+    let mut form = Form::new("T", specs, &no_prefill(), &style(), &opts());
+
+    for line in ["one", "two", "three"] {
+        type_str(&mut form, line);
+        form.handle_key("enter");
+    }
+    type_str(&mut form, "four");
+
+    let rows = rows_of(&mut form, 30, 14, Rect::new(0, 0, 30, 14));
+    let screen = rows.join("\n");
+    assert!(
+        screen.contains("four") && screen.contains("three"),
+        "the last two lines are on screen:\n{screen}"
+    );
+    assert!(
+        !screen.contains("one") && !screen.contains("two"),
+        "the earlier lines scrolled out of the box:\n{screen}"
+    );
+    // Two text rows plus the label, whatever was typed — the title field that
+    // follows is still there.
+    assert!(
+        screen.contains("Title"),
+        "the next field kept its place:\n{screen}"
+    );
+}
