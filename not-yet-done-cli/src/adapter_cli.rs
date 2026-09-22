@@ -276,7 +276,7 @@ fn run_adapter(args: &[String]) -> Result<()> {
             }
         }
 
-        // Event hooks (e.g. `tracking_started`): the adapter publishes them on
+        // Event hooks (e.g. `action_invoked`): the adapter publishes them on
         // the bus while the verb runs; subscribe now, fire them once the verb
         // is done — after the mutation, in order, before the process exits.
         let mut hook_events = not_yet_done_content::subscribe_events(ctx.event_bus.as_ref());

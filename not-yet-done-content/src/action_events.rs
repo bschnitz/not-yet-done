@@ -11,7 +11,7 @@
 //! this decorator, which watches the one action surface both front-ends
 //! already go through and publishes one event per successful invocation. The
 //! host's hook runner then fires whatever the instance's `hooks:` block binds
-//! to `action_invoked` — the same machinery as `tracking_started`.
+//! to `action_invoked`.
 //!
 //! # What is reported
 //!

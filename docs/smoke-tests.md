@@ -8072,49 +8072,11 @@ collides only with its own group. Set
       paths (`/Work/A — 5s`), one per line; the pill hides once the last one
       stops
 
-## Tracking hooks (`tracking_started` / `tracking_stopped`)
-
-The tasks and trackings adapters fire a hook for every tracking they start or
-stop, implicit policy stops included. A view file binds a script to it
-(`hooks: { tracking_started: [ { script: on_tracking.py } ] }`, see
-`docs/examples/views/tasks.yaml`); the script gets the payload as a JSON
-file in `argv[1]`. Set up `~/.local/share/not_yet_done/scripts/tasks/on_tracking.py`
-that appends `$NYD_SCRIPT_HOOK task_path` from its payload to a file, bind
-it in both `tasks.yaml` and `trackings.yaml`, and use the grouped-tracking
-tree above.
-
-- [ ] `s` on `A` → one `tracking_started /Work/A` line appears within a
-      second, the TUI stays responsive
-- [ ] `s` on `B` → `tracking_stopped /Work/A` **before**
-      `tracking_started /Work/B`
-- [ ] `s` on `B` again → `tracking_stopped /Work/B`
-- [ ] The same from the trackings tab writes the same lines (with the
-      trackings instance in the payload's `instance`)
-- [ ] `nyd tasks <id of C> do toggle-tracking` → the line appears before the
-      command returns; a stop made past the adapter
-      (`cargo run -p not-yet-done-task-cli -- track stop`) writes nothing
-- [ ] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
-      the JSON carries `hook`, `instance`, `task_id`, `task_path`,
-      `tracking_id`, `started_at`, `ended_at`
-- [ ] Make the script exit 1 → the TUI keeps working, the failure lands in
-      `~/.local/state/not_yet_done/hooks/runner.log` naming the log file; the
-      CLI prints it on stderr, exit code unchanged
-- [ ] Make the script `sleep 70` → after 60 s it is killed and reported as
-      timed out; later toggles fire again
-- [ ] Let the script run `nyd tasks <id of D> do toggle-tracking` → `D`
-      starts, but the child's toggle fires **no** second hook (the script
-      is not run again); `NYD_HOOK_DEPTH` is `1` inside the script
-- [ ] Bind `script: nope.py` → each toggle logs `script … not found`, the
-      toggle itself still succeeds
-- [ ] A binding with both `run:` and `script:` (or neither) is reported per
-      fire, the other bindings of the hook still run
-- [ ] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
-      next toggle fires the hook **once**, not twice
-
 ## Action hook (`action_invoked`)
 
 Every instance fires `action_invoked` for every action run on one of its
-nodes; the host adds it, no adapter support needed. Bind a script that
+nodes; the host adds it, no adapter support needed — it is the one event hook
+an adapter fires while it runs, tracking toggles included. Bind a script that
 appends `action phase node_id label` from its payload to a file, in
 `jira.yaml` (or any tab with an editor action) as
 `hooks: { action_invoked: [ { script: tasks/on_ticket.py, when: { action: [edit_markdown, "script:html_preview.py"] } } ] }`,
@@ -8138,6 +8100,36 @@ and the same script without `when:` in `tasks.yaml`.
 - [ ] A hook script that runs `nyd tasks … do …` itself triggers no second
       `action_invoked` (depth guard)
 - [ ] Batch/table scripts (`scope: filtered_set` / `table`) write nothing
+
+Tracking toggles are the case the autotrack scripts live on, so check them
+against the grouped-tracking tree above (a toggle carries no task path — the
+script resolves `node_id` against the tree itself):
+
+- [ ] `s` on `A` → one `toggle-tracking invoke` line appears within a second,
+      the TUI stays responsive
+- [ ] `s` on `B` → one line for `B`; the implicit stop of `A` the policy
+      performs is **not** a second line (only the invoked action reports)
+- [ ] The same from the trackings tab writes the same line, with the
+      trackings instance in the payload's `instance`
+- [ ] A stop made past the adapter
+      (`cargo run -p not-yet-done-task-cli -- track stop`) writes nothing
+- [ ] Payload and log files sit in `~/.local/state/not_yet_done/hooks/`;
+      the JSON carries `hook`, `instance`, `action`, `phase`, `node_id`,
+      `node_type`, `label`
+
+And the runner itself, whichever hook drives it:
+
+- [ ] Make the script exit 1 → the TUI keeps working, the failure lands in
+      `~/.local/state/not_yet_done/hooks/runner.log` naming the log file; the
+      CLI prints it on stderr, exit code unchanged
+- [ ] Make the script `sleep 70` → after 60 s it is killed and reported as
+      timed out; later actions fire again
+- [ ] Bind `script: nope.py` → each fire logs `script … not found`, the
+      action itself still succeeds
+- [ ] A binding with both `run:` and `script:` (or neither) is reported per
+      fire, the other bindings of the hook still run
+- [ ] Edit `tasks.yaml` while the TUI runs (`:config tasks`) and save → the
+      next action fires the hook **once**, not twice
 
 ## Tree predicates — path values (`[in_tree, /Root]`)
 

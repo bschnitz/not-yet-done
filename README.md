@@ -2517,79 +2517,17 @@ logged and never blocks startup. See
 [decision 0005](docs/decisions/0005-host-crate-and-lifecycle-hooks.md) for the
 design.
 
-#### Event hooks: `tracking_started` / `tracking_stopped`
-
-The tasks and trackings adapters also fire a hook **while they run**, for
-every tracking they start or stop — the explicit ones (`s`, `toggle-tracking`,
-`nyd tasks … do toggle-tracking`) and the implicit stops a tracking policy
-performs when a start ends the trackings of its group. This is the seam for
-automation that reacts to your time tracking (a status light, a second
-measurement, a notification) without polling the database:
-
-| Hook               | Fires                                                      |
-| ------------------ | ---------------------------------------------------------- |
-| `tracking_started` | after a tracking has been started                          |
-| `tracking_stopped` | after a tracking has been stopped, implicit stops included |
-
-Both carry the same payload: `task_id`, `task_path` (the task's label path,
-`/Work/Project/Task`), `tracking_id`, `started_at` and `ended_at` (RFC 3339,
-`ended_at` is `null` for a start). A binding on such a hook is usually a
-**script**, which is the second kind of binding:
-
-```yaml
-# views/tasks.yaml — and the same block in views/trackings.yaml
-hooks:
-  tracking_started:
-    - script: on_tracking.py # a file in the tab's view-script directory
-  tracking_stopped:
-    - script: on_tracking.py # the payload tells the script which hook fired
-```
-
-A binding names either `run:` (an adapter action) or `script:` (an executable
-file), never both. A bare script name is looked up in the instance's top-level
-view-script directory, `~/.local/share/not_yet_done/scripts/<adapter type>/`
-— the same place the script menu (`x`) keeps its scripts, so a hook script can
-be created and edited there. A name containing `/` is taken relative to the
-scripts root (`trackings/on_tracking.py` from the tasks instance shares one
-file), an absolute path as is. The script receives:
-
-- `argv[1]`: the path of a JSON file with `hook`, `instance` and the payload
-  keys above;
-- `NYD_SCRIPT_HOOK` (the hook name), `NYD_HOOK_INSTANCE` (the instance id)
-  and `NYD_HOOK_DEPTH` (see below) in its environment;
-- no stdin; stdout and stderr go to a log file next to the payload file in
-  `~/.local/state/not_yet_done/hooks/` (kept for an hour).
-
-Bindings run **one after the other and are awaited** (60 s each, then the
-script is killed), so the stop a policy performs is delivered before the
-start that caused it. The TUI runs them in the background as the events come
-in; a `nyd … do …` command runs them after its action, before it exits.
-Failures are logged (`hooks/runner.log` in the state directory for the TUI,
-stderr for the CLI) and never fail the action.
-
-Two things to know:
-
-- A hook fires **in the process that performed the mutation**, and only for
-  the instance that performed it: a tracking toggled on the trackings tab
-  fires the trackings instance's hooks. Configure the block in **both**
-  `tasks.yaml` and `trackings.yaml` (pointing at one script) to catch every
-  toggle. `nyd-t track start/stop` writes through the domain core directly
-  and fires **no** hooks — one of the reasons it is no longer an interface
-  ([0012](docs/decisions/0012-one-interface-the-adapter-protocol.md)).
-- A hook script that itself drives the CLI (`nyd tasks … do toggle-tracking`)
-  would fire the same hook again in the child process. The child inherits
-  `NYD_HOOK_DEPTH=1` and runs no event hooks at that depth, so the recursion
-  stops there; the `connected` hook is unaffected.
-
 #### Event hook: `action_invoked`
 
-**Every** instance fires `action_invoked` for every action a user runs on one
-of its nodes, whatever the adapter: the host wraps each adapter it builds in
-a reporter, so this hook needs no adapter support and is available on the
-Jira tab as much as on the tasks tab. It exists for automation that wants to
-know **what you are working on** rather than what changed — opening a
-ticket's editor, jumping to it in the browser, previewing it — where the
-adapters themselves see only an action id.
+Besides the lifecycle hooks above, **every** instance fires `action_invoked`
+**while it runs**, for every action a user (or a front-end on their behalf)
+runs on one of its nodes — whatever the adapter. The host wraps each adapter
+it builds in a reporter, so this hook needs no adapter support and is
+available on the Jira tab as much as on the tasks tab. It is the seam for
+automation that reacts to **what you are working on** rather than to what
+changed: a tracking toggle lighting a status light, opening a ticket's editor,
+jumping to it in the browser — none of which the adapters themselves see as
+more than an action id.
 
 | Payload key | Value                                                                                                        |
 | ----------- | ------------------------------------------------------------------------------------------------------------ |
@@ -2602,7 +2540,8 @@ adapters themselves see only an action id.
 An action that only asks for confirmation, or that reports an error, is not
 reported; the confirmed re-run is. Because this hook fires for **every**
 action — each tracking toggle included — a binding on it usually names the
-actions it cares about, so the script is not spawned for the rest:
+actions it cares about, so the script is not spawned for the rest. Such a
+binding is usually a **script**, which is the second kind of binding:
 
 ```yaml
 # views/jira.yaml
@@ -2617,6 +2556,42 @@ hooks:
 action. Scripts the script menu (`x`) runs on a node are reported by the TUI
 with the `script:` prefix, so a preview script counts like an editor action.
 Batch and table scripts act on no single node and are not reported.
+
+A binding names either `run:` (an adapter action) or `script:` (an executable
+file), never both. A bare script name is looked up in the instance's top-level
+view-script directory, `~/.local/share/not_yet_done/scripts/<adapter type>/`
+— the same place the script menu (`x`) keeps its scripts, so a hook script can
+be created and edited there. A name containing `/` is taken relative to the
+scripts root (`tasks/on_ticket.py` from the trackings instance shares one
+file), an absolute path as is. The script receives:
+
+- `argv[1]`: the path of a JSON file with `hook`, `instance` and the payload
+  keys above;
+- `NYD_SCRIPT_HOOK` (the hook name), `NYD_HOOK_INSTANCE` (the instance id)
+  and `NYD_HOOK_DEPTH` (see below) in its environment;
+- no stdin; stdout and stderr go to a log file next to the payload file in
+  `~/.local/state/not_yet_done/hooks/` (kept for an hour).
+
+Bindings run **one after the other and are awaited** (60 s each, then the
+script is killed), so a script sees the actions in the order they happened.
+The TUI runs them in the background as the events come in; a `nyd … do …`
+command runs them after its action, before it exits. Failures are logged
+(`hooks/runner.log` in the state directory for the TUI, stderr for the CLI)
+and never fail the action.
+
+Two things to know:
+
+- A hook fires **in the process that performed the action**, and only for the
+  instance that performed it: a tracking toggled on the trackings tab fires
+  the trackings instance's hooks. Configure the block in **both**
+  `tasks.yaml` and `trackings.yaml` (pointing at one script) to catch every
+  toggle. `nyd-t track start/stop` writes through the domain core directly
+  and fires **no** hooks — one of the reasons it is no longer an interface
+  ([0012](docs/decisions/0012-one-interface-the-adapter-protocol.md)).
+- A hook script that itself drives the CLI (`nyd tasks … do toggle-tracking`)
+  would fire the same hook again in the child process. The child inherits
+  `NYD_HOOK_DEPTH=1` and runs no event hooks at that depth, so the recursion
+  stops there; the `connected` hook is unaffected.
 
 ### Editor
 

@@ -2974,15 +2974,11 @@ impl ContentAdapter for TrackingAdapter {
 
     /// Fires `connected` after construction (every program start for this
     /// in-process adapter). The tracking root also exposes the `backup` action,
-    /// so a `connected`→`backup` binding works here too. `tracking_started` /
-    /// `tracking_stopped` fire from every start and stop this instance
-    /// performs, the policy's implicit stops included.
+    /// so a `connected`→`backup` binding works here too. Tracking changes are
+    /// reported by the generic `action_invoked` hook the host's decorator adds,
+    /// which fires for every client alike.
     fn hooks(&self) -> Vec<&str> {
-        vec![
-            "connected",
-            crate::HOOK_TRACKING_STARTED,
-            crate::HOOK_TRACKING_STOPPED,
-        ]
+        vec!["connected"]
     }
 
     /// Anonymize the task name a tracking carries (`label` / `task` / each

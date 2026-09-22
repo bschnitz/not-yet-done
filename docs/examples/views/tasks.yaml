@@ -175,21 +175,16 @@ adapter:
 # A binding may name a `script:` instead of `run:` — an executable in this
 # tab's view-script directory (`~/.local/share/not_yet_done/scripts/tasks/`)
 # that gets the hook payload as a JSON file in argv[1]. That is the usual
-# shape for the event hooks the adapter fires while it runs:
-# `tracking_started` / `tracking_stopped` (payload: task_id, task_path,
-# tracking_id, started_at, ended_at). Scripts run one after the other, in
-# event order. Put the same block into trackings.yaml so a toggle from the
+# shape for `action_invoked`, the event hook every instance fires while it
+# runs, for every action run on one of its nodes (payload: action, phase,
+# node_id, node_type, label). `when.action` names the ids a binding cares
+# about so the script is not spawned for the rest — `toggle-tracking` is the
+# one to watch for time tracking. Scripts run one after the other, in event
+# order. Put the same block into trackings.yaml so a toggle from the
 # trackings tab is caught too (a hook fires for the instance that did it).
-#   tracking_started:
-#     - script: on_tracking.py
-#   tracking_stopped:
-#     - script: on_tracking.py
-# `action_invoked` fires on every instance for every action run on a node
-# (payload: action, phase, node_id, node_type, label); `when.action` names
-# the ids a binding cares about so the script is not spawned for the rest:
 #   action_invoked:
-#     - script: on_ticket.py
-#       when: { action: edit }
+#     - script: on_tracking.py
+#       when: { action: toggle-tracking }
 hooks:
   connected:
     - run: backup

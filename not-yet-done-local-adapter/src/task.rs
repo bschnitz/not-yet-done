@@ -1119,61 +1119,20 @@ pub(crate) async fn apply_tracking(
                     task_id: t.task_id,
                     tracking_id: t.id,
                 });
-                fire_tracking_hook(handle, crate::HOOK_TRACKING_STOPPED, &t).await;
             }
             handle.publish(DomainEvent::TrackingStarted {
                 task_id,
                 tracking_id: started.tracking.id,
             });
-            fire_tracking_hook(handle, crate::HOOK_TRACKING_STARTED, &started.tracking).await;
         }
-    } else if let Ok(Some(mut t)) = handle.tracking_repo.find_active_for_task(task_id).await {
+    } else if let Ok(Some(t)) = handle.tracking_repo.find_active_for_task(task_id).await {
         if handle.tracking_repo.stop(t.id, now).await.is_ok() {
             handle.publish(DomainEvent::TrackingStopped {
                 task_id,
                 tracking_id: t.id,
             });
-            t.ended_at = Some(now);
-            fire_tracking_hook(handle, crate::HOOK_TRACKING_STOPPED, &t).await;
         }
     }
-}
-
-/// The payload of a `tracking_started` / `tracking_stopped` hook: the tracked
-/// task (id and `/`-joined path, root first — the string a grouped tracking
-/// policy matches `group_paths` against) and the tracking's id and times, all
-/// RFC 3339. `ended_at` is `null` for a start.
-pub(crate) fn tracking_hook_payload(
-    task_path: &str,
-    t: &not_yet_done_task_core::entity::tracking::Model,
-) -> serde_json::Value {
-    serde_json::json!({
-        "task_id": t.task_id.to_string(),
-        "task_path": task_path,
-        "tracking_id": t.id.to_string(),
-        "started_at": t.started_at.to_rfc3339(),
-        "ended_at": t.ended_at.map(|d| d.to_rfc3339()),
-    })
-}
-
-/// Fire `hook` for tracking `t` (see [`tracking_hook_payload`]). The path is
-/// resolved here rather than carried by the [`DomainEvent`], which stays a
-/// pure id notification for the in-process bridges; a task whose chain
-/// cannot be read reports an empty path rather than no hook at all.
-async fn fire_tracking_hook(
-    handle: &CoreHandle,
-    hook: &str,
-    t: &not_yet_done_task_core::entity::tracking::Model,
-) {
-    if handle.instance_id().is_empty() {
-        return;
-    }
-    let path = handle
-        .tracking_service
-        .label_path(t.task_id)
-        .await
-        .unwrap_or_default();
-    handle.fire_hook(hook, tracking_hook_payload(&path, t));
 }
 
 /// `prepare` for the `add` action: render the new-task buffer for a task
@@ -2468,14 +2427,10 @@ impl ContentAdapter for TaskAdapter {
 
     /// Fires `connected` after construction — for this in-process adapter that
     /// is every program start; bind `backup` to it (throttled) for auto-backup.
-    /// `tracking_started` / `tracking_stopped` fire from every start and stop
-    /// this instance performs, the policy's implicit stops included.
+    /// Tracking changes are reported by the generic `action_invoked` hook the
+    /// host's decorator adds, which fires for every client alike.
     fn hooks(&self) -> Vec<&str> {
-        vec![
-            "connected",
-            crate::HOOK_TRACKING_STARTED,
-            crate::HOOK_TRACKING_STOPPED,
-        ]
+        vec!["connected"]
     }
 
     /// Anonymize task names (the `label` / `ancestors` columns) with the

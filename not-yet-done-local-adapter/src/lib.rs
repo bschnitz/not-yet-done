@@ -121,8 +121,8 @@ pub struct CoreHandle {
     /// Defaults to 10; overridable via the adapter config's `backup.max_count`.
     backup_max_count: usize,
     /// The adapter instance this handle serves — the `source` of the hook
-    /// events it publishes (see [`HOOK_TRACKING_STARTED`]). Empty for a
-    /// handle built outside an adapter (tests), which then fires no hooks.
+    /// events it publishes. Empty for a handle built outside an adapter
+    /// (tests), which then fires no hooks.
     instance_id: Arc<str>,
     /// Glyph shown in the `tracking`/`tracking_rollup` marker columns for an
     /// actively-tracked task (and its collapsed ancestors) across the Tasks and
@@ -135,14 +135,6 @@ pub struct CoreHandle {
 /// Default glyph for the active-tracking marker column when the adapter config
 /// does not set `tracking_marker`.
 pub const DEFAULT_TRACKING_MARKER: &str = "⏱";
-
-/// Hook fired after a tracking started, with the tracked task's path in the
-/// payload (see [`crate::task::tracking_hook_payload`]).
-pub const HOOK_TRACKING_STARTED: &str = "tracking_started";
-/// Hook fired after a tracking stopped — by a toggle, or implicitly because a
-/// start under the tracking policy stopped it. Same payload as
-/// [`HOOK_TRACKING_STARTED`], with `ended_at` set.
-pub const HOOK_TRACKING_STOPPED: &str = "tracking_stopped";
 
 impl CoreHandle {
     pub fn new(

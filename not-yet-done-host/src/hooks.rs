@@ -13,10 +13,8 @@
 //!       on: { }                # target: root (default) | { id: <node-id> } | { query: <q> }
 //!       with: { }              # ActionContext inputs: value / text / args: { k: v }
 //!       when: { throttle: 24h } # fire at most once per window
-//!   tracking_started:
-//!     - script: autotrack.py   # a view-script instead of an action
 //!   action_invoked:
-//!     - script: autotrack.py
+//!     - script: autotrack.py   # a view-script instead of an action
 //!       when: { action: [edit, open_in_browser] } # only these action ids
 //! ```
 //!
@@ -45,8 +43,9 @@
 //!     every launch). Only instances with a *due* `connected` binding are
 //!     resolved and fired.
 //!   * **Event hooks** — hooks an adapter fires *itself* while it runs (e.g.
-//!     the local adapter's `tracking_started` / `tracking_stopped`). The
-//!     adapter publishes a [`BusEvent`] whose topic is the hook name and whose
+//!     `action_invoked`, which the host's action decorator publishes for every
+//!     instance). The adapter publishes a [`BusEvent`] whose topic is the hook
+//!     name and whose
 //!     source is its instance id; the host turns every such event into a hook
 //!     firing with the event's payload. A long-lived front-end (the TUI) starts
 //!     one [`spawn_event_hook_runner`] per built adapter; a one-shot front-end
@@ -445,9 +444,9 @@ async fn invoke_action(
 // ---------------------------------------------------------------------------
 
 /// How long a hook script may run before it is killed. Hook scripts are
-/// awaited in order (a `tracking_stopped` script must finish before the
-/// `tracking_started` one starts), so a hung script would otherwise stall
-/// every later hook of the process.
+/// awaited in order (a script bound to an earlier event must finish before the
+/// next one starts), so a hung script would otherwise stall every later hook of
+/// the process.
 pub const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long the payload and log files of a script run are kept.
@@ -1052,13 +1051,13 @@ action_invoked:
     #[test]
     fn script_binding_parses_and_is_labelled() {
         let yaml = r#"
-tracking_started:
+action_invoked:
   - script: autotrack.py
   - script: trackings/autotrack.py
     when: { throttle: 5s }
 "#;
         let cfg: HookConfig = serde_yaml::from_str(yaml).unwrap();
-        let b = &cfg["tracking_started"];
+        let b = &cfg["action_invoked"];
         assert!(b[0].run.is_none());
         assert_eq!(b[0].script.as_deref(), Some("autotrack.py"));
         assert_eq!(b[0].label(), "script:autotrack.py");
@@ -1110,11 +1109,11 @@ tracking_started:
 
     #[test]
     fn script_payload_merges_the_event_and_pins_hook_and_instance() {
-        let payload = serde_json::json!({"task_path": "/a/b", "hook": "spoofed"});
-        let doc = script_payload("tracking_started", "tasks", &payload);
-        assert_eq!(doc["hook"], "tracking_started");
+        let payload = serde_json::json!({"node_id": "/a/b", "hook": "spoofed"});
+        let doc = script_payload("action_invoked", "tasks", &payload);
+        assert_eq!(doc["hook"], "action_invoked");
         assert_eq!(doc["instance"], "tasks");
-        assert_eq!(doc["task_path"], "/a/b");
+        assert_eq!(doc["node_id"], "/a/b");
 
         let doc = script_payload("connected", "tasks", &serde_json::Value::Null);
         assert_eq!(doc.as_object().unwrap().len(), 2);
@@ -1129,7 +1128,7 @@ tracking_started:
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("tasks")).unwrap();
         let script = tmp.join("tasks/ok.sh");
-        std::fs::write(&script, "#!/bin/sh\ngrep -q '\"hook\":\"tracking_started\"' \"$1\" && [ \"$NYD_HOOK_DEPTH\" = \"1\" ]\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\ngrep -q '\"hook\":\"action_invoked\"' \"$1\" && [ \"$NYD_HOOK_DEPTH\" = \"1\" ]\n").unwrap();
         let failing = tmp.join("tasks/fail.sh");
         std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
         #[cfg(unix)]
@@ -1145,7 +1144,7 @@ tracking_started:
             &tmp.join("runs"),
             "tasks",
             "tasks",
-            "tracking_started",
+            "action_invoked",
             "ok.sh",
             &serde_json::json!({}),
         )
@@ -1156,7 +1155,7 @@ tracking_started:
             &tmp.join("runs"),
             "tasks",
             "tasks",
-            "tracking_started",
+            "action_invoked",
             "fail.sh",
             &serde_json::json!({}),
         )
@@ -1170,7 +1169,7 @@ tracking_started:
             &tmp.join("runs"),
             "tasks",
             "tasks",
-            "tracking_started",
+            "action_invoked",
             "nope.sh",
             &serde_json::json!({}),
         )

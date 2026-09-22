@@ -90,16 +90,15 @@ adapter:
   # it opts back into loading at startup.
   auto_connect: startup
 
-# Lifecycle hooks (same block as in tasks.yaml, see there). The trackings
-# adapter fires `tracking_started` / `tracking_stopped` for every toggle made
-# from this tab; a hook fires for the instance that performed it, so a script
-# that must see every toggle is bound here AND in tasks.yaml. A name with a
-# `/` is relative to the scripts root, so both tabs can share one file:
+# Lifecycle hooks (same block as in tasks.yaml, see there). Every instance
+# fires `action_invoked` for the actions run on its nodes, this tab's tracking
+# toggles included; a hook fires for the instance that performed it, so a
+# script that must see every toggle is bound here AND in tasks.yaml. A name
+# with a `/` is relative to the scripts root, so both tabs can share one file:
 # hooks:
-#   tracking_started:
+#   action_invoked:
 #     - script: tasks/on_tracking.py
-#   tracking_stopped:
-#     - script: tasks/on_tracking.py
+#       when: { action: toggle-tracking }
 
 views:
   # Flat list of trackings. No `tree_label` / no children — every row is a
