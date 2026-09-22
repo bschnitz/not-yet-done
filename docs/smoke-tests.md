@@ -6386,15 +6386,25 @@ level, running the same ascent `Backspace` runs.
       down reopens at whatever offset the restored selection implies, not at
       the offset you left. The back key restores exactly as much and no more,
       which is the promise the crumb has to keep.
-- [ ] Click the **root** crumb: you are back at the top level, in the state the
-      back key leaves it in.
-- [ ] Drill into a level that sets `keybindings: { back: null }` — the SQLite
+- [x] Click the **root** crumb: you are back at the top level, in the state the
+      back key leaves it in. Measured against the key rather than against an
+      expectation: the screen after the click and the screen after `Backspace`
+      from the same level are byte for byte the same capture. It had to be
+      measured on a copy of the SQLite view with `back: null` taken off the row
+      level, because the shipped config forbids the ascent there — and the
+      state both ways lead to shows why it does (see the next box).
+- [x] Drill into a level that sets `keybindings: { back: null }` — the SQLite
       row level is one — and look at the path: every crumb above the level on
       screen is **dim**, and clicking one does nothing. A level the back key
       cannot leave must not be left by a click either: a coupled split pane
       _is_ the parent row's list, so walking it one level up turns it into a
       second copy of the list it hangs off, with back dead in both panes and
-      only `w q` to clear it.
+      only `w q` to clear it. Both halves measured: on the shipped level the
+      root crumb is painted in the dim colour the separators use while the two
+      `up = 0` crumbs keep theirs, a click on it leaves the screen unchanged,
+      and `Backspace` and `h` are equally dead; with `back: null` removed from
+      the copy the same crumb turns accent-coloured and climbs — into exactly
+      the two-identical-panes state the guard exists to prevent.
 - [ ] **Open:** the mail message list guards the same thing with
       `action_chains: { backspace: [window.close] }` instead of
       `keybindings: { back: null }`. That shadows the _key_, not the action, so
