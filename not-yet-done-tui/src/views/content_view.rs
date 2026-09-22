@@ -8708,6 +8708,18 @@ impl ContentView {
         }
     }
 
+    /// Whether any level of this tab opts into per-node scripts. Asked
+    /// only while a custom-query result is displayed, where the level
+    /// that owns the scripts can no longer answer for itself.
+    fn tab_declares_node_scripts(&self) -> bool {
+        fn any_child(defs: &[ChildDef]) -> bool {
+            defs.iter().any(|c| c.node_scripts || any_child(&c.children))
+        }
+        self.view_defs
+            .iter()
+            .any(|vd| vd.node_scripts || any_child(&vd.children))
+    }
+
     /// Node id that `q` (scripts menu) and `Q` (SQL editor) act on in the
     /// active pane. `selected_item_id()` when the displayed rows own the
     /// scripts themselves; `parent_node_id()` when we've drilled one level
@@ -8715,9 +8727,26 @@ impl ContentView {
     /// declares `node_scripts: true`.
     pub fn target_node_script_node_id(&self) -> Option<String> {
         let pane = self.active_pane();
-        if self.displays_node_scripts() {
+        let here = self.displays_node_scripts();
+        let parent = self.parent_displays_node_scripts();
+        // While a custom-query result is the pane's content, the selected
+        // row is a `qrow:` id and names no node. The query remembers the
+        // node it was issued against, and that node keeps owning the
+        // scripts — without this the natural flow (`Q`, save, `q`) hands
+        // the store a row id and answers with an empty menu for a table
+        // that does have scripts. Still gated on this tab declaring
+        // `node_scripts` somewhere, so a custom query elsewhere does not
+        // start claiming `q`. The tab, not the level: a tree pane has no
+        // tree while a query result is its content, so no level can
+        // answer for it.
+        if let Some(run) = pane.active_custom_query.as_ref() {
+            if here || parent || self.tab_declares_node_scripts() {
+                return Some(run.node_id.clone());
+            }
+        }
+        if here {
             pane.selected_item_id().map(str::to_string)
-        } else if self.parent_displays_node_scripts() {
+        } else if parent {
             pane.parent_node_id().map(str::to_string)
         } else {
             None
@@ -21880,6 +21909,35 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn node_script_target_follows_the_query_while_its_result_is_shown() {
+        // A custom-query result replaces the rows with `qrow:` ids, so
+        // the selected item names no node and the script store answered
+        // with an empty menu right after `Q` + save. The run state knows
+        // the node the query was issued against; that node keeps owning
+        // the scripts for as long as its result is on screen.
+        let mut config = test_config_with_query();
+        config.views[0].node_scripts = true;
+        let mut view =
+            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let pane_id = view.active_pane_id();
+        view.apply_custom_query_result(
+            pane_id,
+            Vec::new(),
+            None,
+            Some(CustomQueryRunState {
+                query: "SELECT 1".into(),
+                node_id: "db/tables/t".into(),
+                mode: PaginationMode::Server,
+                cursor_id: None,
+            }),
+        );
+        assert_eq!(
+            view.target_node_script_node_id().as_deref(),
+            Some("db/tables/t")
+        );
     }
 
     #[test]

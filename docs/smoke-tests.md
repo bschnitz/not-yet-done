@@ -5291,19 +5291,38 @@ a silent no-op — no editor, no error, no log line. Fixed by the arms on
       to reload the level: the key path carried its own copy of the reload
       call, while the custom-query branch that re-runs the query lived only in
       the helper the action chain used. Both keys now go through that helper.
-- [x] `q` after the first save → the script is in the menu. Fixed on
-      2026-09-22: in a tree the key was not claimed at all.
-      `displays_node_scripts()` asked the flat `active_child` (or, at depth 0,
-      the root `ViewDef`), and in tree mode both answer `databases`, which sets
-      no `node_scripts` — so the `node_scripts: true` that the `Table` and
-      `View` children carry was never read. It now maps the cursor onto its
-      level via `tree_active_child_def`, the same lookup the action chains use.
-      `Q` had survived the gap only because `sqlite.yaml` binds it a second
-      time as a forced node action. **Reading the popup:** the node-script menu
-      reuses the saved-query popup, chrome and `✦ Queries` title included. The
-      one visible difference is the footer — the script menu opens without
-      default-query semantics, so its last line lacks `[ctrl+t] default`. The
-      two are easy to mistake for one another.
+- [x] `q` after the first save → the script is in the menu. Measured in both
+      subtabs: `Q` on `orders`, `:wq`, then `q` lists the one entry `default`
+      (the save writes
+      `<data>/not_yet_done/sqlite/sqlite/queries/<db>/<table>/default.sql`).
+      Two bugs were in the way until 2026-09-22.
+
+      - In a tree the key was not claimed at all.
+        `displays_node_scripts()` asked the flat `active_child` (or, at depth
+        0, the root `ViewDef`), and in tree mode both answer `databases`,
+        which sets no `node_scripts` — so the `node_scripts: true` that the
+        `Table` and `View` children carry was never read. It now maps the
+        cursor onto its level via `tree_active_child_def`, the same lookup the
+        action chains use. `Q` had survived the gap only because `sqlite.yaml`
+        binds it a second time as a forced node action.
+      - And in the flow this box describes the menu came up **empty**, because
+        the pane is showing the query result by then: the selected row is a
+        `qrow:` id and names no node, so the store was asked for a row. The
+        run state remembers the node the query was issued against, and
+        `target_node_script_node_id()` now returns that node for as long as
+        its result is the pane's content. In a tree the level could not answer
+        at all there (a tree pane has no tree while a query result is its
+        content), so the gate is the tab — does any level declare
+        `node_scripts` — not the level.
+
+      **Reading the popup:** the node-script menu reuses the saved-query
+      popup, chrome and `✦ Queries` title included. The one visible difference
+      is the footer — the script menu opens without default-query semantics,
+      so its last line lacks `[ctrl+t] default`. The two are easy to mistake
+      for one another; an earlier report of a key collision here was that
+      mistake, and there is no collision to have: `sqlite.yaml` carries no
+      `query:` block at all, so this tab claims no saved-query menu key.
+
 - [x] `Q` one level deeper (in `Rows`) still addresses the table above, not
       the row. The editor opens with `SELECT * FROM "orders";` while the cursor
       stands on a row of the coupled `Rows` pane.
@@ -5313,11 +5332,14 @@ a silent no-op — no editor, no error, no log line. Fixed by the arms on
       `> next page` hint are both gone.
 - [x] An `UPDATE` → fails with the hint about `read_only: false`. The editor
       stays open and writes the failure into the buffer as comment lines above
-      the offending statement: `error returned from database: (code: 8) attempt
-  to write a readonly database (this adapter runs read_only; set read_only:
-  false in its config to allow writes)`. With the shipped `read_only:
-  false` the same statement answers `1 row affected` and the row really
-      changes on disk.
+      the offending statement:
+
+      ```
+      error returned from database: (code: 8) attempt to write a readonly database (this adapter runs read_only; set read_only: false in its config to allow writes)
+      ```
+
+      With the shipped `read_only: false` the same statement answers
+      `1 row affected` and the row really changes on disk.
 
 ### The script branch below the database (`DB Scripts`)
 
