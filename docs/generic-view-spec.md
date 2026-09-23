@@ -3380,8 +3380,13 @@ finished conversation: `reload`, `notify` and their kin are instructions to a
 front-end with panes. It prints the whole `result` payload as JSON on stdout
 instead, which is what a shell can use.
 
-A worked example lives in
-[`docs/examples/scripts/log_work.py`](examples/scripts/log_work.py).
+Two worked examples live in `docs/examples/scripts/`:
+[`log_work.py`](examples/scripts/log_work.py) is a short conversation that
+writes something — ask, check, confirm — and
+[`field_tour.py`](examples/scripts/field_tour.py) is the reference form: every
+field type once, the checks a declaration cannot make, and a confirmation round
+that shows what it collected. It changes nothing, so it is also what to run
+against a change to the form driver.
 
 ### Script hooks (`ctrl+h` in the menu)
 

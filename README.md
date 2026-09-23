@@ -1226,7 +1226,10 @@ prompt. A supplied value goes through the same conversion a typed one does, so
 `--set spent=1h30` reaches the script as `90` either way.
 
 Full reference: [Form scripts](docs/generic-view-spec.md#form-scripts--mode-form--a-script-that-asks).
-A worked example: [`docs/examples/scripts/log_work.py`](docs/examples/scripts/log_work.py).
+Worked examples: [`log_work.py`](docs/examples/scripts/log_work.py) — a short
+conversation that writes something — and
+[`field_tour.py`](docs/examples/scripts/field_tour.py) — every field type once,
+with the checks a declaration cannot make.
 
 ### Reload hooks
 

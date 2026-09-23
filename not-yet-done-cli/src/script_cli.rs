@@ -71,7 +71,16 @@ struct RunArgs {
     payload: Option<PathBuf>,
 }
 
-fn parse_run(args: &[String]) -> Result<RunArgs> {
+/// A run, or the request to be told how to ask for one. `--help` reaches
+/// `parse_run` like any other flag, and answering it here rather than in
+/// [`run`] means it is recognised wherever a flag may stand — `script run
+/// --help` as well as `script run foo.py --help`.
+enum RunRequest {
+    Help,
+    Run(RunArgs),
+}
+
+fn parse_run(args: &[String]) -> Result<RunRequest> {
     let mut script = None;
     let mut set = BTreeMap::new();
     let mut payload = None;
@@ -93,21 +102,28 @@ fn parse_run(args: &[String]) -> Result<RunArgs> {
                         .ok_or_else(|| anyhow!("--payload wants a file"))?,
                 ));
             }
+            "--help" | "-h" => return Ok(RunRequest::Help),
             flag if flag.starts_with("--") => bail!("unknown flag '{flag}'"),
             positional if script.is_none() => script = Some(positional.to_string()),
             extra => bail!("unexpected argument '{extra}' (one script per run)"),
         }
     }
-    Ok(RunArgs {
+    Ok(RunRequest::Run(RunArgs {
         script: script.ok_or_else(|| anyhow!("which script? (`script run <script>`)"))?,
         set,
         payload,
-    })
+    }))
 }
 
 /// `nyd script run <script> [--set …]`
 fn run_form(args: &[String]) -> Result<()> {
-    let args = parse_run(args)?;
+    let args = match parse_run(args)? {
+        RunRequest::Help => {
+            print_help();
+            return Ok(());
+        }
+        RunRequest::Run(args) => args,
+    };
     let path = resolve_script(&args.script)?;
     check_runnable(&path)?;
 
@@ -705,6 +721,38 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        let mut args = vec!["nyd".to_string(), "script".to_string(), "run".to_string()];
+        args.extend(rest.iter().map(|a| (*a).to_string()));
+        args
+    }
+
+    /// Asking a command how to use it must never look like misusing it.
+    /// `script run --help` used to fall into the unknown-flag arm, so the one
+    /// question a newcomer asks was the one answer the command refused.
+    #[test]
+    fn asking_run_for_help_is_not_a_mistake() {
+        assert!(matches!(
+            parse_run(&argv(&["--help"])).unwrap(),
+            RunRequest::Help
+        ));
+        assert!(matches!(
+            parse_run(&argv(&["-h"])).unwrap(),
+            RunRequest::Help
+        ));
+        // Also behind a script, where a reader reaches for it mid-command.
+        assert!(matches!(
+            parse_run(&argv(&["log_work.py", "--help"])).unwrap(),
+            RunRequest::Help
+        ));
+        // A genuinely unknown flag still fails, and still names itself.
+        let complaint = parse_run(&argv(&["--halp"]))
+            .err()
+            .expect("an unknown flag must still be refused")
+            .to_string();
+        assert!(complaint.contains("--halp"), "{complaint}");
     }
 
     fn duration(key: &str) -> FormFieldSpec {
