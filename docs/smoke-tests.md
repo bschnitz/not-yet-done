@@ -484,9 +484,12 @@ enough for the whole block.
       been opened in this session.
 - [x] `:query apply -t Stunden:nonexistent foo` → modal error
       ":query apply — unknown view 'nonexistent' for tab 'Stunden'
-      (available: databases, tables, views)". The tab switch happens
-      _before_ the view is validated, so a wrong view name leaves you on
-      the target tab rather than where you started.
+      (available: databases, tables, views)". The view is checked before
+      the tab is switched, so a wrong view name leaves you where you
+      started. Measured 2026-09-23: `:query apply -t Tasks:nosuch foo` from
+      the Trackings tab shows the modal over Trackings; with a valid view
+      (`Tasks:list`) the tab still switches. Until then the switch came
+      first, and the complaint was read on a tab nobody had reached.
 - [x] `:query apply unknown-name` → modal error ":query apply — no saved
       query named 'unknown-name' (available: probe two words, probeone)".
 - [x] An unknown tab in `-t` → modal error ":query apply — 'Nonsense' is

@@ -8205,7 +8205,12 @@ impl App {
                     Some(format!(":query apply — '{tab_name}' is not a content tab"));
                 return;
             };
-            self.set_active_tab(Tab::Content(tab_idx));
+            // The view is resolved before the tab is shown: a mistyped view
+            // name must leave the user where they were, not on a tab they
+            // never reached, reading a complaint about it. The switch itself
+            // changes nothing when the name is unknown, and needs no active
+            // tab — so showing the tab last also loads the view that was
+            // asked for rather than the one the tab happened to be on.
             if let Some(v) = view_name {
                 let cv = match &mut self.content_views[tab_idx] {
                     ContentSlot::Working(cv) => cv,
@@ -8225,6 +8230,7 @@ impl App {
                     return;
                 }
             }
+            self.set_active_tab(Tab::Content(tab_idx));
         }
         let Tab::Content(tab_idx) = self.active_tab;
 
