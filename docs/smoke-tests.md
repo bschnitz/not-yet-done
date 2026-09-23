@@ -9530,3 +9530,97 @@ column, everything else is text.
       four hits are the chain-template comments that say a dot there is text.
       A hand-written one would now compare against that text; the fix is a
       leading dot.
+
+## Form scripts — a script that asks, in rounds (`# mode: form`)
+
+A `form` script holds a conversation: it declares fields, gets the answers,
+checks them itself and asks again with the values still on screen. The same
+rounds run in the popup and in the terminal, which is the point of the chapter —
+a form script has to mean the same thing in both. Driven with
+`docs/examples/scripts/log_work.py`, which asks for a duration, a day, an
+activity, an optional comment and — only for one activity — a reviewer, refuses
+more than eight hours at once, and then replaces its fields with a confirmation.
+
+### In the popup
+
+- [x] The script appears in the script menu of its level and starts from there.
+      `x` on the tasks tree lists `log_work.py` under
+      `✦ Scripts · tasks · task:item`, and `enter` runs it. The first round's
+      form comes up as `✦ Log work`: a duration field with its hint
+      (`e.g. 1:30, 90m, 1h30`), a date field showing `↳ 2026-09-23` under the
+      word `today`, the activity select on `development`, and a four-line
+      comment box.
+- [x] **`visible_when` is decided in the widget, not in a round.** The
+      `reviewed` field hangs on `activity == review` and is simply absent while
+      the select says `development` — no process was started to work that out.
+- [x] **A rejected value comes back per field, with the input intact.** `20h`
+      in the duration field and `ctrl+enter` fetch the same form again with
+      `⚠ more than 8 hours at once` in the footer — the script's own rule, not
+      the widget's. The round answered without `fields`, so the form on screen
+      is the one that stayed.
+- [x] What comes back in the field is the **canonical** value: `20h` submits as
+      `1200` and is shown as `1200` with `↳ 20 h` under it. A duration is whole
+      minutes once it has been submitted, and the round-trip shows it — the
+      preview line is what keeps that readable.
+- [x] **A new `fields` list replaces the form.** Correcting the duration to
+      `1h30` and submitting gets a different dialog, `✦ Log this?`, holding one
+      toggle labelled `Log 1h30 of development on today` and defaulted to yes —
+      a summary only the script can word, which is why it costs a round rather
+      than a condition.
+- [x] Confirming ends the conversation: the popup closes, the `result` payload's
+      `commands` are dispatched (here `reload`), the pane comes back, and the
+      log has nothing to say about it.
+- [x] **Declining goes back, and `prefill` is how.** Answering the toggle with
+      `no` returns the first form carrying every earlier answer — the fields had
+      been replaced, so `input` no longer holds them and the script sends them
+      as `prefill` out of its own `state`. The footer carries the general error
+      `⚠ nothing was logged`, which is the entry without a field name.
+- [x] `esc` on that returned form closes it outright, with no discard prompt:
+      every value equals its `prefill`, so nothing the user typed would be lost.
+
+### From the terminal (`script run`)
+
+- [x] The same script, addressed by path, runs the same rounds with prompts:
+      `not-yet-done-cli script run docs/examples/scripts/log_work.py`. With
+      every field supplied it needs no terminal at all —
+      `--set spent=1h30 --set day=today --set activity=development --set
+    confirm=true </dev/null` prints the `result` payload as JSON
+      (`commands: [reload]`, `minutes: 90`) and exits 0. The payload the popup
+      would have built from the selected node comes from `--payload FILE`.
+- [x] **A `--set` means what a typed answer means.** `spent=1h30` reaches the
+      script as `90`, a toggle takes `yes`/`no`/`on`/`off`/`1`/`0`, and a select
+      takes only one of its options. Without that a form filled from a cron line
+      and the same form filled by hand would hand the script two different
+      values.
+- [x] A `--set` that cannot mean anything names the flag that wrote it, which is
+      the only place left to fix it: `--set spent=banana` →
+      "`--set spent=banana` is not a span of time (try `90`, `90m`, `1h30`,
+      `1:30`)"; `--set activity=nonsense` → "is not one of development, review,
+      meeting"; `--set confirm=maybe` → "is neither a yes nor a no". Exit 1, no
+      round run against a value the widget would have refused.
+- [x] **Without a terminal nothing waits.** Leaving `spent` out aborts with
+      "the form needs a value for `spent` (Time spent) and there is no terminal
+      to ask on — supply it with `--set spent=…`" and exit 1, instead of
+      blocking on a prompt nobody will see.
+- [x] `visible_when` is evaluated against the supplied values too:
+      `--set activity=review` reveals `reviewed`, and the run then aborts naming
+      _that_ field. A preset decides what the form shows, exactly as a pick in
+      the popup does.
+- [x] **A conversation that cannot move is stopped, with the complaint.**
+      `--set spent=20h` plus every other field leaves nobody to submit anything,
+      so the second identical round ends it: "the script asked for the same form
+      again and every field is supplied from outside, so a further round would
+      change nothing: spent: more than 8 hours at once". The popup needs no such
+      brake — there a person submits every round.
+- [x] A `--set` no round ever asked for is reported once, at the end, and does
+      not fail the run: "--set nonsense=… was never used — no round asked for
+      that field". Saying it every round would drown the prompts.
+- [x] Two refusals come before the first round rather than halfway through one:
+      a script without the header is "… is not a form script — it needs the
+      header line `# mode: form`", one without the bit is "… is not executable
+      (chmod +x it)". Both exit 1 without spawning anything.
+- [x] **A relative script path works.** `script run ./log_work.py` is the
+      developing case and the one that used to fail: the child runs in the
+      script's own directory, so a relative program path was resolved a second
+      time against it and missed. Covered by
+      `form_run::tests::a_script_named_by_a_relative_path_still_runs`.

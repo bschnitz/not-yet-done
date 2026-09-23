@@ -1057,6 +1057,7 @@ Declare the mode in a comment within the first 10 lines:
 | `interactive+capture`  | Interactive + output shown in editor                                             |
 | `commands`             | Background-style; script writes `{"commands": [...]}` JSON to `$NYD_OUTPUT_FILE` |
 | `interactive+commands` | Interactive variant of `commands`                                                |
+| `form`                 | The script asks the user in rounds (see below)                                   |
 
 #### Commands mode — letting a script drive the TUI
 
@@ -1165,6 +1166,67 @@ the `tickets` folder. `-i` is mandatory here: task folder names in the
 tree are typically capitalised (`Acme`) while Taiga's `ref` column
 is always lower-case (`acme#43`), so without case-folding the
 cross-system jump silently misses.
+
+#### Form mode — a script that asks
+
+Every other mode runs to completion and then reports. A `form` script holds a
+**conversation**: it puts a form on screen, gets the answers back, checks them
+itself and — if something is wrong — says so per field and asks again, with what
+was typed still there.
+
+```python
+#!/usr/bin/env python3
+# mode: form
+import json, os, sys
+
+request = json.load(open(sys.argv[1]))   # payload + `input` + `state`
+values = request.get("input", {})
+
+def answer(payload):
+    with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
+        json.dump(payload, f)
+    sys.exit(0)
+
+if not values:                            # the opening round
+    answer({"form": {"header": "Log work", "fields": [
+        {"name": "spent", "label": "Time spent", "type": "duration"},
+        {"name": "day", "type": "date", "default": "today"},
+    ]}})
+
+if int(values["spent"]) > 8 * 60:         # the script owns the rules
+    answer({"form": {"errors": [{"name": "spent", "error": "more than a day"}]}})
+
+answer({"result": {"commands": ["reload"]}})   # …after doing the writing
+```
+
+Each round is a fresh process, so the request carries **every value collected so
+far** (`input`) and whatever the script asked to remember (`state`). The answer
+is exactly one of `form` (show it, and run another round), `result` (done — the
+payload is an ordinary script answer) or `error` (give up, with a message).
+Omitting `fields` keeps the form that is on screen and changes only the errors,
+which is the common case after a failed check.
+
+Beyond the three kinds an adapter form has, a script can declare `number`,
+`decimal`, `duration`, `multiline`, `multiselect`, `file` and `date`/`datetime`
+fields, each with `required`, `default`, `prefill`, `masked` and `visible_when`.
+An unknown `type:` is a loud error, never a silent text box.
+
+The same conversation runs in a terminal, which is how a form script gets
+written and tried out without navigating the TUI, and how one gets automated:
+
+```sh
+not-yet-done-cli script run ./log_work.py
+not-yet-done-cli script run tasks/task_item/log_work.py --set spent=1h30
+```
+
+`--set name=value` answers a field for good — it is never asked about — and
+**without a terminal nothing waits**: a field that still needs a value aborts
+and names itself, so a cron job fails loudly instead of blocking on an invisible
+prompt. A supplied value goes through the same conversion a typed one does, so
+`--set spent=1h30` reaches the script as `90` either way.
+
+Full reference: [Form scripts](docs/generic-view-spec.md#form-scripts--mode-form--a-script-that-asks).
+A worked example: [`docs/examples/scripts/log_work.py`](docs/examples/scripts/log_work.py).
 
 ### Reload hooks
 

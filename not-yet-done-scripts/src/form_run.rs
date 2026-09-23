@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use not_yet_done_content::script_form::{
-    advance, build_request, parse_round, FormState, ScriptFormError, ScriptRound,
-    CHATTY_ROUND_COUNT,
+    CHATTY_ROUND_COUNT, FormState, ScriptFormError, ScriptRound, advance, build_request,
+    parse_round,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -99,6 +99,12 @@ impl FormSession {
     /// `state` to it.
     pub fn new(script: impl Into<PathBuf>, payload: Value) -> Self {
         let script = script.into();
+        // The child runs in the script's own directory, and a relative program
+        // path would then be looked up *inside* it — `./log_work.py` would be
+        // spawned as `scripts/scripts/log_work.py`. Absolute before that
+        // happens; `absolute` only rewrites the string, so a symlinked script
+        // still runs as the name it was called by.
+        let script = std::path::absolute(&script).unwrap_or(script);
         let label = script
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -287,6 +293,26 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_script_named_by_a_relative_path_still_runs() {
+        // The child's working directory is the script's own, so a program path
+        // that is relative would be resolved a second time against it and miss.
+        let dir = tempfile::tempdir_in(".").expect("tempdir");
+        let path = script(
+            &dir,
+            r#"printf '%s' '{"result":{"ok":true}}' > "$NYD_OUTPUT_FILE"
+"#,
+        );
+        // The directory sits in the crate root, so its bare name is a path
+        // relative to where the test process runs.
+        let relative = PathBuf::from(dir.path().file_name().expect("a name"))
+            .join(path.file_name().expect("a name"));
+        assert!(relative.is_relative());
+        let mut session = FormSession::new(relative, json!({}));
+        let round = session.next(&values(&[])).expect("one round");
+        assert_eq!(round.step, FormStep::Done(json!({"ok": true})));
     }
 
     #[test]

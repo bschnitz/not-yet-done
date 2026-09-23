@@ -2662,11 +2662,33 @@ NodeAction::new(
 
 Field types (`FormFieldKind`):
 
-| Kind     | Widget               | Value in `ActionInput::Form`      |
-| -------- | -------------------- | --------------------------------- |
-| `Text`   | single-line text box | free string                       |
-| `Select` | horizontal choice    | the chosen `allowed_values` entry |
-| `Toggle` | on/off               | `"true"` / `"false"`              |
+| Kind          | Widget                               | Value in `ActionInput::Form`      |
+| ------------- | ------------------------------------ | --------------------------------- |
+| `Text`        | single-line text box                 | free string                       |
+| `Select`      | horizontal choice                    | the chosen `allowed_values` entry |
+| `Toggle`      | on/off                               | `"true"` / `"false"`              |
+| `DateTime`    | date(-time) box, natural-date        | the phrase as it was typed        |
+| `Number`      | whole number, `min` / `max` / `step` | digits                            |
+| `Decimal`     | fraction, `min` / `max`, `precision` | always with a dot                 |
+| `Duration`    | `1:30`, `90m`, `1h30`                | whole minutes                     |
+| `Multiline`   | fixed-height scrolling area          | the text, newlines and all        |
+| `MultiSelect` | several options at once              | the chosen entries, one per line  |
+| `File`        | picker inside the form               | the path(s), one per line         |
+
+Three of those need a word on the value, because the widget and the string it
+produces are deliberately not the same thing:
+
+- **`Duration` submits minutes.** `1:30`, `90m` and `1h30` are three spellings
+  of one duration, and an adapter that had to parse all of them would parse
+  them slightly differently from the next one. The widget resolves the spelling
+  and hands over `90`.
+- **`Decimal` always uses a dot**, whatever `tui.yaml` configures as the
+  display separator. The separator governs what is typed and shown; the value
+  stays canonical, so no adapter depends on the locale of whoever ran the form.
+- **`MultiSelect` and `File` join with newlines.** A value is a string — that is
+  what `ActionInput::Form` carries — and a newline is the one separator that
+  cannot occur inside an option label or a path. An empty value means nothing
+  was picked.
 
 Per field:
 
@@ -3123,6 +3145,238 @@ behind it, so a script maintaining a column wants the rows that just landed
 rather than whatever row the cursor happens to sit on. A **load** hook is the
 one exception: it always receives the `table` payload and ignores the header
 (see below).
+
+#### Form scripts (`# mode: form`) — a script that asks
+
+Every other mode runs to completion and then reports. A **form script** holds a
+conversation instead: it puts a form on screen, gets the answers back, checks
+them itself and — if something is wrong — says so _per field_ and asks again.
+
+That is worth a protocol rather than a prompt for two reasons. **The script owns
+the rules**: whether a date may lie in the future, whether a sprint is still
+open, whether two fields contradict each other is often knowable only after
+asking a backend, and no declarative `required: true` expresses it. And **the
+answer is a conversation**: rejecting input without losing what was typed is the
+whole point.
+
+```python
+#!/usr/bin/env python3
+# mode: form
+```
+
+The marker is the header, not the file name — the same first-ten-lines header
+that carries `# mode:` and `# scope:` for every other script. A convention such
+as `*.form.py` was rejected: it would put a second truth next to the header
+(what wins for `# mode: interactive` in `report.form.py`?), it collides with the
+extension that decides language and highlighting, and switching a script back
+and forth would mean renaming the file — which breaks every shortcut and hook
+keyed by its name.
+
+##### One process per round
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant N as not-yet-done
+    participant S as script
+    N->>S: request file: payload + input + state
+    S-->>N: {"form": {fields, errors}}
+    N->>U: the form
+    U-->>N: submit
+    N->>S: request file: payload + input + state
+    S-->>N: {"result": …}, another {"form": …}, or {"error": …}
+```
+
+Each round is a **fresh process**; the script remembers nothing between them,
+and nothing has to be torn down when the user gives up. The transport is the one
+every view script already uses: the request is JSON in a temp file whose path is
+`argv[1]`, and the answer is JSON the script writes to `$NYD_OUTPUT_FILE`.
+stdout stays free on purpose — that is where a `print()`, a library warning or a
+stray `set -x` lands.
+
+**Request.** The usual `scope:` payload (`node`, `filtered_set` or `table`, see
+above), plus two keys:
+
+```json
+{
+  "node": { "…": "…" },
+  "input": { "title": "Rework the exporter", "spent": "90" },
+  "state": { "sprints": ["S-41", "S-42"] }
+}
+```
+
+- **`input`** is `{}` in the first round and thereafter carries **every** value
+  collected so far. A field that is currently hidden by `visible_when` is not in
+  it — its absence is how the script learns the field did not apply.
+- **`state`** is whatever the script sent last round, handed back untouched. The
+  engine never looks inside it; it is there so a script can cache its own
+  lookups (that sprint list) instead of fetching them again every round.
+
+**Answer.** Exactly one of three keys, counted on parse, with unknown keys
+rejected so a typo fails loudly instead of being ignored:
+
+```json
+{ "form": { "header": "New work item", "fields": [], "errors": [] } }
+{ "result": { "commands": [] } }
+{ "error": "Jira is not reachable" }
+```
+
+- **`form`** shows the form. It is _both_ the opening round ("here are my
+  fields") and every repetition after a failed check ("here they are again, with
+  these errors") — invalid input and asking again are one act, not two.
+- **`result`** ends the conversation. Inside it sits the ordinary script answer,
+  unchanged and unread by the protocol — `commands`, captured text, whatever the
+  scope produces. Success is expressed by _which key was used_, not by a boolean
+  that could contradict the payload.
+- **`error`** aborts with a message, without another round.
+
+A fourth key, **`state`**, sits beside them (not inside `form`) and is echoed
+back next round.
+
+##### Declaring a field
+
+```json
+{
+  "form": {
+    "header": "Log work",
+    "fields": [
+      { "name": "spent", "label": "Time spent", "type": "duration" },
+      { "name": "when", "type": "date", "default": "today" },
+      { "name": "comment", "type": "multiline", "lines": 4, "required": false },
+      { "name": "kind", "type": "select", "options": ["dev", "review"] },
+      {
+        "name": "reviewer",
+        "type": "text",
+        "visible_when": { "field": "kind", "equals": "review" }
+      }
+    ]
+  }
+}
+```
+
+| `type:`             | Extra parameters          |
+| ------------------- | ------------------------- |
+| `text`              | `masked`                  |
+| `select`            | `options` (required)      |
+| `multiselect`       | `options` (required)      |
+| `toggle`            | —                         |
+| `date` / `datetime` | —                         |
+| `number`            | `min`, `max`, `step`      |
+| `decimal`           | `min`, `max`, `precision` |
+| `duration`          | —                         |
+| `multiline`         | `lines`, `masked`         |
+| `file`              | `multi`                   |
+
+Every field also takes `label` (default: the name, title-cased), `required`
+(default: true, except a toggle, which is answered by existing), `default`, and
+`prefill`. `default` is the value a field starts at; **`prefill` overrides what
+the user already typed** — a script sends one only when it means to overrule.
+
+Two refusals are deliberate. An **unknown `type:`** is a loud error, never a
+silent fallback to `text`. And a parameter that **means nothing for its type**
+— a `step` on a select, `options` on a toggle — is refused as well, because a
+script author who wrote one expects it to do something. So are a duplicate field
+name, an empty name, a `min` above its `max`, and a `default` that is not one of
+the `options`.
+
+Field kinds and the strings they produce are listed under
+[Structured input forms](#structured-input-forms-inputspecform-m6e5) — a form
+script and an adapter action drive the same widgets and get the same values.
+
+##### Saying what was wrong
+
+```json
+{
+  "form": {
+    "errors": [
+      { "name": "when", "error": "must not be in the future" },
+      { "error": "the tracker rejected the whole request" }
+    ]
+  }
+}
+```
+
+An entry **with** `name` hangs on that field: its label and frame take the
+theme's error colour and the text appears in the footer while that field is
+focused — no extra line per field, no jumping layout. An entry **without** a
+name is the general message. An unknown field name (a typo in the script) is not
+swallowed: it is promoted to the general error and logged.
+
+A field error disappears as soon as **that field** is edited — the value it
+referred to no longer exists. The general error stands until the next round
+replaces it.
+
+**Omitting `fields` keeps the form that is on screen** and changes only the
+errors, which is the common case after a failed check. Sending `fields`
+replaces it, which is how a script reveals a field that only makes sense once an
+earlier answer is in. Either way the **values survive, matched by field name**: a
+field that still exists keeps what the user typed, one that disappears is
+dropped, a new one starts at its `default`.
+
+##### Rounds or `visible_when`
+
+Both change what the form shows, and both stay:
+
+- **Decidable from values already in the form** → `visible_when`. It is
+  re-evaluated on every keystroke and costs nothing; building it out of rounds
+  would mean one process per keystroke.
+- **Needs knowledge only the script can fetch** → a new round with a new
+  `fields` list. It costs a process and a visible pause, and buys a backend
+  question.
+
+##### Ending
+
+There is **no round limit**: the user can always press `Esc`, and every round
+needs a submit, so nothing spins unattended. The one real hole is a `form` with
+**no fields** — instantly submittable, hence a loop without a human brake — so
+that is refused. After roughly fifty rounds a line goes to the log, purely for
+diagnosis.
+
+`Esc` cancels outright only while nothing has been entered; otherwise a
+`Discard your input?` prompt appears, defaulting to **no**, so `Esc Esc` never
+throws work away. Cancelling does not start the script again: each round is a
+process that exited long ago, and a form script writes in the `result` step, not
+before.
+
+##### Running one from the terminal
+
+```sh
+not-yet-done-cli script run ./log_work.py
+not-yet-done-cli script run jira/jira:issue/log_work.py --set spent=1h30
+```
+
+`script run` drives the very same rounds through terminal prompts instead of a
+popup, which is how a form script gets written and tried out without navigating
+the TUI first, and how one gets automated. The script is addressed either by
+**path** — a file on disk wins, because one edits `./log_work.py` and runs it
+long before it is installed anywhere — or by the **level it lives at**,
+`<adapter>[/<node-type>…]/<name>`, the same directory the script menu offers.
+A name that matches nothing there is answered with the directory and its
+contents.
+
+- **`--set name=value`** answers a field from outside. It holds for every round,
+  so the field is never asked about, and a fully supplied form runs without a
+  question; a `--set` that no round ever wanted is reported once at the end.
+- **`--payload FILE`** supplies the scope payload the TUI would have built from
+  the selected node or the visible rows. The default is `{}`.
+- **Without a terminal on stdin nothing waits.** A field that still needs a
+  value aborts and names both the field and the `--set` that would fix it —
+  a cron job fails loudly instead of blocking on a prompt nobody will see.
+
+The field kinds map onto prompts: `text`, `select`, `toggle` and `multiselect`
+onto their obvious ones, a masked field onto a hidden entry, `number`,
+`decimal`, `duration` and the date fields onto a text prompt with the same
+checks the widget applies (a rejected value is explained and asked for again),
+and `multiline` onto `$EDITOR`, which is the only usable equivalent. A field
+hidden by `visible_when` is skipped exactly as it is in the popup.
+
+What the CLI deliberately does **not** do is dispatch the `commands` of a
+finished conversation: `reload`, `notify` and their kin are instructions to a
+front-end with panes. It prints the whole `result` payload as JSON on stdout
+instead, which is what a shell can use.
+
+A worked example lives in
+[`docs/examples/scripts/log_work.py`](examples/scripts/log_work.py).
 
 ### Script hooks (`ctrl+h` in the menu)
 

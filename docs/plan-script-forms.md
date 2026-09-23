@@ -1,7 +1,9 @@
 # Script-Driven Forms — Plan
 
-Status: **design agreed (2026-09-22), nothing built.** Every decision below was
-settled point by point with the user; the open work is the phases at the end.
+Status: **built (2026-09-23), all six phases done.** Every decision below was
+settled point by point with the user. What the phases at the end describe now
+exists; the reference lives in `generic-view-spec.md` (Form scripts), the smoke
+chapter in `smoke-tests.md`.
 
 ## Goal
 

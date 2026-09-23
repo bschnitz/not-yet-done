@@ -295,9 +295,12 @@ fn collect_round(
     // The live values every condition is evaluated against — hidden fields
     // included, because a field can be hidden and still control another.
     let mut live = state.values.clone();
+    let mut presets: BTreeMap<String, String> = BTreeMap::new();
     for field in &state.fields {
-        if let Some(value) = preset.get(&field.key) {
+        if let Some(raw) = preset.get(&field.key) {
+            let value = preset_value(field, raw)?;
             live.insert(field.key.clone(), value.clone());
+            presets.insert(field.key.clone(), value);
             used.insert(field.key.clone());
         }
     }
@@ -312,8 +315,8 @@ fn collect_round(
         if !visible {
             continue;
         }
-        if preset.contains_key(&field.key) {
-            values.insert(field.key.clone(), live[&field.key].clone());
+        if let Some(value) = presets.get(&field.key) {
+            values.insert(field.key.clone(), value.clone());
             continue;
         }
         if let Some(message) = state.field_error_text(&field.key) {
@@ -330,6 +333,92 @@ fn collect_round(
         values.insert(field.key.clone(), value);
     }
     Ok(RoundInput { values, asked })
+}
+
+/// What a `--set` means for this field.
+///
+/// A value supplied from outside has to mean what a typed one means: a
+/// duration is whole minutes whether a person wrote `1h30` at a prompt or a
+/// cron line put it in a flag, and an option that is not on the list is a
+/// mistake worth naming rather than a string to hand on. So every preset goes
+/// through the conversion its kind calls for, and one that cannot ends the run
+/// — the shell is the only place left where it could be fixed.
+fn preset_value(field: &FormFieldSpec, raw: &str) -> Result<String> {
+    let refuse = |complaint: String| anyhow!("`--set {}={raw}` {complaint}", field.key);
+    let trimmed = raw.trim();
+
+    if trimmed.is_empty() {
+        if field.required {
+            return Err(refuse("is empty, and the field needs a value".into()));
+        }
+        // A toggle is never unanswered; an unset one is off.
+        if matches!(field.kind, FormFieldKind::Toggle) {
+            return Ok("false".to_string());
+        }
+        return Ok(String::new());
+    }
+
+    let one_of = |allowed: &[String], chosen: &str| -> Result<String> {
+        match allowed.iter().find(|o| *o == chosen) {
+            Some(option) => Ok(option.clone()),
+            None => Err(refuse(format!("is not one of {}", allowed.join(", ")))),
+        }
+    };
+    let existing_path = |chosen: &str| -> Result<String> {
+        let path = PathBuf::from(expand_home(chosen.trim()));
+        if !path.exists() {
+            return Err(refuse(format!(
+                "names {}, which does not exist",
+                path.display()
+            )));
+        }
+        Ok(path.to_string_lossy().into_owned())
+    };
+
+    Ok(match &field.kind {
+        // A date stays the phrase it was written as, exactly as a typed one
+        // does; resolving it is the backend's job.
+        FormFieldKind::Text | FormFieldKind::DateTime { .. } | FormFieldKind::Multiline { .. } => {
+            raw.to_string()
+        }
+        FormFieldKind::Toggle => match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "y" | "on" | "1" => "true".to_string(),
+            "false" | "no" | "n" | "off" | "0" => "false".to_string(),
+            _ => return Err(refuse("is neither a yes nor a no".into())),
+        },
+        FormFieldKind::Select { allowed_values } => one_of(allowed_values, trimmed)?,
+        FormFieldKind::MultiSelect { allowed_values } => split_lines(raw)
+            .into_iter()
+            .map(|chosen| one_of(allowed_values, chosen.trim()))
+            .collect::<Result<Vec<_>>>()?
+            .join("\n"),
+        FormFieldKind::Number { min, max, .. } => {
+            whole_number(trimmed, field, *min, *max).map_err(refuse)?
+        }
+        FormFieldKind::Decimal {
+            min,
+            max,
+            precision,
+        } => fractional_number(trimmed, field, *min, *max, *precision).map_err(refuse)?,
+        FormFieldKind::Duration => match parse_duration_minutes(trimmed) {
+            Some(minutes) => minutes.to_string(),
+            None => {
+                return Err(refuse(
+                    "is not a span of time (try `90`, `90m`, `1h30`, `1:30`)".into(),
+                ));
+            }
+        },
+        FormFieldKind::File { multi } => {
+            let paths = split_lines(raw)
+                .into_iter()
+                .map(existing_path)
+                .collect::<Result<Vec<_>>>()?;
+            if !multi && paths.len() > 1 {
+                return Err(refuse("names more than one file".into()));
+            }
+            paths.join("\n")
+        }
+    })
 }
 
 /// The value of a field nobody can be asked about: whatever it already has.
@@ -617,6 +706,97 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    fn duration(key: &str) -> FormFieldSpec {
+        let mut field = FormFieldSpec::text(key, "Time spent");
+        field.kind = FormFieldKind::Duration;
+        field
+    }
+
+    /// The whole point of normalising a preset: `1h30` has to mean what it
+    /// means at the prompt, or a form filled from a cron line and the same
+    /// form filled by hand hand the script two different numbers.
+    #[test]
+    fn a_supplied_value_is_converted_the_way_a_typed_one_is() {
+        let mut used = BTreeSet::new();
+        let input = collect_round(
+            &state(
+                vec![
+                    duration("spent"),
+                    FormFieldSpec::toggle("billable", "Billable"),
+                    FormFieldSpec::select(
+                        "activity",
+                        "Activity",
+                        vec!["dev".into(), "review".into()],
+                    ),
+                ],
+                &[],
+            ),
+            &preset(&[
+                ("spent", "1h30"),
+                ("billable", "yes"),
+                ("activity", "review"),
+            ]),
+            &mut used,
+            false,
+            &mut ScriptedPrompter::new(),
+        )
+        .expect("every field supplied");
+        assert_eq!(input.values["spent"], "90");
+        assert_eq!(input.values["billable"], "true");
+        assert_eq!(input.values["activity"], "review");
+    }
+
+    /// And a preset that cannot mean anything says so with the flag that
+    /// wrote it — the only place the user can still fix it.
+    #[test]
+    fn a_supplied_value_that_does_not_fit_names_the_flag() {
+        let mut used = BTreeSet::new();
+        let failure = collect_round(
+            &state(vec![duration("spent")], &[]),
+            &preset(&[("spent", "banana")]),
+            &mut used,
+            false,
+            &mut ScriptedPrompter::new(),
+        )
+        .expect_err("banana is not a duration");
+        assert!(
+            failure.to_string().contains("`--set spent=banana`"),
+            "{failure}"
+        );
+    }
+
+    /// A preset also decides what `visible_when` sees — a field switched on
+    /// from the shell has to reveal the same fields it reveals in the popup.
+    #[test]
+    fn a_supplied_value_drives_the_conditions_too() {
+        let mut reviewer = FormFieldSpec::text("reviewer", "Reviewer");
+        reviewer.visible_when = Some(not_yet_done_content::FieldCondition {
+            field: "activity".into(),
+            equals_any: vec!["review".into()],
+            negate: false,
+        });
+        let mut used = BTreeSet::new();
+        let failure = collect_round(
+            &state(
+                vec![
+                    FormFieldSpec::select(
+                        "activity",
+                        "Activity",
+                        vec!["dev".into(), "review".into()],
+                    ),
+                    reviewer,
+                ],
+                &[],
+            ),
+            &preset(&[("activity", "review")]),
+            &mut used,
+            false,
+            &mut ScriptedPrompter::new(),
+        )
+        .expect_err("the revealed field has nothing in it");
+        assert!(failure.to_string().contains("`reviewer`"), "{failure}");
     }
 
     /// `--set` answers a field for good: it is not prompted for, and the round
