@@ -1056,9 +1056,11 @@ async fn grouped_toggle_stops_only_the_same_group() {
     );
     let groups = ["^/Work"];
 
+    // The toggle did its work; the row's marker is patched from the events,
+    // so there is nothing for a frontend to refetch.
     assert!(matches!(
         toggle_grouped(adapter.as_ref(), &c, &groups).await,
-        ActionDispatch::Noop
+        ActionDispatch::Handled { message: None }
     ));
     toggle_grouped(adapter.as_ref(), &a, &groups).await;
     assert_eq!(

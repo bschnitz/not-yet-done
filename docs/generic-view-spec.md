@@ -2590,11 +2590,16 @@ actions:
 
 What `Node::invoke_action(name, ctx)` returns is described by the
 [`ActionDispatch`](../not-yet-done-content/src/lib.rs) enum (`OpenEditor`,
-`ExecuteQuery`, `CreateChild`, `DeleteSelf`, `Reload`, `Confirm`, `Noop`,
-`Error`). The TUI translates that into the matching view flow — an editor
+`ExecuteQuery`, `DeleteSelf`, `Reload`, `Done`, `Notify`, `Handled`, `Nodes`,
+`Confirm`, `Noop`, `Error`). The TUI translates that into the matching view flow — an editor
 opens, a query lands in a paginated result pane, a delete spawns a confirm
 popup. `Reload` refetches the pane at the level it currently shows — a drilled
-pane re-lists its child level under the same parent, never the root view. `Confirm { prompt }` is the **generic** confirmation mechanism: the
+pane re-lists its child level under the same parent, never the root view. `Handled` says the adapter already did the work and the pane needs no
+refetch, because the domain events it emitted patch the affected cells in
+place — `toggle-tracking` answers this rather than reloading a deep task tree.
+It is the counterpart to `Noop`, which means the node had nothing to dispatch
+at all; keeping them apart is what lets a frontend without an event bridge (the
+CLI) report a toggle as done instead of as "no change". `Confirm { prompt }` is the **generic** confirmation mechanism: the
 adapter returns it on the first call (when `ActionContext.confirmed == false`),
 the TUI shows the `(y/n)` prompt, and on "y" the same action is invoked again on
 the same node with `confirmed: true` — then the adapter does the (often

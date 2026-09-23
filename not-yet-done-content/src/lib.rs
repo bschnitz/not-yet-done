@@ -1784,7 +1784,12 @@ pub enum ActionDispatch {
     /// wording because only it knows what the action will actually do
     /// (e.g. how many successor intervals a restore will purge).
     Confirm { prompt: String },
-    /// No-op — useful as a default for adapters that haven't migrated.
+    /// No-op — the node has nothing to dispatch for this action. It is the
+    /// trait default, so it also means "this adapter has not migrated to
+    /// `invoke_action`", and a frontend may fall back to [`Node::execute`]
+    /// on it. An adapter that *did* the work answers
+    /// [`ActionDispatch::Handled`] instead, so this variant keeps one
+    /// meaning: nothing happened here.
     Noop,
     /// The action succeeded and has a user-facing result to report, but did
     /// *not* change the pane's data (so no reload is warranted). The frontend
@@ -1807,6 +1812,19 @@ pub enum ActionDispatch {
     /// the user half the truth. `message` is optional so the variant also
     /// serves as "it worked, reload, nothing to add".
     Done { message: Option<String> },
+    /// The action did its work and the frontend needs no refresh for it.
+    ///
+    /// *Why it exists:* an adapter that mutates a row and emits the domain
+    /// events for it has already told the frontend everything — the TUI's
+    /// bridge patches the affected cells in place, which is why
+    /// `toggle-tracking` deliberately avoids [`ActionDispatch::Reload`] on a
+    /// deep task tree. Saying that with [`ActionDispatch::Noop`] made the two
+    /// cases indistinguishable, and a frontend without an event bridge drew
+    /// the wrong conclusion: the CLI fell back to [`Node::execute`], got a
+    /// `NotSupported`, and answered `ok (no change)` for a toggle that had
+    /// just flipped. `message` is optional, because "it is done" is often
+    /// the whole story.
+    Handled { message: Option<String> },
     /// The action produced a **set of node references** — a search, a
     /// lookup, any action whose result is "these nodes match".
     ///

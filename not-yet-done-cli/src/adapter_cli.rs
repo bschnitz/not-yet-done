@@ -269,8 +269,8 @@ fn run_adapter(args: &[String]) -> Result<()> {
         // What a hook had to say goes to stderr, not stdout: it is out of band
         // with respect to the verb, and stdout is what a caller pipes. A
         // failing binding already prints itself from the host.
-        for report in not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected")
-            .await
+        for report in
+            not_yet_done_host::fire_hook(adapter.as_ref(), &inv.instance, "connected").await
         {
             if let not_yet_done_host::HookOutcome::Fired(Some(message)) = report.outcome {
                 eprintln!("{}: {message}", report.instance);
@@ -1564,6 +1564,13 @@ async fn do_dispatch(
         },
         ActionDispatch::Notify { message } => {
             println!("{message}");
+            Ok(())
+        }
+        // The adapter did the work itself and has no flow for us to run. The
+        // TUI would let its event bridge repaint the row here; a terminal has
+        // nothing to repaint, so the reply is simply that it happened.
+        ActionDispatch::Handled { message } => {
+            println!("{}", message.as_deref().unwrap_or("ok"));
             Ok(())
         }
         // Reload-and-report. The CLI has no pane to refresh, so only the

@@ -57,8 +57,8 @@ use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec,
     Invalidation, Metadata, MetadataField, Node, NodeAction, NodeHit, NodeSummary, NodeType,
-    ParamSpec, QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode, TypedAdapterFactory,
-    apply_sort,
+    ParamSpec, QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode,
+    TypedAdapterFactory, apply_sort,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
@@ -1569,7 +1569,7 @@ async fn invoke_toggle_tracking(
     apply_tracking(handle, task_id, !is_tracked, &policy).await;
     // No `Reload`: only the row's tracking marker changed, so the bridge
     // patches it in place instead of rebuilding the (deep) task tree.
-    ActionDispatch::Noop
+    ActionDispatch::Handled { message: None }
 }
 
 /// `invoke_action("toggle-tag")` — assign or unassign the tag whose stable
@@ -1617,7 +1617,7 @@ async fn invoke_toggle_tag(
             // No `Reload`: only the row's tag column changed, so the bridge
             // patches it in place (see `spawn_task_bridge`) instead of
             // rebuilding the task tree from a possibly-stale snapshot.
-            ActionDispatch::Noop
+            ActionDispatch::Handled { message: None }
         }
         Err(e) => ActionDispatch::Error(format!("Failed to toggle tag: {e}")),
     }
@@ -2014,7 +2014,14 @@ impl Node for TaskItemNode {
                 } else {
                     self.snapshot.by_id.get(&self.id).and_then(|r| r.parent)
                 };
-                execute_add(&self.handle, &self.snapshot, &text, &original, parent_default).await
+                execute_add(
+                    &self.handle,
+                    &self.snapshot,
+                    &text,
+                    &original,
+                    parent_default,
+                )
+                .await
             }
             ("edit", ActionInput::Edited { text, original, .. }) => {
                 execute_edit(&self.handle, &self.snapshot, self.id, &text, &original).await

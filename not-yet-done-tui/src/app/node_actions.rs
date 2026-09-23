@@ -326,6 +326,10 @@ pub fn dispatch_to_view_request(
             message,
         }),
         ActionDispatch::Noop => None,
+        // The adapter did the work and says the pane needs no refetch: the
+        // events it emitted already patch the affected cells in place. All
+        // that is left is the sentence, if it had one.
+        ActionDispatch::Handled { message } => message.map(ViewRequest::Notify),
         // Success-with-a-message (e.g. `backup` reporting its file path): no
         // data changed, so surface the text in the status bar without a reload.
         ActionDispatch::Notify { message } => Some(ViewRequest::Notify(message)),
