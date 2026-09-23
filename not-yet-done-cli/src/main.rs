@@ -81,12 +81,12 @@ where
 // removed once their adapter replacements landed (D3b-1..3); those names are
 // now free for adapter instances or aliases (see `adapter_cli::BUILTIN_COMMANDS`).
 #[tusks(root)]
-#[command(name = "nyd", about = "not-yet-done — deine Todo-App")]
+#[command(name = "nyd", about = "not-yet-done — your todo app")]
 pub mod cli {
-    #[command(about = "Tag-Verwaltung")]
+    #[command(about = "Manage tags")]
     pub use crate::commands::tag::cli as tag;
 
-    #[command(about = "Backup erstellen")]
+    #[command(about = "Back up and restore the database")]
     pub use crate::commands::backup::cli as backup;
 }
 
