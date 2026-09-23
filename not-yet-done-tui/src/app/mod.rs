@@ -8129,8 +8129,12 @@ impl App {
         view_name: Option<String>,
         query: String,
     ) -> Result<(), String> {
-        self.set_active_tab(Tab::Content(tab_idx));
-
+        // Everything that can refuse is asked before anything moves: a wrong
+        // view name, or a view that is not a tree, must leave the user where
+        // they were — neither on a tab they never reached, reading a
+        // complaint about it, nor with that tab quietly turned to another
+        // subtab. Whether a view is a tree is part of its definition, so the
+        // target can be judged without switching to it.
         let pane_id = {
             let cv = match &mut self.content_views[tab_idx] {
                 ContentSlot::Working(cv) => cv,
@@ -8141,24 +8145,35 @@ impl App {
                     ));
                 }
             };
-            if let Some(v) = view_name {
-                if let Err(available) = cv.switch_to_view_by_name(&v) {
-                    return Err(format!(
-                        "unknown view '{v}' (available: {})",
-                        available.join(", ")
-                    ));
-                }
-            }
-            if !cv.active_view_is_tree() {
+            let target = match &view_name {
+                Some(v) => cv
+                    .view_defs
+                    .iter()
+                    .find(|vd| vd.name.eq_ignore_ascii_case(v))
+                    .ok_or_else(|| {
+                        let available: Vec<&str> =
+                            cv.view_defs.iter().map(|vd| vd.name.as_str()).collect();
+                        format!("unknown view '{v}' (available: {})", available.join(", "))
+                    })?,
+                None => cv
+                    .active_view_def()
+                    .ok_or_else(|| "the tab has no view".to_string())?,
+            };
+            if target.tree_label.is_none() {
                 return Err(
                     "the active view isn't a tree (use :focus-node for flat views)".to_string(),
                 );
+            }
+            if let Some(v) = &view_name {
+                // Cannot miss: the name was just found among the same defs.
+                let _ = cv.switch_to_view_by_name(v);
             }
             let pane_id = cv.active_pane_id();
             cv.active_pane_mut().queue_pending_tree_find(query);
             pane_id
         };
 
+        self.set_active_tab(Tab::Content(tab_idx));
         self.spawn_content_load(tab_idx, pane_id);
         Ok(())
     }

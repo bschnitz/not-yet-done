@@ -463,6 +463,14 @@ Every tick below was read that way, not from a screenshot.
       A modal error for an unknown tab/view ("… is not a content tab"),
       and one pointing at `:focus-node` when the active view is not a
       tree.
+- [x] Both refusals leave you where you were. From the Trackings tab,
+      `:tree-find Tasks:nosuch x` ("unknown view 'nosuch'") and
+      `:tree-find Tasks:list x` ("the active view isn't a tree") show their
+      modal over Trackings, and Tasks is still on its `tasks` subtab
+      afterwards, not turned to `list`. `:tree-find Tasks:tasks <text>` from
+      the same place still switches and finds. Until 2026-09-23 the tab
+      switched first and the flat subtab was set before the tree check
+      refused it.
 
 ## `:query apply` — saved-query activation via cmdline
 
