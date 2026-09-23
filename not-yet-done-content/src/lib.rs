@@ -17,6 +17,7 @@ pub mod children;
 pub mod decorate;
 pub mod describe;
 pub mod download;
+pub mod duration;
 pub mod editor_marks;
 pub mod grouping;
 pub mod http_log;
@@ -56,6 +57,7 @@ pub use auth::{
     InMemorySessionStore, MechanismSpec, PluginSpec, ResolvedSession, SessionCachePolicy,
     SessionEntry, SessionStore,
 };
+pub use duration::{format_duration, parse_duration_minutes};
 pub use editor_marks::NOT_YOURS_MARKER;
 pub use http_send::{Repeat, RetryConfig};
 pub use link_route::{LinkRoute, LinkRouteError};

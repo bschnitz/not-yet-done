@@ -26,10 +26,9 @@ use crate::widgets::text_area::{self, TextArea};
 use crate::widgets::text_input::{CMD_END, CMD_HOME, TextInput};
 use crate::widgets::toggle::Toggle;
 
-use super::numeric::{
-    decimal_in_progress, format_duration, number_in_progress, parse_duration_minutes, to_canonical,
-    to_display,
-};
+use not_yet_done_content::duration::{format_duration, parse_duration_minutes};
+
+use super::numeric::{decimal_in_progress, number_in_progress, to_canonical, to_display};
 use super::options::{FormOptions, SelectStyle};
 use super::spec::{FieldCondition, FormFieldKind, FormFieldSpec};
 use super::style::FormStyle;

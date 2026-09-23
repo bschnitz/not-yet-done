@@ -43,6 +43,9 @@ arboard = { workspace = true }
 tempfile = "3.27.0"
 
 [dependencies]
+# For the duration field's two conversions, which are the same whether a span
+# is typed into a widget or passed on a command line.
+not-yet-done-content = { path = "../not-yet-done-content" }
 not-yet-done-grid-core = { path = "../not-yet-done-grid-core" }
 ratatui = "0.30"
 unicode-width = "0.2.0"

@@ -7,7 +7,7 @@ mod spec;
 mod style;
 
 pub use driver::{Form, FormEvent, FormNotice};
-pub use numeric::{format_duration, parse_duration_minutes};
+pub use not_yet_done_content::duration::{format_duration, parse_duration_minutes};
 pub use options::{FormOptions, SelectStyle};
 pub use spec::{FieldCondition, FormFieldKind, FormFieldSpec};
 pub use style::{FormPalette, FormStyle};

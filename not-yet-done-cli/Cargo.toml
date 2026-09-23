@@ -23,7 +23,6 @@ not-yet-done-scripts = { path = "../not-yet-done-scripts" }
 # Only for the pure input rules behind the numeric fields (`1h30` -> 90). The
 # widgets stay where they are; what the CLI borrows is the parser, so `1h30`
 # does not mean two different things depending on which front-end asked.
-not-yet-done-ratatui = { path = "../not-yet-done-ratatui", default-features = false }
 # Render an adapter's connection-config schema to a YAML template
 # (`config template`) or build it interactively (`config build`, needs the
 # `stdin` driver). Schema comes from `AdapterFactory::config_schema()`.
