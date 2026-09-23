@@ -5373,9 +5373,12 @@ all** and points at the right file.
       `<script dir>/.nyd_tmp_<6 chars><ext>` (same extension as the script,
       and inside the **folder** the script lives in, not the branch root),
       `:wq` writes the text back into the script's own file and the temp file
-      is gone afterwards. Still open: **`M` cannot move anything back to the
-      root**. The field says `Target folder (empty = root)`, but submitting it
-      empty answers `⚠ This field is required` and does nothing.
+      is gone afterwards. `M` with the field left empty moves back to the
+      branch root, a script as well as a folder: `util/probe.sql` answers
+      `Moved DB script 'util/probe.sql' → 'probe.sql'`, and `util/deep` ends
+      up next to `util`. Until 2026-09-23 the field was required, so the form
+      answered `⚠ This field is required` before the action ever saw the
+      empty target its own label promises.
 - [x] `d` on a non-empty folder refuses with "not empty". It first asks
       `Delete 'daily'? (y/n)`; `y` then answers
       `Delete failed: not empty (2 entries)` and the folder is still there.

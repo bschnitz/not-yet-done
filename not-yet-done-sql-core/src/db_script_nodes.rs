@@ -180,10 +180,7 @@ pub fn dir_actions() -> Vec<NodeAction> {
             "move",
             "move",
             InputSpec::Form {
-                fields: vec![FormFieldSpec::text(
-                    "target",
-                    "Target folder (empty = root)",
-                )],
+                fields: vec![move_target_field()],
             },
         ),
         NodeAction::new("delete-dir", "del-dir", InputSpec::None),
@@ -219,14 +216,19 @@ pub fn script_actions() -> Vec<NodeAction> {
             "move",
             "move",
             InputSpec::Form {
-                fields: vec![FormFieldSpec::text(
-                    "target",
-                    "Target folder (empty = root)",
-                )],
+                fields: vec![move_target_field()],
             },
         ),
         NodeAction::new("delete", "del", InputSpec::None),
     ]
+}
+
+/// The one field of a `move` form. Optional, because its label promises what
+/// [`move_target_rel`] does with an empty answer — the branch root. Left
+/// required, the form turned that answer away before the action ever saw it,
+/// and nothing could be moved back up.
+fn move_target_field() -> FormFieldSpec {
+    FormFieldSpec::text("target", "Target folder (empty = root)").optional()
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,6 +1240,51 @@ mod tests {
         let moved = t.list_entries("notes", "util", false, true).await.unwrap();
         assert_eq!(moved.items.len(), 1);
         assert_eq!(moved.items[0].id, "notes/db_scripts/util/audit.sql");
+    }
+
+    /// The label says an empty target means the root, so the form must let an
+    /// empty target through — on folders and scripts alike.
+    #[test]
+    fn the_move_target_may_be_left_empty() {
+        for actions in [dir_actions(), script_actions()] {
+            let action = actions.iter().find(|a| a.id == "move").expect("move");
+            let InputSpec::Form { fields } = &action.input else {
+                panic!("move collects a form");
+            };
+            assert!(!fields[0].required, "an empty target must reach the action");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_target_moves_a_script_back_to_the_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let t = tree(dir.path());
+        t.store().create_db_dir("notes", "util").await.unwrap();
+        t.store()
+            .create_db_script("notes", "util/audit.sql")
+            .await
+            .unwrap();
+        let folder = DbScriptTree::group_node(&t, "notes")
+            .get_child("util")
+            .await
+            .expect("folder");
+        let mut script = folder.get_child("audit.sql").await.expect("script");
+        script
+            .execute(
+                "move",
+                ActionInput::Form(HashMap::from([("target".into(), String::new())])),
+                &Default::default(),
+            )
+            .await
+            .expect("move");
+        let root = t.list_entries("notes", "", false, true).await.unwrap();
+        assert!(
+            root.items
+                .iter()
+                .any(|i| i.id == "notes/db_scripts/audit.sql"),
+            "{:?}",
+            root.items.iter().map(|i| &i.id).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
