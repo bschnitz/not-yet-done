@@ -4353,6 +4353,8 @@ dependencies = [
  "not-yet-done-extended-query",
  "not-yet-done-filter",
  "not-yet-done-host",
+ "not-yet-done-ratatui",
+ "not-yet-done-scripts",
  "not-yet-done-task-core",
  "regex",
  "sea-orm",

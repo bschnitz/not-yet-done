@@ -175,6 +175,7 @@ pub fn try_dispatch(args: &[String]) -> Option<ExitCode> {
         }
         Some("config") => Some(finish(crate::cli_config::run_config(args))),
         Some("adapter") => Some(finish(run_adapter(args))),
+        Some("script") => Some(finish(crate::script_cli::run(args))),
         // Legacy `tusks` built-ins keep their own dispatch + help.
         Some("tag") | Some("backup") => None,
         // Anything else: try a `cli.yaml` alias (which expands to a full
@@ -363,6 +364,7 @@ fn print_top_level_help() {
     println!("  adapter <…>   work with adapter instances (tasks, jira, trackings, …)");
     println!("  tag <…>       manage tags");
     println!("  backup <…>    create a backup");
+    println!("  script <…>    `script run <script>` — drive a form script here");
     println!("  config <…>    edit config files, `config generate <inst>`,");
     println!("                `config build <type>` (interactive connection config),");
     println!("                `config template <type>` (static skeleton),");

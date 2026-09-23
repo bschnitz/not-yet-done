@@ -65,6 +65,46 @@ pub trait Prompter {
         default: usize,
     ) -> Result<Answer<usize>, String>;
 
+    /// Ask for a secret: the answer is not echoed. `allow_empty` permits an
+    /// empty response — an optional secret, or "keep what is stored".
+    ///
+    /// Defaults to [`text`](Prompter::text) so a prompter with no separate
+    /// secret prompt (a scripted one, a log) keeps working, but a terminal
+    /// prompter is expected to override it: a password echoed once is echoed
+    /// for good.
+    fn password(
+        &mut self,
+        label: &str,
+        help: Option<&str>,
+        allow_empty: bool,
+    ) -> Result<Answer<String>, String> {
+        self.text(label, help, None, allow_empty)
+    }
+
+    /// Ask the user to pick any number of `items`, returning their indices in
+    /// ascending order. `selected` marks the ones offered pre-ticked.
+    ///
+    /// Defaults to one yes/no question per item, which every prompter can
+    /// already answer — a menu that does not exist is worse than a slow one.
+    fn multi_select(
+        &mut self,
+        label: &str,
+        _help: Option<&str>,
+        items: &[&str],
+        selected: &[bool],
+    ) -> Result<Answer<Vec<usize>>, String> {
+        let mut picked = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let default = selected.get(i).copied().unwrap_or(false);
+            match self.confirm(&format!("{label}: {item}"), None, default)? {
+                Answer::Value(true) => picked.push(i),
+                Answer::Value(false) => {}
+                Answer::Cancelled => return Ok(Answer::Cancelled),
+            }
+        }
+        Ok(Answer::Value(picked))
+    }
+
     /// Report a recoverable problem with the previous answer before re-asking
     /// (e.g. a value that did not parse). Default: a no-op, so headless
     /// prompters ignore it.
@@ -481,6 +521,49 @@ impl Prompter for DialoguerPrompter {
         })
     }
 
+    fn password(
+        &mut self,
+        label: &str,
+        help: Option<&str>,
+        allow_empty: bool,
+    ) -> Result<Answer<String>, String> {
+        match dialoguer::Password::with_theme(&self.theme)
+            .with_prompt(label)
+            .allow_empty_password(allow_empty)
+            .interact()
+        {
+            Ok(v) => {
+                self.describe(help);
+                Ok(Answer::Value(v))
+            }
+            Err(e) => interrupt_is_cancel(e),
+        }
+    }
+
+    fn multi_select(
+        &mut self,
+        label: &str,
+        help: Option<&str>,
+        items: &[&str],
+        selected: &[bool],
+    ) -> Result<Answer<Vec<usize>>, String> {
+        // `defaults` insists on one flag per item; a caller that knows nothing
+        // about an item means "not ticked".
+        let mut defaults = selected.to_vec();
+        defaults.resize(items.len(), false);
+        let outcome = dialoguer::MultiSelect::with_theme(&self.theme)
+            .with_prompt(label)
+            .items(items)
+            .defaults(&defaults)
+            .interact_opt()
+            .map_err(|e| e.to_string())?;
+        self.describe(help);
+        Ok(match outcome {
+            Some(v) => Answer::Value(v),
+            None => Answer::Cancelled,
+        })
+    }
+
     fn error(&mut self, msg: &str) {
         eprintln!("  {}", console::style(msg).red());
     }
@@ -495,6 +578,8 @@ pub struct ScriptedPrompter {
     texts: VecDeque<String>,
     confirms: VecDeque<bool>,
     selects: VecDeque<usize>,
+    passwords: VecDeque<String>,
+    multi_selects: VecDeque<Vec<usize>>,
 }
 
 impl ScriptedPrompter {
@@ -518,6 +603,20 @@ impl ScriptedPrompter {
     /// Queue a menu selection (variant index).
     pub fn push_select(mut self, i: usize) -> Self {
         self.selects.push_back(i);
+        self
+    }
+
+    /// Queue a secret answer. Its own queue rather than the text one: a test
+    /// that swaps a field between masked and plain should fail loudly instead
+    /// of quietly handing the password to the next text prompt.
+    pub fn push_password(mut self, s: impl Into<String>) -> Self {
+        self.passwords.push_back(s.into());
+        self
+    }
+
+    /// Queue a multi-select answer (the indices ticked).
+    pub fn push_multi_select(mut self, picks: Vec<usize>) -> Self {
+        self.multi_selects.push_back(picks);
         self
     }
 }
@@ -559,5 +658,30 @@ impl Prompter for ScriptedPrompter {
             .pop_front()
             .map(Answer::Value)
             .ok_or_else(|| format!("scripted: no select answer left for `{label}`"))
+    }
+
+    fn password(
+        &mut self,
+        label: &str,
+        _help: Option<&str>,
+        _allow_empty: bool,
+    ) -> Result<Answer<String>, String> {
+        self.passwords
+            .pop_front()
+            .map(Answer::Value)
+            .ok_or_else(|| format!("scripted: no password answer left for `{label}`"))
+    }
+
+    fn multi_select(
+        &mut self,
+        label: &str,
+        _help: Option<&str>,
+        _items: &[&str],
+        _selected: &[bool],
+    ) -> Result<Answer<Vec<usize>>, String> {
+        self.multi_selects
+            .pop_front()
+            .map(Answer::Value)
+            .ok_or_else(|| format!("scripted: no multi-select answer left for `{label}`"))
     }
 }

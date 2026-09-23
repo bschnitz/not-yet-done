@@ -1197,6 +1197,20 @@ pub struct FieldCondition {
     pub negate: bool,
 }
 
+impl FieldCondition {
+    /// Whether the condition holds, given the controller's current value.
+    ///
+    /// A field that has no value yet counts as empty rather than as a missing
+    /// answer: the form is showing *something*, and a condition on a field the
+    /// user has not touched has to decide now. Same rule as the form widget's
+    /// own `is_visible` — a front-end that hid different fields would submit
+    /// values the user never saw.
+    pub fn holds(&self, value: Option<&str>) -> bool {
+        let value = value.unwrap_or_default();
+        self.equals_any.iter().any(|v| v == value) ^ self.negate
+    }
+}
+
 /// One field in an [`InputSpec::Form`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormFieldSpec {
