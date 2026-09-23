@@ -5,7 +5,7 @@ use tusks::tusks;
 pub mod cli {
     pub use crate::cli as parent_;
 
-    /// Create a new tag (global or project-specific with --project)
+    #[command(about = "Create a tag, global or project-specific")]
     pub fn add(
         #[arg(help = "Tag name")] name: String,
         #[arg(long, help = "Foreground color as hex (e.g. #FFFFFF)")] fg: Option<String>,
@@ -50,7 +50,7 @@ pub mod cli {
         }
     }
 
-    /// List tags
+    #[command(about = "List tags")]
     pub fn list(
         #[arg(long, help = "Show only tags for this project (name or ID)")] project: Option<String>,
         #[arg(long, help = "Show only global tags")] global: bool,
@@ -144,14 +144,14 @@ pub mod cli {
         }
     }
 
-    /// Edit a tag
-    ///
-    /// Use the full tag ID including prefix:
-    ///   global-tag:<uuid>   for global tags
-    ///   project-tag:<uuid>  for project-specific tags
-    ///
-    /// Pass an empty string to clear an optional field
-    /// (e.g. `--fg ""` removes the foreground color).
+    #[command(
+        about = "Change a tag's name or style",
+        long_about = "Change a tag's name or style.\n\n\
+            The ID carries the scope: global-tag:<uuid> for a global tag, \
+            project-tag:<uuid> for a project-specific one.\n\n\
+            An empty string clears an optional field, so --fg \"\" removes the \
+            foreground color."
+    )]
     pub fn edit(
         #[arg(help = "Tag ID (global-tag:<uuid> or project-tag:<uuid>)")] id: String,
         #[arg(long, help = "New tag name")] name: Option<String>,
@@ -192,13 +192,15 @@ pub mod cli {
         }
     }
 
-    /// Create a new tag interactively via $EDITOR.
-    ///
-    /// Opens a temporary YAML file with all tag fields. On save the
-    /// file is parsed and the tag is created. If `name:` is empty,
-    /// creation is aborted silently. Validation errors (invalid hex
-    /// color, unknown project, malformed YAML) re-open the editor with
-    /// a `# ERROR:` header so the user can correct the input.
+    #[command(
+        about = "Create a tag in your editor",
+        long_about = "Create a tag in your editor.\n\n\
+            Opens a temporary YAML file holding every tag field. On save the file is \
+            parsed and the tag is created; an empty name: aborts without a word.\n\n\
+            A rejected field - a malformed hex color, an unknown project, broken YAML - \
+            re-opens the editor with a # ERROR: header, so the input can be corrected \
+            instead of retyped."
+    )]
     pub fn new() -> u8 {
         use not_yet_done_task_core::service::{
             annotate_error, new_tag_template, normalize, parse_draft,
@@ -247,11 +249,12 @@ pub mod cli {
         }
     }
 
-    /// Delete a tag
-    ///
-    /// Use the full tag ID including prefix:
-    ///   global-tag:<uuid>   for global tags
-    ///   project-tag:<uuid>  for project-specific tags
+    #[command(
+        about = "Delete a tag",
+        long_about = "Delete a tag.\n\n\
+            The ID carries the scope: global-tag:<uuid> for a global tag, \
+            project-tag:<uuid> for a project-specific one."
+    )]
     pub fn delete(
         #[arg(help = "Tag ID (global-tag:<uuid> or project-tag:<uuid>)")] id: String,
     ) -> u8 {
