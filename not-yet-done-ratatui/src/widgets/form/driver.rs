@@ -695,6 +695,39 @@ impl Form {
         }
     }
 
+    /// The keys the help line offers, as (key, what it does) pairs. Only
+    /// what this form can use: a form of text fields has nothing to pick or
+    /// toggle, and `ctrl+l`/`ctrl+h` move only an inline select. Hidden
+    /// fields count too — a `visible_when` field can appear at any keystroke,
+    /// and a help line that grows under the cursor would jump.
+    fn help_hints(&self) -> Vec<(&'static str, String)> {
+        let widgets = || self.fields.iter().map(|e| &e.widget);
+        let has_inline = widgets().any(|w| matches!(w, FieldWidget::SelectInline { .. }));
+        let has_dropdown = widgets().any(|w| {
+            matches!(
+                w,
+                FieldWidget::Select { .. } | FieldWidget::MultiSelect { .. }
+            )
+        });
+        let has_toggle = widgets()
+            .any(|w| matches!(w, FieldWidget::Toggle(_) | FieldWidget::MultiSelect { .. }));
+
+        let mut hints = vec![("C-j", "next".to_string()), ("C-k", "prev".to_string())];
+        if has_inline {
+            hints.push(("\u{2191}\u{2193}/C-l/h", "pick".to_string()));
+        } else if has_dropdown {
+            hints.push(("\u{2191}\u{2193}", "pick".to_string()));
+        }
+        if has_toggle {
+            hints.push(("Spc", "toggle".to_string()));
+        }
+        // The same word as the submit button, so the two never disagree
+        // ("save" under a `[ Log in ]` button did).
+        hints.push(("C-\u{21b5}", self.submit_label.to_lowercase()));
+        hints.push(("Esc", "quit".to_string()));
+        hints
+    }
+
     // --- keyboard driving -------------------------------------------------
 
     /// Feeds one normalized key string and returns the resulting [`FormEvent`].
@@ -1400,21 +1433,20 @@ impl Form {
         // Compact help line.
         let key = Style::default().fg(accent).add_modifier(Modifier::BOLD);
         let dim = self.footer_style;
+        let spans: Vec<Span> = self
+            .help_hints()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, (k, what))| {
+                let lead = if i == 0 { " " } else { "  " };
+                [
+                    Span::styled(format!("{lead}{k}"), key),
+                    Span::styled(format!(" {what}"), dim),
+                ]
+            })
+            .collect();
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" C-j", key),
-                Span::styled(" next  ", dim),
-                Span::styled("C-k", key),
-                Span::styled(" prev  ", dim),
-                Span::styled("\u{2191}\u{2193}/C-l/h", key),
-                Span::styled(" pick  ", dim),
-                Span::styled("Spc", key),
-                Span::styled(" toggle  ", dim),
-                Span::styled("C-\u{21b5}", key),
-                Span::styled(" save  ", dim),
-                Span::styled("Esc", key),
-                Span::styled(" quit", dim),
-            ])),
+            Paragraph::new(Line::from(spans)),
             Rect::new(inner.x, help_y, inner.width, 1),
         );
     }
@@ -2131,6 +2163,64 @@ mod tests {
             &FormStyle::default(),
             &FormOptions::default(),
         )
+    }
+
+    fn hint_keys(form: &Form) -> Vec<String> {
+        form.help_hints()
+            .into_iter()
+            .map(|(k, what)| format!("{k} {what}"))
+            .collect()
+    }
+
+    /// A form of text fields has nothing to pick or toggle, so the help line
+    /// must not offer either — and the submit hint says what the button says.
+    #[test]
+    fn a_text_only_form_offers_no_pick_or_toggle() {
+        let form = Form::new(
+            "T",
+            vec![FormFieldSpec::text("user", "Username")],
+            &HashMap::new(),
+            &FormStyle::default(),
+            &FormOptions {
+                submit_label: Some("Log in".into()),
+                ..FormOptions::default()
+            },
+        );
+        assert_eq!(
+            hint_keys(&form),
+            ["C-j next", "C-k prev", "C-\u{21b5} log in", "Esc quit"]
+        );
+    }
+
+    /// Each hint appears for the field that uses it: a dropdown picks with the
+    /// arrows only, an inline select adds `ctrl+l`/`ctrl+h`, and a toggle or a
+    /// multi-select brings `space`.
+    #[test]
+    fn the_help_line_follows_the_field_kinds() {
+        let dropdown = build(vec![FormFieldSpec::select("k", "K", vec!["a".into()])]);
+        assert!(hint_keys(&dropdown).contains(&"\u{2191}\u{2193} pick".to_string()));
+        assert!(!hint_keys(&dropdown).iter().any(|h| h.starts_with("Spc")));
+
+        let inline = Form::new(
+            "T",
+            vec![FormFieldSpec::select("k", "K", vec!["a".into()])],
+            &HashMap::new(),
+            &FormStyle::default(),
+            &FormOptions {
+                select_style: SelectStyle::Inline,
+                ..FormOptions::default()
+            },
+        );
+        assert!(hint_keys(&inline).contains(&"\u{2191}\u{2193}/C-l/h pick".to_string()));
+
+        let toggle = build(vec![FormFieldSpec::toggle("t", "T")]);
+        assert!(hint_keys(&toggle).contains(&"Spc toggle".to_string()));
+        assert!(!hint_keys(&toggle).iter().any(|h| h.ends_with("pick")));
+
+        let multi = build(vec![FormFieldSpec::multiselect("m", "M", vec!["a".into()])]);
+        let hints = hint_keys(&multi);
+        assert!(hints.contains(&"\u{2191}\u{2193} pick".to_string()));
+        assert!(hints.contains(&"Spc toggle".to_string()));
     }
 
     /// A select's default value gates a dependent field's initial visibility:
