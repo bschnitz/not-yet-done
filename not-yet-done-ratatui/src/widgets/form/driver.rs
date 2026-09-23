@@ -940,9 +940,6 @@ impl Form {
         )
     }
 
-    /// Whether the focused field makes `enter` its own — a multi-line box, in
-    /// which a newline is the obvious reading of the key. The form is then
-    /// submitted with `ctrl+enter`, which works on every field.
     /// Whether the focused field is a file field — the one kind where `enter`
     /// opens a dialog instead of submitting.
     fn focused_is_file(&self) -> bool {
@@ -1037,6 +1034,9 @@ impl Form {
         self.ensure_focus_visible();
     }
 
+    /// Whether the focused field makes `enter` its own — a multi-line box, in
+    /// which a newline is the obvious reading of the key. The form is then
+    /// submitted with `ctrl+enter`, which works on every field.
     fn focused_takes_enter(&self) -> bool {
         matches!(
             self.fields.get(self.focused).map(|e| &e.widget),

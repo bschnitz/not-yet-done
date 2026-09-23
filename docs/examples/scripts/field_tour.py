@@ -290,21 +290,31 @@ def summary(collected):
 
 
 def shown_values(collected):
-    """(name, label, printable value) for everything that was answered."""
-    labels = {f["name"]: f.get("label", f["name"]) for f in about_fields() + detail_fields()}
-    for name, raw in collected.items():
+    """(name, label, printable value) for everything that was answered.
+
+    In the order the fields were asked in. ``collected`` is a map and its
+    values arrive sorted by key, so reading it out as it comes would hand
+    somebody their own answers back in an order they never saw them in.
+    """
+    for field in about_fields() + detail_fields():
+        name = field["name"]
+        raw = collected.get(name) or ""
         if not raw:
             continue
-        if name == "token":
+        if field.get("masked"):
             shown = "•" * len(raw)  # collected, never shown back
-        elif name == "spent":
+        elif field["type"] == "duration":
             minutes = whole(raw) or 0
             shown = f"{minutes // 60}h{minutes % 60:02d} ({minutes} min)"
-        elif "\n" in raw:
-            shown = ", ".join(split(raw))
+        elif field["type"] == "multiline":
+            # Newlines here are line breaks in one text rather than a list of
+            # values, and a summary that says so reads as what was typed.
+            shown = " ⏎ ".join(split(raw))
         else:
-            shown = raw
-        yield name, labels.get(name, name), shown
+            # What is left that can hold more than one value - a multiselect,
+            # a multi file field - sends them newline-joined.
+            shown = ", ".join(split(raw))
+        yield name, field.get("label", name), shown
 
 
 def confirm_fields(collected):

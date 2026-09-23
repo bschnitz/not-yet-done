@@ -162,16 +162,39 @@ impl App {
 
 /// A round's complaints in the shape the popup shows them in — the protocol
 /// keeps every message on a field, the dialog shows one line per field.
+///
+/// **In form order.** The popup opens on the first field it is handed, and
+/// only that field's message is on screen; which one the reader is shown
+/// first therefore decides where they start. [`FormState::field_errors`] is a
+/// `BTreeMap`, so taking the keys as they come would open on whichever
+/// complained field sorts first — the alphabet, which nobody wrote down and
+/// nobody can see. The field nearest the top of the form is the one an eye
+/// starts at, so that is the one to land on.
 fn field_errors(state: &FormState) -> Vec<FieldError> {
     let mut errors: Vec<FieldError> = state
-        .field_errors
-        .keys()
-        .filter_map(|key| {
+        .fields
+        .iter()
+        .filter_map(|field| {
             state
-                .field_error_text(key)
-                .map(|text| FieldError::field(key, text))
+                .field_error_text(&field.key)
+                .map(|text| FieldError::field(&field.key, text))
         })
         .collect();
+    // A message about a field this round no longer shows has nowhere to land,
+    // but it is still the script's word about the submission, so it is kept
+    // behind the ones that do — never ahead of them, or the form would open
+    // on a field that is not there.
+    errors.extend(
+        state
+            .field_errors
+            .keys()
+            .filter(|key| !state.fields.iter().any(|f| &f.key == *key))
+            .filter_map(|key| {
+                state
+                    .field_error_text(key)
+                    .map(|text| FieldError::field(key, text))
+            }),
+    );
     errors.extend(
         state
             .general_errors
@@ -183,6 +206,8 @@ fn field_errors(state: &FormState) -> Vec<FieldError> {
 
 #[cfg(test)]
 mod tests {
+    use not_yet_done_content::FormFieldSpec;
+
     use super::*;
 
     fn state_with(field_errors: &[(&str, &[&str])], general: &[&str]) -> FormState {
@@ -231,5 +256,40 @@ mod tests {
     #[test]
     fn a_form_without_complaints_produces_none() {
         assert!(field_errors(&FormState::default()).is_empty());
+    }
+
+    /// The reopened form lands on the first message it is handed, so the
+    /// order is the form's, not the alphabet's. A script that complains about
+    /// the title and the approver must reopen on the title, which is what the
+    /// reader sees first — even though `approver` sorts before it in the
+    /// `BTreeMap` the messages were kept in.
+    #[test]
+    fn messages_follow_the_order_of_the_fields() {
+        let mut state = state_with(
+            &[
+                ("approver", &["who signed off?"]),
+                ("title", &["too short"]),
+            ],
+            &[],
+        );
+        state.fields = vec![
+            FormFieldSpec::text("title", "Title"),
+            FormFieldSpec::text("approver", "Approved by"),
+        ];
+        let errors = field_errors(&state);
+        assert_eq!(errors[0].field.as_deref(), Some("title"));
+        assert_eq!(errors[1].field.as_deref(), Some("approver"));
+    }
+
+    /// A message about a field the round has dropped cannot be shown beside
+    /// it, but it is still what the script said — it stays, behind the ones
+    /// that have a field to stand next to.
+    #[test]
+    fn a_message_about_a_vanished_field_comes_last() {
+        let mut state = state_with(&[("gone", &["stale"]), ("title", &["too short"])], &[]);
+        state.fields = vec![FormFieldSpec::text("title", "Title")];
+        let errors = field_errors(&state);
+        assert_eq!(errors[0].field.as_deref(), Some("title"));
+        assert_eq!(errors[1].field.as_deref(), Some("gone"));
     }
 }

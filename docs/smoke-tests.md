@@ -9584,7 +9584,7 @@ more than eight hours at once, and then replaces its fields with a confirmation.
       `not-yet-done-cli script run docs/examples/scripts/log_work.py`. With
       every field supplied it needs no terminal at all —
       `--set spent=1h30 --set day=today --set activity=development --set
-    confirm=true </dev/null` prints the `result` payload as JSON
+  confirm=true </dev/null` prints the `result` payload as JSON
       (`commands: [reload]`, `minutes: 90`) and exits 0. The payload the popup
       would have built from the selected node comes from `--payload FILE`.
 - [x] **A `--set` means what a typed answer means.** `spent=1h30` reaches the
@@ -9624,3 +9624,46 @@ more than eight hours at once, and then replaces its fields with a confirmation.
       script's own directory, so a relative program path was resolved a second
       time against it and missed. Covered by
       `form_run::tests::a_script_named_by_a_relative_path_still_runs`.
+
+### Every field type at once (`field_tour.py`)
+
+`docs/examples/scripts/field_tour.py` writes nothing and talks to nothing: it
+collects one of every field kind, applies the checks a declaration cannot
+express, shows what it got and waits for a yes. That makes it the thing to run
+against a change to the form driver — everything it asks for is exercised in
+four rounds.
+
+- [x] **All eleven kinds come up and behave.** Round one shows `text`, a masked
+      `text`, `select`, `multiselect` and `toggle`; round two `date` (the word
+      `today` with `↳ 2026-09-23` under it), `datetime`, `number`, `decimal`,
+      `duration` (`1h30` with `↳ 1 h 30 min` under it), `multiline` and `file`.
+      The multiselect expands its options in place and `space` ticks them.
+- [x] **A masked field is bullets on screen and in the summary.** Typing a token
+      shows `••••••••••••` in the field, and the confirmation round shows the
+      same count of bullets rather than the value.
+- [x] **`visible_when` is decided in the widget.** `Approved by` is absent while
+      `Urgent` says no and appears the moment it is switched on — no round ran.
+- [x] **Every custom check fires on its own field, with the input intact.** A
+      four-letter title, `ready` and `blocked` together, an estimate of 4, four
+      attachments — each comes back as `⚠ …` in the footer of the field it
+      names, and the form is the one that stayed.
+- [x] **Two complaints at once land on the topmost field, not the alphabet.** A
+      short title plus urgent-without-approver reopens on `Title`; stepping down
+      to `Approved by` shows its own message. The messages are ordered by the
+      form, not by the map they were kept in — see
+      `script_form::tests::messages_follow_the_order_of_the_fields`.
+- [x] **The picker fills a multi `file` field.** `enter` opens it titled
+      `Attachments (any number)`, ticked files appear in `Selected Files`, and
+      `ctrl+o` writes them back as `3 files: …`.
+- [x] **Declining the confirmation goes back to the top, prefilled.** Answering
+      `No` reopens round one with every value in place — `visible_when`
+      re-evaluated from the prefilled toggle, so `Approved by` is there and
+      filled — and the general message `⚠ nothing was submitted — change what
+    you like` under the fields.
+- [x] **A round-tripped value comes back normalised, not as typed.** Round two
+      reopens with `90` in the duration field, which is what was submitted, and
+      the hint under it reads it back as `1 h 30 min`.
+- [x] **A result with an empty `commands` closes the form and does nothing.**
+      The final yes leaves the tree untouched and the log empty — the script
+      asked the front-end for nothing, which is not the same as answering
+      nothing.
