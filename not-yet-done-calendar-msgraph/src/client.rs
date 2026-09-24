@@ -8,7 +8,8 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 
 use not_yet_done_calendar_core::{
-    CalEvent, CalendarError, CalendarRef, EventDraft, ShowAs, TimeRange,
+    CalEvent, CalendarError, CalendarRef, EventDraft, MeetingProvider, OnlineMeeting, ShowAs,
+    TimeRange,
 };
 use not_yet_done_content::auth::CredentialResolver;
 
@@ -17,7 +18,8 @@ use crate::config::{DEFAULT_REQUEST_TIMEOUT_SECS, MsGraphConfig};
 const DEFAULT_BASE_URL: &str = "https://graph.microsoft.com";
 
 /// Fields we ask Graph for — keeps the payload lean and the parse total.
-const SELECT: &str = "id,subject,start,end,isAllDay,showAs,bodyPreview,webLink,location,organizer";
+const SELECT: &str = "id,subject,start,end,isAllDay,showAs,bodyPreview,webLink,location,organizer,\
+isOnlineMeeting,onlineMeetingProvider,onlineMeeting";
 
 pub(crate) struct MsGraphClient {
     http: reqwest::Client,
@@ -331,6 +333,16 @@ struct GraphEvent {
     web_link: Option<String>,
     location: Option<GraphLocation>,
     organizer: Option<GraphRecipient>,
+    #[serde(default)]
+    is_online_meeting: bool,
+    online_meeting_provider: Option<String>,
+    online_meeting: Option<GraphOnlineMeeting>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphOnlineMeeting {
+    join_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -358,6 +370,11 @@ struct GraphEmail {
 }
 
 fn map_event(ev: GraphEvent, label: &str) -> Result<CalEvent, CalendarError> {
+    let online_meeting = map_online_meeting(
+        ev.is_online_meeting,
+        ev.online_meeting_provider.as_deref(),
+        ev.online_meeting.and_then(|m| m.join_url),
+    );
     Ok(CalEvent {
         start: parse_graph_dt(&ev.start.date_time)?,
         end: parse_graph_dt(&ev.end.date_time)?,
@@ -376,7 +393,30 @@ fn map_event(ev: GraphEvent, label: &str) -> Result<CalEvent, CalendarError> {
         show_as: map_show_as(ev.show_as.as_deref()),
         body: ev.body_preview.filter(|s| !s.trim().is_empty()),
         url: ev.web_link.filter(|s| !s.trim().is_empty()),
+        online_meeting,
     })
+}
+
+/// Graph's own word on the meeting: `isOnlineMeeting`, the provider token
+/// (`teamsForBusiness`, `skypeForBusiness`, …) and `onlineMeeting.joinUrl`.
+/// A join link alone still counts — the host names the provider.
+fn map_online_meeting(
+    is_online: bool,
+    provider: Option<&str>,
+    join_url: Option<String>,
+) -> Option<OnlineMeeting> {
+    let join_url = join_url.filter(|u| !u.trim().is_empty());
+    if !is_online && join_url.is_none() {
+        return None;
+    }
+    let provider = match provider {
+        Some("teamsForBusiness") => MeetingProvider::Teams,
+        _ => join_url
+            .as_deref()
+            .and_then(MeetingProvider::of_url)
+            .unwrap_or(MeetingProvider::Other),
+    };
+    Some(OnlineMeeting { provider, join_url })
 }
 
 /// Graph (with `Prefer: outlook.timezone="UTC"`) returns e.g.
@@ -492,5 +532,39 @@ mod tests {
         // adapter's concern, not the client's.
         assert_eq!(mapped.body.as_deref(), Some("  agenda  "));
         assert!(!mapped.all_day);
+    }
+
+    #[test]
+    fn maps_graphs_online_meeting() {
+        let json = r#"{
+            "id": "BBB",
+            "start": {"dateTime": "2024-01-15T09:00:00", "timeZone": "UTC"},
+            "end": {"dateTime": "2024-01-15T10:00:00", "timeZone": "UTC"},
+            "isOnlineMeeting": true,
+            "onlineMeetingProvider": "teamsForBusiness",
+            "onlineMeeting": {"joinUrl": "https://teams.microsoft.com/l/meetup-join/x"}
+        }"#;
+        let ev: GraphEvent = serde_json::from_str(json).unwrap();
+        let meeting = map_event(ev, "Work").unwrap().online_meeting.unwrap();
+        assert_eq!(meeting.provider, MeetingProvider::Teams);
+        assert_eq!(
+            meeting.join_url.as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/x")
+        );
+    }
+
+    #[test]
+    fn online_meeting_falls_back_to_the_link_and_is_absent_when_offline() {
+        assert_eq!(
+            map_online_meeting(true, Some("unknown"), Some("https://example.zoom.us/j/1".into()))
+                .unwrap()
+                .provider,
+            MeetingProvider::Zoom
+        );
+        assert_eq!(
+            map_online_meeting(true, None, None).unwrap().provider,
+            MeetingProvider::Other
+        );
+        assert_eq!(map_online_meeting(false, None, None), None);
     }
 }

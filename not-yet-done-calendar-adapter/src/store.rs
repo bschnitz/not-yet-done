@@ -22,7 +22,7 @@ use sea_orm::{
     QueryFilter, TransactionTrait,
 };
 
-use not_yet_done_calendar_core::{CalEvent, ShowAs, TimeRange};
+use not_yet_done_calendar_core::{CalEvent, MeetingProvider, OnlineMeeting, ShowAs, TimeRange};
 
 use crate::adapter::MergedEvent;
 use crate::entity::{calendar_event, calendar_sync};
@@ -126,6 +126,8 @@ impl EventStore {
                         calendar_event::Column::ShowAs,
                         calendar_event::Column::Body,
                         calendar_event::Column::Url,
+                        calendar_event::Column::MeetingProvider,
+                        calendar_event::Column::MeetingUrl,
                     ])
                     .to_owned(),
                 )
@@ -280,6 +282,11 @@ impl EventStore {
             show_as: Set(e.show_as.as_str().to_string()),
             body: Set(e.body.clone()),
             url: Set(e.url.clone()),
+            meeting_provider: Set(e
+                .online_meeting
+                .as_ref()
+                .map(|m| m.provider.as_str().to_string())),
+            meeting_url: Set(e.online_meeting.as_ref().and_then(|m| m.join_url.clone())),
         }
     }
 }
@@ -304,6 +311,10 @@ fn from_row(r: calendar_event::Model) -> MergedEvent {
             show_as: ShowAs::from_token(&r.show_as),
             body: r.body,
             url: r.url,
+            online_meeting: r.meeting_provider.map(|provider| OnlineMeeting {
+                provider: MeetingProvider::from_token(&provider),
+                join_url: r.meeting_url,
+            }),
         },
     }
 }

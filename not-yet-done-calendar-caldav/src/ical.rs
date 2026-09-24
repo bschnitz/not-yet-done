@@ -10,7 +10,7 @@
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 
-use not_yet_done_calendar_core::{CalEvent, EventDraft, ShowAs};
+use not_yet_done_calendar_core::{CalEvent, EventDraft, OnlineMeeting, ShowAs};
 
 /// Serialise an [`EventDraft`] into a one-`VEVENT` iCalendar document for a
 /// CalDAV `PUT`. `uid` is the event's UID (also the basis of its resource
@@ -149,6 +149,9 @@ pub(crate) struct ParsedEvent {
     /// Duration parsed from a `DURATION` property, used to derive `end` when the
     /// event carries `DTSTART` + `DURATION` instead of `DTEND` (RFC 5545 §3.6.1).
     duration: Option<Duration>,
+    /// The meeting's join link, from `CONFERENCE` (RFC 7986) or a vendor
+    /// property (`X-MICROSOFT-SKYPETEAMSMEETINGURL`, `X-GOOGLE-CONFERENCE`).
+    join_url: Option<String>,
 }
 
 impl Default for ParsedEvent {
@@ -166,6 +169,7 @@ impl Default for ParsedEvent {
             // `ShowAs` has no Default; an event with no busy hint is Unknown.
             show_as: ShowAs::Unknown,
             duration: None,
+            join_url: None,
         }
     }
 }
@@ -200,6 +204,7 @@ impl ParsedEvent {
             show_as: self.show_as,
             body: self.description.filter(|s| !s.trim().is_empty()),
             url: self.url.filter(|s| !s.trim().is_empty()),
+            online_meeting: self.join_url.as_deref().map(OnlineMeeting::from_join_url),
         })
     }
 }
@@ -270,6 +275,14 @@ fn apply_property(ev: &mut ParsedEvent, name: &str, params: &[(String, String)],
             }
         }
         "DURATION" => ev.duration = parse_duration(value),
+        // Teams writes its own property; it names the meeting outright.
+        "X-MICROSOFT-SKYPETEAMSMEETINGURL" if is_web_link(value) => {
+            ev.join_url = Some(value.trim().to_string());
+        }
+        // A `CONFERENCE` may also be a dial-in (`tel:`); only a web link joins.
+        "CONFERENCE" | "X-GOOGLE-CONFERENCE" if is_web_link(value) => {
+            ev.join_url.get_or_insert_with(|| value.trim().to_string());
+        }
         // Prefer the Microsoft busy-status hint (maps cleanly onto ShowAs);
         // fall back to TRANSP. Never downgrade a known value to Unknown.
         "X-MICROSOFT-CDO-BUSYSTATUS" => {
@@ -289,6 +302,11 @@ fn apply_property(ev: &mut ParsedEvent, name: &str, params: &[(String, String)],
         }
         _ => {}
     }
+}
+
+fn is_web_link(value: &str) -> bool {
+    let v = value.trim_start().to_ascii_lowercase();
+    v.starts_with("https://") || v.starts_with("http://")
 }
 
 fn map_busystatus(v: &str) -> ShowAs {
@@ -643,5 +661,37 @@ mod tests {
         // And it still reads back whole.
         let ev = parse_events(&ics).remove(0).into_cal_event("c").unwrap();
         assert_eq!(ev.title, "x".repeat(200));
+    }
+
+    fn one_event(extra: &str) -> CalEvent {
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m-1\r\nDTSTART:20240115T090000Z\r\n\
+             {extra}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        parse_events(&ics).remove(0).into_cal_event("Work").unwrap()
+    }
+
+    #[test]
+    fn the_teams_property_makes_a_teams_meeting() {
+        let ev = one_event(
+            "CONFERENCE;VALUE=URI:https://example.invalid/other\r\n\
+             X-MICROSOFT-SKYPETEAMSMEETINGURL:https://teams.microsoft.com/l/meetup-join/x\r\n",
+        );
+        let meeting = ev.online_meeting.unwrap();
+        assert_eq!(meeting.provider.as_str(), "teams");
+        assert_eq!(
+            meeting.join_url.as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/x")
+        );
+    }
+
+    #[test]
+    fn a_conference_web_link_joins_but_a_dial_in_does_not() {
+        let ev = one_event(
+            "CONFERENCE;VALUE=URI;FEATURE=PHONE:tel:+1-555-0100\r\n\
+             CONFERENCE;VALUE=URI;FEATURE=VIDEO:https://meet.google.com/abc-defg-hij\r\n",
+        );
+        assert_eq!(ev.online_meeting.unwrap().provider.as_str(), "meet");
+        assert_eq!(one_event("").online_meeting, None);
     }
 }

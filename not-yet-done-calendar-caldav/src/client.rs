@@ -192,6 +192,7 @@ impl CalDavClient {
             show_as: draft.show_as,
             body: draft.body.clone(),
             url: Some(target.as_str().to_string()),
+            online_meeting: None,
         })
     }
 

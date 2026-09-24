@@ -55,6 +55,8 @@ const KNOWN_COLUMNS: &[&str] = &[
     "status",
     "body",
     "all_day",
+    "online",
+    "join_url",
 ];
 
 /// A compiled calendar query: a parsed, date-resolved filter expression.
@@ -181,6 +183,14 @@ impl RowFields for EventRow<'_> {
             "body" => text_or_null(&event.body),
             "show_as" | "status" => Field::Text(Cow::Borrowed(event.show_as.as_str())),
             "all_day" => Field::Bool(event.all_day),
+            "online" => match &event.online_meeting {
+                Some(m) => Field::Text(Cow::Borrowed(m.provider.as_str())),
+                None => Field::Null,
+            },
+            "join_url" => match event.online_meeting.as_ref().and_then(|m| m.join_url.as_deref()) {
+                Some(url) => Field::Text(Cow::Borrowed(url)),
+                None => Field::Null,
+            },
             // Unreachable: parse() validated the column set up front.
             _ => Field::Null,
         }
@@ -206,6 +216,7 @@ mod tests {
             show_as: ShowAs::Busy,
             body: None,
             url: None,
+            online_meeting: None,
         }
     }
 
@@ -351,5 +362,19 @@ mod tests {
         let (lo, hi) = q.date_bounds();
         assert_eq!(lo, Some(local_midnight(2030, 6, 1)));
         assert_eq!(hi, None);
+    }
+
+    #[test]
+    fn online_meetings_are_queryable() {
+        use not_yet_done_calendar_core::{MeetingProvider, OnlineMeeting};
+        let mut teams = event("Standup", 9);
+        teams.online_meeting = Some(OnlineMeeting {
+            provider: MeetingProvider::Teams,
+            join_url: None,
+        });
+        let q = "query:\n  [online, eq, teams]";
+        assert!(matches(q, &teams));
+        assert!(!matches(q, &event("Lunch", 12)));
+        assert!(matches("query:\n  [online, is_null]", &event("Lunch", 12)));
     }
 }

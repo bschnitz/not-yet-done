@@ -1506,6 +1506,7 @@ fn signature(merged: &[MergedEvent]) -> u64 {
         m.event.end.timestamp().hash(&mut hasher);
         m.event.title.hash(&mut hasher);
         m.event.show_as.as_str().hash(&mut hasher);
+        m.event.online_meeting.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1549,6 +1550,22 @@ fn event_summary(m: &MergedEvent) -> NodeSummary {
         ),
         field("show_as", e.show_as.as_str().to_string(), "Show as"),
         field("all_day", e.all_day.to_string(), "All day"),
+        field(
+            "online",
+            e.online_meeting
+                .as_ref()
+                .map(|m| m.provider.as_str().to_string())
+                .unwrap_or_default(),
+            "Online",
+        ),
+        field(
+            "join_url",
+            e.online_meeting
+                .as_ref()
+                .and_then(|m| m.join_url.clone())
+                .unwrap_or_default(),
+            "Join URL",
+        ),
     ];
 
     NodeSummary {
@@ -1585,6 +1602,15 @@ fn render_body(m: &MergedEvent) -> String {
         s.push_str(&format!("- **Organizer:** {org}\n"));
     }
     s.push_str(&format!("- **Show as:** {}\n", e.show_as.as_str()));
+    if let Some(meeting) = &e.online_meeting {
+        match meeting.join_url.as_deref() {
+            Some(url) => s.push_str(&format!(
+                "- **Online:** {} — [Join]({url})\n",
+                meeting.provider.as_str()
+            )),
+            None => s.push_str(&format!("- **Online:** {}\n", meeting.provider.as_str())),
+        }
+    }
     if let Some(url) = e.url.as_deref().filter(|u| !u.trim().is_empty()) {
         s.push_str(&format!("\n[Open in calendar]({url})\n"));
     }
@@ -1738,6 +1764,7 @@ mod tests {
                 show_as: ShowAs::Busy,
                 body: Some("agenda".to_string()),
                 url: Some("https://example.invalid/x".to_string()),
+                online_meeting: None,
             },
         }
     }
@@ -2263,6 +2290,7 @@ mod tests {
                 show_as: draft.show_as,
                 body: draft.body.clone(),
                 url: None,
+                online_meeting: None,
             })
         }
     }

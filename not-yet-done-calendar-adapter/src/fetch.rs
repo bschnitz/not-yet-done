@@ -10,7 +10,7 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 
-use not_yet_done_calendar_core::{CalendarBackend, TimeRange};
+use not_yet_done_calendar_core::{meeting, CalEvent, CalendarBackend, TimeRange};
 use not_yet_done_content::Invalidation;
 
 use crate::adapter::{Cache, MergedEvent};
@@ -174,6 +174,7 @@ pub(crate) async fn fetch_one(
         .map_err(|e| format!("{}: {e}", backend.connection_label()))?;
     let mut merged: Vec<MergedEvent> = events
         .into_iter()
+        .map(with_detected_meeting)
         .map(|event| MergedEvent {
             global_id: format!("calendar:{conn}:{}", event.uid),
             account: event.calendar.clone(),
@@ -187,4 +188,14 @@ pub(crate) async fn fetch_one(
             .then_with(|| a.global_id.cmp(&b.global_id))
     });
     Ok(merged)
+}
+
+/// A backend that did not say whether the event is an online meeting leaves
+/// it to the text: a known join link in the location or body, or a location
+/// naming Teams (see [`meeting::detect`]).
+fn with_detected_meeting(mut event: CalEvent) -> CalEvent {
+    if event.online_meeting.is_none() {
+        event.online_meeting = meeting::detect(event.location.as_deref(), event.body.as_deref());
+    }
+    event
 }

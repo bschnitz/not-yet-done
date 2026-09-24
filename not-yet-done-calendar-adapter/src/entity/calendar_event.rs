@@ -30,6 +30,10 @@ pub struct Model {
     pub show_as: String,
     pub body: Option<String>,
     pub url: Option<String>,
+    /// [`MeetingProvider::as_str`](not_yet_done_calendar_core::MeetingProvider::as_str)
+    /// token; `None` for an event held in no online meeting.
+    pub meeting_provider: Option<String>,
+    pub meeting_url: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

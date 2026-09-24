@@ -22,6 +22,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+pub mod meeting;
+
+pub use meeting::{MeetingProvider, OnlineMeeting};
+
 /// Half-open time window `[start, end)` an event listing is scoped to. The
 /// adapter derives it from its configured look-behind / look-ahead window and
 /// passes the same range to every backend so their results line up.
@@ -152,6 +156,9 @@ pub struct CalEvent {
     pub body: Option<String>,
     /// Web link to open the event in the source app, if any.
     pub url: Option<String>,
+    /// The online meeting the event is held in, if any — set by a backend that
+    /// knows, otherwise found in the text by [`meeting::detect`].
+    pub online_meeting: Option<OnlineMeeting>,
 }
 
 /// A calendar collection a connection exposes as a possible **write target**.

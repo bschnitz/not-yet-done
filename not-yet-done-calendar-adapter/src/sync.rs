@@ -226,6 +226,7 @@ mod tests {
                     show_as: ShowAs::Busy,
                     body: None,
                     url: None,
+                    online_meeting: None,
                 })
                 .collect())
         }
