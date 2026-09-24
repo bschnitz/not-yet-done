@@ -76,6 +76,15 @@
 # for it. Enable the backend with the `office365-web` cargo feature (on by
 # default).
 
+# Every connection entry may also say when it touches the network:
+#
+#   fetch — `live` (default): listings and the background poll fetch it.
+#           `on_demand`: only a hard refresh (`r`) or the `sync` action does;
+#           everything else reads what the store holds. Meant for a backend
+#           that is expensive or intrusive to ask (a browser sign-in), synced
+#           on a schedule by something else (see the `sync` action in
+#           calendar.yaml).
+
 connections:
   - id: work
     backend: microsoft
@@ -109,6 +118,7 @@ connections:
   # browser window.
   - id: web
     backend: office365-web
+    fetch: on_demand
     config:
       account_key: web
       name: Web calendar
@@ -157,8 +167,9 @@ connections:
       # calendars:
       #   - /calendars/user@mail.de/private/
 
-# How often (seconds) the background task re-fetches every connection to detect
-# externally-made changes and refresh the view. Optional; defaults to 300.
+# How often (seconds) the background task re-fetches the `live` connections to
+# detect externally-made changes, and picks up what another process synced into
+# the store meanwhile. Optional; defaults to 300.
 # poll_interval_secs: 300
 
 # Event window: how many days back / forward the listing spans, resolved
@@ -173,3 +184,11 @@ connections:
 # frontend's choice — see the `reminder:` block in calendar.yaml. Optional;
 # defaults to a single 5-minute reminder. An empty list turns reminders off.
 # reminder_lead_minutes: [15, 5]
+
+# Event store: every successful fetch lands in a database, so a listing — in
+# the TUI or a one-shot CLI call — shows the last synced events without asking
+# the network, and a sync made by one process is seen by the others. Any
+# database SeaORM speaks works (SQLite, Postgres). Optional; defaults to
+# sqlite:~/.local/share/not_yet_done/calendar-cache.sqlite.
+# db:
+#   url: postgres://user@localhost/calendar

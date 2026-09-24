@@ -207,6 +207,32 @@ async fn invoke_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<A
     })
 }
 
+/// The root's `Sync now` action: fetch every connection (on-demand ones too)
+/// and store the result — see [`crate::sync`]. `--arg connections=a,b`
+/// narrows it, `--arg timeout=<secs>` bounds each connection.
+fn sync_action() -> NodeAction {
+    NodeAction::new("sync", "Sync now", InputSpec::None)
+}
+
+/// `invoke_action("sync")` — sync the chosen connections, awaited. Any
+/// connection that did not sync turns the whole report into an error, so a
+/// scheduler calling the CLI sees a non-zero exit.
+async fn invoke_sync(fetcher: &Fetcher, args: &ActionArgs) -> Result<ActionDispatch> {
+    let (indices, limit) = match crate::sync::select(fetcher, args)
+        .and_then(|indices| Ok((indices, crate::sync::timeout(args)?)))
+    {
+        Ok(chosen) => chosen,
+        Err(why) => return Ok(ActionDispatch::Error(why)),
+    };
+    let report = crate::sync::run(fetcher, &indices, limit).await;
+    if report.failed() {
+        return Ok(ActionDispatch::Error(report.message()));
+    }
+    Ok(ActionDispatch::Done {
+        message: Some(report.message()),
+    })
+}
+
 // -- Form-value helpers (the calendar counterpart of local-adapter's form.rs) --
 
 /// Read a Form field, treating absent or whitespace-only values as `None`.
@@ -1078,6 +1104,7 @@ impl ContentAdapter for CalendarAdapter {
             "calendar:root" => vec![
                 create_event_action(&self.calendars.read().unwrap()),
                 toggle_window_action(),
+                sync_action(),
             ],
             _ => Vec::new(),
         }
@@ -1340,9 +1367,10 @@ impl Node for CalendarRoot {
         }
     }
 
-    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+    async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
             "toggle_window" => invoke_toggle_window(&self.fetcher.backends).await,
+            "sync" => invoke_sync(&self.fetcher, &ctx.args).await,
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the calendar root"
             ))),

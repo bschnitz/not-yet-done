@@ -292,6 +292,17 @@ views:
         type: custom
         id: toggle_window
         on_container: true
+      # Fetch every connection now — the `fetch: on_demand` ones too — and
+      # store the result; the status line reports each connection. The same
+      # action serves a scheduler from the command line:
+      #   nyd adapter calendar root sync --arg connections=work,mailde --arg timeout=120
+      # (`connections` defaults to all, `timeout` — seconds per connection —
+      # to 300). Any connection that did not sync makes it exit non-zero.
+      - name: sync now
+        key: 'a s'
+        type: custom
+        id: sync
+        on_container: true
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f

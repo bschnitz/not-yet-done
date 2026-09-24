@@ -201,6 +201,14 @@ db:
     }
 
     #[test]
+    fn the_committed_example_parses() {
+        let yaml = include_str!("../../docs/examples/views/calendar-adapter.yaml");
+        let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("example parses");
+        let web = cfg.connections.iter().find(|c| c.id == "web").expect("web");
+        assert_eq!(web.fetch, FetchMode::OnDemand);
+    }
+
+    #[test]
     fn rejects_unknown_top_level_field() {
         let yaml = "connections: []\nbogus: 1\n";
         assert!(serde_yaml::from_str::<CalendarConfig>(yaml).is_err());

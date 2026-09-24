@@ -113,6 +113,17 @@ impl Fetcher {
         .await
     }
 
+    /// How many events the cache holds for `connection`.
+    pub(crate) async fn cached_count(&self, connection: &str) -> usize {
+        let prefix = format!("calendar:{connection}:");
+        self.cache
+            .read()
+            .await
+            .keys()
+            .filter(|id| id.starts_with(&prefix))
+            .count()
+    }
+
     /// Load whatever another process stored since the cache was last filled.
     pub(crate) async fn catch_up(&self) -> bool {
         persist::catch_up(&self.cache, self.persisted.as_deref()).await

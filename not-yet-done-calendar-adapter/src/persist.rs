@@ -34,6 +34,7 @@ impl Persisted {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn store(&self) -> &EventStore {
         &self.store
     }

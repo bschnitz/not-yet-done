@@ -21,5 +21,6 @@ mod persist;
 mod query;
 mod registry;
 mod store;
+mod sync;
 
 pub use factory::CalendarAdapterFactory;
