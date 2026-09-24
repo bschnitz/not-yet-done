@@ -114,6 +114,19 @@ impl ShowAs {
             ShowAs::Unknown => "unknown",
         }
     }
+
+    /// Inverse of [`as_str`](Self::as_str); an unrecognised token maps to
+    /// [`ShowAs::Unknown`].
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "free" => ShowAs::Free,
+            "tentative" => ShowAs::Tentative,
+            "busy" => ShowAs::Busy,
+            "oof" => ShowAs::OutOfOffice,
+            "elsewhere" => ShowAs::WorkingElsewhere,
+            _ => ShowAs::Unknown,
+        }
+    }
 }
 
 /// One calendar event, normalised across protocols. `start`/`end` are always

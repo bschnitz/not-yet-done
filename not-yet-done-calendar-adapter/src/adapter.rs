@@ -32,8 +32,10 @@ use not_yet_done_content::*;
 
 use crate::config::{
     CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_WINDOW_FUTURE_DAYS,
-    DEFAULT_WINDOW_PAST_DAYS, Window, default_reminder_leads,
+    DEFAULT_WINDOW_PAST_DAYS, FetchMode, Window, default_reminder_leads,
 };
+use crate::fetch::{Fetcher, Staleness};
+use crate::persist::Persisted;
 use crate::query::CalendarQuery;
 use crate::registry::backend_factories;
 
@@ -234,11 +236,8 @@ fn form_flag(values: &HashMap<String, String>, key: &str) -> bool {
 /// backend that owns the chosen calendar and refresh that connection's cache
 /// slice so the new event shows immediately.
 async fn execute_create(
-    backends: &[Box<dyn CalendarBackend>],
+    fetcher: &Fetcher,
     calendars: &[GlobalCalendar],
-    cache: &Cache,
-    window: Window,
-    inv_tx: &broadcast::Sender<Invalidation>,
     values: &HashMap<String, String>,
 ) -> Result<ActionOutcome> {
     let title = form_required(values, "title")?.to_string();
@@ -281,10 +280,10 @@ async fn execute_create(
     };
 
     // Find the backend that owns the target calendar.
-    let backend = backends
-        .iter()
-        .find(|b| b.connection_id() == target.conn_id)
+    let backend_idx = fetcher
+        .index_of(&target.conn_id)
         .ok_or_else(|| other_err(format!("no connection for calendar '{}'", target.label)))?;
+    let backend = &fetcher.backends[backend_idx];
 
     let draft = EventDraft {
         title: title.clone(),
@@ -301,15 +300,11 @@ async fn execute_create(
         .await
         .map_err(|e| other_err(format!("could not create event: {e}")))?;
 
-    // Re-fetch just this connection's slice so the new event lands in the cache
+    // Re-fetch just this connection's slice so the new event lands in the store
     // and the frontend reloads to show it — the same per-connection path the
     // ready-watch uses, so siblings' cached events are untouched.
-    let range = window.range(Utc::now());
-    if let Ok(events) = fetch_one(backend.as_ref(), &range).await {
-        if store_connection(cache, &target.conn_id, &events).await {
-            let _ = inv_tx.send(Invalidation::All);
-        }
-    }
+    let range = fetcher.window.range(Utc::now());
+    let _ = fetcher.sync_one(backend_idx, &range, Staleness::Keep).await;
 
     let when = if all_day {
         start
@@ -337,18 +332,19 @@ async fn execute_create(
 /// and its origin account label — the unit rows and detail nodes are built
 /// from.
 #[derive(Clone, Debug)]
-struct MergedEvent {
+pub(crate) struct MergedEvent {
     /// `calendar:<connection_id>:<uid>` — unique across all connections.
-    global_id: String,
+    pub(crate) global_id: String,
     /// Connection label surfaced as the "Account" column.
-    account: String,
-    event: CalEvent,
+    pub(crate) account: String,
+    pub(crate) event: CalEvent,
 }
 
-/// Shared cache of the last successful merge, keyed by global id. Kept warm by
-/// both `list()` and the poll loop so `get_by_id` (detail navigation) resolves
+/// Shared cache of the known events, keyed by global id — a mirror of the
+/// persistent store (see [`crate::persist`]). Kept warm by `list()`, the poll
+/// loop and the ready-watch so `get_by_id` (detail navigation) resolves
 /// without another network round-trip.
-type Cache = Arc<RwLock<HashMap<String, MergedEvent>>>;
+pub(crate) type Cache = Arc<RwLock<HashMap<String, MergedEvent>>>;
 
 /// Aggregated loading state across all connections, shared by the per-backend
 /// ready-watch tasks (`spawn_ready_watch`). The banner is Busy while ANY
@@ -475,6 +471,19 @@ pub struct CalendarAdapter {
     /// Latches `true` once `ensure_calendars` has run, so the (possibly empty)
     /// discovered list is cached rather than re-enumerated on every form open.
     calendars_loaded: Arc<AtomicBool>,
+    /// Ids of the `fetch: on_demand` connections — fetched only by an explicit
+    /// sync or a hard reload; everything else serves them from the store.
+    on_demand: Arc<HashSet<String>>,
+    /// The persistent event store the cache mirrors; `None` only in unit
+    /// tests.
+    persisted: Option<Arc<Persisted>>,
+    /// Latches `true` once `list()` kicked its first fetch round, so a view
+    /// warmed from the store still fetches its live connections once per
+    /// process.
+    fetched_once: Arc<AtomicBool>,
+    /// Set by a hard [`refresh`](ContentAdapter::refresh): the next `list()`
+    /// round fetches the on-demand connections too.
+    fetch_on_demand_next: Arc<AtomicBool>,
 }
 
 impl CalendarAdapter {
@@ -483,6 +492,7 @@ impl CalendarAdapter {
     pub(crate) fn from_config(
         instance_id: String,
         cfg: CalendarConfig,
+        persisted: Option<Arc<Persisted>>,
         ctx: &not_yet_done_content::HostContext,
     ) -> std::result::Result<Self, String> {
         let factories = backend_factories();
@@ -490,7 +500,11 @@ impl CalendarAdapter {
             factories.iter().map(|f| (f.backend_type(), f)).collect();
 
         let mut backends: Vec<Box<dyn CalendarBackend>> = Vec::new();
+        let mut on_demand: HashSet<String> = HashSet::new();
         for conn in cfg.connections {
+            if conn.fetch == FetchMode::OnDemand {
+                on_demand.insert(conn.id.clone());
+            }
             let factory = by_type.get(conn.backend.as_str()).ok_or_else(|| {
                 format!(
                     "connection '{}': unknown backend '{}' (not compiled in — enable its cargo feature)",
@@ -564,6 +578,10 @@ impl CalendarAdapter {
             prompts_taken: Arc::new(AtomicBool::new(false)),
             calendars: Arc::new(std::sync::RwLock::new(Vec::new())),
             calendars_loaded: Arc::new(AtomicBool::new(false)),
+            on_demand: Arc::new(on_demand),
+            persisted,
+            fetched_once: Arc::new(AtomicBool::new(false)),
+            fetch_on_demand_next: Arc::new(AtomicBool::new(false)),
         };
         adapter.spawn_poll();
         adapter.spawn_reminders();
@@ -625,27 +643,37 @@ impl CalendarAdapter {
     /// `get_by_id("root")` passes the freshly-ensured list.
     fn build_root(&self, calendars: Vec<GlobalCalendar>) -> CalendarRoot {
         CalendarRoot {
-            backends: Arc::clone(&self.backends),
-            window: self.window,
-            cache: Arc::clone(&self.cache),
+            fetcher: self.fetcher(),
             calendars,
+        }
+    }
+
+    /// The shared handles every fetch lands its result through.
+    fn fetcher(&self) -> Fetcher {
+        Fetcher {
+            backends: Arc::clone(&self.backends),
+            on_demand: Arc::clone(&self.on_demand),
+            cache: Arc::clone(&self.cache),
+            persisted: self.persisted.clone(),
+            window: self.window,
             inv_tx: self.inv_tx.clone(),
+            query_gen: Arc::clone(&self.query_gen),
         }
     }
 
     /// Kick off the background poll loop (no-op outside a Tokio runtime, e.g.
     /// in a sync unit test). Detached: it lives for the adapter's lifetime.
+    ///
+    /// Each tick re-fetches the live connections (never the on-demand ones)
+    /// and loads whatever another process synced into the store meanwhile;
+    /// when the set the user sees changed, it invalidates the view.
     fn spawn_poll(&self) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let backends = Arc::clone(&self.backends);
-        let cache = Arc::clone(&self.cache);
-        let window = self.window;
+        let fetcher = self.fetcher();
         let current_query = Arc::clone(&self.current_query);
         let interval = self.poll_interval;
-        let inv_tx = self.inv_tx.clone();
-        let query_gen = Arc::clone(&self.query_gen);
         let mut armed_rx = self.armed_tx.subscribe();
 
         handle.spawn(async move {
@@ -668,45 +696,37 @@ impl CalendarAdapter {
 
             loop {
                 ticker.tick().await;
-                let gen_start = query_gen.load(Ordering::SeqCst);
-                let range = effective_range(&*current_query.read().await, &window, Utc::now());
-                // Bound the poll fetch at half the poll window: a fetch that
+                let was_empty = fetcher.cache.read().await.is_empty();
+                let range = effective_range(&*current_query.read().await, &fetcher.window, Utc::now());
+                // Bound the fetches at half the poll window: a connection that
                 // can't answer within that budget is abandoned and retried next
                 // tick, so a wedged backend never stalls the loop for a whole
                 // interval. The initial interactive login is *not* subject to
                 // this — it runs on `list()`/the ready-watch, not the poll.
-                let merged =
-                    match tokio::time::timeout(interval / 2, fetch_all(&backends, &range)).await {
-                        Ok(Ok(merged)) => merged,
-                        // Transient failure or timeout: keep the last good
-                        // signature/cache so a blip doesn't spuriously look like
-                        // "everything changed".
-                        Ok(Err(_)) | Err(_) => continue,
-                    };
-                // Query changed while this fetch was in flight → its window is
-                // stale. Drop it; the next tick already reads the new query.
-                if query_gen.load(Ordering::SeqCst) != gen_start {
-                    continue;
-                }
-                // Was the cache empty *before* this store? Used below to detect
-                // "data first arrived" (see the emit condition).
-                let was_empty = cache.read().await.is_empty();
-                if !store_cache(&cache, &merged).await {
-                    // Empty merge over a non-empty cache → transient glitch, kept
-                    // last-good. Don't touch the signature or notify anyone.
-                    continue;
-                }
-                let sig = signature(&merged);
+                let round = futures::future::join_all(fetcher.fetchable(false).into_iter().map(
+                    |idx| {
+                        let fetcher = fetcher.clone();
+                        async move {
+                            let _ = tokio::time::timeout(
+                                interval / 2,
+                                fetcher.sync_one(idx, &range, Staleness::DropIfQueryMoved),
+                            )
+                            .await;
+                        }
+                    },
+                ));
+                round.await;
+                fetcher.catch_up().await;
 
+                let sig = cache_signature(&fetcher.cache).await;
+                let now_empty = fetcher.cache.read().await.is_empty();
                 // Emit an invalidation when the set the user sees actually
                 // changed — OR when data first arrives over a previously empty
-                // cache. The latter auto-refreshes the view after an initial
-                // load that came back empty because the browser backend was
-                // still signing in (so the user need not press `r` again once
-                // the background poll finally gets the events).
+                // cache (an initial load that came back empty because a browser
+                // backend was still signing in), so the user need not press `r`.
                 let changed = last_sig.map(|prev| prev != sig).unwrap_or(false);
-                if changed || (was_empty && !merged.is_empty()) {
-                    let _ = inv_tx.send(Invalidation::All);
+                if changed || (was_empty && !now_empty) {
+                    let _ = fetcher.inv_tx.send(Invalidation::All);
                 }
                 last_sig = Some(sig);
             }
@@ -756,13 +776,9 @@ impl CalendarAdapter {
                 continue;
             };
             let conn_id = backend.connection_id().to_string();
-            let backends = Arc::clone(&self.backends);
-            let cache = Arc::clone(&self.cache);
-            let window = self.window;
+            let fetcher = self.fetcher();
             let current_query = Arc::clone(&self.current_query);
-            let inv_tx = self.inv_tx.clone();
             let status_tx = self.status_tx.clone();
-            let query_gen = Arc::clone(&self.query_gen);
             let load_state = Arc::clone(&load_state);
             handle.spawn(async move {
                 loop {
@@ -811,38 +827,23 @@ impl CalendarAdapter {
                             // own interactive login — so a finished connection's
                             // events would wait for the slowest one. Fetching just
                             // the connection that became ready lands its events the
-                            // instant it's done, and storing only its slice
-                            // (`store_connection`) leaves the siblings' cached
-                            // events untouched.
-                            let backends = Arc::clone(&backends);
-                            let cache = Arc::clone(&cache);
+                            // instant it's done, and landing only its slice
+                            // leaves the siblings' cached events untouched.
+                            let fetcher = fetcher.clone();
                             let current_query = Arc::clone(&current_query);
-                            let inv_tx = inv_tx.clone();
-                            let query_gen = Arc::clone(&query_gen);
-                            let conn_id = conn_id.clone();
                             tokio::spawn(async move {
-                                let gen_start = query_gen.load(Ordering::SeqCst);
                                 let range = effective_range(
                                     &*current_query.read().await,
-                                    &window,
+                                    &fetcher.window,
                                     Utc::now(),
                                 );
-                                let Ok(events) = fetch_one(backends[idx].as_ref(), &range).await
-                                else {
-                                    return;
-                                };
-                                // Query changed mid-fetch → the window this result
-                                // covers is stale; drop it (same rule as the poll).
-                                if query_gen.load(Ordering::SeqCst) != gen_start {
-                                    return;
-                                }
-                                // Per-connection store with the same empty-clobber
-                                // guard: a login blip that yields an empty fetch for
-                                // this connection must not wipe its good cached
-                                // slice — nor any sibling's.
-                                if store_connection(&cache, &conn_id, &events).await {
-                                    let _ = inv_tx.send(Invalidation::All);
-                                }
+                                // Same landing as every fetch: a query change
+                                // mid-fetch drops the stale window, and an empty
+                                // result (a login blip) never wipes this
+                                // connection's known events — nor any sibling's.
+                                let _ = fetcher
+                                    .sync_one(idx, &range, Staleness::DropIfQueryMoved)
+                                    .await;
                             });
                         }
                         // Missed a fire (slow consumer): the next fetch still
@@ -1100,7 +1101,7 @@ impl ContentAdapter for CalendarAdapter {
             let calendars = self.ensure_calendars().await;
             return Ok(Box::new(self.build_root(calendars)));
         }
-        resolve_event(&self.backends, self.window, &self.cache, id).await
+        resolve_event(&self.fetcher(), id).await
     }
 
     /// The single source of truth about what lives under a calendar node: the
@@ -1114,22 +1115,7 @@ impl ContentAdapter for CalendarAdapter {
             "calendar:root" => vec![Child {
                 node_type: event_node_type(),
                 columns: event_columns(),
-                list: Box::new(move |params| {
-                    Box::pin(async move {
-                        list_events_root(
-                            &self.backends,
-                            &self.window,
-                            &self.cache,
-                            &self.armed_tx,
-                            &self.current_query,
-                            &self.query_gen,
-                            &self.inv_tx,
-                            &self.fetch_tasks,
-                            params,
-                        )
-                        .await
-                    })
-                }),
+                list: Box::new(move |params| Box::pin(self.list_events(params))),
             }],
             _ => Vec::new(),
         }
@@ -1140,8 +1126,10 @@ impl ContentAdapter for CalendarAdapter {
     }
 
     /// Hard refresh (the `r` action): abort every in-flight per-connection fetch
-    /// outright and drop the cache, so the ensuing `list()` runs cold and
-    /// re-fetches every connection from scratch. Bumping `query_gen` first means
+    /// outright and drop the cache, so the ensuing `list()` reloads the store
+    /// and re-fetches every connection — the `fetch: on_demand` ones included,
+    /// which is one of the two ways they touch the network (the other is the
+    /// root's `sync` action). Bumping `query_gen` first means
     /// any fetch task that slips past its `abort()` still discards its result
     /// instead of storing a stale slice. The poll loop and ready-watch daemons
     /// are deliberately left running — they are not one-shot loads; their own
@@ -1153,6 +1141,10 @@ impl ContentAdapter for CalendarAdapter {
             handle.abort();
         }
         self.cache.write().await.clear();
+        if let Some(p) = &self.persisted {
+            p.forget_loaded();
+        }
+        self.fetch_on_demand_next.store(true, Ordering::SeqCst);
         let _ = self.armed_tx.send(true);
         Ok(())
     }
@@ -1211,16 +1203,14 @@ impl ContentAdapter for CalendarAdapter {
 /// list-only handles (`armed_tx`, `current_query`, `query_gen`, `inv_tx`) that
 /// used to live here are gone with the node's former `list`.
 struct CalendarRoot {
-    backends: Arc<Vec<Box<dyn CalendarBackend>>>,
-    window: Window,
-    cache: Cache,
+    /// Backends, window, cache and store — also how a successful `create`
+    /// lands the new event and invalidates the view without waiting for the
+    /// next poll.
+    fetcher: Fetcher,
     /// The pooled write-target calendars (see [`GlobalCalendar`]) — the option
     /// list for the `create` form's picker and the lookup `execute` resolves
     /// the chosen target against. Empty until `get_by_id("root")` ensured them.
     calendars: Vec<GlobalCalendar>,
-    /// Broadcast handle so a successful `create` can invalidate the view and
-    /// surface the new event without waiting for the next poll.
-    inv_tx: broadcast::Sender<Invalidation>,
 }
 
 impl CalendarRoot {
@@ -1229,150 +1219,84 @@ impl CalendarRoot {
     const ROOT_ID: &'static str = "root";
 }
 
-/// Kick a background fetch of every connection for `range`, storing each
-/// connection's slice as it lands and invalidating so the frontend reloads
-/// and serves the now-warm cache. Fire-and-forget — the caller never awaits
-/// it — so a slow backend's interactive login can't block the view: a fast
-/// connection's events appear the instant its slice lands, independent of
-/// its siblings.
-///
-/// One detached task per backend (each `list_events` may block for the whole
-/// duration of that connection's sign-in, so they must not be serialised).
-/// No-op outside a Tokio runtime (e.g. a sync unit test). The `query_gen`
-/// guard drops a result whose window a concurrent query change has
-/// superseded; `store_connection` swallows an empty fetch (login still in
-/// flight) without invalidating, so this never spins into a reload storm —
-/// the ready-watch delivers the events once the sign-in actually completes.
-fn spawn_fetch(
-    backends: &Arc<Vec<Box<dyn CalendarBackend>>>,
-    cache: &Cache,
-    inv_tx: &broadcast::Sender<Invalidation>,
-    query_gen: &Arc<AtomicU64>,
-    fetch_tasks: &Arc<Mutex<Vec<AbortHandle>>>,
-    range: TimeRange,
-) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    // Track this round's per-connection tasks so a hard `refresh()` can abort
-    // them outright. A new fetch round supersedes the previous one's handles
-    // (any still-running task from before is either already aborted by the
-    // refresh that triggered us, or about to drop its result via `query_gen`),
-    // so replace rather than append — the vec stays bounded by `backends.len()`.
-    let mut handles = Vec::with_capacity(backends.len());
-    for idx in 0..backends.len() {
-        let backends = Arc::clone(backends);
-        let cache = Arc::clone(cache);
-        let inv_tx = inv_tx.clone();
-        let query_gen = Arc::clone(query_gen);
-        let task = handle.spawn(async move {
-            let gen_start = query_gen.load(Ordering::SeqCst);
-            let Ok(events) = fetch_one(backends[idx].as_ref(), &range).await else {
-                return;
-            };
-            if query_gen.load(Ordering::SeqCst) != gen_start {
-                return;
-            }
-            let conn_id = backends[idx].connection_id().to_string();
-            if store_connection(&cache, &conn_id, &events).await {
-                let _ = inv_tx.send(Invalidation::All);
-            }
-        });
-        handles.push(task.abort_handle());
-    }
-    *fetch_tasks.lock().unwrap() = handles;
-}
-
-/// List the `calendar:event` rows under the root: the single fetch/merge/sort
-/// body shared by [`ContentAdapter::childs`]'s `list` callback and the legacy
-/// [`CalendarRoot::list`]. Sources every bit of state from the passed-in
-/// adapter handles (the root holds copies of exactly these), so both call
-/// sites behave identically. See [`CalendarRoot::list`]'s former inline
-/// comments for the whys — arm the poll latch, publish the query as the load
-/// window's source of truth (bumping `query_gen` on a change to abort stale
-/// in-flight fetches), serve from the warm cache while kicking a background
-/// per-connection fetch when cold or the window changed, then narrow the
-/// snapshot to the active query and sort.
-async fn list_events_root(
-    backends: &Arc<Vec<Box<dyn CalendarBackend>>>,
-    window: &Window,
-    cache: &Cache,
-    armed_tx: &watch::Sender<bool>,
-    current_query: &Arc<RwLock<Option<String>>>,
-    query_gen: &Arc<AtomicU64>,
-    inv_tx: &broadcast::Sender<Invalidation>,
-    fetch_tasks: &Arc<Mutex<Vec<AbortHandle>>>,
-    params: ListParams,
-) -> Result<ListResult> {
-    if params.node_type.type_id != "calendar:event" {
-        return Err(ContentError::NotSupported(format!(
-            "Unknown node type: {}",
-            params.node_type.type_id
-        )));
-    }
-
-    // First real data request → arm the background poll loop.
-    let _ = armed_tx.send(true);
-
-    // Publish this query as the single source of truth for the load window,
-    // so the background poll and the ready-watch fetch the same span (see
-    // `current_query`). A *changed* query bumps the generation, which aborts
-    // the value of any background fetch still in flight for the previous
-    // window (it drops its result instead of storing).
-    let query_changed = {
-        let mut guard = current_query.write().await;
-        let changed = *guard != params.query;
-        if changed {
-            query_gen.fetch_add(1, Ordering::SeqCst);
+impl CalendarAdapter {
+    /// List the `calendar:event` rows under the root: arm the poll latch,
+    /// publish the query as the load window's source of truth (bumping
+    /// `query_gen` on a change to abort stale in-flight fetches), load what
+    /// another process stored meanwhile, kick a background fetch round when
+    /// needed, then narrow the cache snapshot to the active query and sort.
+    async fn list_events(&self, params: ListParams) -> Result<ListResult> {
+        if params.node_type.type_id != "calendar:event" {
+            return Err(ContentError::NotSupported(format!(
+                "Unknown node type: {}",
+                params.node_type.type_id
+            )));
         }
-        *guard = params.query.clone();
-        changed
-    };
-    let range = effective_range(&params.query, window, Utc::now());
 
-    // Serve from the warm cache — never block on a fetch here. A synchronous
-    // `fetch_all` would re-park us behind the slowest backend's still-running
-    // interactive login (`list_events` → `session()` blocks until that
-    // connection is signed in), so a connection whose events are already
-    // cached would appear to wait for a slow sibling: exactly the "items land
-    // late, all at once" symptom. Instead, when we have no data for this
-    // window yet (cold cache) or the query window changed, kick a background
-    // per-connection fetch — it stores each connection's slice as it lands
-    // and invalidates, so the frontend reloads and this `list()` serves the
-    // freshly warmed cache. Each connection thus surfaces independently, the
-    // instant it's ready.
-    let cold = cache.read().await.is_empty();
-    if cold || query_changed {
-        spawn_fetch(backends, cache, inv_tx, query_gen, fetch_tasks, range);
+        // First real data request → arm the background poll loop.
+        let _ = self.armed_tx.send(true);
+
+        // Publish this query as the single source of truth for the load
+        // window, so the background poll and the ready-watch fetch the same
+        // span (see `current_query`). A *changed* query bumps the generation,
+        // which aborts the value of any background fetch still in flight for
+        // the previous window (it drops its result instead of storing).
+        let query_changed = {
+            let mut guard = self.current_query.write().await;
+            let changed = *guard != params.query;
+            if changed {
+                self.query_gen.fetch_add(1, Ordering::SeqCst);
+            }
+            *guard = params.query.clone();
+            changed
+        };
+        let range = effective_range(&params.query, &self.window, Utc::now());
+
+        // Whatever the last sync stored — possibly by another process — is
+        // served right away.
+        let fetcher = self.fetcher();
+        fetcher.catch_up().await;
+
+        // Serve from the cache — never block on a fetch here: a synchronous
+        // fetch would park us behind the slowest backend's interactive login,
+        // so a connection whose events are already known would appear to wait
+        // for a slow sibling. Instead kick a background round — once per
+        // process, when nothing is known yet, or when the query window changed.
+        // Each connection lands its slice as it arrives and invalidates, so the
+        // frontend reloads and this `list()` serves the warmer cache. A hard
+        // reload (`r`) includes the on-demand connections in its round.
+        let first = !self.fetched_once.swap(true, Ordering::SeqCst);
+        let with_on_demand = self.fetch_on_demand_next.swap(false, Ordering::SeqCst);
+        let cold = self.cache.read().await.is_empty();
+        if first || with_on_demand || cold || query_changed {
+            fetcher.spawn_round(with_on_demand, range, &self.fetch_tasks);
+        }
+
+        // Snapshot the cache (the full known window) and narrow to the active
+        // query. The cache holds more than the query shows so detail navigation
+        // (`get_by_id`) still resolves an event the query hides. The same
+        // FilterExpr DSL the trackings tab runs through the DB is evaluated
+        // here in memory (natural-language start/end + title search).
+        let mut merged: Vec<MergedEvent> = self.cache.read().await.values().cloned().collect();
+        merged.sort_by(|a, b| {
+            a.event
+                .start
+                .cmp(&b.event.start)
+                .then_with(|| a.global_id.cmp(&b.global_id))
+        });
+        let filtered = filter_events(merged, &params.query)?;
+
+        let mut items: Vec<NodeSummary> = filtered.iter().map(event_summary).collect();
+        let applied_sort = apply_sort(&mut items, &params.sort, &event_columns());
+
+        Ok(ListResult {
+            items,
+            applied_sort,
+            page: None,
+            batch_download_available: false,
+            downloaded: vec![],
+        })
     }
-
-    // Snapshot the cache (the full fetched window) and narrow to the active
-    // query. The cache holds the full window so detail navigation
-    // (`get_by_id`) still resolves an event the active query hides. The same
-    // FilterExpr DSL the trackings tab runs through the DB is evaluated here
-    // in memory (natural-language start/end + title search — see `query`).
-    let mut merged: Vec<MergedEvent> = {
-        let guard = cache.read().await;
-        guard.values().cloned().collect()
-    };
-    merged.sort_by(|a, b| {
-        a.event
-            .start
-            .cmp(&b.event.start)
-            .then_with(|| a.global_id.cmp(&b.global_id))
-    });
-    let filtered = filter_events(merged, &params.query)?;
-
-    let mut items: Vec<NodeSummary> = filtered.iter().map(event_summary).collect();
-    let applied_sort = apply_sort(&mut items, &params.sort, &event_columns());
-
-    Ok(ListResult {
-        items,
-        applied_sort,
-        page: None,
-        batch_download_available: false,
-        downloaded: vec![],
-    })
 }
 
 #[async_trait]
@@ -1408,15 +1332,7 @@ impl Node for CalendarRoot {
     ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(values)) => {
-                execute_create(
-                    &self.backends,
-                    &self.calendars,
-                    &self.cache,
-                    self.window,
-                    &self.inv_tx,
-                    &values,
-                )
-                .await
+                execute_create(&self.fetcher, &self.calendars, &values).await
             }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the calendar root"
@@ -1426,7 +1342,7 @@ impl Node for CalendarRoot {
 
     async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
         match name {
-            "toggle_window" => invoke_toggle_window(&self.backends).await,
+            "toggle_window" => invoke_toggle_window(&self.fetcher.backends).await,
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on the calendar root"
             ))),
@@ -1434,7 +1350,7 @@ impl Node for CalendarRoot {
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        resolve_event(&self.backends, self.window, &self.cache, id).await
+        resolve_event(&self.fetcher, id).await
     }
 }
 
@@ -1457,96 +1373,6 @@ fn effective_range(query: &Option<String>, window: &Window, now: DateTime<Utc>) 
     TimeRange::new(lo.unwrap_or(base.start), hi.unwrap_or(base.end))
 }
 
-/// Fan out `list_events` across every backend and merge. Partial success is OK
-/// — a connection that errors is skipped as long as at least one succeeds;
-/// only an all-connections failure surfaces as an error. Results are sorted by
-/// start instant (then id) so ordering — and the change signature — is stable.
-async fn fetch_all(
-    backends: &[Box<dyn CalendarBackend>],
-    range: &TimeRange,
-) -> std::result::Result<Vec<MergedEvent>, String> {
-    // Fetch every connection concurrently — a slow backend (e.g. office365-web
-    // driving a browser login) must not hold up the others. Each future is
-    // independent; results are merged and sorted once all resolve.
-    let per_backend = futures::future::join_all(backends.iter().map(|backend| async move {
-        let conn = backend.connection_id();
-        (
-            conn,
-            backend.connection_label(),
-            backend.list_events(range).await,
-        )
-    }))
-    .await;
-
-    let mut merged: Vec<MergedEvent> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    let mut any_ok = false;
-
-    for (conn, label, result) in per_backend {
-        match result {
-            Ok(events) => {
-                any_ok = true;
-                for event in events {
-                    merged.push(MergedEvent {
-                        global_id: format!("calendar:{conn}:{}", event.uid),
-                        account: event.calendar.clone(),
-                        event,
-                    });
-                }
-            }
-            Err(e) => errors.push(format!("{label}: {e}")),
-        }
-    }
-
-    if !any_ok {
-        return Err(if errors.is_empty() {
-            "no calendar connections configured".to_string()
-        } else {
-            errors.join("; ")
-        });
-    }
-
-    merged.sort_by(|a, b| {
-        a.event
-            .start
-            .cmp(&b.event.start)
-            .then_with(|| a.global_id.cmp(&b.global_id))
-    });
-    Ok(merged)
-}
-
-/// Fetch a single backend and namespace its events, without touching the
-/// others. The per-connection counterpart to [`fetch_all`], used by the
-/// ready-watch so a finished connection's events land the instant it's done
-/// rather than waiting on a slower sibling. An error surfaces verbatim (the
-/// caller drops the result); success returns this connection's events sorted by
-/// start instant (then global id) for a stable order within its slice.
-async fn fetch_one(
-    backend: &dyn CalendarBackend,
-    range: &TimeRange,
-) -> std::result::Result<Vec<MergedEvent>, String> {
-    let conn = backend.connection_id();
-    let events = backend
-        .list_events(range)
-        .await
-        .map_err(|e| format!("{}: {e}", backend.connection_label()))?;
-    let mut merged: Vec<MergedEvent> = events
-        .into_iter()
-        .map(|event| MergedEvent {
-            global_id: format!("calendar:{conn}:{}", event.uid),
-            account: event.calendar.clone(),
-            event,
-        })
-        .collect();
-    merged.sort_by(|a, b| {
-        a.event
-            .start
-            .cmp(&b.event.start)
-            .then_with(|| a.global_id.cmp(&b.global_id))
-    });
-    Ok(merged)
-}
-
 /// Apply the active query to a merged event set. `None`/empty query passes
 /// everything through; a malformed query (bad YAML, unknown column) surfaces as
 /// an error so the user sees why rather than an inexplicably empty view.
@@ -1562,74 +1388,83 @@ fn filter_events(merged: Vec<MergedEvent>, query: &Option<String>) -> Result<Vec
         .collect())
 }
 
-/// Replace the cache contents with a fresh merge. Returns `false` (keeping the
-/// last-good cache) when an *empty* merge would clobber a previously non-empty
-/// cache: an empty result over a multi-day window is almost always a transient
-/// backend/login glitch (e.g. the office365-web backend serving a login page as
-/// an empty-but-Ok fetch), not a real "no events" state. Protecting the cache
-/// keeps reminders and `get_by_id` working across such a blip; the user-facing
-/// `list()` still reflects whatever it fetched. See callers for how a `false`
-/// is treated as "transient, kept last-good".
-async fn store_cache(cache: &Cache, merged: &[MergedEvent]) -> bool {
-    let mut guard = cache.write().await;
-    if merged.is_empty() && !guard.is_empty() {
-        return false;
-    }
-    guard.clear();
-    for m in merged {
-        guard.insert(m.global_id.clone(), m.clone());
-    }
-    true
-}
-
 /// Replace just one connection's slice of the cache — every entry whose global
 /// id carries the `calendar:<conn_id>:` prefix — leaving other connections'
-/// events untouched. The per-connection counterpart to [`store_cache`], so a
-/// finished connection's events can land without waiting on (or disturbing) its
-/// siblings.
+/// events untouched, so a finished connection's events can land without
+/// waiting on (or disturbing) its siblings.
 ///
 /// An *empty* fetch never stores and returns `false` (so the caller does not
 /// invalidate). This serves two ends at once: it keeps a connection's last-good
-/// slice across a transient login glitch (empty-but-Ok fetch — same philosophy
-/// as [`store_cache`]), and it stops a *cold* fetch that comes back empty
+/// slice across a transient login glitch (empty-but-Ok fetch: an empty result
+/// over a multi-day window is almost always a login page parsed as "no
+/// events"), and it stops a *cold* fetch that comes back empty
 /// (sign-in still in flight) from spinning into an invalidate→reload→refetch
 /// storm. The events land later regardless: the ready-watch re-fetches this
 /// connection once its sign-in actually completes. A non-empty fetch replaces
 /// the slice wholesale and returns `true`.
-async fn store_connection(cache: &Cache, conn_id: &str, events: &[MergedEvent]) -> bool {
+pub(crate) async fn store_connection(cache: &Cache, conn_id: &str, events: &[MergedEvent]) -> bool {
     if events.is_empty() {
         return false;
     }
+    replace_connection(cache, conn_id, events).await;
+    true
+}
+
+/// Replace one connection's slice of the cache with `events`, unconditionally
+/// (an empty slice clears it) — for loading what the store holds, which has
+/// already passed the empty-clobber guard.
+pub(crate) async fn replace_connection(cache: &Cache, conn_id: &str, events: &[MergedEvent]) {
     let prefix = format!("calendar:{conn_id}:");
     let mut guard = cache.write().await;
     guard.retain(|k, _| !k.starts_with(&prefix));
     for m in events {
         guard.insert(m.global_id.clone(), m.clone());
     }
-    true
 }
 
-/// Resolve one event by global id: serve from cache, or cold-fetch (which also
-/// refills the cache) and retry once. Unknown id → [`ContentError::NotFound`].
-async fn resolve_event(
-    backends: &[Box<dyn CalendarBackend>],
-    window: Window,
-    cache: &Cache,
-    id: &str,
-) -> Result<Box<dyn Node>> {
-    if let Some(m) = cache.read().await.get(id).cloned() {
+/// Resolve one event by global id: serve from the cache (after loading what
+/// another process stored), or fetch the live connections once and retry.
+/// Unknown id → [`ContentError::NotFound`].
+async fn resolve_event(fetcher: &Fetcher, id: &str) -> Result<Box<dyn Node>> {
+    fetcher.catch_up().await;
+    if let Some(m) = fetcher.cache.read().await.get(id).cloned() {
         return Ok(Box::new(EventNode::new(m)));
     }
 
-    let range = window.range(Utc::now());
-    let merged = fetch_all(backends, &range).await.map_err(other_err)?;
-    store_cache(cache, &merged).await;
+    let range = fetcher.window.range(Utc::now());
+    let results = futures::future::join_all(
+        fetcher
+            .fetchable(false)
+            .into_iter()
+            .map(|idx| fetcher.sync_one(idx, &range, Staleness::Keep)),
+    )
+    .await;
+    if results.iter().all(|r| r.is_err()) {
+        if let Some(Err(e)) = results.into_iter().next() {
+            return Err(other_err(e));
+        }
+    }
 
-    merged
-        .into_iter()
-        .find(|m| m.global_id == id)
+    fetcher
+        .cache
+        .read()
+        .await
+        .get(id)
+        .cloned()
         .map(|m| Box::new(EventNode::new(m)) as Box<dyn Node>)
         .ok_or_else(|| ContentError::NotFound(id.to_string()))
+}
+
+/// [`signature`] of the whole cache, in the stable start/id order.
+async fn cache_signature(cache: &Cache) -> u64 {
+    let mut merged: Vec<MergedEvent> = cache.read().await.values().cloned().collect();
+    merged.sort_by(|a, b| {
+        a.event
+            .start
+            .cmp(&b.event.start)
+            .then_with(|| a.global_id.cmp(&b.global_id))
+    });
+    signature(&merged)
 }
 
 /// Stable hash of the merged event set — the poll loop compares consecutive
@@ -1836,6 +1671,26 @@ mod tests {
             prompts_taken: Arc::new(AtomicBool::new(false)),
             calendars: Arc::new(std::sync::RwLock::new(Vec::new())),
             calendars_loaded: Arc::new(AtomicBool::new(false)),
+            on_demand: Arc::new(HashSet::new()),
+            persisted: None,
+            fetched_once: Arc::new(AtomicBool::new(false)),
+            fetch_on_demand_next: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A store-less [`Fetcher`] over `backends` with an empty cache.
+    fn test_fetcher(backends: Vec<Box<dyn CalendarBackend>>) -> Fetcher {
+        Fetcher {
+            backends: Arc::new(backends),
+            on_demand: Arc::new(HashSet::new()),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            persisted: None,
+            window: Window {
+                past_days: 1,
+                future_days: 1,
+            },
+            inv_tx: broadcast::channel(16).0,
+            query_gen: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2050,30 +1905,6 @@ mod tests {
         assert_eq!(absent.reminder_lead_minutes, None);
     }
 
-    #[tokio::test]
-    async fn store_cache_keeps_last_good_on_empty_merge() {
-        let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
-
-        // A good merge populates the cache.
-        let good = vec![sample("AAA", 9, "Standup"), sample("BBB", 10, "Review")];
-        assert!(store_cache(&cache, &good).await, "non-empty merge stores");
-        assert_eq!(cache.read().await.len(), 2);
-
-        // An empty merge (transient login/backend glitch) must NOT clobber it.
-        assert!(
-            !store_cache(&cache, &[]).await,
-            "empty merge over a non-empty cache is rejected"
-        );
-        assert_eq!(cache.read().await.len(), 2, "last-good cache is retained");
-
-        // A fresh non-empty merge replaces wholesale (deletions propagate).
-        let next = vec![sample("CCC", 11, "Retro")];
-        assert!(store_cache(&cache, &next).await);
-        let guard = cache.read().await;
-        assert_eq!(guard.len(), 1);
-        assert!(guard.contains_key("calendar:work:CCC"));
-    }
-
     fn sample_for(conn: &str, uid: &str, hour: u32, title: &str) -> MergedEvent {
         let mut m = sample(uid, hour, title);
         m.global_id = format!("calendar:{conn}:{uid}");
@@ -2206,14 +2037,6 @@ mod tests {
             }
             _ => panic!("expected Busy"),
         }
-    }
-
-    #[tokio::test]
-    async fn store_cache_allows_empty_over_empty() {
-        // An empty merge over an already-empty cache is fine (nothing to lose).
-        let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
-        assert!(store_cache(&cache, &[]).await);
-        assert!(cache.read().await.is_empty());
     }
 
     /// The poll loop only wakes once the adapter is first asked for data. This
@@ -2489,17 +2312,9 @@ mod tests {
     /// Run `execute_create` with no backends and no calendars — enough to
     /// exercise the pure validation guards that run before target resolution.
     async fn exec_create_bare(values: HashMap<String, String>) -> Result<ActionOutcome> {
-        let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
-        let (inv_tx, _) = broadcast::channel(16);
         execute_create(
+            &test_fetcher(Vec::new()),
             &[],
-            &[],
-            &cache,
-            Window {
-                past_days: 1,
-                future_days: 1,
-            },
-            &inv_tx,
             &values,
         )
         .await
@@ -2518,18 +2333,10 @@ mod tests {
             created: Arc::clone(&created),
         })];
         let calendars = vec![gc("work", "cal-1", "Team")];
-        let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
-        let (inv_tx, _) = broadcast::channel(16);
 
         let outcome = execute_create(
-            &backends,
+            &test_fetcher(backends),
             &calendars,
-            &cache,
-            Window {
-                past_days: 1,
-                future_days: 1,
-            },
-            &inv_tx,
             &form(&[
                 ("title", "Standup"),
                 ("start", "today 9:00"),
@@ -2575,17 +2382,9 @@ mod tests {
             created: Arc::clone(&created),
         })];
         let calendars = vec![gc("work", "cal-1", "Team"), gc("work", "cal-2", "Personal")];
-        let cache: Cache = Arc::new(RwLock::new(HashMap::new()));
-        let (inv_tx, _) = broadcast::channel(16);
         let err = execute_create(
-            &backends,
+            &test_fetcher(backends),
             &calendars,
-            &cache,
-            Window {
-                past_days: 1,
-                future_days: 1,
-            },
-            &inv_tx,
             &form(&[
                 ("title", "X"),
                 ("start", "today 9:00"),

@@ -24,6 +24,9 @@ caldav = ["dep:not-yet-done-calendar-caldav"]
 async-trait = { workspace = true }
 fieldsmith  = { workspace = true }
 futures     = { workspace = true }
+# The persistent event store (see src/store.rs): SQLite by default, any
+# SeaORM backend via `db.url`.
+sea-orm     = { workspace = true }
 chrono      = { workspace = true }
 dirs        = { workspace = true }
 serde       = { workspace = true }

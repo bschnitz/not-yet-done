@@ -85,6 +85,33 @@ pub struct CalendarConfig {
     /// [`default_reminder_leads`].
     #[serde(default, deserialize_with = "deserialize_leads")]
     pub(crate) reminder_lead_minutes: Option<Vec<i64>>,
+    /// Where fetched events are persisted. Omit it for a private SQLite file
+    /// under `~/.local/share/not_yet_done/calendar-cache.sqlite`.
+    #[serde(default)]
+    pub(crate) db: Option<DbConfig>,
+}
+
+/// The event store's database (see `store`).
+#[derive(Deserialize, Buildable, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DbConfig {
+    /// Any SeaORM URL (`sqlite://…?mode=rwc`, `postgres://…`).
+    pub(crate) url: String,
+}
+
+/// When a connection talks to its server.
+///
+/// `live` connections are fetched whenever a view needs data and polled in
+/// the background. An `on_demand` connection is only fetched by an explicit
+/// sync — the root's `sync` action or a hard reload (`r`); every other reader
+/// serves what the last sync stored. Meant for connections whose fetch is
+/// expensive or interactive (a browser sign-in).
+#[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchMode {
+    #[default]
+    Live,
+    OnDemand,
 }
 
 /// One connection entry. `config` is the backend-specific sub-tree, kept as an
@@ -103,6 +130,9 @@ pub struct ConnectionConfig {
     #[serde(default)]
     #[builder(leaf)]
     pub(crate) config: serde_yaml::Value,
+    /// When this connection is fetched — see [`FetchMode`].
+    #[serde(default)]
+    pub(crate) fetch: FetchMode,
 }
 
 /// The look-behind / look-ahead window, resolved to a concrete [`TimeRange`]
@@ -150,6 +180,24 @@ window_future_days: 14
         assert_eq!(cfg.poll_interval_secs, Some(120));
         assert_eq!(cfg.window_future_days, Some(14));
         assert_eq!(cfg.window_past_days, None);
+    }
+
+    #[test]
+    fn parses_fetch_mode_and_db() {
+        let yaml = r#"
+connections:
+  - id: work
+    backend: microsoft
+    fetch: on_demand
+  - id: side
+    backend: caldav
+db:
+  url: "sqlite::memory:"
+"#;
+        let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(cfg.connections[0].fetch, FetchMode::OnDemand);
+        assert_eq!(cfg.connections[1].fetch, FetchMode::Live);
+        assert_eq!(cfg.db.expect("db").url, "sqlite::memory:");
     }
 
     #[test]

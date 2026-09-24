@@ -4279,6 +4279,7 @@ dependencies = [
  "not-yet-done-calendar-office365-web",
  "not-yet-done-content",
  "not-yet-done-filter",
+ "sea-orm",
  "serde",
  "serde_yaml",
  "tokio",

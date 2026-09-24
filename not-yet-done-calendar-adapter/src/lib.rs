@@ -14,8 +14,12 @@
 
 mod adapter;
 pub mod config;
+pub mod entity;
 mod factory;
+mod fetch;
+mod persist;
 mod query;
 mod registry;
+mod store;
 
 pub use factory::CalendarAdapterFactory;
