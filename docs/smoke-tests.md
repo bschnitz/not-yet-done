@@ -9706,5 +9706,12 @@ events you created for the purpose.
       `nyd adapter calendar <event id> delete --yes` for real prints
       `“<title>” was already gone from the calendar; removed it here`, and
       `ls` no longer lists it.
+- [ ] **An Outlook-on-the-web event purged elsewhere is still removed.**
+      Delete a test event in Outlook and empty Deleted Items there, then
+      `nyd adapter calendar <event id> delete --yes` prints `“<title>” was
+      already gone from the calendar; removed it here`. (An event that only
+      sits in Deleted Items still has its id: deleting it again succeeds and
+      prints `Deleted`.) The backend half is verified: an id the service
+      does not know comes back as not found, not as a failed run.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
       CalDAV calendar lists as `A & B`, not `A  B`.
