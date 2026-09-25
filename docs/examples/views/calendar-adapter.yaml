@@ -72,10 +72,13 @@
 # yields the events. Creating an event runs `nyd-calendar-create` the same way;
 # it writes to the account's default calendar, the one calendar this backend
 # offers on the "New event" form. Secrets never touch the browser's command line or
-# environment: the flow *asks* for a secret it needs, the answer is resolved
-# here and handed to the run over the socket. For that to happen the browser's
-# own values file (`~/.config/browsertest/values.yaml`) must say `ask` for the
-# secret — a command written there wins over this config, for every account.
+# environment: each one listed under `secrets:` is resolved here and handed to
+# every run over the socket before it starts, so nobody is asked for it and no
+# question reaches the desktop. List exactly the secrets the flows declare under
+# `requires: secrets:` — the browser refuses a run handed one its flow never
+# reads. The browser's own values file (`~/.config/browsertest/values.yaml`)
+# needs no entry for them; a browser too old to take secrets up front asks
+# instead, and this backend answers.
 # When the sign-on reaches the second factor the run says so ("Tap 42 on your
 # phone to sign in"); the sentence is published on the event bus as
 # `office365-web:mfa:number-match` and, with `auto_headed`, the window comes up
