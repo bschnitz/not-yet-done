@@ -97,6 +97,13 @@ impl CalendarBackend for CalDavBackend {
     fn sign_in_prompts(&self) -> u64 {
         self.asking.as_ref().map_or(0, CredentialPrompts::asked)
     }
+
+    /// Every way a CalDAV fetch can go wrong ends in an `Err`: a non-2xx
+    /// response, a body that is not a multistatus, a failed status inside one.
+    /// What is left is the server saying the range holds nothing.
+    fn empty_is_authoritative(&self) -> bool {
+        true
+    }
 }
 
 /// Registers as backend type `caldav`.

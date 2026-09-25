@@ -501,6 +501,12 @@ impl CalDavClient {
             .dav(Method::from_bytes(b"REPORT").unwrap(), cal, "1", &body)
             .await?;
         let responses = parse_multistatus(&resp)?;
+        // A 207 can still carry a failure per resource. Skipping such a
+        // response would make an event the server could not hand over look
+        // deleted — and a calendar where that is every event look empty.
+        if let Some(line) = responses.iter().find_map(RawResponse::failed_status) {
+            return Err(CalendarError::Network(format!("REPORT {cal}: {line}")));
+        }
         let with_data = responses
             .iter()
             .filter(|r| r.calendar_data.is_some())
@@ -689,6 +695,28 @@ struct RawResponse {
     current_user_principal: Option<String>,
     comp_names: Vec<String>,
     calendar_data: Option<String>,
+    /// Every `<status>` line of the response — its own and each propstat's —
+    /// e.g. `HTTP/1.1 404 Not Found`.
+    statuses: Vec<String>,
+}
+
+impl RawResponse {
+    /// The first status line that is not a 2xx, if any.
+    fn failed_status(&self) -> Option<&str> {
+        self.statuses
+            .iter()
+            .map(String::as_str)
+            .find(|line| !status_is_success(line))
+    }
+}
+
+/// Whether a `<status>` line (`HTTP/1.1 200 OK`) reports a 2xx. A line that
+/// carries no readable code is not one.
+fn status_is_success(line: &str) -> bool {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (200..300).contains(&code))
 }
 
 /// Take the whole text of a closed element `name` (under `parent`) into
@@ -702,6 +730,10 @@ fn on_text(name: &str, parent: Option<&str>, text: String, resp: &mut RawRespons
     }
     let text = text.trim();
     if text.is_empty() {
+        return;
+    }
+    if name == "status" {
+        resp.statuses.push(text.to_string());
         return;
     }
     let slot = match (name, parent) {
@@ -736,6 +768,10 @@ fn parse_multistatus(xml: &str) -> Result<Vec<RawResponse>, CalendarError> {
     // The text of the innermost open element, in the chunks and entity
     // references quick-xml splits it into; read when the element closes.
     let mut text = String::new();
+    // Whether the document is a multistatus at all. A body that parses as XML
+    // without being one — an HTML error or sign-in page served with a 2xx —
+    // would otherwise read as "no responses", which to a caller is "no events".
+    let mut root_seen = false;
 
     loop {
         match reader.read_event() {
@@ -744,11 +780,19 @@ fn parse_multistatus(xml: &str) -> Result<Vec<RawResponse>, CalendarError> {
             Ok(Event::Start(e)) => {
                 text.clear();
                 let name = local_name(e.name().as_ref());
+                if !root_seen {
+                    expect_multistatus(&name)?;
+                    root_seen = true;
+                }
                 on_open(&name, &e, &stack, &mut cur, &mut out);
                 stack.push(name);
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref());
+                if !root_seen {
+                    expect_multistatus(&name)?;
+                    root_seen = true;
+                }
                 on_open(&name, &e, &stack, &mut cur, &mut out);
                 // Empty elements don't nest — treat open+close atomically.
             }
@@ -786,11 +830,26 @@ fn parse_multistatus(xml: &str) -> Result<Vec<RawResponse>, CalendarError> {
             _ => {}
         }
     }
+    if !root_seen {
+        return Err(CalendarError::Other(
+            "the server answered with an empty body instead of a multistatus".into(),
+        ));
+    }
     // The last response has no following `<response>` to flush it.
     if let Some(last) = cur.take() {
         out.push(last);
     }
     Ok(out)
+}
+
+fn expect_multistatus(root: &str) -> Result<(), CalendarError> {
+    if root == "multistatus" {
+        Ok(())
+    } else {
+        Err(CalendarError::Other(format!(
+            "the server answered with <{root}> instead of a multistatus"
+        )))
+    }
 }
 
 /// Handle an opening (or empty) element: start a new response, record a
@@ -853,6 +912,40 @@ fn xml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_that_is_not_a_multistatus_is_an_error_not_an_empty_answer() {
+        let html = "<html><head><title>Sign in</title></head><body/></html>";
+        assert!(parse_multistatus(html).is_err());
+        assert!(parse_multistatus("").is_err());
+        assert!(parse_multistatus("<?xml version=\"1.0\"?>").is_err());
+    }
+
+    #[test]
+    fn an_empty_multistatus_is_an_empty_answer() {
+        let xml = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>"#;
+        assert!(parse_multistatus(xml).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_status_inside_a_multistatus_is_reported() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/cal/a.ics</d:href>
+    <d:propstat>
+      <d:prop><c:calendar-data/></d:prop>
+      <d:status>HTTP/1.1 503 Service Unavailable</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/cal/b.ics</d:href>
+    <d:propstat><d:prop/><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+  </d:response>
+</d:multistatus>"#;
+        let r = parse_multistatus(xml).unwrap();
+        assert_eq!(r[0].failed_status(), Some("HTTP/1.1 503 Service Unavailable"));
+        assert_eq!(r[1].failed_status(), None);
+    }
 
     #[test]
     fn fmt_ical_is_compact_utc() {

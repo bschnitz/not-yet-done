@@ -360,6 +360,20 @@ pub trait CalendarBackend: Send + Sync {
     fn sign_in_prompts(&self) -> u64 {
         0
     }
+
+    /// Whether an empty answer from [`list_events`](CalendarBackend::list_events)
+    /// means the calendar really has nothing in the range.
+    ///
+    /// Default `false`: a backend that reads a rendered page cannot tell "no
+    /// events" from "a sign-in page where the events should be", so the adapter
+    /// keeps the known events and reports the empty answer as a suspected
+    /// sign-in problem. A backend that answers `Err` for everything that went
+    /// wrong — every HTTP failure, every body that is not the protocol's own
+    /// answer — says `true`, and its empty answer then clears the connection
+    /// like any other result.
+    fn empty_is_authoritative(&self) -> bool {
+        false
+    }
 }
 
 /// Constructs a [`CalendarBackend`] for one connection from its opaque config

@@ -82,6 +82,10 @@ impl Ingest {
 
 /// Land one connection's successful fetch of `range`. `keep_from` is the
 /// oldest instant worth keeping (the configured window's start).
+///
+/// `trust_empty` says the backend's empty answer is a fact rather than a
+/// symptom (see `CalendarBackend::empty_is_authoritative`): the empty-clobber
+/// guard is then skipped, and an empty fetch clears the connection.
 pub(crate) async fn ingest(
     cache: &Cache,
     persisted: Option<&Persisted>,
@@ -89,12 +93,13 @@ pub(crate) async fn ingest(
     range: &TimeRange,
     keep_from: DateTime<Utc>,
     events: &[MergedEvent],
+    trust_empty: bool,
 ) -> Ingest {
     let Some(p) = persisted else {
-        return ingest_memory_only(cache, connection, events).await;
+        return ingest_memory_only(cache, connection, events, trust_empty).await;
     };
     let now = Utc::now();
-    if events.is_empty() {
+    if events.is_empty() && !trust_empty {
         let known = match p.store.has_events(connection).await {
             Ok(known) => known,
             Err(_) => cache_has_connection(cache, connection).await,
@@ -137,8 +142,16 @@ pub(crate) async fn ingest(
     }
 }
 
-async fn ingest_memory_only(cache: &Cache, connection: &str, events: &[MergedEvent]) -> Ingest {
-    if store_connection(cache, connection, events).await {
+async fn ingest_memory_only(
+    cache: &Cache,
+    connection: &str,
+    events: &[MergedEvent],
+    trust_empty: bool,
+) -> Ingest {
+    if events.is_empty() && trust_empty {
+        replace_connection(cache, connection, events).await;
+        Ingest::EmptyAccepted
+    } else if store_connection(cache, connection, events).await {
         Ingest::Stored
     } else if cache_has_connection(cache, connection).await {
         Ingest::EmptyKept
@@ -268,7 +281,7 @@ mod tests {
         let (db, p) = persisted("cal_store_survives", "calendar").await;
         let cache = empty_cache();
         let events = [event("a", "1", 10, 9, "Standup"), event("a", "2", 11, 9, "Review")];
-        let outcome = ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events).await;
+        let outcome = ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
         assert_eq!(outcome, Ingest::Stored);
 
         // A second process: new cache, same database.
@@ -290,9 +303,9 @@ mod tests {
         let writer = Persisted::new(EventStore::new(db, "calendar"));
         let writer_cache = empty_cache();
 
-        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "Old")]).await;
+        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "Old")], false).await;
         assert!(catch_up(&cache, Some(&reader)).await);
-        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "New")]).await;
+        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "New")], false).await;
         assert!(catch_up(&cache, Some(&reader)).await);
         assert_eq!(titles(&cache).await, ["New"]);
     }
@@ -307,13 +320,11 @@ mod tests {
             "a",
             &range(1, 28),
             at(1, 0),
-            &[event("a", "early", 3, 9, "Early"), event("a", "gone", 10, 9, "Gone")],
-        )
-        .await;
-        ingest(&cache, Some(&p), "b", &range(1, 28), at(1, 0), &[event("b", "x", 10, 9, "Other")]).await;
+            &[event("a", "early", 3, 9, "Early"), event("a", "gone", 10, 9, "Gone")], false).await;
+        ingest(&cache, Some(&p), "b", &range(1, 28), at(1, 0), &[event("b", "x", 10, 9, "Other")], false).await;
 
         // A narrower fetch of `a` that no longer has `gone`.
-        ingest(&cache, Some(&p), "a", &range(9, 12), at(1, 0), &[event("a", "new", 11, 9, "New")]).await;
+        ingest(&cache, Some(&p), "a", &range(9, 12), at(1, 0), &[event("a", "new", 11, 9, "New")], false).await;
         assert_eq!(titles(&cache).await, ["Early", "New", "Other"]);
     }
 
@@ -321,8 +332,8 @@ mod tests {
     async fn events_before_the_window_are_pruned() {
         let (_db, p) = persisted("cal_store_prune", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "old", 2, 9, "Old")]).await;
-        ingest(&cache, Some(&p), "a", &range(10, 28), at(10, 0), &[event("a", "n", 11, 9, "Now")]).await;
+        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "old", 2, 9, "Old")], false).await;
+        ingest(&cache, Some(&p), "a", &range(10, 28), at(10, 0), &[event("a", "n", 11, 9, "Now")], false).await;
         assert_eq!(titles(&cache).await, ["Now"]);
     }
 
@@ -330,8 +341,8 @@ mod tests {
     async fn an_empty_fetch_over_known_events_keeps_them_and_records_why() {
         let (_db, p) = persisted("cal_store_empty_kept", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")]).await;
-        let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[]).await;
+        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")], false).await;
+        let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[], false).await;
         assert_eq!(outcome, Ingest::EmptyKept);
         assert_eq!(titles(&cache).await, ["Keep"]);
         let state = p.store().sync_states().await.unwrap().remove(0);
@@ -340,10 +351,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_trusted_empty_fetch_clears_the_known_events() {
+        let (_db, p) = persisted("cal_store_empty_trusted", "calendar").await;
+        let cache = empty_cache();
+        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Gone")], true).await;
+        let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[], true).await;
+        assert_eq!(outcome, Ingest::EmptyAccepted);
+        assert!(titles(&cache).await.is_empty(), "an empty calendar is empty");
+        let state = p.store().sync_states().await.unwrap().remove(0);
+        assert!(state.last_error.is_none(), "and that is a success, not a failure");
+    }
+
+    #[tokio::test]
     async fn an_empty_fetch_of_an_empty_calendar_is_a_sync() {
         let (_db, p) = persisted("cal_store_empty_ok", "calendar").await;
         let cache = empty_cache();
-        let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[]).await;
+        let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[], false).await;
         assert_eq!(outcome, Ingest::EmptyAccepted);
         assert!(!outcome.changed());
         let state = p.store().sync_states().await.unwrap().remove(0);
@@ -355,7 +378,7 @@ mod tests {
     async fn a_failure_keeps_the_last_success() {
         let (_db, p) = persisted("cal_store_failure", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")]).await;
+        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")], false).await;
         note_failure(Some(&p), "a", "session expired").await;
         let state = p.store().sync_states().await.unwrap().remove(0);
         assert_eq!(state.revision, 1, "a failure is no new data");
@@ -366,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn scopes_do_not_see_each_other() {
         let (db, p) = persisted("cal_store_scopes", "one").await;
-        ingest(&empty_cache(), Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Mine")]).await;
+        ingest(&empty_cache(), Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Mine")], false).await;
         let other = Persisted::new(EventStore::new(db, "two"));
         let cache = empty_cache();
         assert!(!catch_up(&cache, Some(&other)).await);
@@ -378,7 +401,7 @@ mod tests {
         let (db, p) = persisted("cal_store_forget", "calendar").await;
         let cache = empty_cache();
         let events = [event("a", "1", 10, 9, "Standup"), event("a", "2", 11, 9, "Review")];
-        ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events).await;
+        ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
         let other = Persisted::new(EventStore::new(db, "calendar"));
         let other_cache = empty_cache();
         catch_up(&other_cache, Some(&other)).await;

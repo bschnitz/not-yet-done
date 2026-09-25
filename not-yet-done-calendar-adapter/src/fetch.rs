@@ -81,7 +81,9 @@ impl Fetcher {
         }
         match fetched {
             Ok(events) => {
-                let outcome = self.land(&conn, range, &events).await;
+                let outcome = self
+                    .land(&conn, range, &events, backend.empty_is_authoritative())
+                    .await;
                 if outcome.changed() {
                     let _ = self.inv_tx.send(Invalidation::All);
                 }
@@ -95,11 +97,14 @@ impl Fetcher {
     }
 
     /// Land an already-fetched result of `connection` (no invalidation).
+    /// `trust_empty` is the backend's
+    /// [`empty_is_authoritative`](CalendarBackend::empty_is_authoritative).
     pub(crate) async fn land(
         &self,
         connection: &str,
         range: &TimeRange,
         events: &[MergedEvent],
+        trust_empty: bool,
     ) -> Ingest {
         let keep_from = self.window.range(Utc::now()).start;
         persist::ingest(
@@ -109,6 +114,7 @@ impl Fetcher {
             range,
             keep_from,
             events,
+            trust_empty,
         )
         .await
     }
