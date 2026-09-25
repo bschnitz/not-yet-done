@@ -106,6 +106,12 @@ pub fn slugify(title: &str) -> String {
 
 /// `<base>/<KEY>-<slug>` — the persistent folder for one item. Falls back to
 /// the bare key when the title slugifies to nothing.
+///
+/// A folder that already exists for the key wins over the computed name:
+/// other tools create `<KEY>-<slug>` with their own slug (uncapped, or from
+/// a title that has since been renamed), and a second folder next to it
+/// makes every lookup by key ambiguous. Only when no folder for the key
+/// exists is the computed name used.
 pub fn ticket_dir(base: &Path, key: &str, title: &str) -> PathBuf {
     let slug = slugify(title);
     let name = if slug.is_empty() {
@@ -113,7 +119,31 @@ pub fn ticket_dir(base: &Path, key: &str, title: &str) -> PathBuf {
     } else {
         format!("{key}-{slug}")
     };
-    base.join(name)
+    let computed = base.join(name);
+    if computed.is_dir() {
+        return computed;
+    }
+    existing_ticket_dir(base, key).unwrap_or(computed)
+}
+
+/// The one folder under `base` named `<KEY>` or `<KEY>-…`, if there is
+/// exactly one. The `-` after the key keeps `ABC-12` from matching
+/// `ABC-123-…`. Several candidates are left alone — picking one would be a
+/// guess.
+fn existing_ticket_dir(base: &Path, key: &str) -> Option<PathBuf> {
+    let prefix = format!("{key}-");
+    let mut hits = std::fs::read_dir(base)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name == key || name.starts_with(&prefix)
+        })
+        .map(|e| e.path());
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
 /// Download `remote` into `<dir>/attachments/`, skipping any id already
@@ -245,6 +275,48 @@ mod tests {
         );
         // Empty slug → bare key.
         assert_eq!(ticket_dir(base, "PROJ-1", "***"), Path::new("/base/PROJ-1"));
+    }
+
+    #[test]
+    fn ticket_dir_reuses_existing_folder_for_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let long = "PROJ-12-a-folder-named-by-another-tool-with-an-uncapped-slug-and-more";
+        std::fs::create_dir(base.join(long)).unwrap();
+        // A neighbour whose key merely starts with ours must not count.
+        std::fs::create_dir(base.join("PROJ-123-other")).unwrap();
+        assert_eq!(ticket_dir(base, "PROJ-12", "Renamed title"), base.join(long));
+        assert_eq!(
+            ticket_dir(base, "PROJ-1", "Hello World"),
+            base.join("PROJ-1-hello-world")
+        );
+    }
+
+    #[test]
+    fn ticket_dir_prefers_exact_name_and_never_guesses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        std::fs::create_dir(base.join("PROJ-1-hello-world")).unwrap();
+        std::fs::create_dir(base.join("PROJ-1-something-else")).unwrap();
+        assert_eq!(
+            ticket_dir(base, "PROJ-1", "Hello World"),
+            base.join("PROJ-1-hello-world")
+        );
+        // Two foreign candidates: no guess, the computed name stands.
+        assert_eq!(
+            ticket_dir(base, "PROJ-1", "Third"),
+            base.join("PROJ-1-third")
+        );
+    }
+
+    #[test]
+    fn write_ticket_writes_into_existing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("PROJ-7-full-length-slug-from-elsewhere");
+        std::fs::create_dir(&existing).unwrap();
+        let dir = write_ticket(tmp.path(), "PROJ-7", "Short", "# hi\n").unwrap();
+        assert_eq!(dir, existing);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]
