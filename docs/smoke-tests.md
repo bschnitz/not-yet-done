@@ -9698,7 +9698,7 @@ events you created for the purpose.
       flow.** The connection's event count at the next sync is one lower.
 - [x] **Deleting a connection's last event empties it.** The row disappears
       at once, although a re-fetch of an empty calendar keeps the known events.
-- [ ] **`d` in the calendar tab.** The confirm popup names the event; `y`
+- [x] **`d` in the calendar tab.** The confirm popup names the event; `y`
       deletes it and the row disappears without a manual refresh; `n` leaves
       it.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
