@@ -1579,6 +1579,10 @@ fn event_summary(m: &MergedEvent) -> NodeSummary {
                 .unwrap_or_default(),
             "Join URL",
         ),
+        // The event's notes, as far as the backend fetched them (Outlook on
+        // the web gives a preview only). For tools reading `ls -o json`, such
+        // as a menu that shows the whole event on hover.
+        field("body", e.body.clone().unwrap_or_default(), "Notes"),
     ];
 
     NodeSummary {
@@ -1801,6 +1805,7 @@ mod tests {
         assert_eq!(get("show_as").as_deref(), Some("busy"));
         assert_eq!(get("location").as_deref(), Some("Room 1"));
         assert_eq!(get("all_day").as_deref(), Some("false"));
+        assert_eq!(get("body").as_deref(), Some("agenda"));
         // start present and RFC3339-shaped (date + 'T').
         assert!(get("start").unwrap().starts_with("2030-01-15T"));
     }
