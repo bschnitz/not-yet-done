@@ -206,7 +206,7 @@ impl CalDavClient {
             found.extend(self.resources_of(&cal.url, uid).await?);
         }
         if found.is_empty() {
-            return Err(CalendarError::Other(format!(
+            return Err(CalendarError::NotFound(format!(
                 "no event with UID '{uid}' on the server"
             )));
         }

@@ -311,7 +311,8 @@ views:
       # occurrence of a series is deleted alone where the backend addresses
       # occurrences (Graph, Outlook on the web); CalDAV stores a series as
       # one resource, so there the whole series goes. Nobody is sent a
-      # cancellation. From the command line:
+      # cancellation. An event the server no longer has (deleted elsewhere)
+      # is removed from nyd all the same (CalDAV, Graph). From the command line:
       #   nyd adapter calendar <event id> delete --yes
       - { key: d, id: delete }
       # Local filter-while-typing over the loaded rows.

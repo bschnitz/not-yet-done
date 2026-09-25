@@ -148,8 +148,13 @@ impl MsGraphClient {
             resp
         };
         let status = resp.status();
-        if status.is_success() || status == StatusCode::NOT_FOUND {
+        if status.is_success() {
             return Ok(());
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(CalendarError::NotFound(format!(
+                "no event with id '{id}' on the server"
+            )));
         }
         let text = resp.text().await.unwrap_or_default();
         let snippet: String = text.chars().take(300).collect();

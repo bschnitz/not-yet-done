@@ -212,6 +212,9 @@ pub enum CalendarError {
     Network(String),
     #[error("config error: {0}")]
     Config(String),
+    /// The event the call names is not on the server (any more).
+    #[error("{0}")]
+    NotFound(String),
     #[error("{0}")]
     Other(String),
 }
@@ -273,6 +276,9 @@ pub trait CalendarBackend: Send + Sync {
     /// backend addresses occurrences (Outlook); a backend that stores a series
     /// as one resource (CalDAV) deletes the whole series. Nobody is sent a
     /// cancellation.
+    ///
+    /// An event the server no longer has is [`CalendarError::NotFound`], so the
+    /// caller can still forget its own copy of it.
     ///
     /// The default is the same read-only refusal as
     /// [`create_event`](CalendarBackend::create_event).

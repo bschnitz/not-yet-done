@@ -9701,5 +9701,10 @@ events you created for the purpose.
 - [x] **`d` in the calendar tab.** The confirm popup names the event; `y`
       deletes it and the row disappears without a manual refresh; `n` leaves
       it.
+- [x] **An event already gone at the source is still removed.** Delete it
+      once through an isolated copy (`XDG_*_HOME` of a `nyd-tui` iso), then
+      `nyd adapter calendar <event id> delete --yes` for real prints
+      `“<title>” was already gone from the calendar; removed it here`, and
+      `ls` no longer lists it.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
       CalDAV calendar lists as `A & B`, not `A  B`.

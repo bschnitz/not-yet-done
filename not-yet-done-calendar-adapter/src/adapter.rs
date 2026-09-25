@@ -26,7 +26,7 @@ use tokio::task::AbortHandle;
 
 use natural_date::resolve_datetime;
 use not_yet_done_calendar_core::{
-    CalEvent, CalendarBackend, EventDraft, LoadProgress, ShowAs, TimeRange,
+    CalEvent, CalendarBackend, CalendarError, EventDraft, LoadProgress, ShowAs, TimeRange,
 };
 use not_yet_done_content::*;
 
@@ -1685,18 +1685,27 @@ impl EventNode {
 
     /// `execute("delete")` — delete the event through the backend that owns
     /// it, then drop it from the cache and the store right away.
+    ///
+    /// An event the server no longer has is forgotten all the same: the user
+    /// wants it gone, and it is. Refusing would leave a copy nothing can
+    /// remove — a re-fetch of a calendar that came back empty keeps the
+    /// events it knew.
     async fn delete(&self) -> Result<ActionOutcome> {
         let idx = self
             .fetcher
             .index_of(&self.connection)
             .ok_or_else(|| other_err(format!("no connection for event '{}'", self.label)))?;
-        self.fetcher.backends[idx]
-            .delete_event(&self.uid)
-            .await
-            .map_err(|e| other_err(format!("could not delete event: {e}")))?;
+        let message = match self.fetcher.backends[idx].delete_event(&self.uid).await {
+            Ok(()) => format!("Deleted “{}”", self.label),
+            Err(CalendarError::NotFound(_)) => format!(
+                "“{}” was already gone from the calendar; removed it here",
+                self.label
+            ),
+            Err(e) => return Err(other_err(format!("could not delete event: {e}"))),
+        };
         self.fetcher.forget(&self.connection, &self.id).await;
         Ok(ActionOutcome::Done {
-            message: Some(format!("Deleted “{}”", self.label)),
+            message: Some(message),
         })
     }
 }
@@ -2653,5 +2662,46 @@ mod tests {
         assert_eq!(*deleted.lock().unwrap(), ["u:1"], "the uid, not the global id");
         assert!(fetcher.cache.read().await.is_empty());
         assert!(inv_rx.try_recv().is_ok(), "the view reloads");
+    }
+
+    /// A backend whose server has lost every event already.
+    struct EmptiedBackend;
+
+    #[async_trait]
+    impl CalendarBackend for EmptiedBackend {
+        fn connection_id(&self) -> &str {
+            "work"
+        }
+        async fn list_events(
+            &self,
+            _range: &TimeRange,
+        ) -> std::result::Result<Vec<CalEvent>, CalendarError> {
+            Ok(Vec::new())
+        }
+        async fn delete_event(&self, uid: &str) -> std::result::Result<(), CalendarError> {
+            Err(CalendarError::NotFound(format!("no event with UID '{uid}' on the server")))
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_an_event_the_server_no_longer_has_still_forgets_it() {
+        let fetcher = test_fetcher(vec![Box::new(EmptiedBackend)]);
+        let event = sample("u:1", 9, "Dentist");
+        fetcher
+            .cache
+            .write()
+            .await
+            .insert(event.global_id.clone(), event.clone());
+        let mut node = EventNode::new(event, fetcher.clone());
+
+        let outcome = node
+            .execute("delete", ActionInput::None, &ActionArgs::default())
+            .await
+            .unwrap();
+        let ActionOutcome::Done { message } = outcome else {
+            panic!("an event already gone counts as deleted");
+        };
+        assert!(message.unwrap().contains("already gone"));
+        assert!(fetcher.cache.read().await.is_empty());
     }
 }
