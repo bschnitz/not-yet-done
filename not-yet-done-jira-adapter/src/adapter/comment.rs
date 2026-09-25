@@ -1,6 +1,6 @@
 //! Single-comment node: edit own comments, read-only `Content` access.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -8,6 +8,8 @@ use not_yet_done_content::*;
 
 use crate::client::{JiraClient, JiraComment};
 
+use super::cache::JiraCache;
+use super::issue::comment_body::{self, Dialect, Mentions};
 use super::types::comment_node_type;
 use super::util::other_err;
 
@@ -24,6 +26,9 @@ pub(super) fn comment_actions() -> Vec<NodeAction> {
 
 pub(super) struct JiraCommentNode {
     client: Arc<JiraClient>,
+    /// The adapter's cache — the user table `@uu_…` mentions resolve
+    /// against, the same one the ticket buffer uses.
+    cache: Arc<Mutex<JiraCache>>,
     issue_key: String,
     /// Composite ID: `{issue_key}/comment/{comment_id}` for use in `get_by_id`.
     composite_id: String,
@@ -32,7 +37,12 @@ pub(super) struct JiraCommentNode {
 }
 
 impl JiraCommentNode {
-    pub(super) fn new(client: Arc<JiraClient>, comment: JiraComment, issue_key: String) -> Self {
+    pub(super) fn new(
+        client: Arc<JiraClient>,
+        cache: Arc<Mutex<JiraCache>>,
+        comment: JiraComment,
+        issue_key: String,
+    ) -> Self {
         let cached_metadata = Metadata {
             fields: vec![
                 MetadataField {
@@ -68,11 +78,22 @@ impl JiraCommentNode {
         let composite_id = format!("{}/comment/{}", issue_key, comment.id);
         Self {
             client,
+            cache,
             issue_key,
             composite_id,
             comment,
             cached_metadata,
         }
+    }
+
+    async fn mentions(&self) -> Mentions {
+        Mentions::load(
+            &self.client,
+            &self.cache,
+            &self.issue_key,
+            &[&self.comment.body],
+        )
+        .await
     }
 
     async fn write_body(&mut self, data: &[u8], expected_version: Option<&str>) -> Result<String> {
@@ -152,15 +173,22 @@ impl Node for JiraCommentNode {
         match action_id {
             "edit_full" => {
                 let c = &self.comment;
+                let dialect = Dialect::for_body(&c.body);
+                let body = comment_body::to_editor(&c.body, dialect, &self.mentions().await);
                 let template = format!(
-                    "# Comment on {}\n# Author: {} | Created: {}\n{}\n\n{}",
-                    self.issue_key, c.author, c.created, COMMENT_SEPARATOR, c.body
+                    "# Comment on {}\n# Author: {} | Created: {} | Format: {}\n{}\n\n{}",
+                    self.issue_key,
+                    c.author,
+                    c.created,
+                    dialect.name(),
+                    COMMENT_SEPARATOR,
+                    body
                 );
                 Ok(EditorPrep {
                     cursor_line: None,
                     template,
                     version: self.comment.updated.clone(),
-                    suffix: ".jira".into(),
+                    suffix: dialect.suffix().into(),
                     file_path: None,
                     args: Default::default(),
                 })
@@ -186,10 +214,19 @@ impl Node for JiraCommentNode {
                     version,
                 },
             ) => {
-                let body = parse_comment_buffer(&text, &original);
-                if body == self.comment.body.trim() {
+                let edited = parse_comment_buffer(&text, &original);
+                // Same predicate as `prepare`, over the same input, so the
+                // buffer is read back in the dialect it was handed out in.
+                let dialect = Dialect::for_body(&self.comment.body);
+                let mentions = self.mentions().await;
+                // Compared in the buffer's own form: converting an untouched
+                // buffer back would normalize the markup and read as an edit.
+                let shown = comment_body::to_editor(&self.comment.body, dialect, &mentions);
+                if edited == shown.trim() {
                     return Ok(ActionOutcome::NoChanges);
                 }
+                let body =
+                    comment_body::from_editor(&edited, dialect, &mentions).map_err(other_err)?;
                 let expected = if version.is_empty() {
                     None
                 } else {
@@ -291,6 +328,14 @@ mod tests {
         Arc::new(JiraClient::new("http://localhost:0", None, None, Some("test"), false).unwrap())
     }
 
+    fn test_cache() -> Arc<Mutex<JiraCache>> {
+        Arc::new(Mutex::new(JiraCache::new(None, uuid::Uuid::nil())))
+    }
+
+    fn test_node(comment: JiraComment) -> JiraCommentNode {
+        JiraCommentNode::new(test_client(), test_cache(), comment, "PROJ-42".into())
+    }
+
     fn sample_comment() -> JiraComment {
         JiraComment {
             id: "10042".into(),
@@ -304,7 +349,7 @@ mod tests {
 
     #[test]
     fn comment_node_metadata() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         assert_eq!(node.id(), "PROJ-42/comment/10042");
         assert_eq!(node.label(), "bob");
 
@@ -318,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_node_content_read() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         let content = node.content().unwrap();
         let text = content.read_text().await.unwrap();
         assert_eq!(text, "This needs a fix ASAP.");
@@ -327,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn comment_node_has_no_children() {
         let adapter = crate::adapter::test_adapter().await;
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         assert!(not_yet_done_content::children::child_types(&adapter, &node).is_empty());
     }
 
@@ -355,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_requests_confirmation_with_author_and_id() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         let dispatch = node
             .invoke_action("delete", &ActionContext::default())
             .await
@@ -371,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_prepare_contains_header_and_body() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         let prep = node
             .prepare("edit_full", &Default::default())
             .await
@@ -411,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_editor_roundtrip() {
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let node = test_node(sample_comment());
         let prep = node
             .prepare("edit_full", &Default::default())
             .await
@@ -449,5 +494,113 @@ mod tests {
         let template = format!("# Comment on PROJ-42\n{COMMENT_SEPARATOR}\n\nold body");
         let text = "# Comment on PROJ-42\n\n# first\n# second";
         assert_eq!(parse_comment_buffer(text, &template), "# first\n# second");
+    }
+
+    #[tokio::test]
+    async fn prepare_hands_out_markdown_for_a_roundtrippable_body() {
+        let mut c = sample_comment();
+        c.body = "h3. Titel\n\nein *fetter* Hinweis".into();
+        let node = test_node(c);
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
+
+        assert_eq!(prep.suffix, ".md");
+        assert!(
+            prep.template.contains("| Format: markdown"),
+            "{}",
+            prep.template
+        );
+        assert!(prep.template.contains("### Titel"), "{}", prep.template);
+        assert!(prep.template.contains("**fetter**"), "{}", prep.template);
+    }
+
+    #[tokio::test]
+    async fn prepare_stays_in_wiki_markup_when_the_body_would_not_survive() {
+        // `~~x~~` is plain text in Jira but strikethrough in Markdown, so the
+        // round-trip would rewrite it to `-x-`. Such a body keeps its raw
+        // markup — there is no second, plain edit action to fall back to.
+        let mut c = sample_comment();
+        c.body = "nicht ~~weg~~ damit".into();
+        let node = test_node(c);
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
+
+        assert_eq!(prep.suffix, ".jira");
+        assert!(
+            prep.template.contains("| Format: jira"),
+            "{}",
+            prep.template
+        );
+        assert!(
+            prep.template.contains("nicht ~~weg~~ damit"),
+            "{}",
+            prep.template
+        );
+    }
+
+    #[tokio::test]
+    async fn untouched_markdown_buffer_parses_back_to_the_stored_markdown() {
+        // The unchanged-check compares in the buffer's own form, so an
+        // untouched buffer must equal what the codec hands out.
+        let mut c = sample_comment();
+        c.body = "h3. Titel\n\nein *fetter* Hinweis".into();
+        let node = test_node(c);
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
+        let body = parse_comment_buffer(&prep.template, &prep.template);
+
+        let mentions = node.mentions().await;
+        let shown = comment_body::to_editor(&node.comment.body, Dialect::Markdown, &mentions);
+        assert_eq!(body, shown.trim());
+        // ... and converting it back yields the stored wiki markup again.
+        assert_eq!(
+            comment_body::from_editor(&body, Dialect::Markdown, &mentions).unwrap(),
+            node.comment.body
+        );
+    }
+
+    /// The single comment reads mentions the way the ticket buffer does:
+    /// `[~name]` shows as the user's `@uu_…` slug and goes back as `[~name]`.
+    #[tokio::test]
+    async fn mentions_read_and_write_like_the_ticket_buffer() {
+        let mut c = sample_comment();
+        c.body = "[~adoe] bitte pruefen".into();
+        let node = test_node(c);
+        super::super::cache::persist_users(
+            &node.cache,
+            vec![crate::client::JiraUser {
+                name: "adoe".into(),
+                display_name: "Doe, Alice".into(),
+                email_address: None,
+            }],
+        )
+        .await;
+        let prep = node
+            .prepare("edit_full", &Default::default())
+            .await
+            .unwrap();
+        let body = parse_comment_buffer(&prep.template, &prep.template);
+        assert!(body.starts_with("@uu_"), "{body}");
+        assert!(!body.contains("[~"), "{body}");
+
+        let mentions = node.mentions().await;
+        let edited = body.replace("pruefen", "**jetzt** pruefen");
+        assert_eq!(
+            comment_body::from_editor(&edited, Dialect::Markdown, &mentions).unwrap(),
+            "[~adoe] bitte *jetzt* pruefen"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_mention_is_refused_before_sending() {
+        let node = test_node(sample_comment());
+        let mentions = node.mentions().await;
+        assert!(comment_body::from_editor("@uu_nobody hi", Dialect::Markdown, &mentions).is_err());
     }
 }

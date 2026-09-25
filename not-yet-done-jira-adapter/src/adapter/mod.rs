@@ -181,6 +181,7 @@ impl ContentAdapter for JiraAdapter {
                     })?;
                 return Ok(Box::new(JiraCommentNode::new(
                     client,
+                    Arc::clone(&self.cache),
                     comment,
                     issue_key.to_string(),
                 )));

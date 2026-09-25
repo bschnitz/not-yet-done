@@ -683,4 +683,26 @@ mod tests {
             "# one\n# two"
         );
     }
+
+    #[test]
+    fn a_markdown_comment_buffer_becomes_wiki_markup() {
+        // The two steps `create_comment` applies to the edited buffer: drop
+        // the header it seeded, then convert Markdown to wiki markup.
+        let template = "# New comment for PROJ-42\n\n";
+        let text = "# New comment for PROJ-42\n\n## Befund\n\nein **fetter** Hinweis";
+        let body =
+            super::super::comment_body::markup_in(&strip_comment_template_header(text, template));
+        assert_eq!(body, "h2. Befund\n\nein *fetter* Hinweis");
+    }
+
+    #[test]
+    fn a_numbered_list_in_a_markdown_comment_stays_a_numbered_list() {
+        // The header stripper exists so `# erstens` survives; the converter
+        // must then turn Markdown's `1.` form into Jira's `#` form.
+        let template = "# New comment for PROJ-42\n\n";
+        let text = "# New comment for PROJ-42\n\n1. erstens\n2. zweitens";
+        let body =
+            super::super::comment_body::markup_in(&strip_comment_template_header(text, template));
+        assert_eq!(body, "# erstens\n# zweitens");
+    }
 }

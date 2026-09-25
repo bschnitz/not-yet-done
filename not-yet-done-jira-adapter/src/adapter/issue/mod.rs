@@ -31,6 +31,7 @@ use super::types::{attachment_node_type, comment_node_type, issue_node_type};
 use super::util::{browse_issue, format_file_size, other_err, prepare_target_dir, truncate_body};
 
 mod clone;
+pub(crate) mod comment_body;
 mod edit_full;
 mod edit_with_comments;
 mod export;
@@ -42,7 +43,7 @@ mod slugs;
 mod template;
 mod transitions;
 mod upload;
-mod wiki_md;
+pub(crate) mod wiki_md;
 mod workspace;
 
 use edit_with_comments::OwnIdentity;
@@ -486,6 +487,7 @@ impl Node for JiraIssueNode {
         if let Some(comment) = comments.into_iter().find(|c| c.id == plain_id) {
             return Ok(Box::new(JiraCommentNode::new(
                 Arc::clone(&self.client),
+                Arc::clone(&self.cache),
                 comment,
                 self.key.clone(),
             )));
@@ -615,11 +617,14 @@ impl Node for JiraIssueNode {
                     args: Default::default(),
                 })
             }
+            // A new comment is authored in Markdown, like the description:
+            // there is no existing markup to preserve, so `execute` simply
+            // converts the buffer on the way out.
             "create_comment" => Ok(EditorPrep {
                 cursor_line: None,
                 template: format!("# New comment for {}\n\n", self.key),
                 version: String::new(),
-                suffix: ".jira".into(),
+                suffix: ".md".into(),
                 file_path: None,
                 args: Default::default(),
             }),
@@ -792,6 +797,11 @@ impl Node for JiraIssueNode {
                 if body.trim().is_empty() {
                     return Ok(ActionOutcome::NoChanges);
                 }
+                let mentions =
+                    comment_body::Mentions::load(&self.client, &self.cache, &self.key, &[]).await;
+                let body =
+                    comment_body::from_editor(&body, comment_body::Dialect::Markdown, &mentions)
+                        .map_err(other_err)?;
                 let comment = self
                     .client
                     .add_comment(&self.key, &body)
@@ -2478,7 +2488,8 @@ mod tests {
     fn comment_node_sample_round_trip() {
         // Sanity check: importing JiraCommentNode from the comment submodule
         // and constructing it from the same client/comment fixtures.
-        let node = JiraCommentNode::new(test_client(), sample_comment(), "PROJ-42".into());
+        let cache = Arc::new(Mutex::new(JiraCache::new(None, uuid::Uuid::nil())));
+        let node = JiraCommentNode::new(test_client(), cache, sample_comment(), "PROJ-42".into());
         assert_eq!(node.id(), "PROJ-42/comment/10042");
     }
 

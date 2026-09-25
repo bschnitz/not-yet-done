@@ -16,13 +16,13 @@ use crate::client::{JiraClient, JiraComment, JiraIssueDetail};
 use super::super::cache::{fetch_comments, fetch_issue, resolve_unknown_mentions};
 use super::super::util::{other_err, short_ts};
 use super::JiraIssueNode;
+use super::comment_body;
 use super::markers::{
     ADD_COMMENT_MARKER, DELETE_KEYWORD_DEL, DELETE_KEYWORD_DELETE, FOREIGN_BANNER_END,
     FOREIGN_BANNER_START,
 };
 use super::slugs::{
-    SlugTables, build_slug_tables, canonicalize_labels_via_jira, parse_user_mentions,
-    render_user_mentions, resolve_slugs_inplace,
+    SlugTables, build_slug_tables, canonicalize_labels_via_jira, resolve_slugs_inplace,
 };
 use super::template::{
     FieldError, Parsed3b, edit_full_fields, render_3b_from_parsed, render_cache_section,
@@ -436,7 +436,7 @@ pub(super) fn comments_canonical_to_md(canonical: &str) -> String {
         }
         if !body.trim().is_empty() {
             out.push(String::new());
-            out.push(wiki_to_md(body));
+            out.push(comment_body::markup_out(body));
         }
     }
     if cache_idx < lines.len() {
@@ -503,7 +503,7 @@ pub(super) fn comments_md_to_canonical(md: &str) -> String {
         }
         if !body.trim().is_empty() {
             out.push(String::new());
-            out.push(md_to_wiki(body));
+            out.push(comment_body::markup_in(body));
         }
     }
     if cache_idx < lines.len() {
@@ -627,7 +627,7 @@ impl JiraIssueNode {
             out.push_str(&render_comment_header(c, me));
             out.push('\n');
             out.push('\n');
-            let body = render_user_mentions(c.body.trim_end(), &tables.users);
+            let body = comment_body::mentions_out(&c.body, &tables.users);
             out.push_str(&body);
             out.push('\n');
             out.push('\n');
@@ -693,10 +693,10 @@ impl JiraIssueNode {
 
         let mut mention_errors: Vec<FieldError> = Vec::new();
         for block in &mut user.blocks {
-            match parse_user_mentions(&block.body, &tables.users) {
+            match comment_body::mentions_in(&block.body, &tables.users) {
                 Ok(b) => block.body = b,
                 Err(slug) => mention_errors.push(FieldError {
-                    message: format!("unknown user mention `@{slug}` in comment"),
+                    message: comment_body::unknown_mention(&slug),
                 }),
             }
         }
@@ -704,7 +704,7 @@ impl JiraIssueNode {
         // Errors here would be a slug we couldn't resolve; keep the original
         // so the diff just sees a different value (which surfaces as an edit).
         for block in &mut snapshot.blocks {
-            if let Ok(b) = parse_user_mentions(&block.body, &tables.users) {
+            if let Ok(b) = comment_body::mentions_in(&block.body, &tables.users) {
                 block.body = b;
             }
         }
@@ -726,7 +726,7 @@ impl JiraIssueNode {
             .await
             .map_err(other_err)?;
         // Pre-resolve any `[~KEY]` mention we don't yet know about — keeps
-        // `render_user_mentions` synchronous and ensures the foreign-reopen
+        // `comment_body::mentions_out` synchronous and ensures the foreign-reopen
         // banner lands with proper @uu_slugs everywhere.
         let mut mention_sources: Vec<&str> =
             fresh_comments.iter().map(|c| c.body.as_str()).collect();
@@ -1013,7 +1013,7 @@ impl JiraIssueNode {
                 out.push_str(ADD_COMMENT_MARKER);
                 out.push('\n');
                 out.push('\n');
-                let body = render_user_mentions(block.body.trim_end(), &tables.users);
+                let body = comment_body::mentions_out(&block.body, &tables.users);
                 out.push_str(&body);
                 out.push('\n');
                 out.push('\n');
@@ -1024,7 +1024,7 @@ impl JiraIssueNode {
             out.push_str(&render_comment_header(c, me));
             out.push('\n');
             out.push('\n');
-            let body = render_user_mentions(c.body.trim_end(), &tables.users);
+            let body = comment_body::mentions_out(&c.body, &tables.users);
             out.push_str(&body);
             out.push('\n');
             out.push('\n');

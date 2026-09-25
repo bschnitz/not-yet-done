@@ -307,7 +307,7 @@ fn split_header_row(row: &str) -> (String, String) {
 // ─────────────────────────── wiki → markdown ───────────────────────────
 
 /// Convert a Jira wiki-markup body to Markdown.
-pub(super) fn wiki_to_md(wiki: &str) -> String {
+pub(crate) fn wiki_to_md(wiki: &str) -> String {
     // Decouple any block terminator glued to the end of a content line first,
     // so the line-based block scanner below sees it as a standalone close.
     let wiki = split_block_macros(wiki);
@@ -508,7 +508,7 @@ fn is_paragraph_continuation_w(line: &str) -> bool {
 // ─────────────────────────── markdown → wiki ───────────────────────────
 
 /// Convert a Markdown body back to Jira wiki markup.
-pub(super) fn md_to_wiki(md: &str) -> String {
+pub(crate) fn md_to_wiki(md: &str) -> String {
     let lines: Vec<&str> = md.split('\n').collect();
     let mut out: Vec<String> = Vec::new();
     // Jira marker chain of the list currently being emitted, one char per
@@ -808,7 +808,7 @@ fn is_paragraph_continuation_m(line: &str) -> bool {
 /// whitespace), return a short human-readable diff of the first offending
 /// region; otherwise `None`. Used by `prepare("edit_markdown")` to refuse to
 /// open the Markdown editor for a ticket the converter would mangle.
-pub(super) fn roundtrip_diff(wiki: &str) -> Option<String> {
+pub(crate) fn roundtrip_diff(wiki: &str) -> Option<String> {
     let back = md_to_wiki(&wiki_to_md(wiki));
     if normalize_ws(wiki) == normalize_ws(&back) {
         return None;
