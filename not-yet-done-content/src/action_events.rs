@@ -200,7 +200,9 @@ impl NodeDecorator for ActionEventNode {
         let dispatch = self.inner.invoke_action(name, ctx).await?;
         if !matches!(
             dispatch,
-            ActionDispatch::Confirm { .. } | ActionDispatch::Error(_)
+            ActionDispatch::Confirm { .. }
+                | ActionDispatch::Error(_)
+                | ActionDispatch::Deferred { .. }
         ) {
             self.emitter.publish(name, phase::INVOKE, &*self.inner);
         }

@@ -208,13 +208,36 @@ fn dispatch_expanded(args: &[String]) -> ExitCode {
     }
 }
 
+/// Exit status of an action that answered [`ActionDispatch::Deferred`]:
+/// `EX_TEMPFAIL` from `sysexits.h`, the code a caller already reads as "try
+/// again later, nothing is broken".
+const EXIT_DEFERRED: u8 = 75;
+
+/// An action that could not do its work this time and wants to be tried again
+/// later ([`ActionDispatch::Deferred`]). A type of its own so [`finish`] can
+/// tell it from a failure and give it [`EXIT_DEFERRED`] instead of 1.
+#[derive(Debug)]
+struct Deferred(String);
+
+impl std::fmt::Display for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Deferred {}
+
 /// Map a verb result to a process exit code, reporting errors to stderr.
 fn finish(result: Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nyd: {e:#}");
-            ExitCode::FAILURE
+            if e.downcast_ref::<Deferred>().is_some() {
+                ExitCode::from(EXIT_DEFERRED)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -1581,6 +1604,10 @@ async fn do_dispatch(
             Ok(())
         }
         ActionDispatch::Error(msg) => Err(anyhow!("{msg}")),
+        // Nothing broke, the work just did not happen this time: a distinct
+        // exit status lets a scheduler try again at its next slot rather
+        // than treat it as a failure.
+        ActionDispatch::Deferred { message } => Err(Deferred(message).into()),
         // Generic confirm gate. With `--yes` we already passed
         // `confirmed: true`, so the adapter does the work instead of asking;
         // a `Confirm` here means `--yes` was absent.
@@ -2374,6 +2401,16 @@ fn print_table(cols: &[String], rows: &[Vec<String>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deferred_action_exits_75_and_a_failed_one_exits_1() {
+        assert_eq!(
+            finish(Err(Deferred("nobody answered".into()).into())),
+            ExitCode::from(EXIT_DEFERRED)
+        );
+        assert_eq!(finish(Err(anyhow!("boom"))), ExitCode::FAILURE);
+        assert_eq!(finish(Ok(())), ExitCode::SUCCESS);
+    }
 
     fn inv_from(args: &[&str]) -> Invocation {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();

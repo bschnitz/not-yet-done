@@ -324,6 +324,21 @@ pub trait CalendarBackend: Send + Sync {
     ) -> Option<tokio::sync::mpsc::Receiver<not_yet_done_content::PromptRequest>> {
         None
     }
+
+    /// How many times this backend has asked a person to do something to get
+    /// through a sign-in — approve a number on their phone, type a one-time
+    /// code — since it was created.
+    ///
+    /// Only the change matters: a caller reads it before a fetch and again
+    /// after one that failed. If it rose in between, the fetch was waiting on
+    /// a person, and its failure most likely means nobody answered rather than
+    /// that the sign-in is broken. A scheduler tries the first again at its
+    /// next slot and raises the alarm only for the second.
+    ///
+    /// Default `0` — a backend that never asks anyone never rises.
+    fn sign_in_prompts(&self) -> u64 {
+        0
+    }
 }
 
 /// Constructs a [`CalendarBackend`] for one connection from its opaque config

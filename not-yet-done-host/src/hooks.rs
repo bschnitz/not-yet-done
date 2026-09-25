@@ -356,7 +356,11 @@ fn outcome_for(dispatch: ActionDispatch) -> HookOutcome {
         ActionDispatch::Reload | ActionDispatch::Noop | ActionDispatch::Confirm { .. } => {
             HookOutcome::Fired(None)
         }
-        ActionDispatch::Error(e) => HookOutcome::Failed(e),
+        // A hook fires once and has no later slot to wait for, so work that
+        // did not happen is a failed hook like any other.
+        ActionDispatch::Error(e) | ActionDispatch::Deferred { message: e } => {
+            HookOutcome::Failed(e)
+        }
         other => HookOutcome::Failed(format!(
             "action returned {other:?}, which a hook cannot drive head-less"
         )),
@@ -1202,6 +1206,12 @@ action_invoked:
         assert_eq!(
             outcome_for(ActionDispatch::Error("boom".into())),
             HookOutcome::Failed("boom".into())
+        );
+        assert_eq!(
+            outcome_for(ActionDispatch::Deferred {
+                message: "nobody answered".into()
+            }),
+            HookOutcome::Failed("nobody answered".into())
         );
         assert!(matches!(
             outcome_for(ActionDispatch::ExecuteQuery {

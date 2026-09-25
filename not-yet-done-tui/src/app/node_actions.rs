@@ -334,6 +334,9 @@ pub fn dispatch_to_view_request(
         // data changed, so surface the text in the status bar without a reload.
         ActionDispatch::Notify { message } => Some(ViewRequest::Notify(message)),
         ActionDispatch::Error(msg) => Some(ViewRequest::Notify(msg)),
+        // Nothing to retry from here: the person is looking at the TUI, so
+        // saying why it did not happen is all there is to do.
+        ActionDispatch::Deferred { message } => Some(ViewRequest::Notify(message)),
     }
 }
 

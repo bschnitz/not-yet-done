@@ -2,9 +2,14 @@
 //! included —, land every result in the store, and report per connection.
 //!
 //! It is the entry point for anything that keeps the store fresh from outside
-//! the TUI (a scheduler running `nyd adapter calendar root do sync`), so a
+//! the TUI (a scheduler running `nyd adapter calendar root sync`), so a
 //! connection that did not sync makes the whole action fail: the caller's
 //! exit code has to say so.
+//!
+//! One kind of failure is told apart: a fetch that failed after its sign-in
+//! asked a person for something ([`SyncOutcome::Unanswered`]). Nothing is
+//! broken there — nobody approved the sign-in in time — so when that is the
+//! only kind in a report, the action defers instead of failing.
 
 use std::time::Duration;
 
@@ -39,6 +44,11 @@ pub(crate) enum SyncOutcome {
     EmptyKept,
     /// The fetch itself failed.
     Failed(String),
+    /// The fetch failed while its sign-in was waiting on a person — a number
+    /// to approve, a code to type — who did not answer. Whatever the fetch
+    /// said about it is kept. A sign-in that breaks *after* asking lands here
+    /// too; only a later sync can tell the two apart.
+    Unanswered(String),
 }
 
 impl SyncOutcome {
@@ -55,6 +65,9 @@ impl SyncOutcome {
                 "came back empty, kept the known events (sign-in problem?)".to_string()
             }
             SyncOutcome::Failed(why) => format!("failed: {why}"),
+            SyncOutcome::Unanswered(why) => {
+                format!("waited for a sign-in nobody answered ({why})")
+            }
         }
     }
 }
@@ -69,6 +82,16 @@ impl SyncReport {
     /// Whether any connection did not sync.
     pub(crate) fn failed(&self) -> bool {
         self.lines.iter().any(|(_, outcome)| outcome.is_failure())
+    }
+
+    /// Whether the sync should be tried again later rather than reported as
+    /// broken: something did not sync, and every connection that did not
+    /// was waiting on a person who did not answer.
+    pub(crate) fn deferred(&self) -> bool {
+        self.failed()
+            && self.lines.iter().all(|(_, outcome)| {
+                !outcome.is_failure() || matches!(outcome, SyncOutcome::Unanswered(_))
+            })
     }
 
     /// `label: outcome` per connection, joined for a status line.
@@ -132,17 +155,23 @@ pub(crate) fn timeout(args: &ActionArgs) -> Result<Duration, String> {
 /// Sync `indices` over the configured window, all at once — a connection
 /// waiting for an interactive sign-in must not hold up the others. A
 /// connection that takes longer than `limit` counts as failed (and is noted
-/// so in the store).
+/// so in the store); one whose sign-in asked a person for something on the
+/// way counts as [unanswered](SyncOutcome::Unanswered) instead.
 pub(crate) async fn run(fetcher: &Fetcher, indices: &[usize], limit: Duration) -> SyncReport {
     let range = fetcher.window.range(Utc::now());
     let results = join_all(indices.iter().map(|&idx| {
         let range = &range;
         async move {
-            match tokio::time::timeout(limit, fetcher.sync_one(idx, range, Staleness::Keep)).await
+            let backend = &fetcher.backends[idx];
+            let asked_before = backend.sign_in_prompts();
+            let result = match tokio::time::timeout(
+                limit,
+                fetcher.sync_one(idx, range, Staleness::Keep),
+            )
+            .await
             {
                 Ok(result) => result,
                 Err(_) => {
-                    let backend = &fetcher.backends[idx];
                     let why = format!(
                         "{}: no answer within {}s",
                         backend.connection_label(),
@@ -156,12 +185,13 @@ pub(crate) async fn run(fetcher: &Fetcher, indices: &[usize], limit: Duration) -
                     .await;
                     Err(why)
                 }
-            }
+            };
+            (result, backend.sign_in_prompts() > asked_before)
         }
     }))
     .await;
     let mut lines = Vec::with_capacity(indices.len());
-    for (&idx, result) in indices.iter().zip(results) {
+    for (&idx, (result, asked)) in indices.iter().zip(results) {
         let backend = &fetcher.backends[idx];
         let label = backend.connection_label();
         let outcome = match result {
@@ -172,11 +202,17 @@ pub(crate) async fn run(fetcher: &Fetcher, indices: &[usize], limit: Duration) -
             Ok(Some(Ingest::EmptyKept)) => SyncOutcome::EmptyKept,
             // Fetch errors name their connection for the store and the log;
             // the report already leads with it.
-            Err(why) => SyncOutcome::Failed(
-                why.strip_prefix(&format!("{label}: "))
+            Err(why) => {
+                let why = why
+                    .strip_prefix(&format!("{label}: "))
                     .map(str::to_string)
-                    .unwrap_or(why),
-            ),
+                    .unwrap_or(why);
+                if asked {
+                    SyncOutcome::Unanswered(why)
+                } else {
+                    SyncOutcome::Failed(why)
+                }
+            }
         };
         lines.push((label.to_string(), outcome));
     }
@@ -243,6 +279,32 @@ mod tests {
         async fn list_events(&self, _range: &TimeRange) -> Result<Vec<CalEvent>, CalendarError> {
             std::future::pending().await
         }
+    }
+
+    /// A backend whose sign-in asks a person to approve it and then waits
+    /// for good — the approval nobody gave.
+    struct Asking {
+        asked: AtomicU64,
+    }
+
+    #[async_trait]
+    impl CalendarBackend for Asking {
+        fn connection_id(&self) -> &str {
+            "asking"
+        }
+        async fn list_events(&self, _range: &TimeRange) -> Result<Vec<CalEvent>, CalendarError> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::pending().await
+        }
+        fn sign_in_prompts(&self) -> u64 {
+            self.asked.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    fn asking() -> Box<dyn CalendarBackend> {
+        Box::new(Asking {
+            asked: AtomicU64::new(0),
+        })
     }
 
     fn scripted(id: &str, answer: Result<usize, String>) -> Box<dyn CalendarBackend> {
@@ -366,6 +428,39 @@ mod tests {
         let states = f.persisted.as_ref().unwrap().store().sync_states().await.unwrap();
         let silent = states.iter().find(|s| s.connection == "silent").unwrap();
         assert!(silent.last_error.as_deref().unwrap().contains("no answer"));
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_nobody_answered_defers_rather_than_fails() {
+        let f = fetcher("sync_run_unanswered", vec![asking(), scripted("b", Ok(1))], &[]).await;
+        let report = run(&f, &[0, 1], std::time::Duration::from_millis(50)).await;
+        assert!(report.failed());
+        assert!(report.deferred());
+        assert_eq!(
+            report.message(),
+            "asking: waited for a sign-in nobody answered (no answer within 0s); b: 1 event"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_failure_beside_an_unanswered_sign_in_is_not_deferred() {
+        let f = fetcher(
+            "sync_run_unanswered_and_broken",
+            vec![asking(), scripted("b", Err("down".into()))],
+            &[],
+        )
+        .await;
+        let report = run(&f, &[0, 1], std::time::Duration::from_millis(50)).await;
+        assert!(report.failed());
+        assert!(!report.deferred());
+    }
+
+    #[tokio::test]
+    async fn a_silent_timeout_without_a_question_is_a_failure() {
+        let f = fetcher("sync_run_silent_not_deferred", vec![Box::new(Silent)], &[]).await;
+        let report = run(&f, &[0], std::time::Duration::from_millis(50)).await;
+        assert!(!report.deferred());
+        assert!(matches!(report.lines[0].1, SyncOutcome::Failed(_)));
     }
 
     #[test]

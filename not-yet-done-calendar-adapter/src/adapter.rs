@@ -216,7 +216,9 @@ fn sync_action() -> NodeAction {
 
 /// `invoke_action("sync")` — sync the chosen connections, awaited. Any
 /// connection that did not sync turns the whole report into an error, so a
-/// scheduler calling the CLI sees a non-zero exit.
+/// scheduler calling the CLI sees a non-zero exit — unless every one of them
+/// was only waiting for a sign-in nobody answered: that defers (exit 75), so
+/// the scheduler tries again at its next slot instead of reporting a failure.
 async fn invoke_sync(fetcher: &Fetcher, args: &ActionArgs) -> Result<ActionDispatch> {
     let (indices, limit) = match crate::sync::select(fetcher, args)
         .and_then(|indices| Ok((indices, crate::sync::timeout(args)?)))
@@ -225,6 +227,11 @@ async fn invoke_sync(fetcher: &Fetcher, args: &ActionArgs) -> Result<ActionDispa
         Err(why) => return Ok(ActionDispatch::Error(why)),
     };
     let report = crate::sync::run(fetcher, &indices, limit).await;
+    if report.deferred() {
+        return Ok(ActionDispatch::Deferred {
+            message: report.message(),
+        });
+    }
     if report.failed() {
         return Ok(ActionDispatch::Error(report.message()));
     }

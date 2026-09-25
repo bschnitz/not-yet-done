@@ -272,6 +272,11 @@ factory plus YAML — no core code changes.
 - `actions()` — the actions of this concrete node
 - `invoke_action(name, ctx)` → `ActionDispatch` — shortcut-driven action
   dispatch that returns an intent for the UI flow
+  (among them `Error` — the action failed — and `Deferred` — it could not do
+  its work now, but nothing is broken, e.g. a sign-in that asked a person who
+  did not answer; the TUI shows the message as a notice, the CLI exits 75,
+  `EX_TEMPFAIL`, so a scheduler can wait for its next slot instead of
+  retrying or raising an alarm)
 - `prepare(action)` / `picker_options(action)` / `execute(action, input)` —
   the three-stage action flow (render the editor buffer or supply the picker
   options → user input → finalize)

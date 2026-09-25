@@ -1847,6 +1847,18 @@ pub enum ActionDispatch {
     },
     /// Adapter rejected the action with a user-displayable error.
     Error(String),
+    /// The action could not do its work **this time**, and nothing is broken:
+    /// it waited on something outside its reach that did not come — a person
+    /// who was asked to approve a sign-in and did not. Trying again later is
+    /// the whole remedy.
+    ///
+    /// *Why it exists:* a scheduler that runs an action unattended has to tell
+    /// "the flow is broken, look at it" from "nobody was there to answer".
+    /// [`ActionDispatch::Error`] says the first, so a missed approval would
+    /// count as a failure and be retried at once, at a time the person is still
+    /// away. The CLI exits with 75 (`EX_TEMPFAIL`) for this one; the TUI shows
+    /// the message like any other.
+    Deferred { message: String },
 }
 
 /// A node the user marked for a subsequent move — the "clipboard" of the
