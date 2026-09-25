@@ -42,6 +42,9 @@ pub struct CalDavBackend {
     /// something (see [`CredentialProvider::can_prompt`]). Taken out on
     /// the first call, hence the `Option`.
     prompts: Mutex<Option<mpsc::Receiver<PromptRequest>>>,
+    /// The sending side's handle, kept to read how often it asked — see
+    /// [`CalendarBackend::sign_in_prompts`].
+    asking: Option<CredentialPrompts>,
 }
 
 #[async_trait]
@@ -82,6 +85,13 @@ impl CalendarBackend for CalDavBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+
+    /// A locked password store asking for its passphrase is a sign-in
+    /// waiting on a person: a sync that fails after it asked was left
+    /// unanswered, not broken.
+    fn sign_in_prompts(&self) -> u64 {
+        self.asking.as_ref().map_or(0, CredentialPrompts::asked)
     }
 }
 
@@ -127,6 +137,7 @@ impl CalendarBackendFactory for CalDavBackendFactory {
             label,
             client,
             prompts: Mutex::new(rx),
+            asking: prompts,
         }))
     }
 }

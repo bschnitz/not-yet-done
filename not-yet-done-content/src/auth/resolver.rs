@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -70,11 +71,12 @@ pub trait CredentialResolver: Send + Sync {
 /// asking party (the connection, not the script — the user knows their
 /// accounts, not our helpers).
 ///
-/// Cloneable so one connection's providers share a stream.
+/// Cloneable so one connection's providers share a stream — and its count.
 #[derive(Clone)]
 pub struct CredentialPrompts {
     source: String,
     tx: mpsc::Sender<PromptRequest>,
+    asked: Arc<AtomicU64>,
 }
 
 impl CredentialPrompts {
@@ -82,7 +84,15 @@ impl CredentialPrompts {
         Self {
             source: source.into(),
             tx,
+            asked: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many questions went out on this stream so far, answered or not.
+    /// A caller whose work failed after this rose knows it failed waiting on
+    /// a person — a passphrase nobody typed — not because anything broke.
+    pub fn asked(&self) -> u64 {
+        self.asked.load(Ordering::Relaxed)
     }
 }
 
@@ -491,6 +501,7 @@ impl ScriptResolver {
             })
             .collect();
 
+        prompts.asked.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         let request = PromptRequest {
             source: prompts.source.clone(),
@@ -751,13 +762,12 @@ esac
                 let _ = req.respond.send(PromptAnswer::Cancelled);
             }
         });
-        let r = script_resolver(
-            &path,
-            Some("password"),
-            Some(CredentialPrompts::new("synthetic account", tx)),
-        );
+        let prompts = CredentialPrompts::new("synthetic account", tx);
+        let r = script_resolver(&path, Some("password"), Some(prompts.clone()));
         let err = r.resolve().await.expect_err("the user said no");
         assert!(err.to_string().contains("dismissed"), "unexpected: {err}");
+        // Counted though declined: the caller learns it waited on a person.
+        assert_eq!(prompts.asked(), 1);
     }
 
     #[tokio::test]

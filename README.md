@@ -2359,7 +2359,10 @@ Two limits are worth knowing:
   stream, so the adapter must offer one (the calendar's `caldav` and
   `office365-web` backends do). With no stream an unlocked store still
   resolves; a locked one fails with "no interactive frontend" instead of
-  hanging on a dialog nobody will show.
+  hanging on a dialog nobody will show. The CLI answers the stream on the
+  terminal; with no terminal (a timer, a pipe) it declines at once, and the
+  calendar's `sync` counts that as a sign-in nobody answered: it exits 75,
+  not 1, instead of waiting out its timeout.
 - **One dialog, not one per slot.** Slots pointing at the same script are
   serialised on its path, so the first invocation unlocks the store and the
   rest find the agent warm — without that, four calendar connections fetching

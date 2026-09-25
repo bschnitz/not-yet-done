@@ -299,7 +299,8 @@ views:
       # (`connections` defaults to all, `timeout` — seconds per connection —
       # to 300). Any connection that did not sync makes it exit 1 — unless
       # every one that did not only waited for a sign-in nobody answered
-      # (an authenticator number shown, then the timeout): that exits 75,
+      # (an authenticator number shown, then the timeout; a locked password
+      # store's passphrase with no terminal to type it on): that exits 75,
       # "try again later", which a scheduler need not count as a failure.
       - name: sync now
         key: 'a s'

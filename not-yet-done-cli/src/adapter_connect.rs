@@ -25,6 +25,13 @@
 //! Without a terminal (a script, a cron job, a pipe) asking is impossible, and
 //! the command fails with a message naming the fields and the non-interactive
 //! providers that can supply them — never with a silent empty result.
+//!
+//! The same goes for the questions an adapter raises mid-operation
+//! ([`PromptRequest`]s — a locked password store's passphrase, say): the
+//! supervisor takes that stream and asks on the terminal, or, without one,
+//! declines at once. Declining is the point: an untaken stream is never
+//! closed, so the question would wait for an answer until some outer timeout
+//! gave up, and the adapter could not tell "nobody is there" from "broken".
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -32,7 +39,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use not_yet_done_content::{AdapterStatus, AuthField, ContentAdapter};
+use not_yet_done_content::{
+    ActionInput, AdapterStatus, AuthField, ContentAdapter, InputSpec, PromptAnswer, PromptRequest,
+};
 use tokio::sync::oneshot;
 
 /// How long a command waits for an adapter that says it is connecting before
@@ -57,6 +66,9 @@ const ATTENTION_TIMEOUT: Duration = Duration::from_secs(300);
 /// alternative would be waiting on a login that can never complete.
 pub struct Supervisor {
     task: tokio::task::JoinHandle<()>,
+    /// Answers the adapter's mid-operation questions; `None` when it raises
+    /// none.
+    prompts: Option<tokio::task::JoinHandle<()>>,
     fatal: Option<oneshot::Receiver<String>>,
 }
 
@@ -66,6 +78,12 @@ pub struct Supervisor {
 #[async_trait::async_trait]
 pub trait Prompter: Send + Sync {
     async fn ask(&self, fields: Vec<AuthField>) -> Result<HashMap<String, String>>;
+
+    /// Answer a question the adapter raised mid-operation. The default
+    /// declines — what every prompter without a person behind it does.
+    async fn answer(&self, _request: &PromptRequest) -> PromptAnswer {
+        PromptAnswer::Cancelled
+    }
 }
 
 /// Asks on the terminal; fails with a usable explanation when there is none.
@@ -76,11 +94,18 @@ impl Prompter for TerminalPrompter {
     async fn ask(&self, fields: Vec<AuthField>) -> Result<HashMap<String, String>> {
         prompt_credentials(fields).await
     }
+
+    async fn answer(&self, request: &PromptRequest) -> PromptAnswer {
+        answer_on_terminal(request).await
+    }
 }
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(prompts) = &self.prompts {
+            prompts.abort();
+        }
     }
 }
 
@@ -90,6 +115,17 @@ impl Supervisor {
     }
 
     pub fn start_with(adapter: Arc<dyn ContentAdapter>, prompter: Arc<dyn Prompter>) -> Self {
+        let prompts = adapter.take_prompt_requests().map(|mut requests| {
+            let prompter = Arc::clone(&prompter);
+            tokio::spawn(async move {
+                // One at a time: a second question while the first is on the
+                // terminal waits its turn instead of garbling it.
+                while let Some(request) = requests.recv().await {
+                    let answer = prompter.answer(&request).await;
+                    let _ = request.respond.send(answer);
+                }
+            })
+        });
         let (fatal_tx, fatal_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             if let Err(e) = watch_status(adapter, prompter).await {
@@ -98,6 +134,7 @@ impl Supervisor {
         });
         Self {
             task,
+            prompts,
             fatal: Some(fatal_rx),
         }
     }
@@ -258,14 +295,65 @@ pub async fn wait_until_connected(adapter: &dyn ContentAdapter) -> Result<()> {
     }
 }
 
+fn has_terminal() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Answer an adapter's mid-operation question on the terminal: show it, then
+/// collect the form or take the acknowledgement. Without a terminal, or for a
+/// shape the terminal cannot collect, decline — and say so on stderr, since
+/// the failure that follows will not mention the question.
+async fn answer_on_terminal(request: &PromptRequest) -> PromptAnswer {
+    let PromptRequest {
+        source,
+        prompt,
+        detail,
+        input,
+        ..
+    } = request;
+    if !has_terminal() {
+        eprintln!("{source}: {prompt} — no terminal to answer on, declined");
+        return PromptAnswer::Cancelled;
+    }
+    eprintln!("{source}: {prompt}");
+    if let Some(detail) = detail {
+        eprintln!("  {detail}");
+    }
+    match input {
+        InputSpec::None => PromptAnswer::Provided(ActionInput::None),
+        InputSpec::Form { fields } => {
+            let fields = fields
+                .iter()
+                .map(|f| AuthField {
+                    name: f.key.clone(),
+                    label: f.label.clone(),
+                    masked: f.masked,
+                    optional: !f.required,
+                    prefill: f.default.clone(),
+                })
+                .collect();
+            match read_fields(fields).await {
+                Ok(values) => PromptAnswer::Provided(ActionInput::Form(values)),
+                Err(e) => {
+                    eprintln!("{source}: {e}");
+                    PromptAnswer::Cancelled
+                }
+            }
+        }
+        _ => {
+            eprintln!("{source}: this question cannot be answered on the terminal, declined");
+            PromptAnswer::Cancelled
+        }
+    }
+}
+
 /// Ask for the credential fields on the terminal.
 ///
-/// Reads via dialoguer (which prompts on stderr, keeping stdout clean) on a
-/// blocking thread. Without a TTY there is nothing to ask on, and the error
-/// says which fields are missing and how to supply them non-interactively —
-/// the case that used to end in an empty list and exit 0.
+/// Without a TTY there is nothing to ask on, and the error says which fields
+/// are missing and how to supply them non-interactively — the case that used
+/// to end in an empty list and exit 0.
 async fn prompt_credentials(fields: Vec<AuthField>) -> Result<HashMap<String, String>> {
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if !has_terminal() {
         let names = fields
             .iter()
             .map(|f| f.name.as_str())
@@ -277,6 +365,12 @@ async fn prompt_credentials(fields: Vec<AuthField>) -> Result<HashMap<String, St
              keyring) in the connection config, or run the command in a terminal."
         );
     }
+    read_fields(fields).await
+}
+
+/// Read `fields` via dialoguer (which prompts on stderr, keeping stdout clean)
+/// on a blocking thread.
+async fn read_fields(fields: Vec<AuthField>) -> Result<HashMap<String, String>> {
     tokio::task::spawn_blocking(move || {
         let mut out = HashMap::new();
         for f in &fields {
@@ -377,6 +471,81 @@ mod tests {
         });
         let err = wait_until_connected(&a).await.expect_err("fails");
         assert!(err.to_string().contains("no route to host"));
+    }
+
+    /// An adapter that raises questions mid-operation, handing its stream out
+    /// once like a real one.
+    struct Asking {
+        rx: watch::Receiver<AdapterStatus>,
+        prompts: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<PromptRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentAdapter for Asking {
+        fn adapter_type(&self) -> &str {
+            "test"
+        }
+        fn instance_id(&self) -> &str {
+            "test"
+        }
+        fn childs<'a>(
+            &'a self,
+            _node: &'a dyn not_yet_done_content::Node,
+        ) -> Vec<not_yet_done_content::children::Child<'a>> {
+            Vec::new()
+        }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(ContentError::NotSupported("no root".into()))
+        }
+        async fn get_by_id(
+            &self,
+            _id: &str,
+        ) -> not_yet_done_content::Result<Box<dyn not_yet_done_content::Node>> {
+            Err(ContentError::NotSupported("no nodes".into()))
+        }
+        fn subscribe_status(&self) -> watch::Receiver<AdapterStatus> {
+            self.rx.clone()
+        }
+        fn take_prompt_requests(&self) -> Option<tokio::sync::mpsc::Receiver<PromptRequest>> {
+            self.prompts.lock().unwrap().take()
+        }
+    }
+
+    /// A passphrase nobody can type — the command runs from a timer — is
+    /// declined at once, so the adapter fails fast and can tell why, instead
+    /// of waiting on a stream nobody reads until an outer timeout.
+    #[tokio::test]
+    async fn a_question_nobody_can_answer_is_declined_at_once() {
+        struct Nobody;
+        #[async_trait::async_trait]
+        impl Prompter for Nobody {
+            async fn ask(&self, _fields: Vec<AuthField>) -> Result<HashMap<String, String>> {
+                bail!("nobody")
+            }
+        }
+        let (_status, rx) = watch::channel(AdapterStatus::Ready);
+        let (tx, prompts) = tokio::sync::mpsc::channel(8);
+        let adapter: Arc<dyn ContentAdapter> = Arc::new(Asking {
+            rx,
+            prompts: std::sync::Mutex::new(Some(prompts)),
+        });
+        let _sup = Supervisor::start_with(adapter, Arc::new(Nobody));
+
+        let (respond, answer) = oneshot::channel();
+        tx.send(PromptRequest {
+            source: "synthetic account".into(),
+            prompt: "Password store locked".into(),
+            detail: None,
+            input: InputSpec::Form { fields: Vec::new() },
+            respond,
+        })
+        .await
+        .expect("the supervisor reads the stream");
+        let answer = tokio::time::timeout(Duration::from_secs(1), answer)
+            .await
+            .expect("answered without waiting")
+            .expect("answered, not dropped");
+        assert!(matches!(answer, PromptAnswer::Cancelled));
     }
 
     /// The case this module exists for: a prompt that cannot be answered ends
