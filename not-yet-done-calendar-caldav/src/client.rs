@@ -196,6 +196,104 @@ impl CalDavClient {
         })
     }
 
+    /// Delete every resource holding the event whose UID is `uid`. The
+    /// resources are found by a `calendar-query` on the UID in each calendar,
+    /// since a listed event does not carry the resource it came from; a
+    /// recurring event is one resource, so the whole series goes.
+    pub(crate) async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
+        let mut found = Vec::new();
+        for cal in &self.calendars().await? {
+            found.extend(self.resources_of(&cal.url, uid).await?);
+        }
+        if found.is_empty() {
+            return Err(CalendarError::Other(format!(
+                "no event with UID '{uid}' on the server"
+            )));
+        }
+        for url in &found {
+            trace_caldav!("DELETE event {uid} at {url}");
+            self.delete_resource(url).await?;
+        }
+        Ok(())
+    }
+
+    /// The resources in collection `cal` whose event has the UID `uid`.
+    async fn resources_of(&self, cal: &Url, uid: &str) -> Result<Vec<Url>, CalendarError> {
+        let uid = xml_escape(uid);
+        let body = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:getetag/></d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:prop-filter name="UID">
+          <c:text-match collation="i;octet">{uid}</c:text-match>
+        </c:prop-filter>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>"#
+        );
+        let resp = self
+            .dav(Method::from_bytes(b"REPORT").unwrap(), cal, "1", &body)
+            .await?;
+        parse_multistatus(&resp)?
+            .into_iter()
+            .filter_map(|r| r.href)
+            // The collection itself is no event resource.
+            .filter(|href| !href.trim().ends_with('/'))
+            .map(|href| self.resolve(&href))
+            .collect()
+    }
+
+    /// `DELETE` one resource, retrying once on a 401 after invalidating the
+    /// cached credential. A resource that is already gone counts as deleted.
+    async fn delete_resource(&self, url: &Url) -> Result<(), CalendarError> {
+        let resp = self.send_delete(url).await?;
+        let resp = if resp.status() == StatusCode::UNAUTHORIZED {
+            self.user.invalidate().await;
+            self.pass.invalidate().await;
+            self.send_delete(url).await?
+        } else {
+            resp
+        };
+        let status = resp.status();
+        trace_caldav!("DELETE {url} -> {status}");
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        let msg = format!("{url} -> {status}: {snippet}");
+        Err(
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                CalendarError::Auth(msg)
+            } else {
+                CalendarError::Network(msg)
+            },
+        )
+    }
+
+    async fn send_delete(&self, url: &Url) -> Result<reqwest::Response, CalendarError> {
+        let user = self
+            .user
+            .resolve()
+            .await
+            .map_err(|e| CalendarError::Auth(e.to_string()))?;
+        let pass = self
+            .pass
+            .resolve()
+            .await
+            .map_err(|e| CalendarError::Auth(e.to_string()))?;
+        self.http
+            .delete(url.clone())
+            .basic_auth(user, Some(pass))
+            .send()
+            .await
+            .map_err(|e| CalendarError::Network(format!("DELETE {url}: {e}")))
+    }
+
     /// `PUT` a freshly-created iCalendar resource, retrying once on a 401 after
     /// invalidating the cached credential. `If-None-Match: *` makes it a pure
     /// create — the server rejects it if the resource somehow already exists.
@@ -593,6 +691,29 @@ struct RawResponse {
     calendar_data: Option<String>,
 }
 
+/// Take the whole text of a closed element `name` (under `parent`) into
+/// `resp`. The ICS payload keeps its raw whitespace (newlines matter); every
+/// other leaf field is trimmed and skipped when blank, so pretty-print
+/// whitespace between tags never becomes a value.
+fn on_text(name: &str, parent: Option<&str>, text: String, resp: &mut RawResponse) {
+    if name == "calendar-data" {
+        resp.calendar_data.get_or_insert(text);
+        return;
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let slot = match (name, parent) {
+        ("href", Some("response")) => &mut resp.href,
+        ("href", Some("calendar-home-set")) => &mut resp.calendar_home,
+        ("href", Some("current-user-principal")) => &mut resp.current_user_principal,
+        ("displayname", _) => &mut resp.displayname,
+        _ => return,
+    };
+    slot.get_or_insert_with(|| text.to_string());
+}
+
 /// Parse a WebDAV/CalDAV `multistatus` body into per-`response` records. Namespace
 /// prefixes vary by server (`D:`/`d:`, `C:`/`cal:`), so everything matches on the
 /// element's local name.
@@ -606,18 +727,22 @@ fn parse_multistatus(xml: &str) -> Result<Vec<RawResponse>, CalendarError> {
     // split around those newlines, and trimming would strip the newlines at the
     // chunk boundaries — gluing every ICS line into one and breaking the parse.
     // Leaf fields that pick up pretty-print whitespace (href/displayname) are
-    // trimmed individually below instead.
+    // trimmed individually in `on_text` instead.
 
     let mut out: Vec<RawResponse> = Vec::new();
     let mut cur: Option<RawResponse> = None;
     // Stack of element local names, so a Text/child can look at its parent.
     let mut stack: Vec<String> = Vec::new();
+    // The text of the innermost open element, in the chunks and entity
+    // references quick-xml splits it into; read when the element closes.
+    let mut text = String::new();
 
     loop {
         match reader.read_event() {
             Err(e) => return Err(CalendarError::Other(format!("parse multistatus: {e}"))),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
+                text.clear();
                 let name = local_name(e.name().as_ref());
                 on_open(&name, &e, &stack, &mut cur, &mut out);
                 stack.push(name);
@@ -628,51 +753,34 @@ fn parse_multistatus(xml: &str) -> Result<Vec<RawResponse>, CalendarError> {
                 // Empty elements don't nest — treat open+close atomically.
             }
             Ok(Event::End(_)) => {
-                stack.pop();
+                let name = stack.pop();
+                let text = std::mem::take(&mut text);
+                if let (Some(name), Some(resp)) = (name, cur.as_mut()) {
+                    on_text(&name, stack.last().map(String::as_str), text, resp);
+                }
             }
             Ok(Event::Text(t)) => {
-                // `xml_content` decodes the charset + normalises EOLs; entity
-                // references (`&lt;` etc.) still need a separate unescape.
-                let decoded = t.xml_content().map(|c| c.into_owned()).unwrap_or_default();
-                let text = quick_xml::escape::unescape(&decoded)
-                    .map(|c| c.into_owned())
-                    .unwrap_or(decoded);
-                let (Some(top), Some(resp)) = (stack.last(), cur.as_mut()) else {
-                    continue;
-                };
-                // The ICS payload keeps its raw whitespace (newlines matter);
-                // every other leaf field is trimmed and skipped when blank, so
-                // pretty-print whitespace between tags never becomes a value.
-                if top == "calendar-data" {
-                    // Data may arrive in several Text chunks; concatenate raw.
-                    resp.calendar_data
-                        .get_or_insert_with(String::new)
-                        .push_str(&text);
-                    continue;
+                // `xml_content` decodes the charset + normalises EOLs.
+                if let Ok(c) = t.xml_content() {
+                    text.push_str(&c);
                 }
-                let text = text.trim();
-                if text.is_empty() {
-                    continue;
+            }
+            Ok(Event::CData(c)) => {
+                if let Ok(c) = c.decode() {
+                    text.push_str(&c);
                 }
-                let parent = stack.iter().rev().nth(1).map(String::as_str);
-                match top.as_str() {
-                    "href" => match parent {
-                        Some("response") => {
-                            resp.href.get_or_insert_with(|| text.to_string());
-                        }
-                        Some("calendar-home-set") => {
-                            resp.calendar_home.get_or_insert_with(|| text.to_string());
-                        }
-                        Some("current-user-principal") => {
-                            resp.current_user_principal
-                                .get_or_insert_with(|| text.to_string());
-                        }
-                        _ => {}
-                    },
-                    "displayname" => {
-                        resp.displayname.get_or_insert_with(|| text.to_string());
-                    }
-                    _ => {}
+            }
+            // quick-xml hands each entity reference (`&amp;`, `&#38;`) over as
+            // an event of its own, between the text chunks around it.
+            Ok(Event::GeneralRef(r)) => {
+                if let Ok(Some(ch)) = r.resolve_char_ref() {
+                    text.push(ch);
+                } else if let Some(entity) = r
+                    .decode()
+                    .ok()
+                    .and_then(|name| quick_xml::escape::resolve_predefined_entity(&name))
+                {
+                    text.push_str(entity);
                 }
             }
             _ => {}
@@ -733,6 +841,13 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
         };
         (local == key).then(|| String::from_utf8_lossy(&a.value).into_owned())
     })
+}
+
+/// `text` safe to put between XML tags.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -855,5 +970,47 @@ END:VCALENDAR</c:calendar-data>
             r[0].href.as_deref(),
             Some("/calendars/jane@mail.de/private/1.ics")
         );
+    }
+
+    // Regression: quick-xml hands `&amp;` over as an event of its own, which the
+    // parser used to drop — "Chains &amp; brakes" read back as "Chains  brakes".
+    #[test]
+    fn keeps_entity_references_and_cdata() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/cal/a&amp;b.ics</d:href>
+    <d:propstat><d:prop>
+      <d:displayname>Home &amp; garden &#38; more</d:displayname>
+      <c:calendar-data>BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:1
+DTSTART:20240115T090000Z
+SUMMARY:Chains &amp; brakes &lt;now&gt;
+END:VEVENT
+END:VCALENDAR
+</c:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/cal/2.ics</d:href>
+    <d:propstat><d:prop>
+      <c:calendar-data><![CDATA[BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:2
+DTSTART:20240115T090000Z
+SUMMARY:Tea & cake
+END:VEVENT
+END:VCALENDAR
+]]></c:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>"#;
+        let r = parse_multistatus(xml).unwrap();
+        assert_eq!(r[0].href.as_deref(), Some("/cal/a&b.ics"));
+        assert_eq!(r[0].displayname.as_deref(), Some("Home & garden & more"));
+        let first = ical::parse_events(r[0].calendar_data.as_deref().unwrap());
+        assert_eq!(first[0].summary.as_deref(), Some("Chains & brakes <now>"));
+        let second = ical::parse_events(r[1].calendar_data.as_deref().unwrap());
+        assert_eq!(second[0].summary.as_deref(), Some("Tea & cake"));
     }
 }

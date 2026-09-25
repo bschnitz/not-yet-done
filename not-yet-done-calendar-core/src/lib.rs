@@ -268,6 +268,21 @@ pub trait CalendarBackend: Send + Sync {
         ))
     }
 
+    /// Delete the event this connection knows as `uid` (a [`CalEvent::uid`]
+    /// it listed). An occurrence of a series is deleted on its own where the
+    /// backend addresses occurrences (Outlook); a backend that stores a series
+    /// as one resource (CalDAV) deletes the whole series. Nobody is sent a
+    /// cancellation.
+    ///
+    /// The default is the same read-only refusal as
+    /// [`create_event`](CalendarBackend::create_event).
+    async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
+        let _ = uid;
+        Err(CalendarError::Other(
+            "this calendar connection is read-only".into(),
+        ))
+    }
+
     /// Put the backend's window on screen if it is off, take it off if it is on;
     /// answered with whether it is on now.
     ///

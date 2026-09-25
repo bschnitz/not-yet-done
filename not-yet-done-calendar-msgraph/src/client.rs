@@ -128,6 +128,51 @@ impl MsGraphClient {
         map_event(ev, label)
     }
 
+    /// `DELETE /me/events/{id}`, retrying once on a 401. Deleting an
+    /// occurrence's id deletes that occurrence only.
+    pub(crate) async fn delete_event(&self, id: &str) -> Result<(), CalendarError> {
+        // Graph ids are base64 and may hold `/`, `+` and `=`.
+        let escaped = id
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace('+', "%2B")
+            .replace('=', "%3D");
+        let url = format!("{}/v1.0/me/events/{escaped}", self.base_url);
+        let token = self.resolve_token().await?;
+        let resp = self.send_delete(&url, &token).await?;
+        let resp = if resp.status() == StatusCode::UNAUTHORIZED {
+            self.resolver.invalidate().await;
+            let token = self.resolve_token().await?;
+            self.send_delete(&url, &token).await?
+        } else {
+            resp
+        };
+        let status = resp.status();
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        let snippet: String = text.chars().take(300).collect();
+        if status == StatusCode::FORBIDDEN {
+            return Err(CalendarError::Auth(format!(
+                "Graph refused the delete ({status}); the app registration likely \
+                 lacks the delegated `Calendars.ReadWrite` scope. Server said: {snippet}"
+            )));
+        }
+        Err(CalendarError::Network(format!(
+            "DELETE {url} -> {status}: {snippet}"
+        )))
+    }
+
+    async fn send_delete(&self, url: &str, token: &str) -> Result<reqwest::Response, CalendarError> {
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| CalendarError::Network(format!("DELETE {url}: {e}")))
+    }
+
     /// GET with a freshly-resolved bearer token. A 401 forces the credential
     /// provider to re-resolve (an `az`-minted token expires ~hourly) and the
     /// request is retried once — so a long-lived TUI session keeps working

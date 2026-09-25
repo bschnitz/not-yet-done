@@ -210,6 +210,12 @@ async fn invoke_toggle_window(backends: &[Box<dyn CalendarBackend>]) -> Result<A
 /// The root's `Sync now` action: fetch every connection (on-demand ones too)
 /// and store the result — see [`crate::sync`]. `--arg connections=a,b`
 /// narrows it, `--arg timeout=<secs>` bounds each connection.
+/// Delete an event at its source. Goes through the generic delete-confirm
+/// flow (`DeleteSelf`); the delete itself runs in `execute("delete")`.
+fn delete_event_action() -> NodeAction {
+    NodeAction::new("delete", "Delete", InputSpec::None)
+}
+
 fn sync_action() -> NodeAction {
     NodeAction::new("sync", "Sync now", InputSpec::None)
 }
@@ -1104,6 +1110,7 @@ impl ContentAdapter for CalendarAdapter {
             // `create` is a root Form action (New event). Prototype/dry-run
             // for now — see `execute_create`.
             supports_create: true,
+            supports_delete: true,
             ..AdapterCapabilities::default()
         }
     }
@@ -1119,6 +1126,7 @@ impl ContentAdapter for CalendarAdapter {
                 toggle_window_action(),
                 sync_action(),
             ],
+            "calendar:event" => vec![delete_event_action()],
             _ => Vec::new(),
         }
     }
@@ -1469,7 +1477,7 @@ pub(crate) async fn replace_connection(cache: &Cache, conn_id: &str, events: &[M
 async fn resolve_event(fetcher: &Fetcher, id: &str) -> Result<Box<dyn Node>> {
     fetcher.catch_up().await;
     if let Some(m) = fetcher.cache.read().await.get(id).cloned() {
-        return Ok(Box::new(EventNode::new(m)));
+        return Ok(Box::new(EventNode::new(m, fetcher.clone())));
     }
 
     let range = fetcher.window.range(Utc::now());
@@ -1492,7 +1500,7 @@ async fn resolve_event(fetcher: &Fetcher, id: &str) -> Result<Box<dyn Node>> {
         .await
         .get(id)
         .cloned()
-        .map(|m| Box::new(EventNode::new(m)) as Box<dyn Node>)
+        .map(|m| Box::new(EventNode::new(m, fetcher.clone())) as Box<dyn Node>)
         .ok_or_else(|| ContentError::NotFound(id.to_string()))
 }
 
@@ -1644,19 +1652,52 @@ struct EventNode {
     node_type: NodeType,
     metadata: Metadata,
     body: String,
+    /// The connection that owns the event and its uid there — what a delete
+    /// hands to the backend.
+    connection: String,
+    uid: String,
+    /// How a delete reaches the backend and drops the event from the cache
+    /// and the store.
+    fetcher: Fetcher,
 }
 
 impl EventNode {
-    fn new(m: MergedEvent) -> Self {
+    fn new(m: MergedEvent, fetcher: Fetcher) -> Self {
         let summary = event_summary(&m);
         let body = render_body(&m);
+        let connection = m
+            .global_id
+            .strip_prefix("calendar:")
+            .and_then(|rest| rest.strip_suffix(&format!(":{}", m.event.uid)))
+            .unwrap_or_default()
+            .to_string();
         Self {
             id: summary.id,
             label: summary.label,
             node_type: summary.node_type,
             metadata: summary.metadata,
             body,
+            connection,
+            uid: m.event.uid,
+            fetcher,
         }
+    }
+
+    /// `execute("delete")` — delete the event through the backend that owns
+    /// it, then drop it from the cache and the store right away.
+    async fn delete(&self) -> Result<ActionOutcome> {
+        let idx = self
+            .fetcher
+            .index_of(&self.connection)
+            .ok_or_else(|| other_err(format!("no connection for event '{}'", self.label)))?;
+        self.fetcher.backends[idx]
+            .delete_event(&self.uid)
+            .await
+            .map_err(|e| other_err(format!("could not delete event: {e}")))?;
+        self.fetcher.forget(&self.connection, &self.id).await;
+        Ok(ActionOutcome::Done {
+            message: Some(format!("Deleted “{}”", self.label)),
+        })
     }
 }
 
@@ -1680,6 +1721,34 @@ impl Node for EventNode {
 
     fn content(&self) -> Option<&dyn Content> {
         Some(self)
+    }
+
+    async fn invoke_action(&self, name: &str, _ctx: &ActionContext) -> Result<ActionDispatch> {
+        match name {
+            "delete" => Ok(ActionDispatch::DeleteSelf {
+                confirm: Some(format!(
+                    "Delete '{}'? This removes it from the calendar. (y/n)",
+                    self.label
+                )),
+            }),
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on an event"
+            ))),
+        }
+    }
+
+    async fn execute(
+        &mut self,
+        action_id: &str,
+        _input: ActionInput,
+        _args: &ActionArgs,
+    ) -> Result<ActionOutcome> {
+        match action_id {
+            "delete" => self.delete().await,
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` not supported on an event"
+            ))),
+        }
     }
 }
 
@@ -2528,5 +2597,61 @@ mod tests {
         .err()
         .expect("garbage start must error");
         assert!(format!("{err}").contains("start time"), "got: {err}");
+    }
+
+    /// A backend that records the uids it is asked to delete.
+    struct DeletingBackend {
+        deleted: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl CalendarBackend for DeletingBackend {
+        fn connection_id(&self) -> &str {
+            "work"
+        }
+        async fn list_events(
+            &self,
+            _range: &TimeRange,
+        ) -> std::result::Result<Vec<CalEvent>, not_yet_done_calendar_core::CalendarError> {
+            Ok(Vec::new())
+        }
+        async fn delete_event(
+            &self,
+            uid: &str,
+        ) -> std::result::Result<(), not_yet_done_calendar_core::CalendarError> {
+            self.deleted.lock().unwrap().push(uid.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_an_event_asks_first_then_deletes_it_at_its_source() {
+        let deleted = Arc::new(Mutex::new(Vec::new()));
+        let fetcher = test_fetcher(vec![Box::new(DeletingBackend {
+            deleted: Arc::clone(&deleted),
+        })]);
+        let event = sample("u:1", 9, "Dentist");
+        fetcher
+            .cache
+            .write()
+            .await
+            .insert(event.global_id.clone(), event.clone());
+        let mut inv_rx = fetcher.inv_tx.subscribe();
+        let mut node = EventNode::new(event, fetcher.clone());
+
+        let ctx = ActionContext::default();
+        let ActionDispatch::DeleteSelf { confirm } = node.invoke_action("delete", &ctx).await.unwrap()
+        else {
+            panic!("delete goes through the confirm flow");
+        };
+        assert!(confirm.unwrap().contains("Dentist"));
+        assert!(deleted.lock().unwrap().is_empty(), "nothing deleted before the confirm");
+
+        node.execute("delete", ActionInput::None, &ActionArgs::default())
+            .await
+            .unwrap();
+        assert_eq!(*deleted.lock().unwrap(), ["u:1"], "the uid, not the global id");
+        assert!(fetcher.cache.read().await.is_empty());
+        assert!(inv_rx.try_recv().is_ok(), "the view reloads");
     }
 }

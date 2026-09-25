@@ -9681,3 +9681,25 @@ four rounds.
       The final yes leaves the tree untouched and the log empty — the script
       asked the front-end for nothing, which is not the same as answering
       nothing.
+
+## Calendar — deleting an event (`d`)
+
+Every backend deletes: CalDAV by the event's UID (the whole series, which a
+CalDAV server stores as one resource), Graph and Outlook on the web by the id a
+read listed (that occurrence alone). Nobody is sent a cancellation. Use test
+events you created for the purpose.
+
+- [x] **The command line asks first.** `nyd adapter calendar <event id> delete`
+      prints `Delete '<title>'? This removes it from the calendar. (y/n)` and
+      deletes nothing; with `--yes` it prints `Deleted “<title>”`.
+- [x] **A CalDAV event is gone at the source.** After the delete, a
+      `nyd adapter calendar root sync` does not bring it back.
+- [x] **An Outlook-on-the-web event is deleted by the `nyd-calendar-delete`
+      flow.** The connection's event count at the next sync is one lower.
+- [x] **Deleting a connection's last event empties it.** The row disappears
+      at once, although a re-fetch of an empty calendar keeps the known events.
+- [ ] **`d` in the calendar tab.** The confirm popup names the event; `y`
+      deletes it and the row disappears without a manual refresh; `n` leaves
+      it.
+- [x] **A title with `&` reads back whole.** An event created as `A & B` in a
+      CalDAV calendar lists as `A & B`, not `A  B`.

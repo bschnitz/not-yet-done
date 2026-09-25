@@ -113,6 +113,13 @@ impl Fetcher {
         .await
     }
 
+    /// Drop an event deleted at the source from the cache and the store, and
+    /// invalidate the view.
+    pub(crate) async fn forget(&self, connection: &str, global_id: &str) {
+        persist::forget(&self.cache, self.persisted.as_deref(), connection, global_id).await;
+        let _ = self.inv_tx.send(Invalidation::All);
+    }
+
     /// How many events the cache holds for `connection`.
     pub(crate) async fn cached_count(&self, connection: &str) -> usize {
         let prefix = format!("calendar:{connection}:");

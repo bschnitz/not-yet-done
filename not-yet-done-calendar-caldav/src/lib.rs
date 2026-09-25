@@ -7,9 +7,9 @@
 //! recurring events into concrete instances so this crate never has to
 //! interpret `RRULE`/`VTIMEZONE` (see [`client`]).
 //!
-//! Read + write: it lists events, enumerates its calendars, and creates events
+//! Read + write: it lists events, enumerates its calendars, creates events
 //! by `PUT`ting a fresh single-`VEVENT` resource into the chosen collection
-//! (see [`client::CalDavClient::create_event`]). Depends only on
+//! (see [`client::CalDavClient::create_event`]) and deletes them by UID. Depends only on
 //! `calendar-core` (the backend seam) and `content` (the credential resolver) —
 //! never on the adapter crate or the TUI, so it stays an independent,
 //! feature-gated unit like the Microsoft Graph backend.
@@ -73,6 +73,10 @@ impl CalendarBackend for CalDavBackend {
         self.client
             .create_event(calendar_id, draft, &self.label)
             .await
+    }
+
+    async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
+        self.client.delete_event(uid).await
     }
 
     /// The stream a `script` credential provider asks through — the

@@ -152,6 +152,23 @@ async fn cache_has_connection(cache: &Cache, connection: &str) -> bool {
     cache.read().await.keys().any(|k| k.starts_with(&prefix))
 }
 
+/// Drop one event deleted at the source from the cache and the store. A
+/// re-fetch cannot do this: when the deleted event was the connection's last
+/// one, the fetch comes back empty and [`ingest`] keeps the known events.
+pub(crate) async fn forget(
+    cache: &Cache,
+    persisted: Option<&Persisted>,
+    connection: &str,
+    global_id: &str,
+) {
+    cache.write().await.remove(global_id);
+    if let Some(p) = persisted {
+        if let Ok(revision) = p.store.remove(connection, global_id, Utc::now()).await {
+            p.mark_loaded(connection, revision);
+        }
+    }
+}
+
 /// Record a failed fetch of `connection` in the store (no-op without one).
 pub(crate) async fn note_failure(persisted: Option<&Persisted>, connection: &str, error: &str) {
     if let Some(p) = persisted {
@@ -354,5 +371,27 @@ mod tests {
         let cache = empty_cache();
         assert!(!catch_up(&cache, Some(&other)).await);
         assert!(cache.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_event_is_gone_for_every_process_even_the_last_one() {
+        let (db, p) = persisted("cal_store_forget", "calendar").await;
+        let cache = empty_cache();
+        let events = [event("a", "1", 10, 9, "Standup"), event("a", "2", 11, 9, "Review")];
+        ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events).await;
+        let other = Persisted::new(EventStore::new(db, "calendar"));
+        let other_cache = empty_cache();
+        catch_up(&other_cache, Some(&other)).await;
+
+        forget(&cache, Some(&p), "a", "calendar:a:1").await;
+        assert_eq!(titles(&cache).await, ["Review"]);
+        assert!(!catch_up(&cache, Some(&p)).await, "its own cache is current");
+        assert!(catch_up(&other_cache, Some(&other)).await);
+        assert_eq!(titles(&other_cache).await, ["Review"]);
+
+        // The last event: a re-fetch would come back empty and keep it.
+        forget(&cache, Some(&p), "a", "calendar:a:2").await;
+        assert!(catch_up(&other_cache, Some(&other)).await);
+        assert!(other_cache.read().await.is_empty());
     }
 }

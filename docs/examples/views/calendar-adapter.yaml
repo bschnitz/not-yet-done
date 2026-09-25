@@ -62,6 +62,8 @@
 #                   `nyd-calendar`).
 #   create_flow   — the flow that creates an event, named the same way
 #                   (optional; `nyd-calendar-create`).
+#   delete_flow   — the flow that deletes an event, named the same way
+#                   (optional; `nyd-calendar-delete`).
 #   browser       — the `browser-automation` binary (optional; found on PATH).
 #
 # This backend starts one hidden `browser-automation` per account_key and drives

@@ -194,6 +194,41 @@ impl EventStore {
         txn.commit().await
     }
 
+    /// Drop one event of `connection` — after it was deleted at the source —
+    /// and bump the connection's revision, so every other process's cache
+    /// reloads the slice without it. Returns the new revision.
+    pub(crate) async fn remove(
+        &self,
+        connection: &str,
+        global_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<i64, DbErr> {
+        let txn = self.db.begin().await?;
+        calendar_event::Entity::delete_many()
+            .filter(calendar_event::Column::Scope.eq(&self.scope))
+            .filter(calendar_event::Column::GlobalId.eq(global_id))
+            .exec(&txn)
+            .await?;
+        let revision = self.previous_revision(&txn, connection).await? + 1;
+        self.upsert_sync(
+            &txn,
+            calendar_sync::ActiveModel {
+                scope: Set(self.scope.clone()),
+                connection: Set(connection.to_string()),
+                revision: Set(revision),
+                synced_at_unix: Set(None),
+                range_start_unix: Set(None),
+                range_end_unix: Set(None),
+                attempted_at_unix: Set(now.timestamp()),
+                last_error: Set(None),
+            },
+            &[calendar_sync::Column::Revision],
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(revision)
+    }
+
     /// Every connection's sync state for this scope, by connection id.
     pub(crate) async fn sync_states(&self) -> Result<Vec<SyncState>, DbErr> {
         let rows = calendar_sync::Entity::find()

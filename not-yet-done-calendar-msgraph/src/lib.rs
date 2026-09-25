@@ -61,6 +61,9 @@ impl CalendarBackend for MsGraphBackend {
             .create_event(calendar_id, draft, &self.label)
             .await
     }
+    async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
+        self.client.delete_event(uid).await
+    }
 }
 
 /// Registers as backend type `microsoft`.

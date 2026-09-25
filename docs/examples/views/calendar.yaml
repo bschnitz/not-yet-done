@@ -307,6 +307,13 @@ views:
         type: custom
         id: sync
         on_container: true
+      # Delete the event under the cursor at its source, after a confirm. An
+      # occurrence of a series is deleted alone where the backend addresses
+      # occurrences (Graph, Outlook on the web); CalDAV stores a series as
+      # one resource, so there the whole series goes. Nobody is sent a
+      # cancellation. From the command line:
+      #   nyd adapter calendar <event id> delete --yes
+      - { key: d, id: delete }
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f
