@@ -306,7 +306,13 @@ async fn execute_create(
         Some(label) => calendars
             .iter()
             .find(|c| c.label == label)
-            .ok_or_else(|| other_err(format!("unknown calendar: '{label}'")))?,
+            .ok_or_else(|| {
+                let known: Vec<&str> = calendars.iter().map(|c| c.label.as_str()).collect();
+                other_err(format!(
+                    "unknown calendar: '{label}'; known: {}",
+                    known.join(", ")
+                ))
+            })?,
         None => calendars
             .first()
             .ok_or_else(|| other_err("no writable calendar available to create the event in"))?,
