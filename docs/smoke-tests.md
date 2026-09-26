@@ -41,10 +41,18 @@ Findings that turn into separate tasks get a short note under the item.
 - [ ] `e` edits a comment (`edit_full`) → "Comment updated"
       → works. Extended in phase 2: the edit action is hidden for
       comments by other authors (see below).
+- [ ] `e` on a comment whose markup round-trips opens a `.md` buffer
+      (header line says `Format: markdown`, `*bold*` shows as `**bold**`);
+      saving it unchanged gives "No changes". One whose markup would not
+      survive the round-trip (e.g. a literal `~~x~~`) opens a `.jira`
+      buffer with the raw body instead.
 - [ ] `a` (create) opens the editor (`create_comment`) → enter a body,
       `:wq` → the drill-down list refreshes, the new comment is visible
       → the user YAML was outdated (`type: create` without `id`).
       Migrated, re-test.
+- [ ] The `create_comment` buffer is Markdown (`.md`): a body written as
+      `## Titel` / `**fett**` / `1. eins` appears in Jira as a heading,
+      bold text and a numbered list, not as literal asterisks.
 - [x] `backspace` back to the issues
 - [ ] `a` (navigate) drills into the attachments → read-only list, no
       edit action
