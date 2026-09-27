@@ -2635,10 +2635,22 @@ file), an absolute path as is. The script receives:
 
 - `argv[1]`: the path of a JSON file with `hook`, `instance` and the payload
   keys above;
-- `NYD_SCRIPT_HOOK` (the hook name), `NYD_HOOK_INSTANCE` (the instance id)
-  and `NYD_HOOK_DEPTH` (see below) in its environment;
+- `NYD_SCRIPT_HOOK` (the hook name), `NYD_HOOK_INSTANCE` (the instance id),
+  `NYD_HOOK_DEPTH` (see below) and `NYD_ADAPTER` in its environment;
 - no stdin; stdout and stderr go to a log file next to the payload file in
   `~/.local/state/not_yet_done/hooks/` (kept for an hour).
+
+`NYD_ADAPTER` is the path of the adapter CLI the script should drive. Finding
+that binary is the front-end's job, not the script's: only the running process
+knows where its own installation lives, and a front-end started from a desktop
+entry or a compositor binding inherits a login `PATH` that need not contain the
+install directory. A script that looked the CLI up by name therefore failed
+exactly where it was least visible — its reads, resolved another way, kept
+working, and only its writes went missing. The variable is the CLI next to the
+running executable (a `cargo install` puts every front-end in one directory),
+or the executable itself when that is the CLI; a value already in the
+environment is passed on unchanged, and an installation matching neither leaves
+it unset.
 
 Bindings run **one after the other and are awaited** (60 s each, then the
 script is killed), so a script sees the actions in the order they happened.

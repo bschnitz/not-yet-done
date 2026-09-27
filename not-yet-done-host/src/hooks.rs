@@ -23,7 +23,9 @@
 //! view-script directory (`<data_dir>/not_yet_done/scripts/<adapter type>/`; a
 //! name containing `/` is taken relative to the scripts root, an absolute path
 //! as is) and hands it the hook's payload as a JSON file in `argv[1]` — see
-//! [`resolve_script_path`] and [`run_script`].
+//! [`resolve_script_path`] and [`run_script`]. A script that wants to change
+//! something drives the CLI, and the environment names the binary for it
+//! ([`HOOK_CLI_ENV`]) so it never has to search a `PATH` it did not choose.
 //!
 //! This generalises the hard-coded daily backup: binding `backup` to the local
 //! adapter's `connected` hook (fired on every program start) with a 24h throttle
@@ -465,6 +467,59 @@ pub const HOOK_INSTANCE_ENV: &str = "NYD_HOOK_INSTANCE";
 /// no event hooks (see [`event_hooks_suppressed`]).
 pub const HOOK_DEPTH_ENV: &str = "NYD_HOOK_DEPTH";
 
+/// Environment variable naming the adapter CLI a hook script can drive.
+///
+/// A script that changes anything goes through the CLI (`nyd adapter …`), and
+/// finding that binary is the *front-end's* job, not the script's: only the
+/// running process knows where its own installation lives. A bare name on
+/// `$PATH` is not enough — a front-end started from a desktop entry or a
+/// compositor binding inherits a login `PATH` that need not contain the install
+/// directory, and a script's writes then fail while its reads, resolved
+/// differently, still work. See [`cli_for_scripts`].
+pub const HOOK_CLI_ENV: &str = "NYD_ADAPTER";
+
+/// The file name of the adapter CLI, as `cargo install` writes it.
+const CLI_FILE_NAME: &str = "not-yet-done-cli";
+
+/// The adapter CLI to hand to hook scripts, if this process can name one:
+///
+///   1. an explicit [`HOOK_CLI_ENV`] in this process's environment — a value
+///      set by hand (or inherited from an outer hook) wins and is passed on;
+///   2. the CLI next to this executable — one `cargo install` puts every
+///      front-end in the same directory, so the TUI can name the CLI although
+///      it is not one;
+///   3. this executable itself, when it *is* the CLI.
+///
+/// `None` for an installation that matches none of that (or when `current_exe`
+/// fails); the variable is then left unset and a script falls back to its own
+/// guess, as it had to before.
+fn cli_for_scripts() -> Option<PathBuf> {
+    cli_from(
+        std::env::var_os(HOOK_CLI_ENV),
+        std::env::current_exe().ok().as_deref(),
+        &|p| p.is_file(),
+    )
+}
+
+/// [`cli_for_scripts`] with its three inputs passed in, so the decision can be
+/// tested without touching the process environment.
+fn cli_from(
+    configured: Option<std::ffi::OsString>,
+    exe: Option<&Path>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(raw) = configured.filter(|raw| !raw.is_empty()) {
+        return Some(PathBuf::from(raw));
+    }
+    let exe = exe?;
+    let name = format!("{CLI_FILE_NAME}{}", std::env::consts::EXE_SUFFIX);
+    let sibling = exe.parent()?.join(&name);
+    if is_file(&sibling) {
+        return Some(sibling);
+    }
+    (exe.file_name()? == std::ffi::OsStr::new(&name)).then(|| exe.to_path_buf())
+}
+
 fn depth_from(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
@@ -635,8 +690,8 @@ async fn run_script_at(
             Err(e) => return HookOutcome::Failed(format!("creating {}: {e}", log_path.display())),
         };
 
-    let mut child = match tokio::process::Command::new(&path)
-        .arg(&json_path)
+    let mut cmd = tokio::process::Command::new(&path);
+    cmd.arg(&json_path)
         .current_dir(path.parent().unwrap_or(Path::new(".")))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
@@ -644,9 +699,13 @@ async fn run_script_at(
         .env(SCRIPT_HOOK_ENV, hook)
         .env(HOOK_INSTANCE_ENV, instance)
         .env(HOOK_DEPTH_ENV, (hook_depth() + 1).to_string())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    // A script that writes drives the CLI; say which one instead of leaving it
+    // to the script to find on a `PATH` it did not choose.
+    if let Some(cli) = cli_for_scripts() {
+        cmd.env(HOOK_CLI_ENV, cli);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return HookOutcome::Failed(format!("starting {}: {e}", path.display())),
     };
@@ -974,6 +1033,52 @@ pub async fn fire_connected_hooks() -> Vec<HookReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `NYD_ADAPTER` already in the environment is the last word: a user (or
+    /// an outer hook) who named a binary must not be second-guessed.
+    #[test]
+    fn a_configured_cli_wins() {
+        let picked = cli_from(
+            Some("/opt/nyd/cli".into()),
+            Some(Path::new("/usr/bin/not-yet-done-tui")),
+            &|_| true,
+        );
+        assert_eq!(picked, Some(PathBuf::from("/opt/nyd/cli")));
+    }
+
+    /// The TUI is not a CLI, but it is installed next to one.
+    #[test]
+    fn a_sibling_cli_is_found() {
+        let name = format!("{CLI_FILE_NAME}{}", std::env::consts::EXE_SUFFIX);
+        let expected = PathBuf::from("/home/u/.cargo/bin").join(&name);
+        let picked = cli_from(
+            None,
+            Some(Path::new("/home/u/.cargo/bin/not-yet-done-tui")),
+            &|p| p == expected,
+        );
+        assert_eq!(picked, Some(expected));
+    }
+
+    /// No sibling, but this process is the CLI: a single-binary installation.
+    #[test]
+    fn the_cli_itself_is_accepted() {
+        let exe = PathBuf::from("/opt/bin")
+            .join(format!("{CLI_FILE_NAME}{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(cli_from(None, Some(&exe), &|_| false), Some(exe.clone()));
+    }
+
+    /// Nothing recognisable: leave the variable unset rather than name a
+    /// binary that is not there — the script still has its own fallback.
+    #[test]
+    fn an_unknown_layout_names_nothing() {
+        assert!(
+            cli_from(None, Some(Path::new("/opt/bin/some-other-tool")), &|_| {
+                false
+            })
+            .is_none()
+        );
+        assert!(cli_from(Some("".into()), None, &|_| true).is_none());
+    }
 
     #[test]
     fn parse_throttle_units() {
