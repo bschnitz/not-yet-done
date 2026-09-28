@@ -321,8 +321,8 @@ views:
       # as one resource, so it refuses to edit a recurring event rather than
       # move every occurrence; it also refuses when the event changed on the
       # server since the last fetch — refresh and edit again. Outlook on the
-      # web (`office365-web`) cannot edit yet. From the command line, only
-      # the named fields change:
+      # web (`office365-web`) edits one occurrence alone, like Graph. From
+      # the command line, only the named fields change:
       #   nyd adapter calendar <event id> edit --field location="Room 2"
       - name: edit
         key: 'e e'

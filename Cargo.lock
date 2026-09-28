@@ -4331,6 +4331,7 @@ name = "not-yet-done-calendar-office365-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "not-yet-done-calendar-core",
  "not-yet-done-content",
  "not-yet-done-office365-web",

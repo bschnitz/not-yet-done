@@ -9726,8 +9726,9 @@ events you created for the purpose.
 
 ## Calendar — editing an event (`e e`)
 
-CalDAV and Graph edit; Outlook on the web does not yet. Only the fields the
-form changed are sent. Use test events you created for the purpose.
+CalDAV, Graph and Outlook on the web (the `nyd-calendar-update` flow) edit.
+Only the fields the form changed are sent. Use test events you created for the
+purpose.
 
 - [ ] **The form opens filled.** `e e` on a timed event shows its title,
       `YYYY-MM-DD HH:MM` start and end in local time, show-as, location and
@@ -9754,9 +9755,20 @@ form changed are sent. Use test events you created for the purpose.
       error asks to reload and edit again. After `r`, the edit goes through.
 - [ ] **A Graph edit changes one occurrence.** On a Graph connection, editing
       one occurrence of a series moves only that occurrence.
-- [ ] **Outlook on the web says so.** On an `office365-web` connection the
-      submit reports that this calendar connection cannot edit events.
-- [ ] **From the command line.**
+- [x] **An Outlook-on-the-web edit lands at the source.** On an
+      `office365-web` connection, title, start and end, show-as, location and
+      notes each change, and after a `nyd adapter calendar root sync` the
+      event reads back with the new values. An emptied location or note reads
+      back empty.
+- [x] **Outlook on the web, timed to all-day and back.** `all_day=true` with
+      start and end `tomorrow` reads back as a one-day event on tomorrow's
+      date (not the day before); `all_day=false` with times makes it timed
+      again.
+- [ ] **Outlook on the web, an event deleted elsewhere.** Delete a test event
+      in Outlook and empty Deleted Items there, then edit it from nyd: the
+      error says the event is not on the server any more, not that the run
+      failed.
+- [x] **From the command line.**
       `nyd adapter calendar <event id> edit --field location=Room2` prints
       `Updated “<title>”` and changes only the location.
 - [ ] **A new all-day event lands on its date.** `a a` with all-day ticked and

@@ -64,6 +64,8 @@
 #                   (optional; `nyd-calendar-create`).
 #   delete_flow   — the flow that deletes an event, named the same way
 #                   (optional; `nyd-calendar-delete`).
+#   update_flow   — the flow that edits an event, named the same way
+#                   (optional; `nyd-calendar-update`).
 #   browser       — the `browser-automation` binary (optional; found on PATH).
 #
 # This backend starts one hidden `browser-automation` per account_key and drives
@@ -71,8 +73,9 @@
 # browser's shelf, which signs on if it has to, fetches the calendar view and
 # yields the events. Creating an event runs `nyd-calendar-create` the same way;
 # it writes to the account's default calendar, the one calendar this backend
-# offers on the "New event" form. Editing an event is not supported yet: the
-# edit form reports that this connection cannot edit events. Secrets never touch the browser's command line or
+# offers on the "New event" form. Editing an event runs `nyd-calendar-update`,
+# which sends only the changed fields (one occurrence of a series alone), and
+# deleting one runs `nyd-calendar-delete`. Secrets never touch the browser's command line or
 # environment: each one listed under `secrets:` is resolved here and handed to
 # every run over the socket before it starts, so nobody is asked for it and no
 # question reaches the desktop. List exactly the secrets the flows declare under
