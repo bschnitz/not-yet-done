@@ -9,7 +9,8 @@
 //!
 //! Read + write: it lists events, enumerates its calendars, creates events
 //! by `PUT`ting a fresh single-`VEVENT` resource into the chosen collection
-//! (see [`client::CalDavClient::create_event`]) and deletes them by UID. Depends only on
+//! (see [`client::CalDavClient::create_event`]), edits them (one
+//! event, never a series) and deletes them by UID. Depends only on
 //! `calendar-core` (the backend seam) and `content` (the credential resolver) —
 //! never on the adapter crate or the TUI, so it stays an independent,
 //! feature-gated unit like the Microsoft Graph backend.
@@ -23,7 +24,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use not_yet_done_calendar_core::{
     CalEvent, CalendarBackend, CalendarBackendFactory, CalendarError, CalendarRef, EventDraft,
-    TimeRange,
+    EventPatch, TimeRange,
 };
 use not_yet_done_content::PromptRequest;
 use not_yet_done_content::auth::CredentialPrompts;
@@ -77,6 +78,10 @@ impl CalendarBackend for CalDavBackend {
 
     async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
         self.client.delete_event(uid).await
+    }
+
+    async fn update_event(&self, uid: &str, patch: &EventPatch) -> Result<(), CalendarError> {
+        self.client.update_event(uid, patch).await
     }
 
     /// The stream a `script` credential provider asks through — the

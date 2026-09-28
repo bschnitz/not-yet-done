@@ -248,12 +248,10 @@ views:
       # Title/Start/End/All-day/Show-as/Location/Notes form (plus a Calendar
       # picker when more than one connection is configured). `on_container:
       # true` dispatches it against the adapter root, so `a` works at the
-      # un-drilled event list where there is no selected row.
-      #
-      # NOTE: the write path is not wired yet — `execute` currently validates
-      # the form (including the natural-language start/end) and reports the
-      # event it *would* create, without touching a backend. The shortcut and
-      # form are fully live; only the final PUT/POST is pending.
+      # un-drilled event list where there is no selected row. Start and end
+      # take natural-language dates ("tomorrow 14:00"); for an all-day event
+      # the end is the last day it covers, so a one-day event ends on the day
+      # it starts.
       - name: create
         key: 'a a'
         type: custom
@@ -315,6 +313,27 @@ views:
       # is removed from nyd all the same. From the command line:
       #   nyd adapter calendar <event id> delete --yes
       - { key: d, id: delete }
+      # Edit the event under the cursor: the same form as `create`, filled with
+      # the event's values. Only the fields you change are sent, so an
+      # untouched Notes field keeps its formatting and a CalDAV event keeps
+      # its time zone, attendees and alarms; an unchanged form sends nothing.
+      # Graph edits one occurrence of a series alone. CalDAV stores a series
+      # as one resource, so it refuses to edit a recurring event rather than
+      # move every occurrence; it also refuses when the event changed on the
+      # server since the last fetch — refresh and edit again. Outlook on the
+      # web (`office365-web`) cannot edit yet. From the command line, only
+      # the named fields change:
+      #   nyd adapter calendar <event id> edit --field location="Room 2"
+      - name: edit
+        key: 'e e'
+        id: edit
+        form:
+          columns: 2
+          column_assignment:
+            - [title, start, end, all_day]
+            - [show_as, location, body]
+          field_bar: true
+          select_style: inline
       # Local filter-while-typing over the loaded rows.
       - name: fuzzy filter
         key: f

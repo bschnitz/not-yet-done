@@ -24,15 +24,19 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
-use natural_date::resolve_datetime;
 use not_yet_done_calendar_core::{
-    CalEvent, CalendarBackend, CalendarError, EventDraft, LoadProgress, ShowAs, TimeRange,
+    CalEvent, CalendarBackend, CalendarError, EventDraft, EventTimes, LoadProgress,
+    TimeRange,
 };
 use not_yet_done_content::*;
 
 use crate::config::{
     CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_WINDOW_FUTURE_DAYS,
     DEFAULT_WINDOW_PAST_DAYS, FetchMode, Window, default_reminder_leads,
+};
+use crate::event_form::{
+    self,
+    event_fields, form_opt, form_required, form_show_as, form_times, show_as_label,
 };
 use crate::fetch::{Fetcher, Staleness};
 use crate::persist::Persisted;
@@ -96,31 +100,14 @@ fn event_columns() -> Vec<ColumnSchema> {
 }
 
 // ---------------------------------------------------------------------------
-// `New event` action (prototype)
+// `New event` action
 // ---------------------------------------------------------------------------
 //
-// A single `InputSpec::Form` action on the calendar root that exercises every
-// form-field kind the new spec-driven driver renders — Text, DateTime (natural
-// language), Toggle, and Select — so the form UX can be refined end-to-end
-// against a real, non-trivial form before the write path exists.
-//
-// It is deliberately a **dry run**: `CalendarBackend` is read-only today, so
-// `execute` validates the whole form (including resolving the natural-language
-// start/end via `natural-date`) and reports the event it *would* create,
-// without touching any backend. When a backend write path (CalDAV `PUT`,
-// Graph `POST`) lands, only `execute_create` changes — the form contract and
-// the frontend are already in place.
-
-/// The "Show as" choices offered by the form, paired with the [`ShowAs`] token
-/// they map to. The label is what the user picks; the enum is what a future
-/// write path would send.
-const SHOW_AS_CHOICES: &[(&str, ShowAs)] = &[
-    ("Busy", ShowAs::Busy),
-    ("Free", ShowAs::Free),
-    ("Tentative", ShowAs::Tentative),
-    ("Out of office", ShowAs::OutOfOffice),
-    ("Working elsewhere", ShowAs::WorkingElsewhere),
-];
+// A single `InputSpec::Form` action on the calendar root: Title, natural-
+// language Start/End, All-day, Show-as, Location, Notes (the fields live in
+// `event_form`, shared with a row's `edit`), plus a Calendar picker.
+// `execute_create` resolves the form into an `EventDraft` and hands it to the
+// chosen connection's backend.
 
 /// One write-target calendar, flattened out of a connection's
 /// [`CalendarBackend::list_calendars`] — the unit the "New event" form's
@@ -145,16 +132,7 @@ struct GlobalCalendar {
 /// there is a genuine choice (more than one writable calendar) — with a single
 /// target it is unambiguous, so the field would be noise.
 fn create_event_spec(calendars: &[GlobalCalendar]) -> InputSpec {
-    let show_as: Vec<String> = SHOW_AS_CHOICES.iter().map(|(l, _)| l.to_string()).collect();
-    let mut fields = vec![
-        FormFieldSpec::text("title", "Title"),
-        FormFieldSpec::datetime("start", "Start", true).with_default("today 9:00"),
-        FormFieldSpec::datetime("end", "End", true).with_default("today 10:00"),
-        FormFieldSpec::toggle("all_day", "All day"),
-        FormFieldSpec::select("show_as", "Show as", show_as).with_default("Busy"),
-        FormFieldSpec::text("location", "Location").optional(),
-        FormFieldSpec::text("body", "Notes").optional(),
-    ];
+    let mut fields = event_fields();
     if calendars.len() > 1 {
         // Right after the title, before the times: pick the calendar first.
         let labels: Vec<String> = calendars.iter().map(|c| c.label.clone()).collect();
@@ -216,6 +194,19 @@ fn delete_event_action() -> NodeAction {
     NodeAction::new("delete", "Delete", InputSpec::None)
 }
 
+/// Edit an event at its source: the "New event" form without the calendar
+/// picker, seeded with the event (`form_prep`); `execute("edit")` sends what
+/// changed.
+fn edit_event_action() -> NodeAction {
+    NodeAction::new(
+        "edit",
+        "Edit",
+        InputSpec::Form {
+            fields: event_fields(),
+        },
+    )
+}
+
 fn sync_action() -> NodeAction {
     NodeAction::new("sync", "Sync now", InputSpec::None)
 }
@@ -246,31 +237,6 @@ async fn invoke_sync(fetcher: &Fetcher, args: &ActionArgs) -> Result<ActionDispa
     })
 }
 
-// -- Form-value helpers (the calendar counterpart of local-adapter's form.rs) --
-
-/// Read a Form field, treating absent or whitespace-only values as `None`.
-fn form_opt(values: &HashMap<String, String>, key: &str) -> Option<String> {
-    values
-        .get(key)
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-}
-
-/// Read a required Form field; error if absent or empty.
-fn form_required<'a>(values: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
-    match values.get(key).map(|v| v.trim()) {
-        Some(v) if !v.is_empty() => Ok(v),
-        _ => Err(other_err(format!("field '{key}' is required"))),
-    }
-}
-
-/// A Toggle delivers `"true"`/`"false"`; anything but `"true"` (incl. absent)
-/// is off.
-fn form_flag(values: &HashMap<String, String>, key: &str) -> bool {
-    values.get(key).map(|v| v == "true").unwrap_or(false)
-}
-
 /// `execute("create")` — validate the form, then write the event through the
 /// backend that owns the chosen calendar and refresh that connection's cache
 /// slice so the new event shows immediately.
@@ -280,28 +246,14 @@ async fn execute_create(
     values: &HashMap<String, String>,
 ) -> Result<ActionOutcome> {
     let title = form_required(values, "title")?.to_string();
-    let all_day = form_flag(values, "all_day");
-    let now = Local::now();
-
-    // Natural-language start/end → concrete UTC instants (the same resolver the
-    // query/filter layer uses), so "tomorrow 14:00" or "next mon 9am" just work.
-    let start_raw = form_required(values, "start")?;
-    let start = resolve_datetime(start_raw, now)
-        .ok_or_else(|| other_err(format!("could not understand start time: '{start_raw}'")))?;
-    let end_raw = form_required(values, "end")?;
-    let end = resolve_datetime(end_raw, now)
-        .ok_or_else(|| other_err(format!("could not understand end time: '{end_raw}'")))?;
-    if !all_day && end <= start {
-        return Err(other_err("end must be after start"));
-    }
-
-    // Map the "Show as" label the user picked back to its `ShowAs` token.
-    let show_as_label = form_opt(values, "show_as").unwrap_or_else(|| "Busy".to_string());
-    let show_as = SHOW_AS_CHOICES
-        .iter()
-        .find(|(l, _)| *l == show_as_label)
-        .map(|(_, s)| *s)
-        .unwrap_or(ShowAs::Busy);
+    let times = form_times(values, Local::now())?;
+    let EventTimes {
+        start,
+        end,
+        all_day,
+    } = times;
+    let show_as = form_show_as(values);
+    let show_as_label = show_as_label(show_as);
     let location = form_opt(values, "location");
     let body = form_opt(values, "body");
 
@@ -352,10 +304,7 @@ async fn execute_create(
     let _ = fetcher.sync_one(backend_idx, &range, Staleness::Keep).await;
 
     let when = if all_day {
-        start
-            .with_timezone(&Local)
-            .format("%Y-%m-%d (all day)")
-            .to_string()
+        start.format("%Y-%m-%d (all day)").to_string()
     } else {
         format!(
             "{} – {}",
@@ -1126,7 +1075,7 @@ impl ContentAdapter for CalendarAdapter {
                 toggle_window_action(),
                 sync_action(),
             ],
-            "calendar:event" => vec![delete_event_action()],
+            "calendar:event" => vec![edit_event_action(), delete_event_action()],
             _ => Vec::new(),
         }
     }
@@ -1670,8 +1619,11 @@ struct EventNode {
     /// hands to the backend.
     connection: String,
     uid: String,
-    /// How a delete reaches the backend and drops the event from the cache
-    /// and the store.
+    /// The event as fetched — what the edit form starts from and what its
+    /// values are diffed against.
+    event: CalEvent,
+    /// How a delete or an edit reaches the backend and updates the cache and
+    /// the store.
     fetcher: Fetcher,
 }
 
@@ -1692,9 +1644,43 @@ impl EventNode {
             metadata: summary.metadata,
             body,
             connection,
+            event: m.event.clone(),
             uid: m.event.uid,
             fetcher,
         }
+    }
+
+    /// `execute("edit")` — send only what the form changed to the backend
+    /// that owns the event, then re-fetch that connection so the row shows
+    /// the server's version.
+    async fn edit(&self, values: &HashMap<String, String>) -> Result<ActionOutcome> {
+        let patch = event_form::patch(&self.event, values, Local::now())?;
+        if patch.is_empty() {
+            return Ok(ActionOutcome::Done {
+                message: Some("Nothing changed".to_string()),
+            });
+        }
+        let idx = self
+            .fetcher
+            .index_of(&self.connection)
+            .ok_or_else(|| other_err(format!("no connection for event '{}'", self.label)))?;
+        match self.fetcher.backends[idx].update_event(&self.uid, &patch).await {
+            Ok(()) => {}
+            Err(CalendarError::NotFound(_)) => {
+                self.fetcher.forget(&self.connection, &self.id).await;
+                return Err(other_err(format!(
+                    "“{}” is gone from the calendar; removed it here",
+                    self.label
+                )));
+            }
+            Err(e) => return Err(other_err(format!("could not edit event: {e}"))),
+        }
+        let range = self.fetcher.window.range(Utc::now());
+        let _ = self.fetcher.sync_one(idx, &range, Staleness::Keep).await;
+        let title = patch.title.as_deref().unwrap_or(&self.label);
+        Ok(ActionOutcome::Done {
+            message: Some(format!("Updated “{title}”")),
+        })
     }
 
     /// `execute("delete")` — delete the event through the backend that owns
@@ -1760,15 +1746,26 @@ impl Node for EventNode {
         }
     }
 
+    async fn form_prep(&self, action_id: &str) -> Result<HashMap<String, String>> {
+        Ok(match action_id {
+            "edit" => event_form::prefill(&self.event),
+            _ => HashMap::new(),
+        })
+    }
+
     async fn execute(
         &mut self,
         action_id: &str,
-        _input: ActionInput,
+        input: ActionInput,
         _args: &ActionArgs,
     ) -> Result<ActionOutcome> {
-        match action_id {
-            "delete" => self.delete().await,
-            other => Err(ContentError::NotSupported(format!(
+        match (action_id, input) {
+            ("delete", _) => self.delete().await,
+            ("edit", ActionInput::Form(values)) => self.edit(&values).await,
+            ("edit", _) => Err(ContentError::NotSupported(
+                "edit expects the event form".to_string(),
+            )),
+            (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on an event"
             ))),
         }
@@ -1794,7 +1791,7 @@ impl Content for EventNode {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use not_yet_done_calendar_core::{CalendarRef, ShowAs};
+    use not_yet_done_calendar_core::{CalendarRef, EventPatch, ShowAs};
     use not_yet_done_content::children;
 
     /// Assemble a `CalendarAdapter` from the individual state pieces a test
@@ -2700,6 +2697,73 @@ mod tests {
         assert_eq!(*deleted.lock().unwrap(), ["u:1"], "the uid, not the global id");
         assert!(fetcher.cache.read().await.is_empty());
         assert!(inv_rx.try_recv().is_ok(), "the view reloads");
+    }
+
+    /// A backend that records the patches it is asked to apply.
+    struct EditingBackend {
+        patches: Arc<Mutex<Vec<(String, EventPatch)>>>,
+    }
+
+    #[async_trait]
+    impl CalendarBackend for EditingBackend {
+        fn connection_id(&self) -> &str {
+            "work"
+        }
+        async fn list_events(
+            &self,
+            _range: &TimeRange,
+        ) -> std::result::Result<Vec<CalEvent>, CalendarError> {
+            Ok(Vec::new())
+        }
+        async fn update_event(
+            &self,
+            uid: &str,
+            patch: &EventPatch,
+        ) -> std::result::Result<(), CalendarError> {
+            self.patches
+                .lock()
+                .unwrap()
+                .push((uid.to_string(), patch.clone()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn editing_an_event_prefills_the_form_and_sends_only_the_change() {
+        let patches = Arc::new(Mutex::new(Vec::new()));
+        let fetcher = test_fetcher(vec![Box::new(EditingBackend {
+            patches: Arc::clone(&patches),
+        })]);
+        let mut node = EventNode::new(sample("u:1", 9, "Dentist"), fetcher);
+
+        let mut values = node.form_prep("edit").await.unwrap();
+        assert_eq!(values["title"], "Dentist");
+        assert_eq!(values["location"], "Room 1");
+
+        let outcome = node
+            .execute("edit", ActionInput::Form(values.clone()), &ActionArgs::default())
+            .await
+            .unwrap();
+        let ActionOutcome::Done { message } = outcome else {
+            panic!("an untouched form is done");
+        };
+        assert_eq!(message.as_deref(), Some("Nothing changed"));
+        assert!(patches.lock().unwrap().is_empty(), "nothing sent");
+
+        values.insert("location".to_string(), "Room 2".to_string());
+        node.execute("edit", ActionInput::Form(values), &ActionArgs::default())
+            .await
+            .unwrap();
+        let sent = patches.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "u:1", "the uid, not the global id");
+        assert_eq!(
+            sent[0].1,
+            EventPatch {
+                location: Some(Some("Room 2".to_string())),
+                ..EventPatch::default()
+            }
+        );
     }
 
     /// A backend whose server has lost every event already.

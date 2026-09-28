@@ -9723,3 +9723,42 @@ events you created for the purpose.
       does not know comes back as not found, not as a failed run.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
       CalDAV calendar lists as `A & B`, not `A  B`.
+
+## Calendar — editing an event (`e e`)
+
+CalDAV and Graph edit; Outlook on the web does not yet. Only the fields the
+form changed are sent. Use test events you created for the purpose.
+
+- [ ] **The form opens filled.** `e e` on a timed event shows its title,
+      `YYYY-MM-DD HH:MM` start and end in local time, show-as, location and
+      notes. On an all-day event start and end are dates, and a one-day event
+      ends on the day it starts.
+- [ ] **An untouched form sends nothing.** Submitting it unchanged reports
+      `Nothing changed`.
+- [ ] **A CalDAV edit lands at the source.** Change the location; the status
+      reads `Updated “<title>”`, the row shows the new location without a
+      manual refresh, and another client (Thunderbird, the web UI) shows it
+      too — with the start time zone, alarm and attendees it had before.
+- [ ] **Moving an event.** Change start to `tomorrow 15:00` and end to
+      `tomorrow 16:00`; the row moves. An end before the start reports `end must be after
+  start` and nothing is sent.
+- [ ] **Timed to all-day and back.** Tick all-day with start and end on the
+      same date; the event becomes a one-day all-day event on that date in the
+      calendar's own UI (not the day before). Untick it with times; it is timed
+      again.
+- [ ] **A recurring CalDAV event is refused.** `e e` on an occurrence, change
+      the title: the error reads `a recurring event cannot be edited here …`,
+      and no occurrence changes.
+- [ ] **A CalDAV event changed elsewhere is refused.** Edit it in another
+      client, then submit a change from a form opened before the refresh: the
+      error asks to reload and edit again. After `r`, the edit goes through.
+- [ ] **A Graph edit changes one occurrence.** On a Graph connection, editing
+      one occurrence of a series moves only that occurrence.
+- [ ] **Outlook on the web says so.** On an `office365-web` connection the
+      submit reports that this calendar connection cannot edit events.
+- [ ] **From the command line.**
+      `nyd adapter calendar <event id> edit --field location=Room2` prints
+      `Updated “<title>”` and changes only the location.
+- [ ] **A new all-day event lands on its date.** `a a` with all-day ticked and
+      start `tomorrow` creates the event on tomorrow's date in the calendar's
+      own UI, not the day before.

@@ -10,7 +10,9 @@
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 
-use not_yet_done_calendar_core::{CalEvent, EventDraft, OnlineMeeting, ShowAs};
+use not_yet_done_calendar_core::{
+    CalEvent, EventDraft, EventPatch, EventTimes, OnlineMeeting, ShowAs,
+};
 
 /// Serialise an [`EventDraft`] into a one-`VEVENT` iCalendar document for a
 /// CalDAV `PUT`. `uid` is the event's UID (also the basis of its resource
@@ -28,48 +30,181 @@ pub(crate) fn to_ics(draft: &EventDraft, uid: &str, now: DateTime<Utc>) -> Strin
         format!("DTSTAMP:{}", fmt_utc(now)),
     ];
 
-    if draft.all_day {
-        // All-day: DATE values, DTEND exclusive (at least the day after DTSTART).
-        let start_date = draft.start.date_naive();
-        let mut end_date = draft.end.date_naive();
-        if end_date <= start_date {
-            end_date = start_date + Duration::days(1);
-        }
-        lines.push(format!(
-            "DTSTART;VALUE=DATE:{}",
-            start_date.format("%Y%m%d")
-        ));
-        lines.push(format!("DTEND;VALUE=DATE:{}", end_date.format("%Y%m%d")));
-    } else {
-        lines.push(format!("DTSTART:{}", fmt_utc(draft.start)));
-        lines.push(format!("DTEND:{}", fmt_utc(draft.end)));
-    }
-
+    lines.extend(time_lines(&EventTimes {
+        start: draft.start,
+        end: draft.end,
+        all_day: draft.all_day,
+    }));
     lines.push(format!("SUMMARY:{}", escape_text(&draft.title)));
-    if let Some(loc) = draft
-        .location
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        lines.push(format!("LOCATION:{}", escape_text(loc)));
-    }
-    if let Some(body) = draft
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        lines.push(format!("DESCRIPTION:{}", escape_text(body)));
-    }
-
-    let (transp, busy) = show_as_ical(draft.show_as);
-    lines.push(format!("TRANSP:{transp}"));
-    lines.push(format!("X-MICROSOFT-CDO-BUSYSTATUS:{busy}"));
+    lines.extend(text_line("LOCATION", draft.location.as_deref()));
+    lines.extend(text_line("DESCRIPTION", draft.body.as_deref()));
+    lines.extend(show_as_lines(draft.show_as));
 
     lines.push("END:VEVENT".into());
     lines.push("END:VCALENDAR".into());
+    join_folded(lines)
+}
 
+/// Why an event's resource cannot be edited in place.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PatchRefusal {
+    /// The resource holds a series (`RRULE`/`RDATE`, or overridden
+    /// occurrences): its listed events are expanded instances, and writing one
+    /// instance's times into the series would move every occurrence.
+    Recurring,
+    /// No `VEVENT` in the resource.
+    NoEvent,
+}
+
+/// Rewrite the one `VEVENT` of the iCalendar resource `ics` as `patch` says.
+/// Only the properties the patch changes are replaced; everything else —
+/// attendees, alarms, the time zone definitions, unknown vendor properties —
+/// is kept as the server had it. `DTSTAMP`/`LAST-MODIFIED` are restamped with
+/// `now` and `SEQUENCE` goes up by one, as RFC 5545 asks of a changed event.
+pub(crate) fn apply_patch(
+    ics: &str,
+    patch: &EventPatch,
+    now: DateTime<Utc>,
+) -> Result<String, PatchRefusal> {
+    let lines = unfold(ics);
+
+    // One pass to learn the shape: how many events, is it a series, and the
+    // current SEQUENCE (only properties of the VEVENT itself count, not those
+    // of an alarm inside it).
+    let mut events = 0;
+    let mut sequence = 0u32;
+    let mut stack: Vec<String> = Vec::new();
+    for line in &lines {
+        let Some((name, _, value)) = split_line(line) else {
+            continue;
+        };
+        match name.to_ascii_uppercase().as_str() {
+            "BEGIN" => {
+                let comp = value.trim().to_ascii_uppercase();
+                if comp == "VEVENT" {
+                    events += 1;
+                }
+                stack.push(comp);
+            }
+            "END" => {
+                stack.pop();
+            }
+            prop if stack.last().map(String::as_str) == Some("VEVENT") => match prop {
+                "RRULE" | "RDATE" | "RECURRENCE-ID" => return Err(PatchRefusal::Recurring),
+                "SEQUENCE" => sequence = value.trim().parse().unwrap_or(0),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    match events {
+        0 => return Err(PatchRefusal::NoEvent),
+        1 => {}
+        _ => return Err(PatchRefusal::Recurring),
+    }
+
+    let mut replaced: Vec<&str> = vec!["DTSTAMP", "LAST-MODIFIED", "SEQUENCE"];
+    let mut fresh: Vec<String> = vec![
+        format!("DTSTAMP:{}", fmt_utc(now)),
+        format!("LAST-MODIFIED:{}", fmt_utc(now)),
+        format!("SEQUENCE:{}", sequence + 1),
+    ];
+    if let Some(title) = &patch.title {
+        replaced.push("SUMMARY");
+        fresh.push(format!("SUMMARY:{}", escape_text(title)));
+    }
+    if let Some(times) = &patch.times {
+        replaced.extend(["DTSTART", "DTEND", "DURATION"]);
+        fresh.extend(time_lines(times));
+    }
+    if let Some(location) = &patch.location {
+        replaced.push("LOCATION");
+        fresh.extend(text_line("LOCATION", location.as_deref()));
+    }
+    if let Some(body) = &patch.body {
+        replaced.push("DESCRIPTION");
+        fresh.extend(text_line("DESCRIPTION", body.as_deref()));
+    }
+    if let Some(show_as) = patch.show_as {
+        replaced.extend(["TRANSP", "X-MICROSOFT-CDO-BUSYSTATUS"]);
+        fresh.extend(show_as_lines(show_as));
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + fresh.len());
+    let mut stack: Vec<String> = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, _, value)) = split_line(&line) else {
+            out.push(line);
+            continue;
+        };
+        let name = name.to_ascii_uppercase();
+        match name.as_str() {
+            "BEGIN" => {
+                let comp = value.trim().to_ascii_uppercase();
+                let opens_event = comp == "VEVENT";
+                stack.push(comp);
+                out.push(line);
+                // The event's own properties come before its alarms, so the
+                // new ones go right after BEGIN:VEVENT.
+                if opens_event {
+                    out.append(&mut fresh);
+                }
+            }
+            "END" => {
+                stack.pop();
+                out.push(line);
+            }
+            prop if stack.last().map(String::as_str) == Some("VEVENT")
+                && replaced.contains(&prop) => {}
+            _ => out.push(line),
+        }
+    }
+    Ok(join_folded(out))
+}
+
+/// `DTSTART`/`DTEND` for `times`: DATE values for an all-day event (the end
+/// exclusive, at least the day after the start), UTC date-times otherwise.
+fn time_lines(times: &EventTimes) -> Vec<String> {
+    if times.all_day {
+        let start_date = times.start.date_naive();
+        let mut end_date = times.end.date_naive();
+        if end_date <= start_date {
+            end_date = start_date + Duration::days(1);
+        }
+        vec![
+            format!("DTSTART;VALUE=DATE:{}", start_date.format("%Y%m%d")),
+            format!("DTEND;VALUE=DATE:{}", end_date.format("%Y%m%d")),
+        ]
+    } else {
+        vec![
+            format!("DTSTART:{}", fmt_utc(times.start)),
+            format!("DTEND:{}", fmt_utc(times.end)),
+        ]
+    }
+}
+
+/// A TEXT property line, or none for a blank value.
+fn text_line(name: &str, value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|v| format!("{name}:{}", escape_text(v)))
+}
+
+/// `TRANSP` and `X-MICROSOFT-CDO-BUSYSTATUS` for `show_as`.
+fn show_as_lines(show_as: ShowAs) -> [String; 2] {
+    let (transp, busy) = show_as_ical(show_as);
+    [
+        format!("TRANSP:{transp}"),
+        format!("X-MICROSOFT-CDO-BUSYSTATUS:{busy}"),
+    ]
+}
+
+/// Content lines as one document: each folded, each ended by CRLF.
+fn join_folded(lines: Vec<String>) -> String {
     let mut out = String::new();
     for line in lines {
         out.push_str(&fold_line(&line));
@@ -694,4 +829,71 @@ mod tests {
         assert_eq!(ev.online_meeting.unwrap().provider.as_str(), "meet");
         assert_eq!(one_event("").online_meeting, None);
     }
+
+    const STORED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:1@x\r\nDTSTAMP:20300101T000000Z\r\nSEQUENCE:4\r\nDTSTART;TZID=Europe/Berlin:20300115T090000\r\nDURATION:PT1H\r\nSUMMARY:Dentist\r\nLOCATION:Main street\r\nATTENDEE;CN=Jane:mailto:jane@example.org\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn a_patch_replaces_only_what_it_changes() {
+        let patch = EventPatch {
+            title: Some("Dentist, again".into()),
+            location: Some(None),
+            ..EventPatch::default()
+        };
+        let out = apply_patch(STORED, &patch, utc("2030-01-10T08:00:00Z")).unwrap();
+        let ev = &parse_events(&out)[0];
+        assert_eq!(ev.summary.as_deref(), Some("Dentist, again"));
+        assert_eq!(ev.location, None, "a cleared location is gone");
+        // Untouched: the times as written (zone and duration), the attendee,
+        // the alarm with its own DESCRIPTION, the time zone definition.
+        assert!(out.contains("DTSTART;TZID=Europe/Berlin:20300115T090000\r\n"));
+        assert!(out.contains("DURATION:PT1H\r\n"));
+        assert!(out.contains("ATTENDEE;CN=Jane:mailto:jane@example.org\r\n"));
+        assert!(out.contains("DESCRIPTION:Reminder\r\n"));
+        assert!(out.contains("TZID:Europe/Berlin\r\n"));
+        assert!(out.contains("SEQUENCE:5\r\n") && !out.contains("SEQUENCE:4"));
+        assert!(out.contains("DTSTAMP:20300110T080000Z\r\n"));
+        assert!(!out.contains("DTSTAMP:20300101T"));
+    }
+
+    #[test]
+    fn new_times_replace_start_end_and_duration() {
+        let patch = EventPatch {
+            times: Some(EventTimes {
+                start: utc("2030-01-16T13:00:00Z"),
+                end: utc("2030-01-16T14:30:00Z"),
+                all_day: false,
+            }),
+            show_as: Some(ShowAs::Free),
+            body: Some(Some("Bring the card".into())),
+            ..EventPatch::default()
+        };
+        let out = apply_patch(STORED, &patch, utc("2030-01-10T08:00:00Z")).unwrap();
+        assert!(!out.contains("TZID=Europe/Berlin:") && !out.contains("DURATION"));
+        let ev = parse_events(&out).remove(0).into_cal_event("cal").unwrap();
+        assert_eq!(ev.start, utc("2030-01-16T13:00:00Z"));
+        assert_eq!(ev.end, utc("2030-01-16T14:30:00Z"));
+        assert_eq!(ev.show_as, ShowAs::Free);
+        assert_eq!(ev.body.as_deref(), Some("Bring the card"));
+        assert!(out.contains("DESCRIPTION:Reminder\r\n"), "the alarm keeps its text");
+        // The event's properties come before its alarm.
+        assert!(out.find("DTSTART").unwrap() < out.find("BEGIN:VALARM").unwrap());
+    }
+
+    #[test]
+    fn a_series_is_not_patched() {
+        let series = STORED.replace("DURATION:PT1H\r\n", "DURATION:PT1H\r\nRRULE:FREQ=WEEKLY\r\n");
+        let patch = EventPatch {
+            title: Some("x".into()),
+            ..EventPatch::default()
+        };
+        assert_eq!(
+            apply_patch(&series, &patch, utc("2030-01-10T08:00:00Z")),
+            Err(PatchRefusal::Recurring)
+        );
+        assert_eq!(
+            apply_patch("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", &patch, utc("2030-01-10T08:00:00Z")),
+            Err(PatchRefusal::NoEvent)
+        );
+    }
+
 }

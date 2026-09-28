@@ -8,8 +8,8 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 
 use not_yet_done_calendar_core::{
-    CalEvent, CalendarError, CalendarRef, EventDraft, MeetingProvider, OnlineMeeting, ShowAs,
-    TimeRange,
+    CalEvent, CalendarError, CalendarRef, EventDraft, EventPatch, EventTimes, MeetingProvider,
+    OnlineMeeting, ShowAs, TimeRange,
 };
 use not_yet_done_content::auth::CredentialResolver;
 
@@ -122,22 +122,47 @@ impl MsGraphClient {
         let body = serde_json::to_string(&payload)
             .map_err(|e| CalendarError::Other(format!("encode event: {e}")))?;
 
-        let created = self.authed_post(&url, &body).await?;
+        let created = self
+            .authed_write(reqwest::Method::POST, &url, &body)
+            .await?;
         let ev: GraphEvent = serde_json::from_str(&created)
             .map_err(|e| CalendarError::Other(format!("parse created event: {e}")))?;
         map_event(ev, label)
     }
 
-    /// `DELETE /me/events/{id}`, retrying once on a 401. Deleting an
-    /// occurrence's id deletes that occurrence only.
-    pub(crate) async fn delete_event(&self, id: &str) -> Result<(), CalendarError> {
-        // Graph ids are base64 and may hold `/`, `+` and `=`.
+    /// `PATCH /me/events/{id}` with only what `patch` changes. Patching an
+    /// occurrence's id changes that occurrence only. Graph sends no update to
+    /// the attendees for a PATCH.
+    pub(crate) async fn update_event(&self, id: &str, patch: &EventPatch) -> Result<(), CalendarError> {
+        let url = self.event_url(id);
+        let body = serde_json::to_string(&build_patch_json(patch))
+            .map_err(|e| CalendarError::Other(format!("encode event: {e}")))?;
+        self.authed_write(reqwest::Method::PATCH, &url, &body)
+            .await
+            .map(drop)
+            .map_err(|e| match e {
+                CalendarError::NotFound(_) => {
+                    CalendarError::NotFound(format!("no event with id '{id}' on the server"))
+                }
+                other => other,
+            })
+    }
+
+    /// The URL of the event Graph knows as `id`. Graph ids are base64 and may
+    /// hold `/`, `+` and `=`.
+    fn event_url(&self, id: &str) -> String {
         let escaped = id
             .replace('%', "%25")
             .replace('/', "%2F")
             .replace('+', "%2B")
             .replace('=', "%3D");
-        let url = format!("{}/v1.0/me/events/{escaped}", self.base_url);
+        format!("{}/v1.0/me/events/{escaped}", self.base_url)
+    }
+
+    /// `DELETE /me/events/{id}`, retrying once on a 401. Deleting an
+    /// occurrence's id deletes that occurrence only.
+    pub(crate) async fn delete_event(&self, id: &str) -> Result<(), CalendarError> {
+        let url = self.event_url(id);
         let token = self.resolve_token().await?;
         let resp = self.send_delete(&url, &token).await?;
         let resp = if resp.status() == StatusCode::UNAUTHORIZED {
@@ -213,16 +238,21 @@ impl MsGraphClient {
             .map_err(|e| CalendarError::Network(format!("GET {url}: {e}")))
     }
 
-    /// POST a JSON body with a freshly-resolved bearer token, retrying once on a
-    /// 401 (same rationale as [`authed_get`](MsGraphClient::authed_get)). A 403
-    /// is translated into an actionable `Calendars.ReadWrite` scope hint.
-    async fn authed_post(&self, url: &str, body: &str) -> Result<String, CalendarError> {
+    /// POST or PATCH a JSON body with a freshly-resolved bearer token, retrying
+    /// once on a 401 (same rationale as [`authed_get`](MsGraphClient::authed_get)).
+    /// A 403 is translated into an actionable `Calendars.ReadWrite` scope hint.
+    async fn authed_write(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: &str,
+    ) -> Result<String, CalendarError> {
         let token = self.resolve_token().await?;
-        let resp = self.send_post(url, &token, body).await?;
+        let resp = self.send_write(&method, url, &token, body).await?;
         let resp = if resp.status() == StatusCode::UNAUTHORIZED {
             self.resolver.invalidate().await;
             let token = self.resolve_token().await?;
-            self.send_post(url, &token, body).await?
+            self.send_write(&method, url, &token, body).await?
         } else {
             resp
         };
@@ -235,6 +265,11 @@ impl MsGraphClient {
             return Ok(text);
         }
         let snippet: String = text.chars().take(300).collect();
+        if status == StatusCode::NOT_FOUND {
+            return Err(CalendarError::NotFound(format!(
+                "{method} {url} -> {status}: {snippet}"
+            )));
+        }
         if status == StatusCode::FORBIDDEN {
             return Err(CalendarError::Auth(format!(
                 "Graph refused the write ({status}). The app registration likely \
@@ -243,25 +278,26 @@ impl MsGraphClient {
             )));
         }
         Err(CalendarError::Network(format!(
-            "POST {url} -> {status}: {snippet}"
+            "{method} {url} -> {status}: {snippet}"
         )))
     }
 
-    async fn send_post(
+    async fn send_write(
         &self,
+        method: &reqwest::Method,
         url: &str,
         token: &str,
         body: &str,
     ) -> Result<reqwest::Response, CalendarError> {
         self.http
-            .post(url)
+            .request(method.clone(), url)
             .bearer_auth(token)
             .header("Prefer", "outlook.timezone=\"UTC\"")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
             .send()
             .await
-            .map_err(|e| CalendarError::Network(format!("POST {url}: {e}")))
+            .map_err(|e| CalendarError::Network(format!("{method} {url}: {e}")))
     }
 }
 
@@ -271,31 +307,16 @@ impl MsGraphClient {
 fn build_event_json(draft: &EventDraft) -> serde_json::Value {
     use serde_json::json;
 
-    let (start_s, end_s) = if draft.all_day {
-        let start_date = draft.start.date_naive();
-        let mut end_date = draft.end.date_naive();
-        if end_date <= start_date {
-            end_date = start_date + chrono::Duration::days(1);
-        }
-        (
-            format!("{start_date}T00:00:00"),
-            format!("{end_date}T00:00:00"),
-        )
-    } else {
-        (
-            draft.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            draft.end.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        )
-    };
-
     let mut obj = json!({
         "subject": draft.title,
-        "start": { "dateTime": start_s, "timeZone": "UTC" },
-        "end": { "dateTime": end_s, "timeZone": "UTC" },
-        "isAllDay": draft.all_day,
         "showAs": show_as_graph(draft.show_as),
     });
     let map = obj.as_object_mut().expect("json object");
+    map.extend(times_json(&EventTimes {
+        start: draft.start,
+        end: draft.end,
+        all_day: draft.all_day,
+    }));
     if let Some(loc) = draft
         .location
         .as_deref()
@@ -316,6 +337,65 @@ fn build_event_json(draft: &EventDraft) -> serde_json::Value {
         );
     }
     obj
+}
+
+/// The Graph `PATCH /events/{id}` body for `patch`: only the properties it
+/// changes. A cleared location or body is sent empty, which Graph takes as
+/// "none".
+fn build_patch_json(patch: &EventPatch) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut map = serde_json::Map::new();
+    if let Some(title) = &patch.title {
+        map.insert("subject".into(), json!(title));
+    }
+    if let Some(times) = &patch.times {
+        map.extend(times_json(times));
+    }
+    if let Some(location) = &patch.location {
+        map.insert(
+            "location".into(),
+            json!({ "displayName": location.as_deref().unwrap_or_default() }),
+        );
+    }
+    if let Some(body) = &patch.body {
+        map.insert(
+            "body".into(),
+            json!({ "contentType": "text", "content": body.as_deref().unwrap_or_default() }),
+        );
+    }
+    if let Some(show_as) = patch.show_as {
+        map.insert("showAs".into(), json!(show_as_graph(show_as)));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// `start`, `end` and `isAllDay` for `times`, in UTC. An all-day event carries
+/// date-midnight bounds (Graph requires the end to be the exclusive next day).
+fn times_json(times: &EventTimes) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::json;
+
+    let (start_s, end_s) = if times.all_day {
+        let start_date = times.start.date_naive();
+        let mut end_date = times.end.date_naive();
+        if end_date <= start_date {
+            end_date = start_date + chrono::Duration::days(1);
+        }
+        (
+            format!("{start_date}T00:00:00"),
+            format!("{end_date}T00:00:00"),
+        )
+    } else {
+        (
+            times.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            times.end.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        )
+    };
+    let mut map = serde_json::Map::new();
+    map.insert("start".into(), json!({ "dateTime": start_s, "timeZone": "UTC" }));
+    map.insert("end".into(), json!({ "dateTime": end_s, "timeZone": "UTC" }));
+    map.insert("isAllDay".into(), json!(times.all_day));
+    map
 }
 
 /// [`ShowAs`] → Graph `showAs` token (the write mirror of [`map_show_as`]).
@@ -616,5 +696,33 @@ mod tests {
             MeetingProvider::Other
         );
         assert_eq!(map_online_meeting(false, None, None), None);
+    }
+
+    #[test]
+    fn a_patch_sends_only_what_it_changes() {
+        let body = build_patch_json(&EventPatch {
+            title: Some("Review".into()),
+            location: Some(None),
+            ..EventPatch::default()
+        });
+        assert_eq!(
+            body,
+            serde_json::json!({ "subject": "Review", "location": { "displayName": "" } })
+        );
+
+        let body = build_patch_json(&EventPatch {
+            times: Some(EventTimes {
+                start: utc("2030-01-15T00:00:00Z"),
+                end: utc("2030-01-15T00:00:00Z"),
+                all_day: true,
+            }),
+            show_as: Some(ShowAs::OutOfOffice),
+            ..EventPatch::default()
+        });
+        assert_eq!(body["start"]["dateTime"], "2030-01-15T00:00:00");
+        assert_eq!(body["end"]["dateTime"], "2030-01-16T00:00:00");
+        assert_eq!(body["isAllDay"], true);
+        assert_eq!(body["showAs"], "oof");
+        assert!(body.get("subject").is_none() && body.get("body").is_none());
     }
 }

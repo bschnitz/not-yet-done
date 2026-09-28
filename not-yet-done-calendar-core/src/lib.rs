@@ -15,9 +15,8 @@
 //!
 //! A backend implementation (e.g. Microsoft Graph) lives in its own crate that
 //! depends **only** on this one — never on the adapter crate and never on the
-//! TUI — so backends are independent, feature-gated units. Write support is
-//! intentionally absent for now: a future `CalendarWriteBackend` extension
-//! trait can add it without touching the read seam or any existing backend.
+//! TUI — so backends are independent, feature-gated units. Writing (create,
+//! edit, delete) is opt-in: those trait methods default to a read-only refusal.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -201,6 +200,41 @@ pub struct EventDraft {
     pub show_as: ShowAs,
 }
 
+/// The changes an edit makes to an existing event. Every field is optional:
+/// `None` leaves that part of the event as the server has it, so an edit that
+/// only moves an event never rewrites its notes (which a server may keep as
+/// HTML) or the time zone its times were written in.
+///
+/// Start, end and the all-day flag travel together in [`EventTimes`], since a
+/// backend writes them as one (an all-day event's bounds are dates).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EventPatch {
+    pub title: Option<String>,
+    pub times: Option<EventTimes>,
+    /// `Some(None)` clears the location.
+    pub location: Option<Option<String>>,
+    /// `Some(None)` clears the notes.
+    pub body: Option<Option<String>>,
+    pub show_as: Option<ShowAs>,
+}
+
+impl EventPatch {
+    /// Whether the patch changes nothing at all.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// When an event takes place, as an edit sets it — the same conventions as
+/// [`EventDraft`]: UTC instants, the end exclusive, and for an all-day event
+/// only the date part of each counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventTimes {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub all_day: bool,
+}
+
 /// Failure of a backend operation. The adapter maps these onto the content
 /// layer's error type; keeping a dedicated enum here spares backends a
 /// dependency on the content crate's error type.
@@ -221,7 +255,8 @@ pub enum CalendarError {
 
 /// A live connection to one calendar source. Reading is mandatory;
 /// [`list_calendars`](CalendarBackend::list_calendars) /
-/// [`create_event`](CalendarBackend::create_event) default to "read-only" so a
+/// [`create_event`](CalendarBackend::create_event) /
+/// [`update_event`](CalendarBackend::update_event) default to "read-only" so a
 /// backend opts into writing only when it implements them.
 #[async_trait]
 pub trait CalendarBackend: Send + Sync {
@@ -286,6 +321,23 @@ pub trait CalendarBackend: Send + Sync {
         let _ = uid;
         Err(CalendarError::Other(
             "this calendar connection is read-only".into(),
+        ))
+    }
+
+    /// Change the event this connection knows as `uid` (a [`CalEvent::uid`] it
+    /// listed) as `patch` says; what the patch leaves out stays as it is. An
+    /// occurrence of a series is changed on its own where the backend
+    /// addresses occurrences (Outlook); a backend that stores a series as one
+    /// resource (CalDAV) refuses to edit it rather than move the whole series.
+    /// Nobody is sent an update.
+    ///
+    /// An event the server no longer has is [`CalendarError::NotFound`].
+    ///
+    /// The default refuses: a backend gains editing only by overriding this.
+    async fn update_event(&self, uid: &str, patch: &EventPatch) -> Result<(), CalendarError> {
+        let _ = (uid, patch);
+        Err(CalendarError::Other(
+            "this calendar connection cannot edit events".into(),
         ))
     }
 

@@ -4,7 +4,8 @@
 //! calendar connection into a single flat, time-sorted, groupable event list.
 //! Connections may mix protocols and include several instances of the same
 //! protocol — each is a [`CalendarBackend`](not_yet_done_calendar_core::CalendarBackend)
-//! from a feature-gated backend crate (see [`registry`]). Read-only for now.
+//! from a feature-gated backend crate (see [`registry`]). Events are created,
+//! edited and deleted through the backend that owns them, where it can.
 //!
 //! Live update is decoupled from the frontend: a background poll task detects
 //! externally-made changes and pushes
@@ -13,6 +14,7 @@
 //! already knows how to act on.
 
 mod adapter;
+mod event_form;
 pub mod config;
 pub mod entity;
 mod factory;

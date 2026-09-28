@@ -14,7 +14,9 @@ use chrono::SecondsFormat;
 use reqwest::{Method, StatusCode, Url, header};
 use tokio::sync::Mutex;
 
-use not_yet_done_calendar_core::{CalEvent, CalendarError, CalendarRef, EventDraft, TimeRange};
+use not_yet_done_calendar_core::{
+    CalEvent, CalendarError, CalendarRef, EventDraft, EventPatch, TimeRange,
+};
 use not_yet_done_content::auth::{CredentialPrompts, CredentialResolver};
 
 use crate::config::{CalDavConfig, DEFAULT_REQUEST_TIMEOUT_SECS};
@@ -178,7 +180,7 @@ impl CalDavClient {
             .map_err(|e| CalendarError::Other(format!("build event url: {e}")))?;
 
         trace_caldav!("PUT new event {uid} -> {target} ({} bytes)", ics.len());
-        self.put_ics(&target, &ics).await?;
+        self.put_ics(&target, &ics, Precondition::Absent).await?;
 
         Ok(CalEvent {
             uid,
@@ -215,6 +217,96 @@ impl CalDavClient {
             self.delete_resource(url).await?;
         }
         Ok(())
+    }
+
+    /// Change the event whose UID is `uid` as `patch` says: fetch its
+    /// resource, rewrite the properties the patch changes and `PUT` it back
+    /// under `If-Match`, so an edit made elsewhere in between is not lost. A
+    /// series is refused — its listed events are expanded instances, and
+    /// writing one instance's times into the series would move all of them.
+    pub(crate) async fn update_event(
+        &self,
+        uid: &str,
+        patch: &EventPatch,
+    ) -> Result<(), CalendarError> {
+        let mut found = Vec::new();
+        for cal in &self.calendars().await? {
+            found.extend(self.resources_of(&cal.url, uid).await?);
+        }
+        let url = match found.as_slice() {
+            [] => {
+                return Err(CalendarError::NotFound(format!(
+                    "no event with UID '{uid}' on the server"
+                )));
+            }
+            [url] => url.clone(),
+            _ => {
+                return Err(CalendarError::Other(format!(
+                    "the event with UID '{uid}' is stored {} times on the server; \
+                     not editing any of them",
+                    found.len()
+                )));
+            }
+        };
+        let (ics, etag) = self.get_resource(&url).await?;
+        let ics = ical::apply_patch(&ics, patch, chrono::Utc::now()).map_err(|why| {
+            CalendarError::Other(match why {
+                ical::PatchRefusal::Recurring => {
+                    "a recurring event cannot be edited here: CalDAV stores the series \
+                     as one, and the change would move every occurrence"
+                        .into()
+                }
+                ical::PatchRefusal::NoEvent => format!("{url} holds no event"),
+            })
+        })?;
+        trace_caldav!("PUT changed event {uid} -> {url} ({} bytes)", ics.len());
+        let precondition = match &etag {
+            Some(etag) => Precondition::Matches(etag),
+            None => Precondition::None,
+        };
+        self.put_ics(&url, &ics, precondition).await
+    }
+
+    /// `GET` one event resource: its iCalendar text and its `ETag`, if the
+    /// server sent one.
+    async fn get_resource(&self, url: &Url) -> Result<(String, Option<String>), CalendarError> {
+        let resp = self.send_get(url).await?;
+        let resp = if resp.status() == StatusCode::UNAUTHORIZED {
+            self.user.invalidate().await;
+            self.pass.invalidate().await;
+            self.send_get(url).await?
+        } else {
+            resp
+        };
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Err(CalendarError::NotFound(format!("{url} is gone")));
+        }
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let ics = read_body(url, resp).await?;
+        Ok((ics, etag))
+    }
+
+    async fn send_get(&self, url: &Url) -> Result<reqwest::Response, CalendarError> {
+        let user = self
+            .user
+            .resolve()
+            .await
+            .map_err(|e| CalendarError::Auth(e.to_string()))?;
+        let pass = self
+            .pass
+            .resolve()
+            .await
+            .map_err(|e| CalendarError::Auth(e.to_string()))?;
+        self.http
+            .get(url.clone())
+            .basic_auth(user, Some(pass))
+            .send()
+            .await
+            .map_err(|e| CalendarError::Network(format!("GET {url}: {e}")))
     }
 
     /// The resources in collection `cal` whose event has the UID `uid`.
@@ -294,15 +386,19 @@ impl CalDavClient {
             .map_err(|e| CalendarError::Network(format!("DELETE {url}: {e}")))
     }
 
-    /// `PUT` a freshly-created iCalendar resource, retrying once on a 401 after
-    /// invalidating the cached credential. `If-None-Match: *` makes it a pure
-    /// create — the server rejects it if the resource somehow already exists.
-    async fn put_ics(&self, url: &Url, ics: &str) -> Result<(), CalendarError> {
-        let resp = self.send_put(url, ics).await?;
+    /// `PUT` an iCalendar resource under `precondition`, retrying once on a 401
+    /// after invalidating the cached credential.
+    async fn put_ics(
+        &self,
+        url: &Url,
+        ics: &str,
+        precondition: Precondition<'_>,
+    ) -> Result<(), CalendarError> {
+        let resp = self.send_put(url, ics, precondition).await?;
         let resp = if resp.status() == StatusCode::UNAUTHORIZED {
             self.user.invalidate().await;
             self.pass.invalidate().await;
-            self.send_put(url, ics).await?
+            self.send_put(url, ics, precondition).await?
         } else {
             resp
         };
@@ -310,6 +406,16 @@ impl CalDavClient {
         if status.is_success() {
             trace_caldav!("PUT {url} -> {status}");
             return Ok(());
+        }
+        if status == StatusCode::PRECONDITION_FAILED {
+            return Err(CalendarError::Other(match precondition {
+                Precondition::Matches(_) => {
+                    "the event was changed on the server in the meantime; \
+                     reload and edit it again"
+                        .to_string()
+                }
+                _ => format!("{url} already exists"),
+            }));
         }
         let text = resp.text().await.unwrap_or_default();
         let snippet: String = text.chars().take(300).collect();
@@ -323,7 +429,12 @@ impl CalDavClient {
         )
     }
 
-    async fn send_put(&self, url: &Url, ics: &str) -> Result<reqwest::Response, CalendarError> {
+    async fn send_put(
+        &self,
+        url: &Url,
+        ics: &str,
+        precondition: Precondition<'_>,
+    ) -> Result<reqwest::Response, CalendarError> {
         let user = self
             .user
             .resolve()
@@ -334,11 +445,17 @@ impl CalDavClient {
             .resolve()
             .await
             .map_err(|e| CalendarError::Auth(e.to_string()))?;
-        self.http
+        let request = self
+            .http
             .put(url.clone())
             .basic_auth(user, Some(pass))
-            .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
-            .header(header::IF_NONE_MATCH, "*")
+            .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8");
+        let request = match precondition {
+            Precondition::Absent => request.header(header::IF_NONE_MATCH, "*"),
+            Precondition::Matches(etag) => request.header(header::IF_MATCH, etag),
+            Precondition::None => request,
+        };
+        request
             .body(ics.to_string())
             .send()
             .await
@@ -610,6 +727,18 @@ impl CalDavClient {
             .join(href.trim())
             .map_err(|e| CalendarError::Other(format!("bad href '{href}': {e}")))
     }
+}
+
+/// What a `PUT` asks of the resource it writes.
+#[derive(Clone, Copy)]
+enum Precondition<'a> {
+    /// `If-None-Match: *` — a pure create: the server refuses when the
+    /// resource somehow exists already.
+    Absent,
+    /// `If-Match: <etag>` — overwrite only the version that was read.
+    Matches(&'a str),
+    /// No condition: the server gave no `ETag` to hold it to.
+    None,
 }
 
 async fn read_body(url: &Url, resp: reqwest::Response) -> Result<String, CalendarError> {

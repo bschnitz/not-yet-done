@@ -21,7 +21,7 @@ mod config;
 use async_trait::async_trait;
 use not_yet_done_calendar_core::{
     CalEvent, CalendarBackend, CalendarBackendFactory, CalendarError, CalendarRef, EventDraft,
-    TimeRange,
+    EventPatch, TimeRange,
 };
 
 use client::MsGraphClient;
@@ -63,6 +63,10 @@ impl CalendarBackend for MsGraphBackend {
     }
     async fn delete_event(&self, uid: &str) -> Result<(), CalendarError> {
         self.client.delete_event(uid).await
+    }
+
+    async fn update_event(&self, uid: &str, patch: &EventPatch) -> Result<(), CalendarError> {
+        self.client.update_event(uid, patch).await
     }
 }
 
