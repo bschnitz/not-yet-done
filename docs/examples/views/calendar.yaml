@@ -325,7 +325,7 @@ views:
       # the command line, only the named fields change:
       #   nyd adapter calendar <event id> edit --field location="Room 2"
       - name: edit
-        key: 'e e'
+        key: 'a e'
         id: edit
         form:
           columns: 2

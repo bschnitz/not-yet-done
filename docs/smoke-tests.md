@@ -9724,13 +9724,13 @@ events you created for the purpose.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
       CalDAV calendar lists as `A & B`, not `A  B`.
 
-## Calendar — editing an event (`e e`)
+## Calendar — editing an event (`a e`)
 
 CalDAV, Graph and Outlook on the web (the `nyd-calendar-update` flow) edit.
 Only the fields the form changed are sent. Use test events you created for the
 purpose.
 
-- [ ] **The form opens filled.** `e e` on a timed event shows its title,
+- [ ] **The form opens filled.** `a e` on a timed event shows its title,
       `YYYY-MM-DD HH:MM` start and end in local time, show-as, location and
       notes. On an all-day event start and end are dates, and a one-day event
       ends on the day it starts.
