@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
@@ -1555,8 +1555,8 @@ fn event_summary(m: &MergedEvent) -> NodeSummary {
     };
 
     let fields = vec![
-        field("start", e.start.with_timezone(&Local).to_rfc3339(), "Start"),
-        field("end", e.end.with_timezone(&Local).to_rfc3339(), "End"),
+        field("start", shown(e, e.start).to_rfc3339(), "Start"),
+        field("end", shown(e, e.end).to_rfc3339(), "End"),
         field("account", m.account.clone(), "Account"),
         field("title", event_label(e), "Title"),
         field(
@@ -1602,11 +1602,25 @@ fn event_summary(m: &MergedEvent) -> NodeSummary {
     }
 }
 
+/// An event's start or end as the user's clock shows it. An all-day event's
+/// times are its dates at UTC midnight — how the backends store a `DATE` —
+/// so it gets local midnight of that date instead: converted as an instant,
+/// midnight would become 02:00 in Berlin, or the evening before west of
+/// Greenwich, and a reader of the time would think it started then.
+fn shown(e: &CalEvent, at: DateTime<Utc>) -> DateTime<Local> {
+    let midnight = e
+        .all_day
+        .then(|| at.date_naive().and_hms_opt(0, 0, 0))
+        .flatten()
+        .and_then(|midnight| Local.from_local_datetime(&midnight).earliest());
+    midnight.unwrap_or_else(|| at.with_timezone(&Local))
+}
+
 /// Markdown detail body for the preview pane.
 fn render_body(m: &MergedEvent) -> String {
     let e = &m.event;
-    let start = e.start.with_timezone(&Local);
-    let end = e.end.with_timezone(&Local);
+    let start = shown(e, e.start);
+    let end = shown(e, e.end);
     let fmt = if e.all_day {
         "%Y-%m-%d"
     } else {
@@ -1862,6 +1876,30 @@ mod tests {
                 online_meeting: None,
             },
         }
+    }
+
+    #[test]
+    fn an_all_day_event_starts_at_local_midnight_of_its_date() {
+        let mut m = sample("AAA", 0, "Holiday");
+        m.event.all_day = true;
+        m.event.start = Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap();
+        m.event.end = Utc.with_ymd_and_hms(2030, 1, 16, 0, 0, 0).unwrap();
+        let row = event_summary(&m);
+        let get = |key: &str| {
+            let value = row.metadata.fields.iter().find(|f| f.key == key).unwrap();
+            DateTime::parse_from_rfc3339(&value.value).unwrap()
+        };
+        // Whatever the zone the test runs in: the date stays, the clock is 00:00.
+        assert_eq!(get("start").naive_local().to_string(), "2030-01-15 00:00:00");
+        assert_eq!(get("end").naive_local().to_string(), "2030-01-16 00:00:00");
+        assert!(render_body(&m).contains("2030-01-15 – 2030-01-16"));
+
+        // A timed event is still the instant, in the local zone.
+        let timed = sample("BBB", 9, "Standup");
+        assert_eq!(
+            shown(&timed.event, timed.event.start),
+            timed.event.start.with_timezone(&Local)
+        );
     }
 
     #[test]
