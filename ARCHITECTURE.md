@@ -79,6 +79,7 @@ of the services shown here. That layer is described in
 - Every file in `commands/` represents one command area
 - Functions in those modules are the subcommands
 - Commands receive the Shaku module as a parameter (or build it themselves — see bootstrapping)
+- tusks 2.1 ignores doc comments: `///` never reaches `--help`. Put user-facing text in `#[command(about = "…", long_about = "…")]` (`about` = line in the parent list, `long_about` = `<cmd> --help`). There are exactly three `#[tusks]` modules: `main.rs` (root), `commands/backup.rs`, `commands/tag.rs`.
 
 **What is left in `commands/`:** only the built-in commands that have no
 adapter equivalent yet — currently `backup` and `tag`. Everything around
