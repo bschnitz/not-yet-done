@@ -6155,27 +6155,30 @@ level's script menu. `window-pending` and `window-overdue` defined under
       sync adds them, every task is still there.
 - [x] `e e` on a task: the buffer shows the time-window hint and the
       `not_before:` / `due:` lines with the stored values (empty when open).
-- [ ] `due: friday 17:00` and `not_before: 2026-10-15` save; the Due column
+- [x] `due: friday 17:00` and `not_before: 2026-10-15` save; the Due column
       shows the date, `e e` shows them back as written (a bare date stays
-      bare, a time keeps its time).
-- [ ] `not_before` after `due`: the save is refused with a message, and neither
+      bare, a time keeps its time). Run 2026-10-02 the other way round
+      (`not_before: friday`, `due: 2026-10-15 17:00`): on a Friday, `friday`
+      resolves to the next week's Friday and comes back as the bare date
+      `2026-10-09`; the due time stays `17:00`.
+- [x] `not_before` after `due`: the save is refused with a message, and neither
       the window nor the other frontmatter fields changed.
-- [ ] Clear a line (`due:` with nothing after it): the column empties.
+- [x] Clear a line (`due:` with nothing after it): the column empties.
 - [x] A task with `not_before` in the future, two levels deep: yellow. A task
       with `due` in the past and status todo, two levels deep: red.
 - [x] The same overdue task set to done or cancelled: no colour. A task inside
       its window: no colour.
 - [x] `e e` → status done on a red task → `:wq`: the red is gone at once,
       without `r`. Back to todo: red again at once.
-- [ ] Collapse a parent, restart, expand it lazily: its coloured children are
+- [x] Collapse a parent, restart, expand it lazily: its coloured children are
       coloured on the expansion itself.
 - [x] Flat list (`t l`): the same rows carry the same colours.
 - [x] The cursor on a coloured row shows the style's `selected` variant, not
       the plain surface colour.
-- [ ] A second script on the tree level answering with `order`: one message
+- [x] A second script on the tree level answering with `order`: one message
       "`order` ignored — a tree orders rows under their parent", the tree keeps
       its shape, the colours still land.
-- [ ] Filter `[due, <, today]` in `Q`: only tasks with a past due date.
+- [x] Filter `[due, <, today]` in `Q`: only tasks with a past due date.
 
 ## A script on the `row_change` hook (the cursor moved)
 
