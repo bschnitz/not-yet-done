@@ -4249,7 +4249,8 @@ views: []
              hides deleted tasks now the universe is loaded whole): {default:?}"
         );
         // Column parity with the native tab: the default visible set + order
-        // (St / Pri / Tr / T / Task / Created / Updated / Tracked / N). The
+        // (St / Pri / Tr / T / Task / Created / Updated / Tracked / N), plus
+        // the time window (From / Due) in front of N. The
         // `🔗` links column is intentionally absent (app-level link store not
         // wired to the in-process adapter yet). `tag_names` is declared but
         // ships `hidden: true` — like the native tab it is offered in the `c`
@@ -4269,6 +4270,8 @@ views: []
                 "created",
                 "updated",
                 "last_tracked",
+                "not_before",
+                "due",
                 "notes",
             ],
             "tasks columns must mirror the native default order"

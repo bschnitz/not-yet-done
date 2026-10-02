@@ -6138,6 +6138,45 @@ with open(os.environ["NYD_OUTPUT_FILE"], "w") as f:
       the same index — a reordering load must not silently move the selection
       to another ticket.
 
+## Task time window, coloured by a load hook
+
+A task's `not_before` / `due` edited in the frontmatter, shown as From / Due,
+and painted by
+[`docs/examples/scripts/time_window.py`](examples/scripts/time_window.py) on
+every load path of a tree: the whole eager tree, a lazily expanded parent, and
+the single row patched after an editor save.
+
+Preparation: the script in `scripts/tasks/task_item/` (and, for the flat list,
+a link in `scripts/tasks/task_flat/`), bound to `load` via `ctrl+h` in each
+level's script menu. `window-pending` and `window-overdue` defined under
+`theme.styles` in `tui.yaml`. The From / Due columns in `views/tasks.yaml`.
+
+- [x] Start against an existing `tasks.db` without the two columns: the schema
+      sync adds them, every task is still there.
+- [x] `e e` on a task: the buffer shows the time-window hint and the
+      `not_before:` / `due:` lines with the stored values (empty when open).
+- [ ] `due: friday 17:00` and `not_before: 2026-10-15` save; the Due column
+      shows the date, `e e` shows them back as written (a bare date stays
+      bare, a time keeps its time).
+- [ ] `not_before` after `due`: the save is refused with a message, and neither
+      the window nor the other frontmatter fields changed.
+- [ ] Clear a line (`due:` with nothing after it): the column empties.
+- [x] A task with `not_before` in the future, two levels deep: yellow. A task
+      with `due` in the past and status todo, two levels deep: red.
+- [x] The same overdue task set to done or cancelled: no colour. A task inside
+      its window: no colour.
+- [x] `e e` → status done on a red task → `:wq`: the red is gone at once,
+      without `r`. Back to todo: red again at once.
+- [ ] Collapse a parent, restart, expand it lazily: its coloured children are
+      coloured on the expansion itself.
+- [x] Flat list (`t l`): the same rows carry the same colours.
+- [x] The cursor on a coloured row shows the style's `selected` variant, not
+      the plain surface colour.
+- [ ] A second script on the tree level answering with `order`: one message
+      "`order` ignored — a tree orders rows under their parent", the tree keeps
+      its shape, the colours still land.
+- [ ] Filter `[due, <, today]` in `Q`: only tasks with a past due date.
+
 ## A script on the `row_change` hook (the cursor moved)
 
 The third hook: it fires from navigation, not from a load, runs detached, and
@@ -9606,7 +9645,7 @@ more than eight hours at once, and then replaces its fields with a confirmation.
       `not-yet-done-cli script run docs/examples/scripts/log_work.py`. With
       every field supplied it needs no terminal at all —
       `--set spent=1h30 --set day=today --set activity=development --set
-  confirm=true </dev/null` prints the `result` payload as JSON
+confirm=true </dev/null` prints the `result` payload as JSON
       (`commands: [reload]`, `minutes: 90`) and exits 0. The payload the popup
       would have built from the selected node comes from `--payload FILE`.
 - [x] **A `--set` means what a typed answer means.** `spent=1h30` reaches the
@@ -9681,7 +9720,7 @@ four rounds.
       `No` reopens round one with every value in place — `visible_when`
       re-evaluated from the prefilled toggle, so `Approved by` is there and
       filled — and the general message `⚠ nothing was submitted — change what
-    you like` under the fields.
+  you like` under the fields.
 - [x] **A round-tripped value comes back normalised, not as typed.** Round two
       reopens with `90` in the duration field, which is what was submitted, and
       the hint under it reads it back as `1 h 30 min`.
@@ -9717,7 +9756,7 @@ events you created for the purpose.
 - [ ] **An Outlook-on-the-web event purged elsewhere is still removed.**
       Delete a test event in Outlook and empty Deleted Items there, then
       `nyd adapter calendar <event id> delete --yes` prints `“<title>” was
-      already gone from the calendar; removed it here`. (An event that only
+    already gone from the calendar; removed it here`. (An event that only
       sits in Deleted Items still has its id: deleting it again succeeds and
       prints `Deleted`.) The backend half is verified: an id the service
       does not know comes back as not found, not as a failed run.
@@ -9742,7 +9781,7 @@ purpose.
       too — with the start time zone, alarm and attendees it had before.
 - [ ] **Moving an event.** Change start to `tomorrow 15:00` and end to
       `tomorrow 16:00`; the row moves. An end before the start reports `end must be after
-  start` and nothing is sent.
+start` and nothing is sent.
 - [ ] **Timed to all-day and back.** Tick all-day with start and end on the
       same date; the event becomes a one-day all-day event on that date in the
       calendar's own UI (not the day before). Untick it with times; it is timed

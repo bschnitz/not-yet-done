@@ -308,6 +308,20 @@ views:
         format: "%Y-%m-%d"
         style: accent
         sizing: max
+      # The task's time window (`e e` edits it). Colour by it with a load
+      # hook: see docs/examples/scripts/time_window.py.
+      - key: not_before
+        label: From
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: due
+        label: Due
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
       # Notes marker: `📝` when a notes file exists for the task, blank else.
       - key: notes
         label: N
@@ -565,6 +579,20 @@ views:
         kind: datetime
         format: "%Y-%m-%d"
         style: accent
+        sizing: max
+      # The task's time window (`e e` edits it). Colour by it with a load
+      # hook: see docs/examples/scripts/time_window.py.
+      - key: not_before
+        label: From
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
+        sizing: max
+      - key: due
+        label: Due
+        kind: datetime
+        format: "%Y-%m-%d"
+        style: secondary
         sizing: max
       - key: notes
         label: N

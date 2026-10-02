@@ -2500,7 +2500,9 @@ impl ContentPane {
             let Some(level) = tree_level_for_chain(view_def, chain) else {
                 continue;
             };
-            if level.highlights.is_empty() {
+            // A level without rules of its own may still carry what a load
+            // hook painted on its rows.
+            if level.highlights.is_empty() && self.script_highlights.is_empty() {
                 continue;
             }
             let highlights = TableHighlights {

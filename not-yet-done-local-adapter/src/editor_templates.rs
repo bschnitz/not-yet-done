@@ -1,5 +1,5 @@
 //! The `TaskAdapter`'s editor-buffer format: a markdown document with a
-//! `---` frontmatter (status / priority / tracking / parent) and a
+//! `---` frontmatter (status / priority / tracking / parent / time window) and a
 //! `## Description:` / `## Notes:` body. Rendering (`new_task`/`edit_task`)
 //! and parsing (`parse_new_task`/`parse_edit_task`) are the two halves of
 //! the [`InputSpec::Editor`](not_yet_done_content::InputSpec::Editor)
@@ -17,8 +17,23 @@
 //! hoisting into `not-yet-done-content` as a shared frontmatter helper —
 //! see the A2 follow-up note in `docs/plan-adapterize-tasks-trackings.md`.
 
+use chrono::{DateTime, Utc};
 use not_yet_done_task_core::entity::task::{Model as Task, TaskStatus};
+use not_yet_done_task_core::service::check_window;
 use uuid::Uuid;
+
+use crate::datetime::{WindowEdge, fmt_window_bound, parse_window_bound};
+
+/// Comment line above the two window keys, shared by both templates.
+const WINDOW_HINT: &str = "# time window: not_before = don't start earlier, due = finish by \
+(e.g. 2026-10-15, friday, friday 17:00; empty = open)";
+
+fn window_line(key: &str, bound: Option<DateTime<Utc>>, edge: WindowEdge) -> String {
+    match bound {
+        Some(dt) => format!("{key}: {}", fmt_window_bound(dt, edge)),
+        None => format!("{key}:"),
+    }
+}
 
 /// Generate the markdown template for creating a new task.
 pub fn new_task(parent_id: Option<Uuid>) -> String {
@@ -34,6 +49,9 @@ status: todo
 priority: 0
 tracking: false
 {parent_line}
+{WINDOW_HINT}
+not_before:
+due:
 ---
 
 ## Description:
@@ -69,6 +87,8 @@ fn edit_task_inner(task: &Task, is_tracked: bool) -> String {
         Some(id) => format!("parent: {id}"),
         None => "# parent:".to_string(),
     };
+    let not_before_line = window_line("not_before", task.not_before, WindowEdge::Start);
+    let due_line = window_line("due", task.due, WindowEdge::End);
 
     format!(
         r#"---
@@ -77,6 +97,9 @@ status: {status_str}
 priority: {}
 tracking: {}
 {parent_line}
+{WINDOW_HINT}
+{not_before_line}
+{due_line}
 ---
 
 ## Description:
@@ -96,6 +119,9 @@ pub struct ParsedEditTask {
     pub status: Option<TaskStatus>,
     pub priority: Option<i32>,
     pub tracking: Option<bool>,
+    /// The new time window `(not_before, due)` as a whole, `None` when
+    /// neither bound changed.
+    pub window: Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>)>,
 }
 
 #[derive(Debug)]
@@ -105,6 +131,8 @@ pub struct ParsedNewTask {
     pub status: Option<TaskStatus>,
     pub priority: Option<i32>,
     pub tracking: bool,
+    pub not_before: Option<DateTime<Utc>>,
+    pub due: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -134,6 +162,8 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
     let mut status: Option<TaskStatus> = None;
     let mut priority: Option<i32> = None;
     let mut tracking = false;
+    let mut not_before = None;
+    let mut due = None;
     let mut errors = Vec::new();
 
     for line in frontmatter.lines() {
@@ -193,10 +223,15 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
                         }
                     }
                 }
+                "not_before" => {
+                    not_before = parse_bound_field("not_before", value, WindowEdge::Start, &mut errors)
+                }
+                "due" => due = parse_bound_field("due", value, WindowEdge::End, &mut errors),
                 _ => {}
             }
         }
     }
+    check_window_fields(not_before, due, &mut errors);
 
     let description = parse_description(&body);
 
@@ -214,6 +249,8 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
             status,
             priority,
             tracking,
+            not_before,
+            due,
         })
     } else {
         ParseResult::Errors {
@@ -240,6 +277,11 @@ pub fn parse_edit_task(
     let mut parsed_status: Option<TaskStatus> = None;
     let mut parsed_priority: Option<i32> = None;
     let mut parsed_tracking: Option<bool> = None;
+    // Outer `None`: the key is absent (or its text is unchanged) — keep the
+    // stored bound. A buffer without the lines, as a script may hand one
+    // over, must not wipe a window it never mentioned.
+    let mut parsed_not_before: Option<Option<DateTime<Utc>>> = None;
+    let mut parsed_due: Option<Option<DateTime<Utc>>> = None;
     let mut errors = Vec::new();
 
     for line in frontmatter.lines() {
@@ -309,10 +351,33 @@ pub fn parse_edit_task(
                         }
                     }
                 }
+                "not_before" => {
+                    parsed_not_before = edited_bound(
+                        "not_before",
+                        value,
+                        original.not_before,
+                        WindowEdge::Start,
+                        &mut errors,
+                    )
+                }
+                "due" => {
+                    parsed_due =
+                        edited_bound("due", value, original.due, WindowEdge::End, &mut errors)
+                }
                 _ => {}
             }
         }
     }
+    let window = (parsed_not_before.is_some() || parsed_due.is_some()).then(|| {
+        (
+            parsed_not_before.unwrap_or(original.not_before),
+            parsed_due.unwrap_or(original.due),
+        )
+    });
+    if let Some((not_before, due)) = window {
+        check_window_fields(not_before, due, &mut errors);
+    }
+    let window = window.filter(|w| *w != (original.not_before, original.due));
 
     let description_text = parse_description(&body);
 
@@ -345,6 +410,7 @@ pub fn parse_edit_task(
         && priority.is_none()
         && parsed_parent.is_none()
         && parsed_tracking.is_none()
+        && window.is_none()
     {
         return ParseResult::Aborted;
     }
@@ -355,7 +421,68 @@ pub fn parse_edit_task(
         status,
         priority,
         tracking: parsed_tracking,
+        window,
     })
+}
+
+/// Parse one window bound's value; empty = no bound. A bad value is recorded
+/// against its key and reads as "no bound" — the buffer reopens anyway.
+fn parse_bound_field(
+    key: &'static str,
+    value: &str,
+    edge: WindowEdge,
+    errors: &mut Vec<FieldError>,
+) -> Option<DateTime<Utc>> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    match parse_window_bound(v, edge) {
+        Ok(dt) => Some(dt),
+        Err(message) => {
+            errors.push(FieldError {
+                field: key,
+                message,
+            });
+            None
+        }
+    }
+}
+
+/// Like [`parse_bound_field`], but `None` when the text still reads exactly as
+/// the stored bound renders. Comparing the text rather than the instant keeps
+/// a bound stored with seconds (`in 2 hours`) from counting as edited just
+/// because its minute-precision rendering parses back without them.
+fn edited_bound(
+    key: &'static str,
+    value: &str,
+    stored: Option<DateTime<Utc>>,
+    edge: WindowEdge,
+    errors: &mut Vec<FieldError>,
+) -> Option<Option<DateTime<Utc>>> {
+    let unchanged = match stored {
+        Some(dt) => value.trim() == fmt_window_bound(dt, edge),
+        None => value.trim().is_empty(),
+    };
+    if unchanged {
+        return None;
+    }
+    Some(parse_bound_field(key, value, edge, errors))
+}
+
+/// The service refuses a window that ends before it starts; saying so at the
+/// `due:` line lets the user fix it in place instead of losing the buffer.
+fn check_window_fields(
+    not_before: Option<DateTime<Utc>>,
+    due: Option<DateTime<Utc>>,
+    errors: &mut Vec<FieldError>,
+) {
+    if check_window(not_before, due).is_err() {
+        errors.push(FieldError {
+            field: "due",
+            message: "due must lie after not_before".to_string(),
+        });
+    }
 }
 
 /// Re-render the editor content with error messages injected.
@@ -760,6 +887,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_tracked_at: None,
+            not_before: None,
+            due: None,
             path: None,
         }
     }

@@ -355,6 +355,8 @@ pub enum LoadMsg {
         parent_path: Vec<String>,
         result: Result<TreeChildrenPayload, String>,
         append: bool,
+        /// See [`LoadMsg::ContentItems::hook_depth`].
+        hook_depth: u8,
     },
     /// A whole eagerly-expanded subtree, loaded by `spawn_subtree_load`
     /// for an adapter that advertises `supports_eager_subtree`. Lands via
@@ -367,6 +369,8 @@ pub enum LoadMsg {
         pane_id: crate::views::content_view::PaneId,
         parent_path: Vec<String>,
         result: Result<not_yet_done_content::Subtree, String>,
+        /// See [`LoadMsg::ContentItems::hook_depth`].
+        hook_depth: u8,
     },
     /// Targeted reload of a single grouped-tree **bucket** (M9 now-bucket
     /// refresh), spawned by [`App::spawn_now_bucket_reload`] in response to
@@ -608,6 +612,7 @@ pub mod row_change;
 pub mod script;
 pub mod script_form;
 pub mod script_hook;
+mod partial_load_hook;
 
 pub use editor::EditorRequest;
 
@@ -2441,8 +2446,10 @@ impl App {
         // M9 — a single row's refreshed state: patch it in place (no
         // refetch). The adapter already computed the new cell values.
         if let Invalidation::Row(summary) = &inv {
+            let mut summary = summary.clone();
+            self.run_row_load_hooks(view_index, &mut summary);
             if let Some(cv) = self.content_view_mut(view_index) {
-                cv.patch_row(summary);
+                cv.patch_row(&summary);
             }
             return;
         }
@@ -2763,6 +2770,7 @@ impl App {
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         depth: u32,
+        hook_depth: u8,
     ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
@@ -2846,6 +2854,7 @@ impl App {
                 pane_id,
                 parent_path: Vec::new(),
                 result,
+                hook_depth,
             });
         });
     }
@@ -4019,6 +4028,7 @@ impl App {
             .map(|r| r.sort)
             .unwrap_or_default();
         let tx = self.load_tx.clone();
+        let hook_depth = self.load_hook_depth;
         tokio::spawn(async move {
             let payload = run_with_retries(retries, &tx, view_index, pane_id, || {
                 let adapter = Arc::clone(&adapter);
@@ -4096,6 +4106,7 @@ impl App {
                 parent_path,
                 result: payload,
                 append,
+                hook_depth,
             });
         });
     }
@@ -4219,6 +4230,7 @@ impl App {
         for field in &fresh.metadata.fields {
             summary.metadata.set_field(&field.key, field.value.clone());
         }
+        self.run_row_load_hooks(view_index, &mut summary);
         let patched = self
             .content_view_mut(view_index)
             .map(|cv| cv.patch_row(&summary))
@@ -4584,8 +4596,18 @@ impl App {
                     // The hooks also answer with highlights, which belong
                     // beside the rows rather than in them — they travel the
                     // few lines to the pane instead of being applied here.
-                    let script_highlights = if load_ok {
-                        self.run_load_hooks(view_index, pane_id, hook_depth, &mut items)
+                    // An eager tree re-delivers these rows with the whole
+                    // subtree, and the hook runs there over all of them.
+                    let script_highlights = if load_ok
+                        && !self.eager_subtree_follows(view_index, pane_id)
+                    {
+                        self.run_load_hooks(
+                            view_index,
+                            pane_id,
+                            hook_depth,
+                            script_hook::LoadSeam::Flat,
+                            &mut items,
+                        )
                     } else {
                         Default::default()
                     };
@@ -4630,7 +4652,7 @@ impl App {
                         ),
                     );
                     if let Some(depth) = eager_depth {
-                        self.spawn_subtree_load(view_index, pane_id, depth);
+                        self.spawn_subtree_load(view_index, pane_id, depth, hook_depth);
                     } else {
                         // Tree mode: kick off the `expand_depth` cascade now
                         // that the depth-0 rows are in.
@@ -4691,6 +4713,7 @@ impl App {
                     parent_path,
                     result,
                     append,
+                    hook_depth,
                 } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         if let Some(pane) = cv.find_pane_mut(pane_id) {
@@ -4698,7 +4721,14 @@ impl App {
                         }
                     }
                     match result {
-                        Ok(payload) => {
+                        Ok(mut payload) => {
+                            self.run_tree_children_load_hooks(
+                                view_index,
+                                pane_id,
+                                hook_depth,
+                                &payload.child_node_type,
+                                &mut payload.items,
+                            );
                             if let Some(cv) = self.content_view_mut(view_index) {
                                 cv.apply_tree_children(
                                     pane_id,
@@ -4732,6 +4762,7 @@ impl App {
                     pane_id,
                     parent_path,
                     result,
+                    hook_depth,
                 } => {
                     if let Some(cv) = self.content_view_mut(view_index) {
                         cv.end_load();
@@ -4740,7 +4771,7 @@ impl App {
                         }
                     }
                     match result {
-                        Ok(subtree) => {
+                        Ok(mut subtree) => {
                             fn count_subtree(st: &not_yet_done_content::Subtree) -> usize {
                                 st.items.len()
                                     + st.items
@@ -4755,6 +4786,16 @@ impl App {
                                     subtree.items.len(),
                                     count_subtree(&subtree)
                                 ),
+                            );
+                            // The `load` hook for the whole tree — the root
+                            // rows included, whose `ContentItems` seam stood
+                            // aside for this one.
+                            self.run_subtree_load_hooks(
+                                view_index,
+                                pane_id,
+                                hook_depth,
+                                &parent_path,
+                                &mut subtree,
                             );
                             if let Some(cv) = self.content_view_mut(view_index) {
                                 cv.apply_subtree(pane_id, parent_path, subtree);
@@ -9731,7 +9772,7 @@ impl App {
             } => {
                 // Fuzzy filter opened on an eager tree: pull the whole subtree
                 // so the filter matches across collapsed / unpaged branches.
-                self.spawn_subtree_load(view_index, pane_id, u32::MAX);
+                self.spawn_subtree_load(view_index, pane_id, u32::MAX, self.load_hook_depth);
                 EditorRequest::None
             }
             ViewRequest::DriveTreeAutoExpand {

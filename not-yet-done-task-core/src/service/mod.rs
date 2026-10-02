@@ -11,7 +11,7 @@ pub use tag_form::{
     normalize, parse_draft, strip_error_block,
 };
 pub use tag_service::{TagItem, TagService, TagServiceImpl};
-pub use task_service::{TaskService, TaskServiceImpl};
+pub use task_service::{TaskService, TaskServiceImpl, check_window};
 pub use tracking_policy::{TrackingPolicy, label_path};
 pub use tracking_service::{
     DaySummary, ExportOptions, ExportedTracking, GravityDirection, MoveOptions, MovedTracking,

@@ -11,7 +11,9 @@
 //!     entry in the script menu.
 //!   - Two firing seams, both in the `LoadMsg::ContentItems` handler:
 //!     [`App::run_load_hooks`] on the rows *before* they are handed to the
-//!     pane, and [`App::fire_reload_hooks`] once they have landed.
+//!     pane, and [`App::fire_reload_hooks`] once they have landed. A tree
+//!     pane's deeper levels arrive through their own messages and run the
+//!     `load` hook there (see [`crate::app::partial_load_hook`]).
 //!
 //! **Why two hooks and not one.** They have different contracts and only
 //! one of them can be moved. A `reload` hook sees the settled view — the
@@ -52,6 +54,18 @@ use crate::config::highlight::StyleResolver;
 use crate::config::keybindings::ScriptMenuAction;
 use crate::views::content_highlights::ScriptHighlights;
 use crate::views::content_view::PaneId;
+
+/// Where a `load` hook's rows are headed — it decides what of the answer
+/// can be honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoadSeam {
+    /// One flat level of rows, about to become the pane's table.
+    Flat,
+    /// Rows of a tree, possibly from several levels at once. `order` is
+    /// refused here: a tree orders siblings under their parent, and a flat
+    /// id list cannot say which parent it means.
+    Tree,
+}
 
 /// Events a view script can be bound to. Unknown values read from the
 /// database parse to `None` and are ignored, so a binding written by a
@@ -300,6 +314,7 @@ impl App {
         view_index: usize,
         pane_id: PaneId,
         hook_depth: u8,
+        seam: LoadSeam,
         items: &mut [NodeSummary],
     ) -> ScriptHighlights {
         // Same provenance guard as the reload hook: rows fetched *because* a
@@ -333,7 +348,7 @@ impl App {
 
         self.hook_runs_in_flight.insert((view_index, pane_id));
         for name in names {
-            self.run_load_hook_script(view_index, pane_id, &name, items, &mut highlights);
+            self.run_load_hook_script(view_index, pane_id, &name, seam, items, &mut highlights);
         }
         self.hook_runs_in_flight.remove(&(view_index, pane_id));
         highlights
@@ -346,6 +361,7 @@ impl App {
         view_index: usize,
         pane_id: PaneId,
         name: &str,
+        seam: LoadSeam,
         items: &mut [NodeSummary],
         highlights: &mut ScriptHighlights,
     ) {
@@ -386,7 +402,13 @@ impl App {
             }
             Err(e) => self.notify_error(format!("Load hook '{name}': {e}")),
         }
-        self.apply_script_order(view_index, pane_id, name, items, &answer);
+        match seam {
+            LoadSeam::Flat => self.apply_script_order(view_index, pane_id, name, items, &answer),
+            LoadSeam::Tree if answer.get("order").is_some() => self.notify(format!(
+                "Load hook '{name}': `order` ignored — a tree orders rows under their parent"
+            )),
+            LoadSeam::Tree => {}
+        }
         self.collect_script_highlights(view_index, name, items, &answer, highlights);
     }
 

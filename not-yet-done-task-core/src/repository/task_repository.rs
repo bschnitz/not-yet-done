@@ -117,6 +117,15 @@ pub trait TaskRepository: shaku::Interface {
         parent_id: Option<Option<Uuid>>,
         deleted: Option<bool>,
     ) -> Result<task::Model, AppError>;
+    /// Replace the task's time window (`not_before` / `due`) as a whole.
+    /// `None` clears the bound. No validation here — the service checks the
+    /// bounds against each other.
+    async fn set_window(
+        &self,
+        id: Uuid,
+        not_before: Option<chrono::DateTime<chrono::Utc>>,
+        due: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<task::Model, AppError>;
     async fn assign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError>;
     async fn unassign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError>;
     async fn soft_delete_by_project(&self, project_id: Uuid) -> Result<(), AppError>;
@@ -418,6 +427,21 @@ impl TaskRepository for TaskRepositoryImpl {
         } else {
             Ok(updated)
         }
+    }
+
+    async fn set_window(
+        &self,
+        id: Uuid,
+        not_before: Option<chrono::DateTime<chrono::Utc>>,
+        due: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<task::Model, AppError> {
+        let db = self.db.as_ref().expect("DB not initialized");
+        let task = self.find_by_id(id).await?;
+        let mut model: ActiveModel = task.into();
+        model.not_before = Set(not_before);
+        model.due = Set(due);
+        model.updated_at = Set(chrono::Utc::now());
+        Ok(model.update(db).await?)
     }
 
     async fn assign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError> {

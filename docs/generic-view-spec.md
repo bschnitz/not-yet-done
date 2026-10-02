@@ -3489,6 +3489,26 @@ twice keeps its first place.
   it survives the user's next reload and can be turned around.
 - Like `highlights`, `order` in a **`reload`** hook — or in a manual run from
   the menu — is refused with a message: by then the table is already built.
+- **Not in a tree.** A tree orders its rows under their parents, so there is
+  no flat sequence for an `order` to rearrange. On a tree level the key is
+  refused with a message; `cells` and `highlights` still apply.
+
+**Trees and single rows.** A tree gets its rows in more than one load, and the
+hook fires on each of them, so a row is patched and painted wherever it
+sits, not only on the top level:
+
+- **The whole expanded tree**, when an eager adapter (the local tasks tab)
+  loads every open level in one call. The script runs once on all of them,
+  not once for the roots and again for the rest.
+- **One parent's children**, when a lazy tree expands a node.
+- **A single row patched in place**, after an editor save (`e e`) or a live
+  refresh. The script is handed that one row, so a colour that depends on
+  the edited value follows the edit at once, with no `r`.
+
+In all three only the rows of the level's own node type are handed over: the
+hook is bound to that level's script scope, and a child level of another type
+has a scope of its own. A partial load replaces only what the script painted on
+the rows it was handed; the colours of every other row stay.
 
 **Which one to use.** If the value can be computed from the rows themselves plus
 local data, `load` is both cheaper and correct at first sight. If the script has

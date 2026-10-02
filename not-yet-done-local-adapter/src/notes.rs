@@ -307,6 +307,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_tracked_at: None,
+            not_before: None,
+            due: None,
             path: None,
         }
     }

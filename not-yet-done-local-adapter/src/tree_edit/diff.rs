@@ -313,6 +313,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_tracked_at: None,
+            not_before: None,
+            due: None,
             path: None,
         }
     }

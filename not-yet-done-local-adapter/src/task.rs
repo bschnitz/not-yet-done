@@ -579,6 +579,16 @@ fn status_icon(status: &task::TaskStatus) -> &'static str {
     }
 }
 
+/// The stored value of a status — what `status_key` carries for scripts.
+fn status_key(status: &task::TaskStatus) -> &'static str {
+    match status {
+        task::TaskStatus::Todo => "todo",
+        task::TaskStatus::InProgress => "in_progress",
+        task::TaskStatus::Done => "done",
+        task::TaskStatus::Cancelled => "cancelled",
+    }
+}
+
 fn tag_name(tag: &not_yet_done_task_core::repository::ResolvedTag) -> String {
     use not_yet_done_task_core::repository::ResolvedTag;
     match tag {
@@ -725,6 +735,10 @@ fn task_metadata(
             // filterable without anyone having to know it is also the label.
             field("description", t.description.clone(), "Description"),
             field("status", status_icon(&t.status).to_string(), "Status"),
+            // Hidden twin of `status`: the stored value (`todo`,
+            // `in_progress`, `done`, `cancelled`) for scripts and queries,
+            // which should not have to match nerd-font glyphs.
+            field("status_key", status_key(&t.status).to_string(), "Status key"),
             field("priority", t.priority.to_string(), "Priority"),
             // Tag columns mirror the native split: `tag_symbols` (icons only)
             // and `tag_names` (comma-separated). Both precomputed at snapshot
@@ -754,6 +768,18 @@ fn task_metadata(
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default(),
                 "Last Tracked",
+            ),
+            // Time window: work must not start before `not_before` and must
+            // be done by `due`. RFC 3339 or empty, like `last_tracked`.
+            field(
+                "not_before",
+                t.not_before.map(|d| d.to_rfc3339()).unwrap_or_default(),
+                "Not before",
+            ),
+            field(
+                "due",
+                t.due.map(|d| d.to_rfc3339()).unwrap_or_default(),
+                "Due",
             ),
             field("id", t.id.to_string(), "ID"),
             // Deleted flag (`"true"`/`""`) — not a visible column, a styling
@@ -790,6 +816,8 @@ fn task_columns() -> Vec<ColumnSchema> {
         ("priority", "Priority", "text"),
         ("created", "Created", "datetime"),
         ("updated", "Updated", "datetime"),
+        ("not_before", "Not before", "datetime"),
+        ("due", "Due", "datetime"),
     ]
     .into_iter()
     .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
@@ -1227,6 +1255,18 @@ async fn execute_add(
                 Ok(c) => c,
                 Err(e) => return Ok(reopen_service_error(text, e)),
             };
+            let created = if parsed.not_before.is_some() || parsed.due.is_some() {
+                match handle
+                    .task_service
+                    .set_task_window(created.id, parsed.not_before, parsed.due)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => return Ok(reopen_service_error(text, e)),
+                }
+            } else {
+                created
+            };
             notes::write_notes(&created, &all_tasks(snapshot), &notes_text);
             if wants_tracking {
                 apply_tracking(handle, created.id, true, &handle.tracking_policy).await;
@@ -1295,6 +1335,18 @@ async fn execute_edit(
             }
             let parent_changed =
                 parsed.parent_id.is_some() && parsed.parent_id != Some(task.parent_id);
+
+            // The window goes first: the parser already checked it, but a
+            // refusal here still leaves the task untouched.
+            if let Some((not_before, due)) = parsed.window {
+                if let Err(e) = handle
+                    .task_service
+                    .set_task_window(id, not_before, due)
+                    .await
+                {
+                    return Ok(reopen_service_error(text, e));
+                }
+            }
 
             let updated = match handle
                 .task_service
@@ -2716,6 +2768,8 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     last_tracked_at: None,
+                    not_before: None,
+                    due: None,
                     path: None,
                 },
                 tag_names: String::new(),
@@ -3301,6 +3355,7 @@ mod tests {
         assert_eq!(get("priority").as_deref(), Some("5"));
         // status is rendered as the native nerd-font glyph, not a text label.
         assert_eq!(get("status").as_deref(), Some("󰄳"));
+        assert_eq!(get("status_key").as_deref(), Some("in_progress"));
         assert_eq!(get("tag_names").as_deref(), Some("home, urgent"));
         assert_eq!(get("tag_symbols").as_deref(), Some("🔥"));
         assert_eq!(get("notes").as_deref(), Some("📝"));
@@ -3308,6 +3363,16 @@ mod tests {
         let created = get("created").unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&created).is_ok());
         assert_eq!(get("last_tracked").as_deref(), Some(""));
+        // An open window renders empty; a set bound is RFC 3339.
+        assert_eq!(get("not_before").as_deref(), Some(""));
+        let due = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 10, 15, 21, 59, 59).unwrap();
+        r.task.due = Some(due);
+        let md_due = task_metadata(&r, true, true, "[]".to_string(), "⏱");
+        let due_cell = md_due.fields.iter().find(|f| f.key == "due").unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&due_cell.value).unwrap(),
+            due
+        );
         // The marker reflects the passed-in tracked flag.
         assert_eq!(get("tracking").as_deref(), Some("⏱"));
         // The roll-up marker reflects the passed-in subtree flag (separate

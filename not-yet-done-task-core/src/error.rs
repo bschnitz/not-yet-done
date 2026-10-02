@@ -43,6 +43,9 @@ pub enum AppError {
     #[error("Invalid color (expected hex string like #FF5733): {0}")]
     InvalidColor(String),
 
+    #[error("Invalid time window: {0}")]
+    InvalidTimeWindow(String),
+
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
 

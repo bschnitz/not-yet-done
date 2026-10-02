@@ -29,6 +29,12 @@ pub struct Model {
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub last_tracked_at: Option<DateTimeUtc>,
+    /// Start of the task's time window: work on it must not begin before
+    /// this instant. `None` = no lower bound.
+    pub not_before: Option<DateTimeUtc>,
+    /// End of the task's time window: the task must be finished by this
+    /// instant. `None` = no deadline.
+    pub due: Option<DateTimeUtc>,
     /// Materialized path: `/<ancestor-short-id>/.../` for tree queries.
     /// Short ID = first 8 hex chars of UUID. Updated by the repository.
     #[sea_orm(column_type = "Text", nullable)]

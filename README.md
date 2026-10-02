@@ -355,6 +355,34 @@ from `mouse:` in `tui.yaml` (see [Mouse](#mouse-1)).
 | `o`      | Open/edit notes for selected task                             |
 | `s`      | Start/stop tracking on selected task                          |
 
+### Task time window
+
+A task can carry a time window: `not_before` (work must not start earlier)
+and `due` (the task must be finished by then). Either side may stay open. Both
+are set in the frontmatter of the task editor (`e e`):
+
+```yaml
+not_before: 2026-10-15
+due: friday 17:00
+```
+
+The values take the natural-language [date expressions](#date-expressions); a
+bare date means its start for `not_before` and its end for `due`, so
+`due: 2026-10-15` leaves the whole day. An empty line clears that side. A
+window whose end lies before its start is refused and the task stays as it
+was.
+
+The window shows as the `not_before` and `due` columns (labelled From and Due
+in the example view) and can be queried like any other date field. It changes
+no behaviour by itself: whether a task outside its window gets coloured,
+hidden or sorted away is up to the view. The example load hook
+[`docs/examples/scripts/time_window.py`](docs/examples/scripts/time_window.py)
+paints tasks that are not startable yet and open tasks past their due date;
+it names two styles, `window-pending` and `window-overdue`, that `tui.yaml`
+defines under `theme.styles`. Rows also carry a hidden `status_key` field with
+the stored status (`todo`, `in_progress`, `done`, `cancelled`), for scripts
+that cannot read the status glyph.
+
 ### Filtering
 
 **Fuzzy filter** — press `f` to type a fuzzy filter. Matches are shown instantly. Press `Enter` to accept, `Esc` to cancel.
@@ -903,7 +931,7 @@ String values are automatically resolved as natural-language dates:
 
 ### Available Fields
 
-**Task filters**: `id`, `description`, `status`, `deleted`, `deleted_at`, `priority`, `parent_id`, `path`, `created_at`, `updated_at`, `last_tracked_at`
+**Task filters**: `id`, `description`, `status`, `deleted`, `deleted_at`, `priority`, `parent_id`, `path`, `created_at`, `updated_at`, `last_tracked_at`, `not_before`, `due`
 
 **Tracking filters**: `id`, `task_id`, `predecessor_id`, `started_at`, `ended_at`, `deleted`, `created_at`
 

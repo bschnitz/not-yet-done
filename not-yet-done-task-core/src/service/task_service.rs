@@ -62,6 +62,17 @@ pub trait TaskService: shaku::Interface {
         deleted: Option<bool>,
     ) -> Result<task::Model, AppError>;
 
+    /// Replace the task's time window: work must not start before
+    /// `not_before` and must be finished by `due`. Either bound may be `None`
+    /// (open on that side). Refused when both are set and `due` does not lie
+    /// after `not_before`.
+    async fn set_task_window(
+        &self,
+        id: Uuid,
+        not_before: Option<chrono::DateTime<chrono::Utc>>,
+        due: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<task::Model, AppError>;
+
     /// Batch fetch tags for many tasks. Returns map task_id → tags
     /// (mix of global + project tags). Empty vec for tagless tasks.
     async fn load_tags_for_tasks(
@@ -263,12 +274,38 @@ impl TaskService for TaskServiceImpl {
             .await
     }
 
+    async fn set_task_window(
+        &self,
+        id: Uuid,
+        not_before: Option<chrono::DateTime<chrono::Utc>>,
+        due: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<task::Model, AppError> {
+        check_window(not_before, due)?;
+        self.task_repository.set_window(id, not_before, due).await
+    }
+
     async fn load_tags_for_tasks(
         &self,
         task_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, Vec<crate::repository::ResolvedTag>>, AppError>
     {
         self.task_repository.find_tags_by_task_ids(task_ids).await
+    }
+}
+
+/// A window whose end does not lie after its start leaves no time to do the
+/// task in — almost certainly the two dates swapped or a typo.
+pub fn check_window(
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
+    due: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), AppError> {
+    match (not_before, due) {
+        (Some(start), Some(end)) if end <= start => Err(AppError::InvalidTimeWindow(format!(
+            "due ({}) must lie after not_before ({})",
+            end.to_rfc3339(),
+            start.to_rfc3339()
+        ))),
+        _ => Ok(()),
     }
 }
 

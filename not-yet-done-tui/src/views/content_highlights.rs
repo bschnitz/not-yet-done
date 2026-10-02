@@ -134,6 +134,15 @@ impl ScriptHighlights {
         }
     }
 
+    /// Drop everything addressed to these rows, so a reload of part of a
+    /// tree can take back what an earlier answer painted on them. The
+    /// table-wide `"*"` entry belongs to no row and stays.
+    pub fn forget_rows<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>) {
+        for id in ids {
+            self.rows.remove(id);
+        }
+    }
+
     /// How many row ids here belong to no row of this load. Reported and
     /// never fatal, exactly as the `cells` patch treats them. `"*"` is not a
     /// row id and does not count.
