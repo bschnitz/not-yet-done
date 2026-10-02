@@ -787,6 +787,181 @@ impl App {
         }
     }
 
+    /// Open the editor-template menu of the create action `action_name`
+    /// (its `templates.menu_key`). Refuses when the adapter does not declare
+    /// the action templated on the node it would create under — the menu
+    /// would offer buffers nothing can use.
+    pub fn open_editor_templates_menu(
+        &mut self,
+        view_index: usize,
+        action_name: String,
+        action_id: String,
+        parent_node_id: Option<String>,
+    ) -> EditorRequest {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.notify("No adapter for this view".to_string());
+            return EditorRequest::None;
+        };
+        let listed: Result<Vec<String>, String> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let node = match &parent_node_id {
+                    Some(id) => adapter.get_by_id(id).await,
+                    None => adapter.root().await,
+                }
+                .map_err(|e| e.to_string())?;
+                let templated = adapter
+                    .actions_for_type(node.node_type())
+                    .iter()
+                    .any(|a| a.id == action_id && a.templates);
+                if !templated {
+                    return Err(format!("action '{action_id}' takes no editor templates here"));
+                }
+                let store = adapter
+                    .template_store(&action_id)
+                    .ok_or_else(|| "this adapter stores no editor templates".to_string())?;
+                store.list().await.map_err(|e| e.to_string())
+            })
+        });
+        let names = match listed {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify_error(format!("Templates: {e}"));
+                return EditorRequest::None;
+            }
+        };
+        let entries: Vec<crate::components::query_menu::QueryMenuEntry> = names
+            .into_iter()
+            .map(|name| crate::components::query_menu::QueryMenuEntry {
+                name,
+                shortcut: None,
+                // Unused for templates; non-empty so the row is selectable.
+                query: "<template>".to_string(),
+                is_default: false,
+            })
+            .collect();
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.open_editor_templates_popup(action_name, action_id, entries);
+        }
+        EditorRequest::None
+    }
+
+    /// Open the stored editor template `template` of `action_id` in
+    /// `$EDITOR`. A new one starts from the adapter's plain buffer for the
+    /// action, prepared on its root so no context (a parent id, …) is baked
+    /// into what is stored.
+    pub fn edit_editor_template(
+        &mut self,
+        view_index: usize,
+        action_id: String,
+        template: String,
+        is_new: bool,
+    ) -> EditorRequest {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.notify("No adapter for this view".to_string());
+            return EditorRequest::None;
+        };
+        let Some(store) = adapter.template_store(&action_id) else {
+            self.notify_error("This adapter stores no editor templates".to_string());
+            return EditorRequest::None;
+        };
+        let body: not_yet_done_content::Result<String> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if is_new {
+                    let root = adapter.root().await?;
+                    let prep = root
+                        .prepare(&action_id, &not_yet_done_content::ActionArgs::default())
+                        .await?;
+                    Ok(prep.template)
+                } else {
+                    store.load(&template).await
+                }
+            })
+        });
+        match body {
+            Ok(body) => {
+                let suffix = adapter.template_suffix().to_string();
+                let session = crate::edit_session::TemplateEditSession::new(
+                    store, template, body, suffix, is_new,
+                );
+                self.open_session(Box::new(session))
+            }
+            Err(e) => {
+                self.notify_error(format!("Template '{template}': {e}"));
+                EditorRequest::None
+            }
+        }
+    }
+
+    /// Remove the stored editor template `template` of `action_id`.
+    pub fn delete_editor_template(&mut self, view_index: usize, action_id: String, template: String) {
+        let Some(store) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .and_then(|a| a.template_store(&action_id))
+        else {
+            self.notify("No template store for this view".to_string());
+            return;
+        };
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(store.delete(&template))
+        });
+        match result {
+            Ok(()) => self.notify(format!("Deleted template '{template}'")),
+            Err(e) => self.notify_error(format!("Delete failed: {e}")),
+        }
+    }
+
+    /// Copy the stored editor template `template` to `new_name` and open
+    /// the copy. An existing `new_name` is never overwritten.
+    pub fn duplicate_editor_template(
+        &mut self,
+        view_index: usize,
+        action_id: String,
+        template: String,
+        new_name: String,
+    ) -> EditorRequest {
+        let Some(store) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .and_then(|a| a.template_store(&action_id))
+        else {
+            self.notify("No template store for this view".to_string());
+            return EditorRequest::None;
+        };
+        let copied: not_yet_done_content::Result<bool> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if store.list().await?.contains(&new_name) {
+                    return Ok(false);
+                }
+                let body = store.load(&template).await?;
+                store.save(&new_name, &body).await?;
+                Ok(true)
+            })
+        });
+        match copied {
+            Ok(true) => {
+                self.notify(format!("Duplicated '{template}' as '{new_name}'"));
+                self.edit_editor_template(view_index, action_id, new_name, false)
+            }
+            Ok(false) => {
+                self.modal_message = Some(format!("A template named '{new_name}' already exists."));
+                EditorRequest::None
+            }
+            Err(e) => {
+                self.notify_error(format!("Could not duplicate '{template}': {e}"));
+                EditorRequest::None
+            }
+        }
+    }
+
     /// Which store already holds `name` for this view's adapter, if any.
     /// `Ok(None)` when the name is free or the view has no adapter.
     pub(super) fn existing_query_kind(

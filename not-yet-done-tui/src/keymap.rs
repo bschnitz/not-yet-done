@@ -154,6 +154,14 @@ pub enum KeySource {
     YamlMenuKey {
         view: String,
     },
+    /// `templates.menu_key` on a `type: create` action — opens the editor
+    /// template menu for that action. `action` is the action's
+    /// [`name`](crate::config::view_config::ActionDef::name).
+    TemplateMenuKey {
+        view: String,
+        child_path: Vec<String>,
+        action: String,
+    },
     /// `preview.keybinding` on a YAML view or child.
     YamlPreviewKey {
         view: String,
@@ -250,6 +258,20 @@ impl KeySource {
                 format!("script[{scope}/{name}]")
             }
             Self::YamlMenuKey { view } => format!("views.{view}.query.menu_key"),
+            Self::TemplateMenuKey {
+                view,
+                child_path,
+                action,
+            } => {
+                if child_path.is_empty() {
+                    format!("views.{view}.actions[{action}].templates.menu_key")
+                } else {
+                    format!(
+                        "views.{view}.children.{}.actions[{action}].templates.menu_key",
+                        child_path.join(".")
+                    )
+                }
+            }
             Self::YamlPreviewKey { view, child_path } => {
                 if child_path.is_empty() {
                     format!("views.{view}.preview.keybinding")
@@ -326,6 +348,7 @@ impl KeySource {
             Self::YamlAction { view, .. }
             | Self::SavedQueryShortcut { view, .. }
             | Self::YamlMenuKey { view }
+            | Self::TemplateMenuKey { view, .. }
             | Self::YamlPreviewKey { view, .. }
             | Self::YamlChildKeybinding { view, .. }
             | Self::PaneSearchJump { view, .. } => Some(view.as_str()),
@@ -350,6 +373,7 @@ impl KeySource {
             Self::NodeScriptShortcut { script, .. } => format!("{script} (script)"),
             Self::ScriptShortcut { name, .. } => format!("{name} (script)"),
             Self::YamlMenuKey { .. } => "Saved-query menu".into(),
+            Self::TemplateMenuKey { action, .. } => format!("{action} (templates)"),
             Self::YamlPreviewKey { .. } => "Toggle preview".into(),
             Self::YamlCardKey { .. } => "Toggle card mode".into(),
             Self::YamlSubtab { view } => format!("Switch to {view}"),
@@ -1123,6 +1147,17 @@ fn push_action_claims(
             name: action.name().to_string(),
         },
     ));
+    if let Some(mk) = action.templates.as_ref().and_then(|t| t.menu_key.as_ref()) {
+        km.push(KeyClaim::handler(
+            KeyBinding::new(mk.clone()),
+            KeyScope::Pane(tab.clone(), profile.clone()),
+            KeySource::TemplateMenuKey {
+                view: view.to_string(),
+                child_path: child_path.to_vec(),
+                action: action.name().to_string(),
+            },
+        ));
+    }
     if let Some(search) = &action.search {
         if let Some(k) = &search.next_key {
             km.push(KeyClaim::handler(
@@ -2068,6 +2103,29 @@ views:
             errs.iter()
                 .any(|e| e.contains("card.key") && e.contains("\"C\"")),
             "expected a card.key / 'C' conflict, got: {errs:?}"
+        );
+    }
+
+    /// A create action's template-menu key is claimed on its level, so it
+    /// collides with an action key there like any other binding.
+    #[test]
+    fn validate_view_file_flags_template_menu_key_vs_action_key() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: tasks
+    node_type: t
+    actions:
+      - { name: add, key: a a, type: create, id: add, templates: { menu_key: a t } }
+      - { name: tag, key: a t, id: tag }
+"#;
+        let cfg = yaml_str(yaml);
+        let errs = validate_view_file(&cfg, &KeyBindingConfig::default());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("actions[add].templates.menu_key") && e.contains("\"a t\"")),
+            "expected a templates.menu_key / 'a t' conflict, got: {errs:?}"
         );
     }
 

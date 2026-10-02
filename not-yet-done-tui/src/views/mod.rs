@@ -580,6 +580,44 @@ pub enum ViewRequest {
         label: String,
         editor_profile: Option<String>,
         commit_on_save: bool,
+        /// Name of a stored editor template (the action's
+        /// [`TemplateStore`](not_yet_done_content::TemplateStore)) to start
+        /// from instead of the adapter's built-in buffer.
+        template: Option<String>,
+    },
+    /// Open the editor-template menu of a `type: create` action
+    /// (`templates.menu_key`). The App lists the action's template store and
+    /// calls back into the `ContentView` to populate the popup.
+    /// `parent_node_id` is where the action would create (`None` = the
+    /// adapter root), so the App can check the adapter declares the action
+    /// templated there.
+    OpenEditorTemplatesMenu {
+        view_index: usize,
+        pane_id: PaneId,
+        action_name: String,
+        action_id: String,
+        parent_node_id: Option<String>,
+    },
+    /// Edit the stored editor template `template` of `action_id` in
+    /// `$EDITOR`. `is_new` seeds the buffer from the adapter's plain one.
+    EditEditorTemplate {
+        view_index: usize,
+        action_id: String,
+        template: String,
+        is_new: bool,
+    },
+    /// Remove a stored editor template.
+    DeleteEditorTemplate {
+        view_index: usize,
+        action_id: String,
+        template: String,
+    },
+    /// Copy a stored editor template to `new_name` and open the copy.
+    DuplicateEditorTemplate {
+        view_index: usize,
+        action_id: String,
+        template: String,
+        new_name: String,
     },
     /// Save a content query to the DB (upsert by scope+name).
     SaveContentQuery {

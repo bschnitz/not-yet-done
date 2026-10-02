@@ -7366,6 +7366,7 @@ impl App {
                 other_source,
                 KeySource::YamlSubtab { .. }
                     | KeySource::YamlMenuKey { .. }
+                    | KeySource::TemplateMenuKey { .. }
                     | KeySource::YamlPreviewKey { .. }
                     | KeySource::YamlChildKeybinding { .. }
                     | KeySource::AppActionChain { .. }
@@ -10025,6 +10026,7 @@ impl App {
                 label,
                 editor_profile,
                 commit_on_save,
+                template,
             } => {
                 let adapter = self
                     .content_view(view_index)
@@ -10057,7 +10059,21 @@ impl App {
                             parent_node_id: node_id.clone(),
                             child_node_type,
                         };
-                        crate::edit_session::NodeActionEditSession::new(
+                        // A stored template is loaded here, by name, so a
+                        // template edited since the menu opened is used as
+                        // it is now.
+                        let template = match template {
+                            None => None,
+                            Some(name) => {
+                                let store = adapter.template_store(&action_id).ok_or_else(
+                                    || "this adapter stores no editor templates".to_string(),
+                                )?;
+                                Some(store.load(&name).await.map_err(|e| {
+                                    format!("template '{name}': {e}")
+                                })?)
+                            }
+                        };
+                        crate::edit_session::NodeActionEditSession::new_templated(
                             adapter,
                             node_id,
                             action_id,
@@ -10067,6 +10083,7 @@ impl App {
                             editor_profile,
                             commit_on_save,
                             Default::default(),
+                            template,
                         )
                         .await
                         .map_err(|e| e.to_string())
@@ -10080,6 +10097,33 @@ impl App {
                     }
                 }
             }
+            ViewRequest::OpenEditorTemplatesMenu {
+                view_index,
+                pane_id: _,
+                action_name,
+                action_id,
+                parent_node_id,
+            } => self.open_editor_templates_menu(view_index, action_name, action_id, parent_node_id),
+            ViewRequest::EditEditorTemplate {
+                view_index,
+                action_id,
+                template,
+                is_new,
+            } => self.edit_editor_template(view_index, action_id, template, is_new),
+            ViewRequest::DeleteEditorTemplate {
+                view_index,
+                action_id,
+                template,
+            } => {
+                self.delete_editor_template(view_index, action_id, template);
+                EditorRequest::None
+            }
+            ViewRequest::DuplicateEditorTemplate {
+                view_index,
+                action_id,
+                template,
+                new_name,
+            } => self.duplicate_editor_template(view_index, action_id, template, new_name),
             ViewRequest::SaveContentQuery {
                 view_index,
                 scope: _,

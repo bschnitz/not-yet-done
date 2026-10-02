@@ -1240,6 +1240,14 @@ pub enum QueryMenuMode {
     /// with `node_scripts: true`. Carries the owning node's id in the
     /// adapter's own form — the view never parses it.
     NodeScripts { node_id: String },
+    /// Stored editor templates of one `type: create` action
+    /// ([`ActionDef::templates`]). `action_name` finds the action on the
+    /// active pane's level again when an entry is applied; `action_id` names
+    /// the adapter's template store.
+    EditorTemplates {
+        action_name: String,
+        action_id: String,
+    },
 }
 
 pub struct ContentView {
@@ -7319,6 +7327,21 @@ impl ContentPane {
                 },
             ));
         }
+        // Template-menu keys of the level's `type: create` actions.
+        for action in self.current_actions(view_defs) {
+            let Some(mk) = action.templates.as_ref().and_then(|t| t.menu_key.as_ref()) else {
+                continue;
+            };
+            km.push(KeyClaim::handler(
+                KeyBinding::new(mk.clone()),
+                scope.clone(),
+                KeySource::TemplateMenuKey {
+                    view: source_view.clone(),
+                    child_path: source_child_path.clone(),
+                    action: action.name().to_string(),
+                },
+            ));
+        }
 
         // Preview toggle.
         if let Some(kb) = self
@@ -7529,6 +7552,14 @@ impl ContentPane {
                     .find(|a| a.name() == *name)
                     .cloned()?;
                 Some(self.execute_action(&action, view_index, pane_id, view_defs))
+            }
+            KeySource::TemplateMenuKey { action, .. } => {
+                let def = self
+                    .current_actions(view_defs)
+                    .into_iter()
+                    .find(|a| a.name() == *action)
+                    .cloned()?;
+                Some(self.templates_menu_request(&def, view_index, pane_id, view_defs))
             }
             KeySource::YamlPreviewKey { .. } => {
                 self.preview_open = !self.preview_open;
@@ -7792,6 +7823,104 @@ impl ContentPane {
         out
     }
 
+    /// Where a `type: create` action puts its new node: the parent (`None`
+    /// = the adapter root) and the new child's node type.
+    ///
+    /// `under_selection`: parent the new node on the highlighted row (tree
+    /// or flat) rather than the drilled-into container. The new child's
+    /// node_type is the selected node's own type — correct for a recursive
+    /// tree (task:item → task:item); the container path stays the default
+    /// for every other create.
+    ///
+    /// A `None` parent means "create on the adapter root": an
+    /// `under_selection` create with nothing selected (empty tree), or a
+    /// container create at the un-drilled root level (nav stack empty). The
+    /// async handler resolves it to `adapter.root()`. Either way we still
+    /// need a child node_type for the reload drilldown; fall back to this
+    /// view's own node_type when there's no selection/active child to read
+    /// it from.
+    fn create_target(
+        &self,
+        action: &ActionDef,
+        view_defs: &[ViewDef],
+    ) -> Option<(Option<String>, String)> {
+        let (parent_id, child_type) = if action.under_selection {
+            (
+                self.selected_item_id().map(str::to_string),
+                self.selected_node_type_chain(view_defs).last().cloned(),
+            )
+        } else {
+            (
+                self.parent_node_id().map(str::to_string),
+                self.current_child_node_type().map(str::to_string),
+            )
+        };
+        let child_type =
+            child_type.or_else(|| self.view_def(view_defs).map(|v| v.node_type.clone()))?;
+        Some((parent_id, child_type))
+    }
+
+    /// The request a `type: create` action fires, starting from the stored
+    /// editor template `template` when one is given.
+    pub(crate) fn create_request(
+        &self,
+        action: &ActionDef,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+        template: Option<String>,
+    ) -> SubViewMessage {
+        let Some(action_id) = action.id.clone() else {
+            return SubViewMessage::Request(ViewRequest::Notify(format!(
+                "create action '{}' missing `id` (e.g. id: create_comment)",
+                action.name()
+            )));
+        };
+        let Some((parent_node_id, child_node_type)) = self.create_target(action, view_defs) else {
+            return SubViewMessage::SelectionChanged(None);
+        };
+        SubViewMessage::Request(ViewRequest::CreateContentChild {
+            view_index,
+            pane_id,
+            parent_node_id,
+            child_node_type,
+            action_id,
+            label: action.name().to_string(),
+            editor_profile: action.editor.clone(),
+            commit_on_save: action.commit_on_save,
+            template,
+        })
+    }
+
+    /// The request a create action's `templates.menu_key` fires: list the
+    /// stored templates for the action and open the menu over them. The
+    /// parent is resolved now so the App can check that the adapter
+    /// declares the action templated on it.
+    fn templates_menu_request(
+        &self,
+        action: &ActionDef,
+        view_index: usize,
+        pane_id: PaneId,
+        view_defs: &[ViewDef],
+    ) -> SubViewMessage {
+        let Some(action_id) = action.id.clone() else {
+            return SubViewMessage::Request(ViewRequest::Notify(format!(
+                "create action '{}' missing `id`",
+                action.name()
+            )));
+        };
+        let Some((parent_node_id, _)) = self.create_target(action, view_defs) else {
+            return SubViewMessage::SelectionChanged(None);
+        };
+        SubViewMessage::Request(ViewRequest::OpenEditorTemplatesMenu {
+            view_index,
+            pane_id,
+            action_name: action.name().to_string(),
+            action_id,
+            parent_node_id,
+        })
+    }
+
     fn execute_action(
         &mut self,
         action: &ActionDef,
@@ -7919,51 +8048,7 @@ impl ContentPane {
             "download" => {
                 // TODO: download node content to file
             }
-            "create" => {
-                let Some(action_id) = action.id.clone() else {
-                    return SubViewMessage::Request(ViewRequest::Notify(format!(
-                        "create action '{}' missing `id` (e.g. id: create_comment)",
-                        action.name()
-                    )));
-                };
-                // `under_selection`: parent the new node on the highlighted
-                // row (tree or flat) rather than the drilled-into container.
-                // The new child's node_type is the selected node's own type —
-                // correct for a recursive tree (task:item → task:item); the
-                // container path stays the default for every other create.
-                let (parent_id, child_type) = if action.under_selection {
-                    (
-                        self.selected_item_id().map(str::to_string),
-                        self.selected_node_type_chain(view_defs).last().cloned(),
-                    )
-                } else {
-                    (
-                        self.parent_node_id().map(str::to_string),
-                        self.current_child_node_type().map(str::to_string),
-                    )
-                };
-                // A `None` parent means "create on the adapter root": an
-                // `under_selection` create with nothing selected (empty tree),
-                // or a container create at the un-drilled root level (nav stack
-                // empty). The async handler resolves it to `adapter.root()`.
-                // Either way we still need a child node_type for the reload
-                // drilldown; fall back to this view's own node_type when there's
-                // no selection/active child to read it from.
-                let child_type =
-                    child_type.or_else(|| self.view_def(view_defs).map(|v| v.node_type.clone()));
-                if let Some(child_type) = child_type {
-                    return SubViewMessage::Request(ViewRequest::CreateContentChild {
-                        view_index,
-                        pane_id,
-                        parent_node_id: parent_id,
-                        child_node_type: child_type,
-                        action_id,
-                        label: action.name().to_string(),
-                        editor_profile: action.editor.clone(),
-                        commit_on_save: action.commit_on_save,
-                    });
-                }
-            }
+            "create" => return self.create_request(action, view_index, pane_id, view_defs, None),
             "custom" => {
                 // `on_container`: invoke the action on the adapter's
                 // container (root) rather than the selected row, through the
@@ -9930,6 +10015,45 @@ impl ContentView {
             .open_without_default(&entries, &self.query_menu_kb);
     }
 
+    /// Open the editor-template menu of the create action `action_name`.
+    /// Called by the App after it has listed the action's templates.
+    pub fn open_editor_templates_popup(
+        &mut self,
+        action_name: String,
+        action_id: String,
+        entries: Vec<QueryMenuEntry>,
+    ) {
+        self.query_menu_mode = QueryMenuMode::EditorTemplates {
+            action_name,
+            action_id,
+        };
+        // A template is a starting buffer, not a filter — no default.
+        self.query_menu
+            .open_without_default(&entries, &self.query_menu_kb);
+    }
+
+    /// Run the create action `action_name` of the active pane's level with
+    /// the stored template `template` as its starting buffer.
+    fn apply_editor_template(&self, action_name: &str, template: String) -> SubViewMessage {
+        let pane = self.active_pane();
+        let Some(action) = pane
+            .current_actions(&self.view_defs)
+            .into_iter()
+            .find(|a| a.name() == action_name)
+        else {
+            return SubViewMessage::Request(ViewRequest::Notify(format!(
+                "action '{action_name}' is not available here"
+            )));
+        };
+        pane.create_request(
+            action,
+            self.view_index,
+            self.active_pane_id(),
+            &self.view_defs,
+            Some(template),
+        )
+    }
+
     /// Handle key events when the query popup is open.
     pub fn handle_query_popup_key(&mut self, key: &str) -> Option<SubViewMessage> {
         if !self.query_menu.is_open() {
@@ -10104,6 +10228,58 @@ impl ContentView {
                     is_new: true,
                 }))
             }
+
+            // ── Editor templates ──────────────────────────────────────
+            // Unreachable — opened via `open_without_default`.
+            (QueryMenuMode::EditorTemplates { .. }, QueryMenuMessage::SetDefault { .. }) => noop,
+            (
+                QueryMenuMode::EditorTemplates { action_name, .. },
+                QueryMenuMessage::Apply { name, .. },
+            ) => Some(self.apply_editor_template(&action_name, name)),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::EditExisting { name, .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::EditEditorTemplate {
+                view_index,
+                action_id,
+                template: name,
+                is_new: false,
+            })),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::CreateNew { name, .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::EditEditorTemplate {
+                view_index,
+                action_id,
+                template: name,
+                is_new: true,
+            })),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::Delete { name },
+            ) => Some(SubViewMessage::Request(ViewRequest::DeleteEditorTemplate {
+                view_index,
+                action_id,
+                template: name,
+            })),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::Duplicate { name, new_name, .. },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::DuplicateEditorTemplate {
+                    view_index,
+                    action_id,
+                    template: name,
+                    new_name,
+                },
+            )),
+            // Template chords come in the next step (plan-editor-templates).
+            (
+                QueryMenuMode::EditorTemplates { .. },
+                QueryMenuMessage::EditShortcut { .. } | QueryMenuMessage::ClearShortcut { .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::Notify(
+                "Template shortcuts are not supported yet".to_string(),
+            ))),
         }
     }
 
@@ -15637,6 +15813,7 @@ mod tests {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    templates: None,
                     force: false,
                     message: None,
                     prominent: false,
@@ -16307,6 +16484,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -19981,6 +20159,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20670,6 +20849,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20703,6 +20883,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20739,6 +20920,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20771,6 +20953,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20872,6 +21055,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20910,6 +21094,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -20941,6 +21126,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -22317,6 +22503,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -22363,6 +22550,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -22383,6 +22571,88 @@ mod tests {
                 );
             }
             other => panic!("Expected CreateContentChild on selection, got {other:?}"),
+        }
+    }
+
+    /// `templates.menu_key` opens the template menu for the create action,
+    /// carrying the parent the action would create under; applying an
+    /// entry fires that same create with the template's name.
+    #[test]
+    fn template_menu_key_opens_menu_and_apply_creates_with_template() {
+        let mut config = test_config_with_children();
+        config.views[0].actions.push(ActionDef {
+            label: Some("add child".into()),
+            key: Some("A".into()),
+            action_type: "create".into(),
+            id: Some("add".into()),
+            target: Default::default(),
+            node_id_from: None,
+            args: Default::default(),
+            navigate_to: None,
+            fuzzy_filter: None,
+            search: None,
+            text_search: None,
+            apply_query: None,
+            tree_find: None,
+            hide_from_bar: false,
+            in_action_bar: false,
+            editor: None,
+            under_selection: true,
+            commit_on_save: false,
+            inherit: false,
+            script_scope: Default::default(),
+            script_default_field: None,
+            on_container: false,
+            option_menu: None,
+            templates: Some(crate::config::view_config::TemplatesConfig {
+                menu_key: Some("T".into()),
+            }),
+            force: false,
+            message: None,
+            prominent: false,
+            form: None,
+            emit: None,
+            on_event: None,
+        });
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let issues = mock_issues();
+        let first_id = issues[0].id.clone();
+        view.set_items(issues, Vec::new(), None, Vec::new(), None);
+        match view.handle_key("T") {
+            SubViewMessage::Request(ViewRequest::OpenEditorTemplatesMenu {
+                action_name,
+                action_id,
+                parent_node_id,
+                ..
+            }) => {
+                assert_eq!(action_name, "add child");
+                assert_eq!(action_id, "add");
+                assert_eq!(parent_node_id, Some(first_id.clone()));
+            }
+            other => panic!("Expected OpenEditorTemplatesMenu, got {other:?}"),
+        }
+        view.open_editor_templates_popup(
+            "add child".into(),
+            "add".into(),
+            vec![QueryMenuEntry {
+                name: "todo".into(),
+                query: "<template>".into(),
+                shortcut: None,
+                is_default: false,
+            }],
+        );
+        match view.handle_query_popup_key("enter") {
+            Some(SubViewMessage::Request(ViewRequest::CreateContentChild {
+                parent_node_id,
+                action_id,
+                template,
+                ..
+            })) => {
+                assert_eq!(parent_node_id, Some(first_id));
+                assert_eq!(action_id, "add");
+                assert_eq!(template.as_deref(), Some("todo"));
+            }
+            other => panic!("Expected CreateContentChild with template, got {other:?}"),
         }
     }
 
@@ -22471,6 +22741,7 @@ mod tests {
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -23151,6 +23422,7 @@ mod tests {
                 script_default_field: None,
                 on_container: false,
                 option_menu: None,
+                templates: None,
                 force: false,
                 message: None,
                 prominent: false,
@@ -26690,6 +26962,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    templates: None,
                     force: false,
                     message: None,
                     prominent: false,
@@ -26721,6 +26994,7 @@ pub fn default_jira_view_config() -> ViewFileConfig {
                     script_default_field: None,
                     on_container: false,
                     option_menu: None,
+                    templates: None,
                     force: false,
                     message: None,
                     prominent: false,

@@ -811,6 +811,14 @@ fn check_action(
         }
         _ => {}
     }
+    // Templates replace the starting buffer of a *new* node. On an edit
+    // they would overwrite the content being edited, so only `create`.
+    if a.templates.is_some() && a.action_type != "create" {
+        errors.push(format!(
+            "{scope}: `templates:` applies only to type='create' (this is type='{}')",
+            a.action_type
+        ));
+    }
     // `node` and `edit` are the two types that fire on a *node*; only they
     // can be re-addressed to the parent. Everything else resolves its target
     // from the nav stack on its own.
@@ -2189,6 +2197,16 @@ pub struct ActionDef {
     /// with the chosen value. Required for `option_menu`, ignored otherwise.
     #[serde(default)]
     pub option_menu: Option<OptionMenuConfig>,
+    /// For `type: create` actions: offer stored editor templates as the
+    /// starting buffer. `menu_key` opens the template menu (the shared query
+    /// menu in a third mode); applying an entry runs this very create action
+    /// — same parent, same `inherit`, same `commit_on_save` — with that
+    /// template merged in by the adapter instead of its built-in buffer. The
+    /// adapter must declare the action
+    /// [`templated`](not_yet_done_content::NodeAction::templates). Refused on
+    /// every other type.
+    #[serde(default)]
+    pub templates: Option<TemplatesConfig>,
     /// Deliberately take over a key that a built-in handler (a global
     /// hotkey, a common fallback like `c` column-config / `S` sort / `:`
     /// command-line, a window-leader chord, or a content action) would
@@ -2245,6 +2263,17 @@ pub struct ActionDef {
     /// form.
     #[serde(default)]
     pub form: Option<ActionFormConfig>,
+}
+
+/// Editor templates for a `type: create` action ([`ActionDef::templates`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplatesConfig {
+    /// Key (or chord) opening the template menu for this action. Claimed on
+    /// the action's level like the action's own `key`. Absent → no menu key
+    /// (the block still marks the action as templated).
+    #[serde(default)]
+    pub menu_key: Option<String>,
 }
 
 /// Per-action layout/behaviour overrides for an [`InputSpec::Form`] popup.
@@ -4009,6 +4038,7 @@ views:
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -4059,6 +4089,7 @@ views:
             script_default_field: None,
             on_container: false,
             option_menu: None,
+            templates: None,
             force: false,
             message: None,
             prominent: false,
@@ -6477,6 +6508,34 @@ views:
             errs.iter()
                 .any(|e| e.contains("`target: parent` only applies")),
             "expected a target error for the reload action, got: {errs:?}"
+        );
+    }
+
+    /// Templates replace the starting buffer of a new node; on any other
+    /// type they would overwrite content or mean nothing.
+    #[test]
+    fn validate_accepts_templates_only_on_create() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    actions:
+      - { name: add, key: a, type: create, id: add, templates: { menu_key: t } }
+      - { name: edit, key: e, type: edit, id: edit, templates: { menu_key: x } }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let errs = cfg
+            .validate(
+                &KeyBindingConfig::default(),
+                &crate::config::editor::EditorsConfig::default(),
+            )
+            .unwrap_err();
+        assert_eq!(errs.len(), 1, "only the edit action is wrong: {errs:?}");
+        assert!(
+            errs[0].contains("actions[edit]") && errs[0].contains("`templates:` applies only"),
+            "{errs:?}"
         );
     }
 

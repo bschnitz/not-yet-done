@@ -100,6 +100,27 @@ pub fn locate_binding(source: &KeySource) -> Option<BindingLocation> {
             path: vec![PathStep::key("views"), PathStep::find("name", view.clone())],
             entry: "key".to_string(),
         }),
+        // `actions[<name>].templates.menu_key` — the editor-template menu
+        // opener of a create action.
+        KeySource::TemplateMenuKey {
+            view,
+            child_path,
+            action,
+        } => {
+            let mut path = vec![PathStep::key("views"), PathStep::find("name", view.clone())];
+            for child in child_path {
+                path.push(PathStep::key("children"));
+                path.push(PathStep::find("name", child.clone()));
+            }
+            path.push(PathStep::key("actions"));
+            path.push(PathStep::find_action(action.clone()));
+            path.push(PathStep::key("templates"));
+            Some(BindingLocation {
+                target: EditTarget::ViewFile { view: view.clone() },
+                path,
+                entry: "menu_key".to_string(),
+            })
+        }
         // `views[*].query.menu_key` — the saved-query menu opener.
         KeySource::YamlMenuKey { view } => Some(BindingLocation {
             target: EditTarget::ViewFile { view: view.clone() },

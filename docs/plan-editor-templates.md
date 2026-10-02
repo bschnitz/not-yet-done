@@ -1,6 +1,6 @@
 # Plan: editor templates for create actions
 
-Status: step 1 done (protocol + tasks adapter).
+Status: steps 1–2 done (protocol + tasks adapter, TUI menu + create path).
 
 ## Goal
 
@@ -131,7 +131,21 @@ that have a deadline **or** the `todo` tag (union).
 *before* the task is created (unknown name → Reopen, nothing created).
 Verified by CLI against a copied DB. The real DB has no tag `todo` yet.
 
-## Step 2 — design notes from reading the TUI (not started)
+## Step 2 — done
+
+As designed below, with these differences: `templates.menu_key` is optional
+(removing the key through the shortcut menu must leave a valid block), so the
+block alone marks an action templated. `KeySource::TemplateMenuKey { view,
+child_path, action }` is a slot binding (`actions[<name>].templates.menu_key`).
+The pane's `create_target`/`create_request` are shared by `type: create` and
+the menu; `OpenEditorTemplatesMenu` carries the parent so the App refuses the
+menu unless the adapter declares the action templated on that node.
+`NodeActionEditSession::new_templated` loads nothing itself — the App loads
+the template by name when the create fires. `edit_session/template_edit.rs`
+saves through the `TemplateStore`. The menu's shortcut keys answer "not
+supported yet" until step 3.
+
+### Design notes (as read before the build)
 
 - `ActionDef` (view_config.rs:2021): add `templates: Option<TemplatesConfig>`
   (`menu_key`); validate only on `type: create`.

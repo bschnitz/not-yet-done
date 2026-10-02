@@ -23,6 +23,7 @@ mod file_edit;
 mod node_action;
 mod notification_view;
 mod saved_query;
+mod template_edit;
 mod tracking_script;
 mod tracking_script_output;
 
@@ -37,6 +38,7 @@ pub use file_edit::FileEditSession;
 pub use node_action::{NavContext, NodeActionEditSession, ReloadTarget};
 pub use notification_view::NotificationViewSession;
 pub use saved_query::SavedQueryEditSession;
+pub use template_edit::TemplateEditSession;
 pub use tracking_script::ScriptSession;
 pub use tracking_script_output::ScriptOutputSession;
 

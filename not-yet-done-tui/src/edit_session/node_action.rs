@@ -84,6 +84,39 @@ impl NodeActionEditSession {
         commit_on_save: bool,
         args: ActionArgs,
     ) -> Result<Self, ContentError> {
+        Self::new_templated(
+            adapter,
+            node_id,
+            action_id,
+            label,
+            nav,
+            reload,
+            editor_profile,
+            commit_on_save,
+            args,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::new`], starting from the stored editor template `template`
+    /// when one is given: the adapter merges it into the context through
+    /// [`Node::prepare_templated`](not_yet_done_content::Node::prepare_templated)
+    /// instead of rendering its built-in buffer. Refused unless the adapter
+    /// declares the action [`templated`](not_yet_done_content::NodeAction::templates).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_templated(
+        adapter: Arc<dyn ContentAdapter>,
+        node_id: String,
+        action_id: String,
+        label: String,
+        nav: Option<NavContext>,
+        reload: Option<ReloadTarget>,
+        editor_profile: Option<String>,
+        commit_on_save: bool,
+        args: ActionArgs,
+        template: Option<String>,
+    ) -> Result<Self, ContentError> {
         let node = adapter.get_by_id(&node_id).await?;
         let Some(declared) = adapter
             .actions_for_type(node.node_type())
@@ -107,7 +140,15 @@ impl NodeActionEditSession {
                     .into(),
                 )
             })?;
-        let prep = node.prepare(&action_id, &args).await?;
+        let prep = match &template {
+            None => node.prepare(&action_id, &args).await?,
+            Some(_) if !declared.templates => {
+                return Err(ContentError::NotSupported(format!(
+                    "action `{action_id}` takes no editor templates"
+                )));
+            }
+            Some(body) => node.prepare_templated(&action_id, &args, body).await?,
+        };
         Ok(Self {
             adapter,
             node_id,
