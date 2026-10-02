@@ -536,7 +536,7 @@ pub fn render_with_errors(content: &str, errors: &[FieldError]) -> String {
 // ---------------------------------------------------------------------------
 
 fn split_frontmatter(content: &str) -> (String, String) {
-    let content = content.trim_start();
+    let content = skip_leading_comments(content);
 
     let Some(rest) = content.strip_prefix("---") else {
         return (String::new(), content.to_string());
@@ -557,6 +557,21 @@ fn split_frontmatter(content: &str) -> (String, String) {
     } else {
         (rest.to_string(), String::new())
     }
+}
+
+/// `content` without leading whitespace and `<!-- … -->` blocks — the error
+/// banner [`render_with_errors`] puts in front of the frontmatter. Without
+/// this a reopened buffer has no frontmatter at all, and its next save reads
+/// as "nothing changed".
+fn skip_leading_comments(content: &str) -> &str {
+    let mut rest = content.trim_start();
+    while let Some(inner) = rest.strip_prefix("<!--") {
+        let Some(end) = inner.find("-->") else {
+            break;
+        };
+        rest = inner[end + 3..].trim_start();
+    }
+    rest
 }
 
 fn parse_kv(line: &str) -> Option<(&str, &str)> {
@@ -835,6 +850,34 @@ mod tests {
             }
             other => panic!("Expected Ok, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn edit_task_saves_after_an_error_reopen() {
+        let task = make_task("Task", TaskStatus::Todo, 0, None);
+        let template = edit_task(&task, false);
+        let broken = template.replace("status: todo", "status: bogus");
+        let ParseResult::Errors {
+            errors,
+            original_content,
+        } = parse_edit_task(&broken, &template, &task)
+        else {
+            panic!("expected the bogus status to be refused");
+        };
+        // The reopened buffer — banner on top — is the baseline of the retry.
+        let reopened = render_with_errors(&original_content, &errors);
+        let fixed = reopened.replace("status: bogus", "status: done");
+        match parse_edit_task(&fixed, &reopened, &task) {
+            ParseResult::Ok(parsed) => assert_eq!(parsed.status, Some(TaskStatus::Done)),
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_frontmatter_skips_a_leading_comment() {
+        let (fm, body) = split_frontmatter("<!-- note\n  - x -->\n---\nstatus: todo\n---\nbody");
+        assert_eq!(fm, "status: todo");
+        assert_eq!(body, "body");
     }
 
     // ----- render_with_errors -----
