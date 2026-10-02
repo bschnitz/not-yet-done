@@ -202,3 +202,22 @@ bound by a `query_shortcut` row (`template:tasks/tasks/add`, `todo`) instead of
 through the menu. deadlines-widget: `sources/nyd-deadlines.sh` takes `due set OR tag
 todo`, undated after dated (oldest first), `when: todo`, level 1, menu group
 "Ohne Deadline" before "Erledigt".
+
+## Follow-ups from the smoke run (2026-10-02)
+
+- [x] Finding 3 fixed: `editor_templates::unchanged`
+  (local adapter) — a buffer reopened with the `ERROR_BANNER` and saved again
+  unchanged is parsed (retry), not `Aborted`; covers `parse_new_task` and
+  `parse_edit_task`. Test `unchanged_resave_of_an_error_buffer_is_parsed`;
+  adapter tests 202 green.
+- [ ] Template menu title says "Queries" in `QueryMenuMode::EditorTemplates`
+  (content_view.rs, popup title) → "Templates".
+- [ ] Binding-conflict dialog lists `a a — add task` three times (dedupe the
+  conflict list; probably one entry per level/claim).
+- [ ] `nyd tag add` (CLI, core config → `nyd.db`) does not reach the tasks
+  adapter, which keeps its tags in `tasks.db`. The real `todo` tag was put
+  into `tasks.db` by hand. Decide: point `nyd tag` at the tasks adapter's DB
+  or route it through the adapter.
+- [ ] `split_frontmatter`: a buffer whose first non-comment line is not `---`
+  silently loses all front-matter keys (tags, parent …). Report an error when
+  a `---` line appears later instead.

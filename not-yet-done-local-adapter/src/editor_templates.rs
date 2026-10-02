@@ -234,7 +234,7 @@ pub enum ParseResult<T> {
 }
 
 pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTask> {
-    if content.trim() == template.trim() {
+    if unchanged(content, template) {
         return ParseResult::Aborted;
     }
 
@@ -359,7 +359,7 @@ pub fn parse_edit_task(
     template: &str,
     original: &Task,
 ) -> ParseResult<ParsedEditTask> {
-    if content.trim() == template.trim() {
+    if unchanged(content, template) {
         return ParseResult::Aborted;
     }
 
@@ -577,12 +577,26 @@ fn check_window_fields(
     }
 }
 
+/// First line of the banner [`render_with_errors`] puts above a buffer it
+/// sends back.
+const ERROR_BANNER: &str = "<!-- ⚠ ERRORS — please fix and save again:";
+
+/// Saved without a change, i.e. abandoned. Only a buffer the adapter rendered
+/// fresh can be abandoned that way: one reopened with an error banner was
+/// already saved once, and saving it again unchanged means "try again" — the
+/// cause may have been fixed outside the buffer (a tag created meanwhile), and
+/// treating it as abandoned would drop everything typed.
+fn unchanged(content: &str, template: &str) -> bool {
+    content.trim() == template.trim() && !template.trim_start().starts_with(ERROR_BANNER)
+}
+
 /// Re-render the editor content with error messages injected.
 pub fn render_with_errors(content: &str, errors: &[FieldError]) -> String {
     let mut result = String::new();
 
     // Banner at top.
-    result.push_str("<!-- ⚠ ERRORS — please fix and save again:\n");
+    result.push_str(ERROR_BANNER);
+    result.push('\n');
     for e in errors {
         result.push_str(&format!("  - {}: {}\n", e.field, e.message));
     }
@@ -973,6 +987,28 @@ mod tests {
     }
 
     // ----- render_with_errors -----
+
+    /// A buffer reopened with errors and saved again unchanged is a retry,
+    /// not an abandoned create: the cause may have been fixed outside it.
+    #[test]
+    fn unchanged_resave_of_an_error_buffer_is_parsed() {
+        let content = "---\ntags: todo\n---\n\n## Description:\nText\n";
+        let errors = vec![FieldError {
+            field: "tags",
+            message: "Unknown tag: todo".into(),
+        }];
+        let reopened = render_with_errors(content, &errors);
+        match parse_new_task(&reopened, &reopened) {
+            ParseResult::Ok(task) => {
+                assert_eq!(task.tags, vec!["todo".to_string()]);
+                assert_eq!(task.description, "Text");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        // A fresh buffer saved unchanged is still abandoned.
+        let fresh = new_task(None);
+        assert!(matches!(parse_new_task(&fresh, &fresh), ParseResult::Aborted));
+    }
 
     #[test]
     fn render_with_errors_adds_banner() {
