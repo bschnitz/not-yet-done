@@ -120,3 +120,42 @@ that have a deadline **or** the `todo` tag (union).
 2. TUI: YAML key, menu mode, create path; build; commit.
 3. TUI: template shortcuts; build; commit.
 4. Docs, smoke-test section; install; user config; deadlines-widget script.
+
+## Step 1 — done (697d220)
+
+`NodeAction::templated`, `Node::prepare_templated` (forwarded in
+`decorate.rs`, `aliasing.rs`, `action_events.rs`), `TemplateStore` +
+`ContentAdapter::template_store(action_id)`/`template_suffix()`,
+`TEMPLATE_DIR = "templates"`. Tasks: `editor_templates::with_parent`,
+`tags:` key (new buffer now has a `tags:` line), tags resolved to global tags
+*before* the task is created (unknown name → Reopen, nothing created).
+Verified by CLI against a copied DB. The real DB has no tag `todo` yet.
+
+## Step 2 — design notes from reading the TUI (not started)
+
+- `ActionDef` (view_config.rs:2021): add `templates: Option<TemplatesConfig>`
+  (`menu_key`); validate only on `type: create`.
+- Static keymap: `push_action_claims` (keymap.rs:1101) pushes the extra claim
+  `KeySource::TemplateMenuKey { view, child_path, action }`; add arms to
+  `human` (:240ff), `subtab_view` (:328), `action_name` (:352),
+  `config/keybinding_edit.rs` (:73/:104), `app/mod.rs:7368`.
+- Runtime pane claims: content_view.rs ~7308 (beside the YamlAction loop);
+  pane dispatch ~7525: find the action by name → new
+  `ViewRequest::OpenEditorTemplatesMenu { view_index, pane_id, action_name, action_id }`.
+- Refactor the `"create"` arm (content_view.rs:7922) into a pane fn
+  `create_request(action, template: Option<String>, …)`; `CreateContentChild`
+  (views/mod.rs:569) gains `template: Option<String>`.
+- App (`app/editor.rs`, model on `open_node_scripts_menu` :339 and
+  `edit/delete/duplicate_node_script`): list via
+  `adapter.template_store(action_id)`, open
+  `cv.open_editor_templates_popup(action_name, action_id, entries)` →
+  `QueryMenuMode::EditorTemplates { action_name, action_id }` with
+  `open_without_default`. Apply → ContentView finds the active pane's action
+  by name and calls `create_request(action, Some(name))`.
+- Editing a template: `FileEditSession` is YAML-config specific (validates
+  YAML, emits ReloadConfig) — write a small `edit_session/template_edit.rs`
+  (store + name + suffix; commit = `store.save`, `CommitOutcome::Done`).
+  New template seeded from `adapter.root().prepare(action_id, {})`.
+- Create path: app/mod.rs:10019 loads the body from the store and calls a new
+  `NodeActionEditSession::new_templated(…, template)` (node_action.rs:76),
+  which checks `declared.templates` and calls `prepare_templated`.
