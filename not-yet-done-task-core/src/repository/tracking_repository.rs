@@ -375,6 +375,8 @@ impl TrackingWithTaskRegistry {
         "last_tracked_at",
         "not_before",
         "due",
+        "recur",
+        "series_id",
         "path",
     ];
 }

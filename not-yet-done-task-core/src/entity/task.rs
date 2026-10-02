@@ -35,6 +35,12 @@ pub struct Model {
     /// End of the task's time window: the task must be finished by this
     /// instant. `None` = no deadline.
     pub due: Option<DateTimeUtc>,
+    /// Recurrence rule as written (`daily at 08:00, due +4h`, see
+    /// [`crate::recur`]). Completing the task creates its successor.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub recur: Option<String>,
+    /// Shared by every occurrence of a recurring task: the first one's id.
+    pub series_id: Option<Uuid>,
     /// Materialized path: `/<ancestor-short-id>/.../` for tree queries.
     /// Short ID = first 8 hex chars of UUID. Updated by the repository.
     #[sea_orm(column_type = "Text", nullable)]

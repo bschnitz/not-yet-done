@@ -171,6 +171,8 @@ mod tests {
             last_tracked_at: None,
             not_before: None,
             due: None,
+            recur: None,
+            series_id: None,
             path: None,
         }
     }

@@ -73,6 +73,16 @@ pub trait TaskService: shaku::Interface {
         due: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<task::Model, AppError>;
 
+    /// Replace the task's recurrence rule (see [`crate::recur`]); `None` or
+    /// blank ends the series at this task. Refused when the rule does not
+    /// parse. The task's own window is left as it is — the rule only decides
+    /// the successor's.
+    async fn set_task_recur(
+        &self,
+        id: Uuid,
+        recur: Option<String>,
+    ) -> Result<task::Model, AppError>;
+
     /// Batch fetch tags for many tasks. Returns map task_id → tags
     /// (mix of global + project tags). Empty vec for tagless tasks.
     async fn load_tags_for_tasks(
@@ -282,6 +292,19 @@ impl TaskService for TaskServiceImpl {
     ) -> Result<task::Model, AppError> {
         check_window(not_before, due)?;
         self.task_repository.set_window(id, not_before, due).await
+    }
+
+    async fn set_task_recur(
+        &self,
+        id: Uuid,
+        recur: Option<String>,
+    ) -> Result<task::Model, AppError> {
+        let recur = recur.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+        if let Some(rule) = &recur {
+            rule.parse::<crate::recur::Rule>()
+                .map_err(|e| AppError::InvalidRecurrence(e.to_string()))?;
+        }
+        self.task_repository.set_recur(id, recur).await
     }
 
     async fn load_tags_for_tasks(

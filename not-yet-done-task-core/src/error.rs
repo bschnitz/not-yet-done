@@ -46,6 +46,9 @@ pub enum AppError {
     #[error("Invalid time window: {0}")]
     InvalidTimeWindow(String),
 
+    #[error("Invalid recurrence rule: {0}")]
+    InvalidRecurrence(String),
+
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
 

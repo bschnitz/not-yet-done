@@ -15,6 +15,7 @@ use crate::entity::task::{self, ActiveModel, TaskColumnRegistry, TaskStatus};
 use crate::entity::task_project;
 use crate::error::AppError;
 use crate::filter::{FilterBuilder, FilterExpr};
+use crate::recur::Rule;
 
 // ---------------------------------------------------------------------------
 // Batch operation types
@@ -75,6 +76,27 @@ pub fn compute_path(id: Uuid, parents: &HashMap<Uuid, Option<Uuid>>) -> String {
     path
 }
 
+fn is_open(status: &TaskStatus) -> bool {
+    matches!(status, TaskStatus::Todo | TaskStatus::InProgress)
+}
+
+/// Path of a new task: parent's path + own short id.
+async fn child_path(
+    db: &DatabaseConnection,
+    id: Uuid,
+    parent_id: Option<Uuid>,
+) -> Result<String, AppError> {
+    Ok(if let Some(pid) = parent_id {
+        let parent = task::Entity::find_by_id(pid).one(db).await?;
+        let parent_path = parent
+            .and_then(|p| p.path)
+            .unwrap_or_else(|| format!("/{}/", short_id(pid)));
+        format!("{}/{}/", parent_path.trim_end_matches('/'), short_id(id))
+    } else {
+        format!("/{}/", short_id(id))
+    })
+}
+
 #[async_trait]
 pub trait TaskRepository: shaku::Interface {
     async fn insert(
@@ -126,6 +148,10 @@ pub trait TaskRepository: shaku::Interface {
         not_before: Option<chrono::DateTime<chrono::Utc>>,
         due: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<task::Model, AppError>;
+    /// Replace the task's recurrence rule; `None` ends the series at this
+    /// task. A task that gets a rule and has no `series_id` starts its own
+    /// series. No validation here — the service parses the rule.
+    async fn set_recur(&self, id: Uuid, recur: Option<String>) -> Result<task::Model, AppError>;
     async fn assign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError>;
     async fn unassign_project(&self, task_id: Uuid, project_id: Uuid) -> Result<(), AppError>;
     async fn soft_delete_by_project(&self, project_id: Uuid) -> Result<(), AppError>;
@@ -204,21 +230,7 @@ impl TaskRepository for TaskRepositoryImpl {
         if let Some(p) = priority {
             model.priority = Set(p);
         }
-        // Compute path: parent's path + own short id.
-        let path = if let Some(pid) = parent_id {
-            let parent = task::Entity::find_by_id(pid).one(db).await?;
-            let parent_path = parent
-                .and_then(|p| p.path)
-                .unwrap_or_else(|| format!("/{}/", short_id(pid)));
-            format!(
-                "{}/{}/",
-                parent_path.trim_end_matches('/'),
-                short_id(model.id.clone().unwrap())
-            )
-        } else {
-            format!("/{}/", short_id(model.id.clone().unwrap()))
-        };
-        model.path = Set(Some(path));
+        model.path = Set(Some(child_path(db, model.id.clone().unwrap(), parent_id).await?));
         Ok(model.insert(db).await?)
     }
 
@@ -397,6 +409,7 @@ impl TaskRepository for TaskRepositoryImpl {
         let db = self.db.as_ref().expect("DB not initialized");
         let task = self.find_by_id(id).await?;
         let parent_changed = parent_id.is_some() && parent_id != Some(task.parent_id);
+        let before = task.clone();
         let mut model: ActiveModel = task.into();
         if let Some(d) = description {
             model.description = Set(d);
@@ -415,6 +428,7 @@ impl TaskRepository for TaskRepositoryImpl {
         }
         model.updated_at = Set(chrono::Utc::now());
         let updated = model.update(db).await?;
+        self.advance_series(db, &before, &updated).await?;
 
         // Rebuild paths for this task and all descendants when parent changes.
         if parent_changed {
@@ -440,6 +454,17 @@ impl TaskRepository for TaskRepositoryImpl {
         let mut model: ActiveModel = task.into();
         model.not_before = Set(not_before);
         model.due = Set(due);
+        model.updated_at = Set(chrono::Utc::now());
+        Ok(model.update(db).await?)
+    }
+
+    async fn set_recur(&self, id: Uuid, recur: Option<String>) -> Result<task::Model, AppError> {
+        let db = self.db.as_ref().expect("DB not initialized");
+        let task = self.find_by_id(id).await?;
+        let series_id = task.series_id.or(recur.as_ref().map(|_| task.id));
+        let mut model: ActiveModel = task.into();
+        model.recur = Set(recur);
+        model.series_id = Set(series_id);
         model.updated_at = Set(chrono::Utc::now());
         Ok(model.update(db).await?)
     }
@@ -763,6 +788,7 @@ impl TaskRepository for TaskRepositoryImpl {
                     deleted,
                 } => {
                     let task = self.find_by_id(id).await?;
+                    let before = task.clone();
                     let mut model: ActiveModel = task.into();
                     if let Some(d) = description {
                         model.description = Set(d);
@@ -781,6 +807,7 @@ impl TaskRepository for TaskRepositoryImpl {
                     }
                     model.updated_at = Set(chrono::Utc::now());
                     let updated = model.update(db).await?;
+                    self.advance_series(db, &before, &updated).await?;
                     results.push(updated);
                 }
                 TaskOp::Delete { id } => {
@@ -820,6 +847,155 @@ impl TaskRepository for TaskRepositoryImpl {
 
 // Private helper methods (not part of the trait).
 impl TaskRepositoryImpl {
+    /// Keeps a recurring series at one open task (see `docs/plan-recurring-tasks.md`).
+    /// Closing an occurrence (done or cancelled) creates its successor;
+    /// reopening it withdraws that successor again if nobody has touched it.
+    /// Called wherever a status is written, so every path gets it.
+    async fn advance_series(
+        &self,
+        db: &DatabaseConnection,
+        before: &task::Model,
+        after: &task::Model,
+    ) -> Result<(), AppError> {
+        if after.deleted {
+            return Ok(());
+        }
+        match (is_open(&before.status), is_open(&after.status)) {
+            (true, false) => self.spawn_successor(db, after).await,
+            (false, true) => self.withdraw_successor(db, after).await,
+            _ => Ok(()),
+        }
+    }
+
+    async fn spawn_successor(
+        &self,
+        db: &DatabaseConnection,
+        closed: &task::Model,
+    ) -> Result<(), AppError> {
+        use crate::entity::{task_global_tag, task_project_tag};
+
+        // The rule was validated when it was set; one that no longer parses
+        // must not make the task impossible to complete.
+        let Some(rule) = closed.recur.as_deref().and_then(|r| r.parse::<Rule>().ok()) else {
+            return Ok(());
+        };
+        let window = rule.successor(closed.updated_at, closed.not_before, &chrono::Local);
+        let id = Uuid::new_v4();
+        // One instant for both stamps: `updated_at == created_at` is how a
+        // reopen recognises a successor nobody has touched.
+        let now = chrono::Utc::now();
+        ActiveModel {
+            id: Set(id),
+            description: Set(closed.description.clone()),
+            status: Set(TaskStatus::Todo),
+            deleted: Set(false),
+            deleted_at: Set(None),
+            priority: Set(closed.priority),
+            parent_id: Set(closed.parent_id),
+            created_at: Set(now),
+            updated_at: Set(now),
+            last_tracked_at: Set(None),
+            not_before: Set(Some(window.not_before)),
+            due: Set(window.due),
+            recur: Set(closed.recur.clone()),
+            series_id: Set(Some(closed.series_id.unwrap_or(closed.id))),
+            path: Set(Some(child_path(db, id, closed.parent_id).await?)),
+        }
+        .insert(db)
+        .await?;
+
+        for link in task_global_tag::Entity::find()
+            .filter(task_global_tag::Column::TaskId.eq(closed.id))
+            .all(db)
+            .await?
+        {
+            task_global_tag::ActiveModel { task_id: Set(id), global_tag_id: Set(link.global_tag_id) }
+                .insert(db)
+                .await?;
+        }
+        for link in task_project_tag::Entity::find()
+            .filter(task_project_tag::Column::TaskId.eq(closed.id))
+            .all(db)
+            .await?
+        {
+            task_project_tag::ActiveModel { task_id: Set(id), project_tag_id: Set(link.project_tag_id) }
+                .insert(db)
+                .await?;
+        }
+        for link in task_project::Entity::find()
+            .filter(task_project::Column::TaskId.eq(closed.id))
+            .all(db)
+            .await?
+        {
+            task_project::ActiveModel { task_id: Set(id), project_id: Set(link.project_id) }
+                .insert(db)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Removes the successor of a reopened occurrence — the newest later task
+    /// of its series — unless it has been edited, tracked, given subtasks or
+    /// started. A touched successor stays, and the series has two open tasks.
+    async fn withdraw_successor(
+        &self,
+        db: &DatabaseConnection,
+        reopened: &task::Model,
+    ) -> Result<(), AppError> {
+        use crate::entity::task::Column;
+        use crate::entity::{task_global_tag, task_project_tag, tracking};
+        use sea_orm::{PaginatorTrait, QueryOrder};
+
+        let Some(series_id) = reopened.series_id else {
+            return Ok(());
+        };
+        let Some(successor) = task::Entity::find()
+            .filter(Column::SeriesId.eq(series_id))
+            .filter(Column::Id.ne(reopened.id))
+            .filter(Column::Deleted.eq(false))
+            .filter(Column::CreatedAt.gt(reopened.created_at))
+            .order_by_desc(Column::CreatedAt)
+            .one(db)
+            .await?
+        else {
+            return Ok(());
+        };
+        let untouched = successor.status == TaskStatus::Todo
+            && successor.updated_at == successor.created_at
+            && successor.last_tracked_at.is_none();
+        if !untouched {
+            return Ok(());
+        }
+        let children = task::Entity::find()
+            .filter(Column::ParentId.eq(successor.id))
+            .count(db)
+            .await?;
+        let trackings = tracking::Entity::find()
+            .filter(tracking::Column::TaskId.eq(successor.id))
+            .count(db)
+            .await?;
+        if children > 0 || trackings > 0 {
+            return Ok(());
+        }
+
+        // Deleted for good, not soft-deleted: `undelete_last` would bring it
+        // back as a second open task.
+        task_global_tag::Entity::delete_many()
+            .filter(task_global_tag::Column::TaskId.eq(successor.id))
+            .exec(db)
+            .await?;
+        task_project_tag::Entity::delete_many()
+            .filter(task_project_tag::Column::TaskId.eq(successor.id))
+            .exec(db)
+            .await?;
+        task_project::Entity::delete_many()
+            .filter(task_project::Column::TaskId.eq(successor.id))
+            .exec(db)
+            .await?;
+        task::Entity::delete_by_id(successor.id).exec(db).await?;
+        Ok(())
+    }
+
     /// Rebuild paths for a task and all its descendants.
     async fn rebuild_subtree_paths(
         &self,

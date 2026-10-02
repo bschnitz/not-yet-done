@@ -99,6 +99,8 @@ async fn insert_task(
         last_tracked_at: Set(None),
         not_before: Set(None),
         due: Set(None),
+        recur: Set(None),
+        series_id: Set(None),
         path: Set(None),
     };
     model.insert(db).await.expect("insert failed")
