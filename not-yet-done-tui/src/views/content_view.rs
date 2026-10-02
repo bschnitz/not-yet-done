@@ -9960,14 +9960,9 @@ impl ContentView {
                 ))
             }
             (QueryMenuMode::SavedQueries, QueryMenuMessage::EditExisting { name, query }) => {
-                // Stamped, not applied: the editor opens on this body. The
-                // kind still has to follow it, or a pane that last ran an
-                // extended document would keep claiming so for a native body.
+                // Stamped, not applied: the editor opens on this body.
                 let kind = self.query_kind_of(&name);
-                let pane = self.active_pane_mut();
-                pane.active_query = Some(query);
-                pane.active_query_name = Some(name.clone());
-                pane.active_query_kind = kind;
+                self.stamp_query_for_edit(pane_id, name.clone(), query, kind);
                 Some(SubViewMessage::Request(
                     ViewRequest::OpenContentQueryEditor {
                         view_index,
@@ -10020,6 +10015,22 @@ impl ContentView {
                     kind,
                 }),
             ),
+            (
+                QueryMenuMode::SavedQueries,
+                QueryMenuMessage::Duplicate {
+                    name,
+                    query,
+                    new_name,
+                },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::DuplicateContentQuery {
+                    view_index,
+                    pane_id,
+                    name,
+                    query,
+                    new_name,
+                },
+            )),
             (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => Some(
                 SubViewMessage::Request(ViewRequest::SetDefaultContentQuery { view_index, name }),
             ),
@@ -10071,6 +10082,16 @@ impl ContentView {
                     },
                 ))
             }
+            (
+                QueryMenuMode::NodeScripts { node_id },
+                QueryMenuMessage::Duplicate { name, new_name, .. },
+            ) => Some(SubViewMessage::Request(ViewRequest::DuplicateNodeScript {
+                view_index,
+                pane_id,
+                node_id,
+                script: name,
+                new_name,
+            })),
             // Scripts are files in one store; the kind the menu offers for
             // query bodies means nothing here, but a typed `+` prefix is
             // still stripped, which is what the script menu does too.
@@ -10276,6 +10297,24 @@ impl ContentView {
     /// the body, so the kind is looked up here rather than threaded through
     /// the popup. An unknown name is adapter-native: that is what a body
     /// typed into the query editor is.
+    /// Stamp `query` as the pane's active query without applying it: the
+    /// query editor opens on the active query. The kind has to follow the
+    /// body, or a pane that last ran an extended document would keep
+    /// claiming so for a native body.
+    pub fn stamp_query_for_edit(
+        &mut self,
+        pane_id: PaneId,
+        name: String,
+        query: String,
+        kind: QueryKind,
+    ) {
+        if let Some(pane) = self.find_pane_mut(pane_id) {
+            pane.active_query = Some(query);
+            pane.active_query_name = Some(name);
+            pane.active_query_kind = kind;
+        }
+    }
+
     pub fn query_kind_of(&self, name: &str) -> QueryKind {
         self.db_saved_queries
             .iter()

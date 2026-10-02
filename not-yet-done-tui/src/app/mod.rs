@@ -9939,6 +9939,13 @@ impl App {
                 script,
                 is_new,
             } => self.edit_node_script(view_index, pane_id, node_id, script, is_new),
+            ViewRequest::DuplicateNodeScript {
+                view_index,
+                pane_id,
+                node_id,
+                script,
+                new_name,
+            } => self.duplicate_node_script(view_index, pane_id, node_id, script, new_name),
             ViewRequest::DeleteNodeScript {
                 view_index,
                 pane_id,
@@ -10130,6 +10137,13 @@ impl App {
                 self.notify(format!("Cleared shortcut for '{name}'"));
                 EditorRequest::None
             }
+            ViewRequest::DuplicateContentQuery {
+                view_index,
+                pane_id,
+                name,
+                query,
+                new_name,
+            } => self.duplicate_content_query(view_index, pane_id, name, query, new_name),
             ViewRequest::RenameContentQuery {
                 view_index,
                 scope,
@@ -12658,29 +12672,38 @@ impl App {
     /// view at `view_index`. No-op if the adapter doesn't expose that store
     /// (e.g. Postgres, which has neither).
     fn save_content_query_body(&self, view_index: usize, name: &str, body: &str, kind: QueryKind) {
-        let Some(cv) = self.content_view(view_index) else {
-            return;
-        };
-        let adapter = cv.adapter.clone();
-        let name_owned = name.to_string();
-        let body_owned = body.to_string();
+        let _ = self.store_content_query_body(view_index, name, body, kind);
+    }
+
+    /// [`Self::save_content_query_body`] for a caller that has to know
+    /// whether the body landed: a missing view, adapter or store is an
+    /// error here, not a no-op.
+    pub(super) fn store_content_query_body(
+        &self,
+        view_index: usize,
+        name: &str,
+        body: &str,
+        kind: QueryKind,
+    ) -> Result<(), String> {
+        let adapter = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.clone())
+            .ok_or_else(|| "this view has no adapter".to_string())?;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let Some(adapter) = adapter.as_ref() else {
-                    return;
-                };
-                let _ = match kind {
+                let saved = match kind {
                     QueryKind::Saved => match adapter.saved_query_store() {
-                        Some(store) => store.save(&name_owned, &body_owned).await,
-                        None => return,
+                        Some(store) => store.save(name, body).await,
+                        None => return Err("the adapter stores no queries".to_string()),
                     },
                     QueryKind::Extended => match adapter.extended_query_store() {
-                        Some(store) => store.save(&name_owned, &body_owned).await,
-                        None => return,
+                        Some(store) => store.save(name, body).await,
+                        None => return Err("the adapter stores no extended queries".to_string()),
                     },
                 };
+                saved.map_err(|e| e.to_string())
             })
-        });
+        })
     }
 
     /// Delete a query body plus its shortcut row. `kind` picks the store:

@@ -488,6 +488,15 @@ pub enum ViewRequest {
         node_id: String,
         script: String,
     },
+    /// Copy the node script `script` to `new_name` (shortcut not copied)
+    /// and open the copy in the editor.
+    DuplicateNodeScript {
+        view_index: usize,
+        pane_id: PaneId,
+        node_id: String,
+        script: String,
+        new_name: String,
+    },
     /// Bind a key chord to a node script. The chord was recorded in the
     /// script menu itself (so it may be a sequence like `"f f"`); the App
     /// only checks it for conflicts and writes it to the `query_shortcut`
@@ -600,6 +609,16 @@ pub enum ViewRequest {
         view_index: usize,
         scope: String,
         name: String,
+    },
+    /// Save `query` — the body of the entry `name` — under `new_name` in
+    /// the same store, then open the copy in the editor. Shortcut and
+    /// default mark stay with `name`.
+    DuplicateContentQuery {
+        view_index: usize,
+        pane_id: PaneId,
+        name: String,
+        query: String,
+        new_name: String,
     },
     /// Rename a content query in the DB.
     RenameContentQuery {

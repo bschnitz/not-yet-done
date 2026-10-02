@@ -102,6 +102,14 @@ views:
       # queries with mandatory variables (`{var}`) are applied raw at
       # start, without the variable popup.
       #
+      # Duplicate: in the q menu, `ctrl+u` (keybinding
+      # `query_menu.duplicate`) asks for the copy's name in a small form,
+      # prefilled with the selected entry's name. A name the menu already
+      # lists is refused inside that form. Enter saves the body under the
+      # new name in the same store (saved or extended) and opens the copy
+      # in the editor; leaving the editor unchanged keeps the copy.
+      # Shortcut and ★ stay with the source.
+      #
       # `inherit_default: true` (default false) additionally stamps the
       # user default query (★) onto *this* subtab at start — the plain
       # start-apply only hits the tab's default view. Why opt-in: sibling
@@ -3630,6 +3638,10 @@ menu had been opened and Enter pressed on the entry (same `scope:`/
 `default_field` context). The chord is checked against all keys active in its
 tab (including chord prefixes) and rejected on collision. Assigned shortcuts
 appear in the menu as a `[chord]` suffix.
+
+`ctrl+u` duplicates a script as in the query menu: name prompt prefilled with
+the script's name, the file is copied under the new name (its shortcut is not)
+and opened in the editor.
 
 ### Tag management (`type: tag`)
 

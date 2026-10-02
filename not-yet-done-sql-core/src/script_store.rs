@@ -217,6 +217,26 @@ impl ScriptStore for SqlScriptStore {
             Err(e) => Err(Self::io_err(e)),
         }
     }
+
+    async fn copy_node_script(&self, node_id: &str, src: &str, dst: &str) -> Result<bool> {
+        let Some(segments) = self.layout.node_segments(node_id) else {
+            return Err(ContentError::NotFound(format!(
+                "script '{src}' (node '{node_id}' has no scripts)"
+            )));
+        };
+        let src_path = files::node_script_file_path(&self.instance_data_dir, &segments, src);
+        let dst_path = files::node_script_file_path(&self.instance_data_dir, &segments, dst);
+        if tokio::fs::try_exists(&dst_path).await.unwrap_or(false) {
+            return Ok(false);
+        }
+        match tokio::fs::copy(&src_path, &dst_path).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(ContentError::NotFound(format!("script '{src}'")))
+            }
+            Err(e) => Err(Self::io_err(e)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +344,33 @@ mod tests {
         assert!(s.list_node_scripts("main/users").await.unwrap().is_empty());
         // Idempotent delete.
         s.delete_node_script("main/users", "active").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn copy_node_script_duplicates_the_body_but_never_overwrites() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let s = store(dir.path());
+        let path = s
+            .node_script_path("main/users", "active")
+            .expect("placeable");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, "select 1").await.unwrap();
+
+        assert!(s.copy_node_script("main/users", "active", "copy").await.unwrap());
+        let copy = s.node_script_path("main/users", "copy").unwrap();
+        assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "select 1");
+
+        // An existing target stays as it is.
+        tokio::fs::write(&copy, "select 2").await.unwrap();
+        assert!(!s.copy_node_script("main/users", "active", "copy").await.unwrap());
+        assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "select 2");
+
+        assert!(matches!(
+            s.copy_node_script("main/users", "missing", "other").await,
+            Err(ContentError::NotFound(_))
+        ));
     }
 
     #[test]

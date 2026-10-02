@@ -702,6 +702,91 @@ impl App {
         self.open_session(Box::new(session))
     }
 
+    /// Save `query`, the body of the entry `name`, under `new_name` in the
+    /// store `name` lives in, then open the copy in the editor as the
+    /// existing entry it now is. The copy is written before the editor
+    /// opens, so leaving the editor unchanged keeps it. Shortcut and default
+    /// mark are not copied: both select one entry, and the source keeps it.
+    pub fn duplicate_content_query(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        name: String,
+        query: String,
+        new_name: String,
+    ) -> EditorRequest {
+        // The menu refused names it lists; the store may have learned one
+        // since (another process), and a save would overwrite it.
+        match self.existing_query_kind(view_index, &new_name) {
+            Ok(Some(existing)) => {
+                self.modal_message = Some(format!(
+                    "A query named '{new_name}' already exists ({existing})."
+                ));
+                return EditorRequest::None;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.notify_error(format!("Could not check query names: {e}"));
+                return EditorRequest::None;
+            }
+        }
+        let kind = self.content_query_kind(view_index, &name);
+        if let Err(e) = self.store_content_query_body(view_index, &new_name, &query, kind) {
+            self.notify_error(format!("Could not duplicate '{name}': {e}"));
+            return EditorRequest::None;
+        }
+        self.reload_content_saved_queries(view_index);
+        self.notify(format!("Duplicated '{name}' as '{new_name}'"));
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.stamp_query_for_edit(pane_id, new_name.clone(), query, kind);
+        }
+        self.open_content_query_editor(view_index, Some(new_name), false, kind)
+    }
+
+    /// Copy the node script `script` to `new_name` and open the copy in the
+    /// editor. Its shortcut is not copied — a chord selects one script.
+    pub fn duplicate_node_script(
+        &mut self,
+        view_index: usize,
+        pane_id: crate::views::content_view::PaneId,
+        node_id: String,
+        script: String,
+        new_name: String,
+    ) -> EditorRequest {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.notify("No adapter for this view".to_string());
+            return EditorRequest::None;
+        };
+        let copied = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match adapter.script_store() {
+                    Some(store) => store.copy_node_script(&node_id, &script, &new_name).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "scripts".to_string(),
+                    )),
+                }
+            })
+        });
+        match copied {
+            Ok(true) => {
+                self.notify(format!("Duplicated '{script}' as '{new_name}'"));
+                self.edit_node_script(view_index, pane_id, node_id, new_name, false)
+            }
+            Ok(false) => {
+                self.modal_message = Some(format!("A script named '{new_name}' already exists."));
+                EditorRequest::None
+            }
+            Err(e) => {
+                self.notify_error(format!("Could not duplicate '{script}': {e}"));
+                EditorRequest::None
+            }
+        }
+    }
+
     /// Which store already holds `name` for this view's adapter, if any.
     /// `Ok(None)` when the name is free or the view has no adapter.
     pub(super) fn existing_query_kind(

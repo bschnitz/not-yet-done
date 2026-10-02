@@ -874,6 +874,9 @@ pub enum QueryMenuAction {
     /// Toggle the selected entry as the default query — applied
     /// automatically on app start.
     SetDefault,
+    /// Copy the selected entry under a new name (asked in a small prompt)
+    /// and open the copy in the editor.
+    Duplicate,
     Close,
 }
 
@@ -888,6 +891,7 @@ impl QueryMenuAction {
             Self::EditShortcut => "edit_shortcut",
             Self::ClearShortcut => "clear_shortcut",
             Self::SetDefault => "set_default",
+            Self::Duplicate => "duplicate",
             Self::Close => "close",
         }
     }
@@ -911,6 +915,7 @@ impl FromStr for QueryMenuAction {
             "edit_shortcut" => Ok(Self::EditShortcut),
             "clear_shortcut" => Ok(Self::ClearShortcut),
             "set_default" => Ok(Self::SetDefault),
+            "duplicate" => Ok(Self::Duplicate),
             "close" => Ok(Self::Close),
             other => Err(format!("unknown query_menu action: {}", other)),
         }
@@ -1340,6 +1345,7 @@ impl Default for KeyBindingSection<QueryMenuAction> {
         m.insert(QueryMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
         m.insert(QueryMenuAction::ClearShortcut, KeyBinding::new("ctrl+x"));
         m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
+        m.insert(QueryMenuAction::Duplicate, KeyBinding::new("ctrl+u"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         Self { bindings: m }
     }
@@ -1536,7 +1542,7 @@ mod tests {
         check!(CommonAction, 20);
         check!(ContentAction, 19);
         check!(WindowAction, 5);
-        check!(QueryMenuAction, 9);
+        check!(QueryMenuAction, 10);
         check!(TagMenuAction, 7);
         check!(ScriptMenuAction, 8);
         check!(PopupAction, 5);

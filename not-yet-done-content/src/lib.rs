@@ -3785,6 +3785,12 @@ pub trait ScriptStore: Send + Sync {
     /// Delete the script `name` attached to `node_id`. Missing entries
     /// are not an error (idempotent delete).
     async fn delete_node_script(&self, node_id: &str, name: &str) -> Result<()>;
+
+    /// Copy the script `src` attached to `node_id` to a new script `dst`
+    /// of the same node. Returns `Ok(true)` when copied, `Ok(false)` when
+    /// `dst` already exists (left untouched). A missing `src` is
+    /// [`ContentError::NotFound`].
+    async fn copy_node_script(&self, node_id: &str, src: &str, dst: &str) -> Result<bool>;
 }
 
 // ---------------------------------------------------------------------------

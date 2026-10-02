@@ -8338,6 +8338,27 @@ tracking whose result was deleted.
 - [ ] CLI parity: `nyd adapter trackings ls -q '<query>'` gives the same
       rows as the tab.
 
+## Query menu — duplicate (`ctrl+u`)
+
+Needs a content tab with saved queries (one with a shortcut and ★), one
+extended query (`++name`), and a node-scripts level with a script.
+
+- [ ] `q`, select the ★ query, `ctrl+u` → form "Duplicate '<name>'"
+      prefilled with the name; Enter right away → "'<name>' already
+      exists" under the field, the form stays open.
+- [ ] Type a name another entry has → the same error; `esc` → back in
+      the menu, nothing created.
+- [ ] Type a new name, Enter → notification "Duplicated …", the editor
+      opens with the source's body; `:q` without changes → the copy is in
+      the menu, without `[key]` and without ★; the source keeps both.
+- [ ] Edit the copy, save → the copy changes, the source does not.
+- [ ] Duplicate the extended query → the copy opens as a Markdown
+      document and runs as an extended query.
+- [ ] Scripts menu (`q` on the script level), `ctrl+u`, new name → the
+      script file is copied and opened in the SQL editor; the copy has no
+      `[key]`.
+- [ ] Hint bar of both menus shows `duplicate`.
+
 ## CLI — a view file that does not parse is named, not dropped
 
 Put a `views/broken.yaml` with `tab:` + `adapter:` and a bad head, e.g.
