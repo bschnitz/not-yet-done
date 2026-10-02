@@ -176,8 +176,13 @@ pub fn try_dispatch(args: &[String]) -> Option<ExitCode> {
         Some("config") => Some(finish(crate::cli_config::run_config(args))),
         Some("adapter") => Some(finish(run_adapter(args))),
         Some("script") => Some(finish(crate::script_cli::run(args))),
-        // Legacy `tusks` built-ins keep their own dispatch + help.
-        Some("tag") | Some("backup") => None,
+        // Legacy `tusks` built-in keeps its own dispatch + help.
+        Some("backup") => None,
+        // Removed: it wrote the legacy core DB, which no adapter reads.
+        Some("tag") => {
+            eprintln!("nyd: tag management is `nyd-t tag` (it works on tasks.db)");
+            Some(ExitCode::FAILURE)
+        }
         // Anything else: try a `cli.yaml` alias (which expands to a full
         // `adapter …`/`config …` argv), else fall through to `tusks`.
         Some(_) => match expand_alias(args) {

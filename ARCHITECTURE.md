@@ -133,7 +133,6 @@ use tusks::tusks;
 #[command(about = "not-yet-done — your todo app")]
 pub mod not_yet_done {
     pub mod backup;
-    pub mod tag;
 }
 ```
 

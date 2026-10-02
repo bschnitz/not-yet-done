@@ -70,22 +70,18 @@ where
 // protocol (Block D): tasks, trackings *and* projects are reached as adapter
 // instances (`nyd tasks …`, `nyd projects do create …`), and the terse
 // everyday forms live as `cli.yaml` aliases (see `cli_config::DEFAULT_ALIASES`),
-// not as hard-coded subcommands. The only built-in `tusks` commands left are
-// the two that have no adapter path yet:
-//   * `tag`    — tag CRUD with fg/bg/symbol styling; the task adapter only
-//                exposes tags as a value source + per-task mutation, so the
-//                standalone management UI still lives here.
+// not as hard-coded subcommands. The only built-in `tusks` command left is
+// the one that has no adapter path yet:
 //   * `backup` — backup/list/restore of the legacy core DB; stays until D4
 //                turns it into a `tasks.db` adapter action.
+// Tag management (fg/bg/symbol styling) is `nyd-t tag`, which works on
+// `tasks.db`; `nyd tag` worked on the legacy core DB the adapters never read.
 // The former `task` / `project` / `track` / `query` / `db sync` commands were
 // removed once their adapter replacements landed (D3b-1..3); those names are
 // now free for adapter instances or aliases (see `adapter_cli::BUILTIN_COMMANDS`).
 #[tusks(root)]
 #[command(name = "nyd", about = "not-yet-done — your todo app")]
 pub mod cli {
-    #[command(about = "Manage tags")]
-    pub use crate::commands::tag::cli as tag;
-
     #[command(about = "Back up and restore the database")]
     pub use crate::commands::backup::cli as backup;
 }

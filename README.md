@@ -664,17 +664,17 @@ instead.
 
 ### Tags & Backup
 
-Tag styling (fg/bg/symbol) has no generic adapter path yet, so tag management
-stays a built-in command; `backup` keeps the legacy core-DB backups until it
-becomes an adapter action.
+Tag styling (fg/bg/symbol) has no generic adapter path yet, so tags are
+managed with `nyd-t tag`, on the same `tasks.db` the Tasks adapter reads;
+`backup` keeps the legacy core-DB backups until it becomes an adapter action.
 
 ```bash
 # Tags (global or project-specific)
-nyd tag list
-nyd tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""
-nyd tag new                                   # create interactively via $EDITOR
-nyd tag edit global-tag:<uuid> --name "blocked"
-nyd tag delete global-tag:<uuid>
+nyd-t tag list
+nyd-t tag add "urgent" --fg "#FFFFFF" --bg "#FF5733" --symbol ""
+nyd-t tag new                                 # create interactively via $EDITOR
+nyd-t tag edit global-tag:<uuid> --name "blocked"
+nyd-t tag delete global-tag:<uuid>
 
 # Backups
 nyd backup create

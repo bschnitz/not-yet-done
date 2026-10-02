@@ -217,10 +217,11 @@ todo`, undated after dated (oldest first), `when: todo`, level 1, menu group
   duplicates: one `actions:` entry per level, all dropped on confirm.
   `key_conflict::disambiguate` appends `KeySource::place` (`view › child`)
   to every name another item shares.
-- [ ] `nyd tag add` (CLI, core config → `nyd.db`) does not reach the tasks
+- [x] `nyd tag add` (CLI, core config → `nyd.db`) does not reach the tasks
   adapter, which keeps its tags in `tasks.db`. The real `todo` tag was put
-  into `tasks.db` by hand. Decide: point `nyd tag` at the tasks adapter's DB
-  or route it through the adapter.
+  into `tasks.db` by hand. Removed `nyd tag`; `nyd-t tag` already works on
+  `tasks.db` (the installed `~/.cargo/bin/nyd-t` was a stale build reading
+  `nyd.db` — not owned by cargo, left alone).
 - [x] `split_frontmatter`: a buffer whose first non-comment line is not `---`
   silently loses all front-matter keys (tags, parent …). Now
   `misplaced_frontmatter` reports a later `---` block of key lines as a
