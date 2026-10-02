@@ -406,9 +406,10 @@ impl QueryMenuComponent {
         let prefill = HashMap::from([(DUPLICATE_NAME_FIELD.to_string(), name.clone())]);
         let options = FormOptions {
             submit_label: Some("Duplicate".to_string()),
+            field_bar: true,
             ..FormOptions::default()
         };
-        let form = ContentFormPopup::new(
+        let form = ContentFormPopup::overlay(
             format!("Duplicate '{name}'"),
             vec![field],
             &prefill,
@@ -458,10 +459,28 @@ impl QueryMenuComponent {
         if let Some(popup) = &mut self.popup {
             popup.view(frame, area);
         }
-        if let Some(prompt) = &mut self.duplicate_prompt {
-            prompt.form.render(frame, area);
+        let menu = self.popup.as_ref().and_then(|p| p.panel_rect());
+        if let (Some(prompt), Some(menu)) = (&mut self.duplicate_prompt, menu) {
+            prompt.form.render(frame, prompt_area(area, menu));
         }
     }
+}
+
+/// Narrowest the duplicate prompt gets, so the name field stays usable over
+/// a slim menu.
+const PROMPT_MIN_WIDTH: u16 = 40;
+
+/// Where the duplicate prompt goes: over the menu, as wide as the menu (at
+/// least [`PROMPT_MIN_WIDTH`]). The form centres its panel in what it gets,
+/// and the menu is centred in `area` too, so the full height keeps the two
+/// on one centre without clipping the prompt to a short menu.
+fn prompt_area(area: Rect, menu: Rect) -> Rect {
+    let width = menu.width.max(PROMPT_MIN_WIDTH).min(area.width);
+    let centre = menu.x + menu.width / 2;
+    let x = centre
+        .saturating_sub(width / 2)
+        .clamp(area.x, area.x + area.width - width);
+    Rect::new(x, area.y, width, area.height)
 }
 
 #[cfg(test)]
@@ -736,6 +755,35 @@ mod tests {
             menu.handle_key("enter", &kb),
             QueryMenuMessage::Apply { ref name, .. } if name == "alpha"
         ));
+    }
+
+    #[test]
+    fn duplicate_prompt_is_a_small_panel_over_the_menu() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut menu = QueryMenuComponent::new(theme(), "Queries");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("ctrl+u", &kb);
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| menu.render(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        let overlay = theme().form_overlay_bg();
+        let rows: Vec<u16> = (0..40)
+            .filter(|&y| (0..120).any(|x| Some(buf[(x, y)].bg) == overlay))
+            .collect();
+        let cols: Vec<u16> = (0..120)
+            .filter(|&x| (0..40).any(|y| Some(buf[(x, y)].bg) == overlay))
+            .collect();
+        // A content-sized panel in the middle, not the whole area.
+        assert!(!rows.is_empty() && rows.len() < 15, "rows {rows:?}");
+        assert!(cols.len() <= 52, "cols {}", cols.len());
+        assert!(cols[0] > 0 && *cols.last().unwrap() < 119);
+        if std::env::var("SHOW").is_ok() {
+            for y in 0..40 {
+                let line: String = (0..120).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                eprintln!("{line}");
+            }
+        }
     }
 
     #[test]

@@ -8343,7 +8343,8 @@ tracking whose result was deleted.
 Needs a content tab with saved queries (one with a shortcut and ★), one
 extended query (`++name`), and a node-scripts level with a script.
 
-- [ ] `q`, select the ★ query, `ctrl+u` → form "Duplicate '<name>'"
+- [ ] `q`, select the ★ query, `ctrl+u` → a small ✦ panel "Duplicate
+      '<name>'" centred on the menu, slightly lighter than the menu,
       prefilled with the name; Enter right away → "'<name>' already
       exists" under the field, the form stays open.
 - [ ] Type a name another entry has → the same error; `esc` → back in

@@ -74,6 +74,8 @@ pub struct SearchablePopup {
     recorder: Option<KeyRecorder>,
     /// What the running recording binds, shown dim in the recorder heading.
     record_subject: String,
+    /// Where the last render put the panel, for prompts opened on top of it.
+    panel_rect: Option<Rect>,
 }
 
 impl SearchablePopup {
@@ -96,7 +98,13 @@ impl SearchablePopup {
             key_icons: None,
             recorder: None,
             record_subject: String::new(),
+            panel_rect: None,
         }
+    }
+
+    /// The panel rectangle of the last render; `None` before the first one.
+    pub fn panel_rect(&self) -> Option<Rect> {
+        self.panel_rect
     }
 
     /// The `(left, right)` pairs handed to the [`LeaderList`]: the label
@@ -343,10 +351,11 @@ impl Component for SearchablePopup {
         // and scroll from there.
         let rows = self.list.visible_indices().len() as u16 + 2;
         let cap = (area.height * 3 / 5).max(5);
-        let body = PanelChrome::new(heading)
+        let chrome = PanelChrome::new(heading)
             .hints(hints)
-            .body(self.list.min_width() as usize, rows.min(cap))
-            .render(frame, area, &t);
+            .body(self.list.min_width() as usize, rows.min(cap));
+        self.panel_rect = Some(chrome.panel_rect(area));
+        let body = chrome.render(frame, area, &t);
 
         if let Some(body) = body {
             self.list.view(frame, body);

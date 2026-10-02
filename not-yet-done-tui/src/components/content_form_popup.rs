@@ -56,8 +56,35 @@ impl ContentFormPopup {
         theme: &Theme,
         options: &FormOptions,
     ) -> Self {
+        Self::with_palette(title, fields, prefill, palette(theme), options)
+    }
+
+    /// [`Self::new`] for a form that opens on top of another panel: the
+    /// panel is filled with [`Theme::form_overlay_bg`] so it stands apart
+    /// from the panel underneath.
+    pub fn overlay(
+        title: impl Into<String>,
+        fields: Vec<FormFieldSpec>,
+        prefill: &HashMap<String, String>,
+        theme: &Theme,
+        options: &FormOptions,
+    ) -> Self {
+        let palette = FormPalette {
+            panel_bg: theme.form_overlay_bg(),
+            ..palette(theme)
+        };
+        Self::with_palette(title, fields, prefill, palette, options)
+    }
+
+    fn with_palette(
+        title: impl Into<String>,
+        fields: Vec<FormFieldSpec>,
+        prefill: &HashMap<String, String>,
+        palette: FormPalette,
+        options: &FormOptions,
+    ) -> Self {
         let specs = fields.into_iter().map(to_field_spec).collect();
-        let style = FormStyle::from_palette(&palette(theme));
+        let style = FormStyle::from_palette(&palette);
         Self {
             form: Form::new(title, specs, prefill, &style, options),
         }

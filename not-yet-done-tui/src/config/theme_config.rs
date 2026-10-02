@@ -227,6 +227,11 @@ pub struct FormThemeConfig {
     /// `form.field_bar` is set). `None` → falls back to `form_bg`.
     #[serde(default)]
     pub panel_bg: Option<HexColor>,
+    /// Fill behind a form panel that opens on top of another panel (e.g.
+    /// the name prompt over the query menu). `None` → `panel_bg` lightened
+    /// a little, so the two stay apart.
+    #[serde(default)]
+    pub overlay_bg: Option<HexColor>,
 }
 
 /// Optional per-role overrides for the built-in vim editor pane. Each `None`

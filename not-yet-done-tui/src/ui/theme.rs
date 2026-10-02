@@ -3,6 +3,19 @@ use std::collections::HashMap;
 use ratatui::style::Color;
 
 use crate::config::ThemeConfig;
+
+/// How far [`Theme::form_overlay_bg`] moves the panel fill towards white.
+const OVERLAY_LIGHTEN: f32 = 0.08;
+
+/// Move an RGB colour `amount` (0..=1) of the way towards white. Named and
+/// indexed colours have no channels to move and come back unchanged.
+fn lighten(color: Color, amount: f32) -> Color {
+    let up = |c: u8| c + ((255 - c) as f32 * amount).round() as u8;
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(up(r), up(g), up(b)),
+        other => other,
+    }
+}
 use crate::config::highlight::StyleSpec;
 
 /// Runtime theme — wraps `ThemeConfig` and exposes `ratatui::Color` values.
@@ -195,6 +208,16 @@ impl Theme {
                 .map(|c| c.to_ratatui())
                 .unwrap_or_else(|| self.form_bg()),
         )
+    }
+    /// Fill behind a form panel stacked on another panel. Falls back to
+    /// [`Self::form_panel_bg`] lightened by [`OVERLAY_LIGHTEN`].
+    pub fn form_overlay_bg(&self) -> Option<Color> {
+        Some(self.override_or(self.cfg.form.overlay_bg.as_ref(), || {
+            lighten(self.form_bg_or_panel(), OVERLAY_LIGHTEN)
+        }))
+    }
+    fn form_bg_or_panel(&self) -> Color {
+        self.form_panel_bg().unwrap_or_else(|| self.form_bg())
     }
 
     // ── Built-in vim editor pane (each role overridable, else app-theme) ────

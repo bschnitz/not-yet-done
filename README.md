@@ -3059,7 +3059,9 @@ absent block changes nothing.
 
 `theme.form:` — the spec-driven form popup: `accent`, `label_idle`, `text`,
 `text_idle`, `placeholder`, `selected`, `hint`, `error`, `field_bg`,
-`field_bg_idle`, `panel_bg`.
+`field_bg_idle`, `panel_bg`, `overlay_bg`. `overlay_bg` fills a form that
+opens on top of another panel (the duplicate prompt over the query menu);
+unset, it is `panel_bg` lightened a little.
 
 `theme.mouse:` — the [mouse](#mouse) drag selection:
 
