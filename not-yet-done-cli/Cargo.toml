@@ -47,3 +47,7 @@ regex                = { workspace = true }
 # Terminal Markdown rendering for the built-in `help` action (TTY only; piped
 # output stays raw Markdown). Canop/termimad — actively maintained.
 termimad             = "0.35"
+
+[dev-dependencies]
+# The in-memory adapter for tests of the CLI's node resolution.
+not-yet-done-content = { path = "../not-yet-done-content", features = ["mock"] }

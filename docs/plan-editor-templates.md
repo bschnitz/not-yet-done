@@ -145,6 +145,22 @@ the template by name when the create fires. `edit_session/template_edit.rs`
 saves through the `TemplateStore`. The menu's shortcut keys answer "not
 supported yet" until step 3.
 
+## Step 3 — done
+
+Deviation from the design: the `query_shortcut` scope is
+`template:<adapter>/<instance>/<action_id>` and the row name is the template
+name (not `<action_id>/<template>` in the view scope) — a distinct scope keeps
+template rows out of the saved-query listing. Pieces: `KeySource::TemplateShortcut
+{ action_id, template }`; `ContentView::template_shortcuts` cache +
+`templated_create_ids()` + `template_shortcut_scope()`; claims in
+`build_view_claims`, dispatch in `dispatch_view_claim` (→ `create_request`);
+`App::ensure_template_shortcuts_loaded` (called per content keypress);
+`ShortcutTarget::Template(TemplateCoords)`, `DbShortcutInvalidate::Template`,
+`resolve_db_shortcut` arm; `Bind/ClearEditorTemplateShortcut` requests; the
+menu shows chords; deleting a template unsets its row. Covered by
+`template_shortcut_chord_creates_with_template` (content_view.rs); 1206
+tests green.
+
 ### Design notes (as read before the build)
 
 - `ActionDef` (view_config.rs:2021): add `templates: Option<TemplatesConfig>`

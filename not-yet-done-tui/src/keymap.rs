@@ -150,6 +150,15 @@ pub enum KeySource {
         scope: String,
         name: String,
     },
+    /// Shortcut bound to a stored editor template of a create action (per
+    /// `query_shortcut` row scoped to `template:<adapter>/<inst>/<action_id>`).
+    /// Live while the focused level offers a `type: create` action with that
+    /// `id` and a `templates:` block; pressing it runs that create with the
+    /// template.
+    TemplateShortcut {
+        action_id: String,
+        template: String,
+    },
     /// `query.menu_key` on a YAML view.
     YamlMenuKey {
         view: String,
@@ -256,6 +265,9 @@ impl KeySource {
             }
             Self::ScriptShortcut { scope, name } => {
                 format!("script[{scope}/{name}]")
+            }
+            Self::TemplateShortcut { action_id, template } => {
+                format!("template[{action_id}/{template}]")
             }
             Self::YamlMenuKey { view } => format!("views.{view}.query.menu_key"),
             Self::TemplateMenuKey {
@@ -372,6 +384,7 @@ impl KeySource {
             Self::SavedQueryShortcut { name, .. } => format!("{name} (saved query)"),
             Self::NodeScriptShortcut { script, .. } => format!("{script} (script)"),
             Self::ScriptShortcut { name, .. } => format!("{name} (script)"),
+            Self::TemplateShortcut { template, .. } => format!("{template} (template)"),
             Self::YamlMenuKey { .. } => "Saved-query menu".into(),
             Self::TemplateMenuKey { action, .. } => format!("{action} (templates)"),
             Self::YamlPreviewKey { .. } => "Toggle preview".into(),

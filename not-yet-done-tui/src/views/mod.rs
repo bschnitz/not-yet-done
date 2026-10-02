@@ -619,6 +619,21 @@ pub enum ViewRequest {
         template: String,
         new_name: String,
     },
+    /// Bind a key chord to a stored editor template. The chord was recorded
+    /// in the template menu; the App checks it for conflicts and writes it
+    /// to `query_shortcut` under the action's template scope.
+    BindEditorTemplateShortcut {
+        view_index: usize,
+        action_id: String,
+        template: String,
+        chord: String,
+    },
+    /// Remove the key chord bound to a stored editor template.
+    ClearEditorTemplateShortcut {
+        view_index: usize,
+        action_id: String,
+        template: String,
+    },
     /// Save a content query to the DB (upsert by scope+name).
     SaveContentQuery {
         view_index: usize,

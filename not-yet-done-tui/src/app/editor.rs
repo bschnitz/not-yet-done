@@ -806,7 +806,12 @@ impl App {
             self.notify("No adapter for this view".to_string());
             return EditorRequest::None;
         };
-        let listed: Result<Vec<String>, String> = tokio::task::block_in_place(|| {
+        let scope = self
+            .content_view(view_index)
+            .and_then(|cv| cv.template_shortcut_scope(&action_id));
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let listed: Result<(Vec<String>, std::collections::HashMap<String, String>), String> =
+            tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let node = match &parent_node_id {
                     Some(id) => adapter.get_by_id(id).await,
@@ -823,10 +828,21 @@ impl App {
                 let store = adapter
                     .template_store(&action_id)
                     .ok_or_else(|| "this adapter stores no editor templates".to_string())?;
-                store.list().await.map_err(|e| e.to_string())
+                let names = store.list().await.map_err(|e| e.to_string())?;
+                let shortcuts = match &scope {
+                    Some(scope) => shortcut_repo
+                        .list_by_scope(scope)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.name, m.shortcut))
+                        .collect(),
+                    None => Default::default(),
+                };
+                Ok((names, shortcuts))
             })
         });
-        let names = match listed {
+        let (names, shortcuts) = match listed {
             Ok(v) => v,
             Err(e) => {
                 self.notify_error(format!("Templates: {e}"));
@@ -836,8 +852,8 @@ impl App {
         let entries: Vec<crate::components::query_menu::QueryMenuEntry> = names
             .into_iter()
             .map(|name| crate::components::query_menu::QueryMenuEntry {
+                shortcut: shortcuts.get(&name).cloned(),
                 name,
-                shortcut: None,
                 // Unused for templates; non-empty so the row is selectable.
                 query: "<template>".to_string(),
                 is_default: false,
@@ -910,9 +926,23 @@ impl App {
             self.notify("No template store for this view".to_string());
             return;
         };
+        let scope = self
+            .content_view(view_index)
+            .and_then(|cv| cv.template_shortcut_scope(&action_id));
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(store.delete(&template))
+            tokio::runtime::Handle::current().block_on(async {
+                store.delete(&template).await?;
+                // Best-effort, like a node script's: a missing row is fine.
+                if let Some(scope) = &scope {
+                    let _ = shortcut_repo.unset(scope, &template).await;
+                }
+                Ok::<_, not_yet_done_content::ContentError>(())
+            })
         });
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.template_shortcuts.remove(&action_id);
+        }
         match result {
             Ok(()) => self.notify(format!("Deleted template '{template}'")),
             Err(e) => self.notify_error(format!("Delete failed: {e}")),

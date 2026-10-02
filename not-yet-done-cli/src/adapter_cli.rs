@@ -1283,7 +1283,7 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
     let is_root = target_id.is_none();
     let mut node: Box<dyn Node> = match resolve_target(adapter, inv, target_id).await? {
         Some(node) => node,
-        None => adapter.root().await?,
+        None => action_root(adapter).await?,
     };
 
     // Framework built-in actions (currently just `help`) are handled by the
@@ -1817,6 +1817,21 @@ fn pick_type<'a>(child_types: &'a [NodeType], filter: Option<&str>) -> Result<&'
 /// over an explicit `id`. Returns `None` when neither is given, so the caller
 /// supplies its own default (the adapter root for `ls`/`do`; an error for
 /// `show`). Giving both at once is rejected as ambiguous.
+/// The adapter root as the target of an action.
+///
+/// `root()` is the fast snapshot for listing; an adapter may put off work until
+/// its root is addressed by id — the calendar discovers the calendars it can
+/// write to only then, so its `create` form has a target. The TUI opens a form
+/// through that round-trip, and an action here takes the same one. A root that
+/// is not addressable by id keeps the snapshot.
+async fn action_root(adapter: &dyn ContentAdapter) -> Result<Box<dyn Node>> {
+    let root = adapter.root().await?;
+    match adapter.get_by_id(root.id()).await {
+        Ok(node) => Ok(node),
+        Err(_) => Ok(root),
+    }
+}
+
 async fn resolve_target(
     adapter: &dyn ContentAdapter,
     inv: &Invocation,
@@ -2401,6 +2416,61 @@ fn print_table(cols: &[String], rows: &[Vec<String>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A root that defers work until it is addressed by id: `root()` hands out
+    /// the fast snapshot, `get_by_id` the complete node — the way the calendar
+    /// discovers its write targets only when the `create` form is opened.
+    struct DeferringRoot {
+        snapshot: not_yet_done_content::mock::MockAdapter,
+        complete: not_yet_done_content::mock::MockAdapter,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentAdapter for DeferringRoot {
+        fn adapter_type(&self) -> &str {
+            "deferring"
+        }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn Node>> {
+            self.snapshot.root().await
+        }
+        async fn get_by_id(&self, id: &str) -> not_yet_done_content::Result<Box<dyn Node>> {
+            self.complete.get_by_id(id).await
+        }
+        fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::children::Child<'a>> {
+            self.complete.childs(node)
+        }
+    }
+
+    fn root_labelled(label: &str) -> not_yet_done_content::mock::MockAdapter {
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData};
+        MockAdapterBuilder::new("deferring")
+            .node(MockNodeData::new("root", label))
+            .build()
+    }
+
+    /// An action without a node id runs on the root, and must see the complete
+    /// one: on the snapshot the calendar's `create` found no calendar to write to.
+    #[tokio::test]
+    async fn an_action_without_an_id_runs_on_the_root_addressed_by_id() {
+        let adapter = DeferringRoot {
+            snapshot: root_labelled("snapshot"),
+            complete: root_labelled("complete"),
+        };
+        assert_eq!(action_root(&adapter).await.unwrap().label(), "complete");
+    }
+
+    /// A root that is not addressable by id keeps working from the snapshot.
+    #[tokio::test]
+    async fn a_root_not_addressable_by_id_falls_back_to_the_snapshot() {
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData};
+        let adapter = DeferringRoot {
+            snapshot: root_labelled("snapshot"),
+            complete: MockAdapterBuilder::new("deferring")
+                .node(MockNodeData::new("elsewhere", "other"))
+                .build(),
+        };
+        assert_eq!(action_root(&adapter).await.unwrap().label(), "snapshot");
+    }
 
     #[test]
     fn a_deferred_action_exits_75_and_a_failed_one_exits_1() {

@@ -1016,6 +1016,14 @@ pub struct ScriptShortcutCoords {
     pub name: String,
 }
 
+/// Address of a stored editor template, for a pending shortcut binding.
+#[derive(Debug, Clone)]
+pub struct TemplateCoords {
+    pub view_index: usize,
+    pub action_id: String,
+    pub template: String,
+}
+
 /// What a pending shortcut assignment will bind. All three live in the
 /// `query_shortcut` table and share one check-then-write path, so the capture
 /// overlay only has to carry which of them is meant.
@@ -1027,6 +1035,8 @@ pub enum ShortcutTarget {
     Script(ScriptShortcutCoords),
     /// A per-node script (e.g. a Postgres table's).
     NodeScript(NodeScriptCoords),
+    /// A stored editor template of a create action.
+    Template(TemplateCoords),
 }
 
 impl ShortcutTarget {
@@ -1036,6 +1046,7 @@ impl ShortcutTarget {
             Self::Favorite(f) => &f.name,
             Self::Script(c) => &c.name,
             Self::NodeScript(c) => &c.script,
+            Self::Template(c) => &c.template,
         }
     }
 
@@ -1044,6 +1055,7 @@ impl ShortcutTarget {
         match self {
             Self::Favorite(_) => "Query",
             Self::Script(_) | Self::NodeScript(_) => "Script",
+            Self::Template(_) => "Template",
         }
     }
 }
@@ -1082,6 +1094,8 @@ enum DbShortcutInvalidate {
     ScriptScope(String),
     /// Drop `ContentView::node_script_shortcuts[node_id]`.
     NodeScript(String),
+    /// Drop `ContentView::template_shortcuts[action_id]`.
+    Template(String),
 }
 
 impl ContentSlot {
@@ -5935,6 +5949,8 @@ impl App {
             // the focused level so `build_view_claims` registers run-on-chord
             // handlers. No-op off a script-capable level / when cached.
             self.ensure_script_shortcuts_loaded(idx);
+            // And for the templated create actions' template chords.
+            self.ensure_template_shortcuts_loaded(idx);
             if let Some(cv) = self.content_view_mut(idx) {
                 let msg = cv.handle_key(key);
                 // A `mark_read_on_reach_end` hook may have armed during the
@@ -10124,6 +10140,41 @@ impl App {
                 template,
                 new_name,
             } => self.duplicate_editor_template(view_index, action_id, template, new_name),
+            ViewRequest::BindEditorTemplateShortcut {
+                view_index,
+                action_id,
+                template,
+                chord,
+            } => {
+                self.begin_shortcut_bind(
+                    ShortcutTarget::Template(TemplateCoords {
+                        view_index,
+                        action_id,
+                        template,
+                    }),
+                    chord,
+                );
+                EditorRequest::None
+            }
+            ViewRequest::ClearEditorTemplateShortcut {
+                view_index,
+                action_id,
+                template,
+            } => {
+                let source = crate::keymap::KeySource::TemplateShortcut {
+                    action_id,
+                    template: template.clone(),
+                };
+                self.ensure_template_shortcuts_loaded(view_index);
+                match self.free_db_shortcut(&source) {
+                    Ok(true) => self.notify(format!("Cleared shortcut for template '{template}'")),
+                    Ok(false) => self.notify_error(format!(
+                        "Template '{template}' is not available on this level"
+                    )),
+                    Err(e) => self.notify_error(e),
+                }
+                EditorRequest::None
+            }
             ViewRequest::SaveContentQuery {
                 view_index,
                 scope: _,
@@ -12503,6 +12554,44 @@ impl App {
         }
     }
 
+    /// Populate `ContentView::template_shortcuts` for the templated create
+    /// actions of the focused level. One `query_shortcut` lookup per action
+    /// not cached yet; no-op on a level without such actions.
+    pub fn ensure_template_shortcuts_loaded(&mut self, view_index: usize) {
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        let missing: Vec<(String, String)> = cv
+            .templated_create_ids()
+            .into_iter()
+            .filter(|id| !cv.template_shortcuts.contains_key(id))
+            .filter_map(|id| cv.template_shortcut_scope(&id).map(|scope| (id, scope)))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let repo = Arc::clone(&self.query_shortcut_repo);
+        let loaded: Vec<(String, Vec<(String, String)>)> = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut out = Vec::new();
+                for (id, scope) in missing {
+                    let rows = repo
+                        .list_by_scope(&scope)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|m| (m.name, m.shortcut))
+                        .collect();
+                    out.push((id, rows));
+                }
+                out
+            })
+        });
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.template_shortcuts.extend(loaded);
+        }
+    }
+
     /// Populate `ContentView::script_shortcuts` for the focused level's
     /// script scope (`script:<tab>/<view…>`). Cache miss → one indexed
     /// `query_shortcut` lookup. No-op when the level offers no `type:
@@ -12574,6 +12663,13 @@ impl App {
                     script: c.script.clone(),
                 },
             ),
+            ShortcutTarget::Template(c) => (
+                c.view_index,
+                KeySource::TemplateShortcut {
+                    action_id: c.action_id.clone(),
+                    template: c.template.clone(),
+                },
+            ),
         };
         let cv = self.content_view(idx)?;
         Some((source, KeyScope::Tab(TabRef::new(&cv.tab_name))))
@@ -12588,6 +12684,7 @@ impl App {
         match target {
             ShortcutTarget::Script(c) => self.ensure_script_shortcuts_loaded(c.view_index),
             ShortcutTarget::NodeScript(c) => self.ensure_node_script_shortcuts_loaded(c.view_index),
+            ShortcutTarget::Template(c) => self.ensure_template_shortcuts_loaded(c.view_index),
             ShortcutTarget::Favorite(_) => {}
         }
     }
@@ -12873,6 +12970,22 @@ impl App {
                     invalidate: DbShortcutInvalidate::NodeScript(node_id.clone()),
                 })
             }
+            KeySource::TemplateShortcut {
+                action_id,
+                template,
+            } => {
+                // The shortcut is live only in the focused view, so that is
+                // the one whose cache holds it.
+                let (idx, cv) = self
+                    .content_views_indexed()
+                    .find(|(_, cv)| cv.template_shortcuts.contains_key(action_id))?;
+                Some(DbShortcutTarget {
+                    scope: cv.template_shortcut_scope(action_id)?,
+                    name: template.clone(),
+                    view_index: idx,
+                    invalidate: DbShortcutInvalidate::Template(action_id.clone()),
+                })
+            }
             _ => None,
         }
     }
@@ -12892,6 +13005,11 @@ impl App {
             DbShortcutInvalidate::NodeScript(node) => {
                 if let Some(cv) = self.content_view_mut(target.view_index) {
                     cv.node_script_shortcuts.remove(node);
+                }
+            }
+            DbShortcutInvalidate::Template(action_id) => {
+                if let Some(cv) = self.content_view_mut(target.view_index) {
+                    cv.template_shortcuts.remove(action_id);
                 }
             }
         }

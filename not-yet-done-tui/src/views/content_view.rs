@@ -1495,6 +1495,13 @@ pub struct ContentView {
     /// `App::bind_script_shortcut`.
     pub script_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
 
+    /// Lazy cache of editor-template shortcuts, keyed by the create action's
+    /// adapter `id` and holding `(template_name, key_chord)` pairs. Filled by
+    /// `App::ensure_template_shortcuts_loaded` for the templated create
+    /// actions of the focused level, consulted by [`build_view_claims`];
+    /// an entry is dropped on bind / clear / delete so it refetches.
+    pub template_shortcuts: std::collections::HashMap<String, Vec<(String, String)>>,
+
     /// Source of truth for user column-config overrides (popup `c`),
     /// keyed by [`ContentPane::column_level_key`]. Mirrored into every
     /// pane (including ones created by later splits/drills) so a level's
@@ -8442,6 +8449,7 @@ impl ContentView {
             pending_mark_read: None,
             node_script_shortcuts: std::collections::HashMap::new(),
             script_shortcuts: std::collections::HashMap::new(),
+            template_shortcuts: std::collections::HashMap::new(),
             column_overrides: std::collections::HashMap::new(),
             card_mode_overrides: std::collections::HashMap::new(),
             nav_chars: Vec::new(),
@@ -10032,6 +10040,32 @@ impl ContentView {
             .open_without_default(&entries, &self.query_menu_kb);
     }
 
+    /// Adapter ids of the focused level's `type: create` actions that carry
+    /// a `templates:` block — the actions whose template shortcuts are live.
+    pub fn templated_create_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .active_pane()
+            .current_actions(&self.view_defs)
+            .into_iter()
+            .filter(|a| a.action_type == "create" && a.templates.is_some())
+            .filter_map(|a| a.id.clone())
+            .collect();
+        ids.dedup();
+        ids
+    }
+
+    /// `query_shortcut` scope of the template shortcuts of `action_id`:
+    /// templates belong to an adapter instance and an action, so the scope
+    /// names both. `None` without an adapter.
+    pub fn template_shortcut_scope(&self, action_id: &str) -> Option<String> {
+        let adapter = self.adapter.as_ref()?;
+        Some(format!(
+            "template:{}/{}/{action_id}",
+            adapter.adapter_type(),
+            adapter.instance_id()
+        ))
+    }
+
     /// Run the create action `action_name` of the active pane's level with
     /// the stored template `template` as its starting buffer.
     fn apply_editor_template(&self, action_name: &str, template: String) -> SubViewMessage {
@@ -10273,13 +10307,27 @@ impl ContentView {
                     new_name,
                 },
             )),
-            // Template chords come in the next step (plan-editor-templates).
             (
-                QueryMenuMode::EditorTemplates { .. },
-                QueryMenuMessage::EditShortcut { .. } | QueryMenuMessage::ClearShortcut { .. },
-            ) => Some(SubViewMessage::Request(ViewRequest::Notify(
-                "Template shortcuts are not supported yet".to_string(),
-            ))),
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::EditShortcut { name, chord, .. },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::BindEditorTemplateShortcut {
+                    view_index,
+                    action_id,
+                    template: name,
+                    chord,
+                },
+            )),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::ClearShortcut { name },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::ClearEditorTemplateShortcut {
+                    view_index,
+                    action_id,
+                    template: name,
+                },
+            )),
         }
     }
 
@@ -11899,6 +11947,22 @@ impl ContentView {
             }
         }
 
+        // Editor-template shortcuts of the level's templated create actions.
+        for action_id in self.templated_create_ids() {
+            if let Some(entries) = self.template_shortcuts.get(&action_id) {
+                for (template, chord) in entries {
+                    km.push(KeyClaim::handler(
+                        KeyBinding::new(chord.clone()),
+                        scope.clone(),
+                        KeySource::TemplateShortcut {
+                            action_id: action_id.clone(),
+                            template: template.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
         // Record-detail split toggle (`o`) + value-wrap toggle (`X`).
         // Claimed at view level — not in the pane's `build_claims` — because
         // (un)splitting touches `pane_trees`, which only the ContentView
@@ -12623,6 +12687,23 @@ impl ContentView {
             }
             KeySource::NodeScriptShortcut { node_id, script } => {
                 Some(self.dispatch_node_script_apply(node_id.clone(), script.clone()))
+            }
+            KeySource::TemplateShortcut {
+                action_id,
+                template,
+            } => {
+                let pane = self.active_pane();
+                let action = pane
+                    .current_actions(&self.view_defs)
+                    .into_iter()
+                    .find(|a| a.id.as_deref() == Some(action_id) && a.templates.is_some())?;
+                Some(pane.create_request(
+                    action,
+                    self.view_index,
+                    self.active_pane_id(),
+                    &self.view_defs,
+                    Some(template.clone()),
+                ))
             }
             KeySource::ScriptShortcut { name, .. } => {
                 let view_index = self.view_index;
@@ -22648,6 +22729,47 @@ mod tests {
                 template,
                 ..
             })) => {
+                assert_eq!(parent_node_id, Some(first_id));
+                assert_eq!(action_id, "add");
+                assert_eq!(template.as_deref(), Some("todo"));
+            }
+            other => panic!("Expected CreateContentChild with template, got {other:?}"),
+        }
+    }
+
+    /// A cached template shortcut is a view claim: its chord fires the
+    /// templated create action directly, with the template's name and the
+    /// parent the action would create under. Without the cache entry the
+    /// chord is not claimed.
+    #[test]
+    fn template_shortcut_chord_creates_with_template() {
+        let mut config = test_config_with_children();
+        let action: ActionDef = serde_yaml::from_str(
+            r#"{ name: add child, key: A, type: create, id: add, under_selection: true, templates: { menu_key: T } }"#,
+        )
+        .unwrap();
+        config.views[0].actions.push(action);
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let issues = mock_issues();
+        let first_id = issues[0].id.clone();
+        view.set_items(issues, Vec::new(), None, Vec::new(), None);
+        assert_eq!(view.templated_create_ids(), vec!["add".to_string()]);
+        assert!(
+            !matches!(
+                view.handle_key("ctrl+y"),
+                SubViewMessage::Request(ViewRequest::CreateContentChild { .. })
+            ),
+            "an uncached chord must not create"
+        );
+        view.template_shortcuts
+            .insert("add".into(), vec![("todo".into(), "ctrl+y".into())]);
+        match view.handle_key("ctrl+y") {
+            SubViewMessage::Request(ViewRequest::CreateContentChild {
+                parent_node_id,
+                action_id,
+                template,
+                ..
+            }) => {
                 assert_eq!(parent_node_id, Some(first_id));
                 assert_eq!(action_id, "add");
                 assert_eq!(template.as_deref(), Some("todo"));
