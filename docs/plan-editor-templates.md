@@ -210,14 +210,19 @@ todo`, undated after dated (oldest first), `when: todo`, level 1, menu group
   unchanged is parsed (retry), not `Aborted`; covers `parse_new_task` and
   `parse_edit_task`. Test `unchanged_resave_of_an_error_buffer_is_parsed`;
   adapter tests 202 green.
-- [ ] Template menu title says "Queries" in `QueryMenuMode::EditorTemplates`
-  (content_view.rs, popup title) → "Templates".
-- [ ] Binding-conflict dialog lists `a a — add task` three times (dedupe the
-  conflict list; probably one entry per level/claim).
+- [x] Template menu title says "Queries" in `QueryMenuMode::EditorTemplates`
+  → `QueryMenuComponent::set_title`; templates say "Templates", the node
+  scripts menu "Scripts".
+- [x] Binding-conflict dialog lists `a a — add task` three times. Not
+  duplicates: one `actions:` entry per level, all dropped on confirm.
+  `key_conflict::disambiguate` appends `KeySource::place` (`view › child`)
+  to every name another item shares.
 - [ ] `nyd tag add` (CLI, core config → `nyd.db`) does not reach the tasks
   adapter, which keeps its tags in `tasks.db`. The real `todo` tag was put
   into `tasks.db` by hand. Decide: point `nyd tag` at the tasks adapter's DB
   or route it through the adapter.
-- [ ] `split_frontmatter`: a buffer whose first non-comment line is not `---`
-  silently loses all front-matter keys (tags, parent …). Report an error when
-  a `---` line appears later instead.
+- [x] `split_frontmatter`: a buffer whose first non-comment line is not `---`
+  silently loses all front-matter keys (tags, parent …). Now
+  `misplaced_frontmatter` reports a later `---` block of key lines as a
+  `frontmatter` error (new and edit), and `render_with_errors` reopens such a
+  buffer without inventing an empty block in front.

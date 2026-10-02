@@ -323,6 +323,7 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
         }
     }
     check_window_fields(not_before, due, &mut errors);
+    errors.extend(misplaced_frontmatter(content));
 
     let description = parse_description(&body);
 
@@ -470,6 +471,7 @@ pub fn parse_edit_task(
         check_window_fields(not_before, due, &mut errors);
     }
     let window = window.filter(|w| *w != (original.not_before, original.due));
+    errors.extend(misplaced_frontmatter(content));
 
     let description_text = parse_description(&body);
 
@@ -607,6 +609,13 @@ pub fn render_with_errors(content: &str, errors: &[FieldError]) -> String {
         .map(|e| (e.field, e.message.as_str()))
         .collect();
 
+    let rest = skip_leading_comments(content);
+    if !rest.starts_with("---") {
+        // No block in front to annotate: inventing an empty one would leave
+        // the misplaced block behind it, and the next save fails the same way.
+        result.push_str(rest);
+        return result;
+    }
     let (frontmatter, body) = split_frontmatter(content);
 
     result.push_str("---\n");
@@ -663,6 +672,40 @@ fn split_frontmatter(content: &str) -> (String, String) {
     } else {
         (rest.to_string(), String::new())
     }
+}
+
+/// A `---` block that is not at the top: [`split_frontmatter`] reads only a
+/// leading one, so every key in it (tags, parent …) would be dropped without
+/// a word. Only a block that reads like front matter counts — key lines,
+/// comments and blank lines up to a closing `---`, at least one key — so a
+/// `---` rule in a description stays text.
+fn misplaced_frontmatter(content: &str) -> Option<FieldError> {
+    let rest = skip_leading_comments(content);
+    if rest.starts_with("---") {
+        return None;
+    }
+    let lines: Vec<&str> = rest.lines().collect();
+    let found = lines.iter().enumerate().any(|(i, line)| {
+        if line.trim_end() != "---" {
+            return false;
+        }
+        let inner = &lines[i + 1..];
+        let Some(end) = inner.iter().position(|l| l.trim_end() == "---") else {
+            return false;
+        };
+        let block = &inner[..end];
+        block.iter().any(|l| parse_kv(l.trim()).is_some())
+            && block.iter().all(|l| {
+                let l = l.trim();
+                l.is_empty() || l.starts_with('#') || parse_kv(l).is_some()
+            })
+    });
+    found.then(|| FieldError {
+        field: "frontmatter",
+        message: "the `---` block must be the first thing in the buffer \
+                  (only comments may precede it); its keys were not read"
+            .to_string(),
+    })
 }
 
 /// `content` without leading whitespace and `<!-- … -->` blocks — the error
@@ -986,6 +1029,36 @@ mod tests {
         assert_eq!(body, "body");
     }
 
+    #[test]
+    fn a_late_frontmatter_block_is_an_error() {
+        let content = "A title\n---\ntags: todo\n# parent:\n---\n\n## Description:\nText\n";
+        let template = new_task(None);
+        let ParseResult::Errors { errors, .. } = parse_new_task(content, &template) else {
+            panic!("expected errors");
+        };
+        assert!(
+            errors.iter().any(|e| e.field == "frontmatter"),
+            "{errors:?}"
+        );
+        // Reopened, the buffer keeps the block where it was instead of
+        // gaining an empty one in front of it.
+        let reopened = render_with_errors(content, &errors);
+        assert!(reopened.contains("A title\n---\ntags: todo"), "{reopened}");
+        assert_eq!(reopened.matches("\n---\n").count(), 2, "{reopened}");
+    }
+
+    #[test]
+    fn a_rule_in_a_description_is_not_a_frontmatter_block() {
+        let content = "---\n---\n\n## Description:\nAbove\n---\nBelow\n---\n";
+        assert!(misplaced_frontmatter(content).is_none());
+        let no_block = "## Description:\nAbove\n---\nnote: see below\n---\n";
+        // A key-only stretch between rules in a buffer without front matter
+        // does read as a misplaced block — that buffer has no other place
+        // its keys could be.
+        assert!(misplaced_frontmatter(no_block).is_some());
+        assert!(misplaced_frontmatter("## Description:\nAbove\n---\nBelow\n").is_none());
+    }
+
     // ----- render_with_errors -----
 
     /// A buffer reopened with errors and saved again unchanged is a retry,
@@ -1007,7 +1080,10 @@ mod tests {
         }
         // A fresh buffer saved unchanged is still abandoned.
         let fresh = new_task(None);
-        assert!(matches!(parse_new_task(&fresh, &fresh), ParseResult::Aborted));
+        assert!(matches!(
+            parse_new_task(&fresh, &fresh),
+            ParseResult::Aborted
+        ));
     }
 
     #[test]
