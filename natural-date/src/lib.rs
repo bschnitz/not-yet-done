@@ -105,6 +105,9 @@ where
     if let Some(rest) = todays_weekday(s, now) {
         return resolve_core(&rest, now);
     }
+    if let Some(d) = last_weekday(s, now) {
+        return Some(d);
+    }
     if let Some(d) = in_prefix(s, now) {
         return Some(d);
     }
@@ -162,7 +165,8 @@ fn normalize(s: &str) -> String {
 /// Friday), rewritten to start with `today` instead. chrono-english reads a
 /// bare weekday as the *next* one, which on that very day is a week away;
 /// someone naming today's weekday means today. `next friday` doesn't
-/// start with the weekday and keeps its week jump.
+/// start with the weekday and keeps its week jump (`last friday`: see
+/// [`last_weekday`]).
 fn todays_weekday<Tz>(s: &str, now: DateTime<Tz>) -> Option<String>
 where
     Tz: TimeZone,
@@ -173,6 +177,26 @@ where
         return None;
     }
     Some(if rest.is_empty() { "today".to_string() } else { format!("today {rest}") })
+}
+
+/// `last <weekday> [time]`: the most recent such day *before* today, so
+/// `last friday` on a Friday is a week back. chrono-english counts today in
+/// and answers with today. The time part is resolved on today and moved back,
+/// so it takes whatever `today <time>` takes.
+fn last_weekday<Tz>(s: &str, now: DateTime<Tz>) -> Option<DateTime<Tz>>
+where
+    Tz: TimeZone,
+    Tz::Offset: Copy,
+{
+    let rest = s.strip_prefix("last ")?;
+    let (word, time) = rest.split_once(' ').unwrap_or((rest, ""));
+    let day = word.parse::<Weekday>().ok()?;
+    let back = match (7 + now.weekday().num_days_from_monday() - day.num_days_from_monday()) % 7 {
+        0 => 7,
+        n => n,
+    };
+    let on_today = if time.is_empty() { "today".to_string() } else { format!("today {time}") };
+    Some(resolve_core(&on_today, now)? - Duration::days(i64::from(back)))
 }
 
 /// `in <n> <unit>`: `now` + a duration. `a`/`an` count as 1.

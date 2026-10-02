@@ -49,8 +49,8 @@ Three readings differ from a plain `chrono-english` pass, on purpose:
   `chrono-english`, `last month` reads as `last mon…` and answers with a
   Monday.
 - **Today's weekday is today.** `friday` (or `fri 17:00`, `friday noon`) on a
-  Friday resolves to that same day, not to the Friday a week later. `next
-friday` still jumps a week.
+  Friday resolves to that same day, not to the Friday a week later. Both
+  `next friday` and `last friday` jump a week from there.
 
 ## API
 

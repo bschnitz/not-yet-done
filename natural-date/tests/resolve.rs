@@ -235,7 +235,7 @@ fn bare_periods_resolve_to_their_start() {
 // --- a bare weekday includes today -------------------------------------------
 
 /// Friday 2026-10-02 10:00 UTC: naming today's weekday means today, not the
-/// same day next week. `next friday` keeps its week jump.
+/// same day next week. `next friday` and `last friday` keep their week jump.
 fn on_friday(s: &str) -> String {
     natural_date::resolve_datetime(s, Utc.with_ymd_and_hms(2026, 10, 2, 10, 0, 0).unwrap())
         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -254,4 +254,8 @@ fn a_bare_weekday_naming_today_is_today() {
     assert_eq!(on_friday("saturday"), "2026-10-03 00:00:00");
     assert_eq!(on_friday("thursday"), "2026-10-08 00:00:00");
     assert_eq!(on_friday("next friday"), "2026-10-09 00:00:00");
+    assert_eq!(on_friday("last friday"), "2026-09-25 00:00:00");
+    assert_eq!(on_friday("last fri 17:00"), "2026-09-25 17:00:00");
+    assert_eq!(on_friday("last thursday"), "2026-10-01 00:00:00");
+    assert_eq!(on_friday("last saturday"), "2026-09-26 00:00:00");
 }
