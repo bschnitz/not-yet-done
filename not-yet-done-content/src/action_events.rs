@@ -214,6 +214,17 @@ impl NodeDecorator for ActionEventNode {
             .publish(action_id, phase::PREPARE, &*self.inner);
         Ok(prep)
     }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        let prep = self.inner.prepare_templated(action_id, args, template).await?;
+        self.emitter
+            .publish(action_id, phase::PREPARE, &*self.inner);
+        Ok(prep)
+    }
     async fn execute(
         &mut self,
         action_id: &str,

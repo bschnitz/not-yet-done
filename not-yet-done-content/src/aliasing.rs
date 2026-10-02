@@ -404,6 +404,17 @@ impl NodeDecorator for AliasingNode {
             Some((target, args)) => self.inner.prepare(&target, &args).await,
         }
     }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        match self.resolve(action_id, args)? {
+            None => self.inner.prepare_templated(action_id, args, template).await,
+            Some((target, args)) => self.inner.prepare_templated(&target, &args, template).await,
+        }
+    }
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         let target = self.resolve_name(action_id)?;
         self.inner.picker_options(&target).await

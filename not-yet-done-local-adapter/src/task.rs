@@ -951,13 +951,13 @@ const FIND_LIMIT: u32 = 200;
 
 fn task_root_actions() -> Vec<NodeAction> {
     vec![
-        NodeAction::new("add", "Add task", InputSpec::Editor),
+        NodeAction::new("add", "Add task", InputSpec::Editor).templated(),
         // Sibling-of-a-top-level-task *is* a top-level task, so on the root
         // `add-sibling` aliases `add` (both → `prepare_add(None)`). It exists
         // here only so the empty-tree create fallback — which invokes the
         // configured action id on the forest root when nothing is selected —
         // finds the id rather than erroring.
-        NodeAction::new("add-sibling", "Add task", InputSpec::Editor),
+        NodeAction::new("add-sibling", "Add task", InputSpec::Editor).templated(),
         // Container action: snapshot the whole task database (see
         // `invoke_backup`). DB-wide, so it lives on the root, not a task row.
         NodeAction::new("backup", "Backup database", InputSpec::None),
@@ -977,12 +977,12 @@ fn task_root_actions() -> Vec<NodeAction> {
 fn task_item_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("edit", "Edit", InputSpec::Editor),
-        NodeAction::new("add", "Add subtask", InputSpec::Editor),
+        NodeAction::new("add", "Add subtask", InputSpec::Editor).templated(),
         // Add a *sibling* of this task: the new node's parent is this task's
         // own (effective, re-rooted) parent, so it lands next to it rather
         // than nested under it. At a top-level task the parent is `None`, so
         // the sibling is another top-level task.
-        NodeAction::new("add-sibling", "Add sibling", InputSpec::Editor),
+        NodeAction::new("add-sibling", "Add sibling", InputSpec::Editor).templated(),
         // Subtree-restructure outline editor: edit the task and its whole
         // subtree as one indented checkbox list — reparent, re-status,
         // add/remove rows in a single buffer. Bound to `ctrl+n` in
@@ -1073,6 +1073,44 @@ fn would_create_cycle(snapshot: &ForestSnapshot, moving: Uuid, new_parent: Uuid)
 
 fn emit_task_changed(handle: &CoreHandle, id: Uuid) {
     handle.publish(DomainEvent::TaskChanged { id });
+}
+
+/// The global tag ids for the names a new task's `tags:` lists. A new task
+/// has no project yet, so only global tags can apply. An unknown name is
+/// answered with `text` reopened, naming it.
+async fn resolve_new_task_tags(
+    handle: &CoreHandle,
+    names: &[String],
+    text: &str,
+) -> std::result::Result<Vec<Uuid>, ActionOutcome> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let known = handle
+        .tag_service
+        .list_global()
+        .await
+        .map_err(|e| reopen_service_error(text, e))?;
+    let mut ids = Vec::new();
+    let mut unknown = Vec::new();
+    for name in names {
+        match known.iter().find(|t| t.name == *name) {
+            Some(t) if !ids.contains(&t.id) => ids.push(t.id),
+            Some(_) => {}
+            None => unknown.push(name.as_str()),
+        }
+    }
+    if !unknown.is_empty() {
+        let errors = [FieldError {
+            field: "tags",
+            message: format!("Unknown tag: {}", unknown.join(", ")),
+        }];
+        return Err(ActionOutcome::Reopen {
+            content: editor_templates::render_with_errors(text, &errors),
+            new_version: None,
+        });
+    }
+    Ok(ids)
 }
 
 /// Wrap a service error as a buffer-reopen carrying the message, so the
@@ -1167,9 +1205,19 @@ pub(crate) async fn apply_tracking(
 /// under `parent_id` (`None` = top-level). No version token — a create has
 /// nothing to conflict with.
 fn prepare_add(parent_id: Option<Uuid>) -> EditorPrep {
+    prepare_add_from(editor_templates::new_task(parent_id))
+}
+
+/// `prepare_templated` for the `add` action: the stored `template` with its
+/// `parent:` set to `parent_id` — see [`editor_templates::with_parent`].
+fn prepare_add_templated(parent_id: Option<Uuid>, template: &str) -> EditorPrep {
+    prepare_add_from(editor_templates::with_parent(template, parent_id))
+}
+
+fn prepare_add_from(template: String) -> EditorPrep {
     EditorPrep {
         cursor_line: None,
-        template: editor_templates::new_task(parent_id),
+        template,
         version: String::new(),
         suffix: ".md".into(),
         file_path: None,
@@ -1240,6 +1288,13 @@ async fn execute_add(
             let parent_id = parsed
                 .parent_id
                 .or_else(|| parent_default.map(|id| id.to_string()));
+            // Tags are resolved before anything is created: a misspelt name
+            // reopens the buffer, and a task created without its tags would
+            // be created a second time by the save that fixes it.
+            let tag_ids = match resolve_new_task_tags(handle, &parsed.tags, text).await {
+                Ok(ids) => ids,
+                Err(outcome) => return Ok(outcome),
+            };
             let created = match handle
                 .task_service
                 .add_task(
@@ -1267,6 +1322,22 @@ async fn execute_add(
             } else {
                 created
             };
+            for tag_id in tag_ids {
+                if let Err(e) = handle
+                    .task_service
+                    .edit_task(
+                        created.id,
+                        None,
+                        None,
+                        None,
+                        Some(format!("global-tag:{tag_id}")),
+                        None,
+                    )
+                    .await
+                {
+                    return Ok(reopen_service_error(text, e));
+                }
+            }
             notes::write_notes(&created, &all_tasks(snapshot), &notes_text);
             if wants_tracking {
                 apply_tracking(handle, created.id, true, &handle.tracking_policy).await;
@@ -1909,6 +1980,19 @@ impl Node for TaskRootNode {
             ))),
         }
     }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        _args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        match action_id {
+            "add" | "add-sibling" => Ok(prepare_add_templated(None, template)),
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` takes no template on the task root"
+            ))),
+        }
+    }
     async fn execute(
         &mut self,
         action_id: &str,
@@ -2050,6 +2134,23 @@ impl Node for TaskItemNode {
             "edit-notes" => prepare_edit_notes(&self.snapshot, self.id),
             other => Err(ContentError::NotSupported(format!(
                 "action `{other}` has no editor buffer"
+            ))),
+        }
+    }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        _args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        match action_id {
+            "add" => Ok(prepare_add_templated(Some(self.id), template)),
+            "add-sibling" => Ok(prepare_add_templated(
+                self.snapshot.by_id.get(&self.id).and_then(|r| r.parent),
+                template,
+            )),
+            other => Err(ContentError::NotSupported(format!(
+                "action `{other}` takes no template"
             ))),
         }
     }
@@ -2662,6 +2763,11 @@ impl ContentAdapter for TaskAdapter {
 
     fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
         Some(&self.saved_queries)
+    }
+
+    /// A stored `add` template is a new-task buffer, which is Markdown.
+    fn template_suffix(&self) -> &str {
+        ".md"
     }
 
     /// Saved queries here carry the shared `${name:default}` placeholders,

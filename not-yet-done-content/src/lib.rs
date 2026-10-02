@@ -1109,6 +1109,14 @@ pub struct NodeAction {
     /// declared type, so an action wanting a number is not left parsing the
     /// text a command line produced.
     pub params: Vec<ParamSpec>,
+    /// An [`InputSpec::Editor`] action that may start from a **stored
+    /// template** instead of its built-in buffer — see
+    /// [`ContentAdapter::template_store`] and [`Node::prepare_templated`].
+    ///
+    /// A capability, not a hint: a front-end offers templates only for an
+    /// action that declares it, because only such an action knows how to
+    /// merge a stored buffer into its context.
+    pub templates: bool,
 }
 
 impl NodeAction {
@@ -1120,6 +1128,7 @@ impl NodeAction {
             input,
             local: false,
             params: Vec::new(),
+            templates: false,
         }
     }
 
@@ -1140,6 +1149,13 @@ impl NodeAction {
     /// [`NodeAction::local`].
     pub fn local(mut self) -> Self {
         self.local = true;
+        self
+    }
+
+    /// Mark the editor action as accepting a stored template — see
+    /// [`NodeAction::templates`].
+    pub fn templated(mut self) -> Self {
+        self.templates = true;
         self
     }
 }
@@ -2930,6 +2946,29 @@ pub trait ContentAdapter: Send + Sync {
         )))
     }
 
+    /// Persistence for the stored **editor templates** of one create action
+    /// (`action_id`, an action declaring [`NodeAction::templates`]).
+    ///
+    /// One namespace per `(instance, action)`, because an adapter's editor
+    /// actions differ in their buffers. Stateless like
+    /// [`extended_query_store`](Self::extended_query_store), so the default
+    /// builds it on demand under
+    /// `<instance_data_dir>/`[`TEMPLATE_DIR`]`/<action_id>/` with
+    /// [`template_suffix`](Self::template_suffix). Decorators need not
+    /// forward it as long as they forward `instance_data_dir`.
+    fn template_store(&self, action_id: &str) -> Option<Box<dyn TemplateStore>> {
+        Some(Box::new(FsQueryStore::new(
+            self.instance_data_dir().join(TEMPLATE_DIR).join(action_id),
+            self.template_suffix(),
+        )))
+    }
+
+    /// File-name suffix (with dot) of a stored editor template, so the
+    /// external editor highlights it. `.txt` by default.
+    fn template_suffix(&self) -> &str {
+        ".txt"
+    }
+
     /// File-name suffix (with dot) for a query body when it is opened in the
     /// external editor, so the editor picks the right syntax highlighting.
     ///
@@ -3153,6 +3192,30 @@ pub trait Node: Send + Sync {
         Err(ContentError::NotSupported("prepare not supported".into()))
     }
 
+    /// Render the initial buffer for an `InputSpec::Editor` action from a
+    /// stored **template** (see [`ContentAdapter::template_store`]) rather
+    /// than the built-in one.
+    ///
+    /// `template` is a complete buffer in the action's own format; the
+    /// adapter merges what the context decides into it (the tasks adapter
+    /// sets `parent:` from the node it is called on) and keeps the rest. The
+    /// front-end passes the returned `template` back as the original buffer,
+    /// so saving it unchanged still means "nothing typed, nothing created".
+    ///
+    /// Only called for an action declaring [`NodeAction::templates`]; the
+    /// default refuses.
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        let _ = (action_id, args, template);
+        Err(ContentError::NotSupported(
+            "prepare_templated not supported".into(),
+        ))
+    }
+
     /// Fetch the option list for an `InputSpec::Picker` action.
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         let _ = action_id;
@@ -3281,6 +3344,39 @@ pub trait ExtendedQueryStore: Send + Sync {
         None
     }
 }
+
+/// Adapter-owned persistence for the stored editor templates of one create
+/// action — see [`ContentAdapter::template_store`].
+///
+/// Same five methods as [`SavedQueryStore`], deliberately a distinct type
+/// for the reason [`ExtendedQueryStore`] is one: a template is a buffer in
+/// an action's format, not a query, and a value that could stand for
+/// either would let one be loaded as the other.
+#[async_trait]
+pub trait TemplateStore: Send + Sync {
+    /// All template names, sorted. Empty when nothing has been saved yet.
+    async fn list(&self) -> Result<Vec<String>>;
+
+    /// The template buffer for `name`. Returns [`ContentError::NotFound`]
+    /// when the entry doesn't exist.
+    async fn load(&self, name: &str) -> Result<String>;
+
+    /// Persist `body` under `name`, creating or overwriting it.
+    async fn save(&self, name: &str, body: &str) -> Result<()>;
+
+    /// Remove the entry. Missing entries are not an error.
+    async fn delete(&self, name: &str) -> Result<()>;
+
+    /// Optional: the on-disk path of the entry, so the frontend can edit
+    /// it as a file. See [`SavedQueryStore::path`].
+    fn path(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// Directory name (under [`ContentAdapter::instance_data_dir`]) holding the
+/// stored editor templates, one subdirectory per action id.
+pub const TEMPLATE_DIR: &str = "templates";
 
 /// Directory name (under [`ContentAdapter::instance_data_dir`]) holding
 /// extended-query documents. Sibling of `queries/`, not a subdirectory of
@@ -3424,6 +3520,29 @@ impl SavedQueryStore for FsQueryStore {
 
 #[async_trait]
 impl ExtendedQueryStore for FsQueryStore {
+    async fn list(&self) -> Result<Vec<String>> {
+        self.list_names().await
+    }
+
+    async fn load(&self, name: &str) -> Result<String> {
+        self.read(name).await
+    }
+
+    async fn save(&self, name: &str, body: &str) -> Result<()> {
+        self.write(name, body).await
+    }
+
+    async fn delete(&self, name: &str) -> Result<()> {
+        self.remove(name).await
+    }
+
+    fn path(&self, name: &str) -> Option<std::path::PathBuf> {
+        Some(self.file_path(name))
+    }
+}
+
+#[async_trait]
+impl TemplateStore for FsQueryStore {
     async fn list(&self) -> Result<Vec<String>> {
         self.list_names().await
     }

@@ -37,10 +37,7 @@ fn window_line(key: &str, bound: Option<DateTime<Utc>>, edge: WindowEdge) -> Str
 
 /// Generate the markdown template for creating a new task.
 pub fn new_task(parent_id: Option<Uuid>) -> String {
-    let parent_line = match parent_id {
-        Some(id) => format!("parent: {id}"),
-        None => "# parent:".to_string(),
-    };
+    let parent_line = parent_line(parent_id);
 
     format!(
         r#"---
@@ -49,6 +46,8 @@ status: todo
 priority: 0
 tracking: false
 {parent_line}
+# tags: comma-separated tag names
+tags:
 {WINDOW_HINT}
 not_before:
 due:
@@ -60,6 +59,87 @@ due:
 ## Notes:
 "#
     )
+}
+
+/// The `parent:` frontmatter line for `parent_id` — commented out (blank) for a
+/// top-level task, as [`new_task`] writes it.
+fn parent_line(parent_id: Option<Uuid>) -> String {
+    match parent_id {
+        Some(id) => format!("parent: {id}"),
+        None => "# parent:".to_string(),
+    }
+}
+
+/// A stored template with its `parent:` set from the create's context.
+///
+/// The parent is the one thing a template cannot know — it is decided by
+/// where the create was started — so whatever `parent:` line the template
+/// has (set, blank or commented out) is replaced, the first one in place and
+/// any further ones dropped. A template without one gets it before the
+/// closing `---`, and one without a frontmatter gets a frontmatter holding
+/// only it. Everything else is kept byte for byte.
+pub fn with_parent(template: &str, parent_id: Option<Uuid>) -> String {
+    let line = parent_line(parent_id);
+    let is_parent = |l: &str| {
+        l.trim()
+            .trim_start_matches('#')
+            .trim_start()
+            .starts_with("parent:")
+    };
+
+    let mut out = Vec::new();
+    let mut lines = template.lines();
+    // Everything up to the opening `---`; anything but blank lines there
+    // means there is no frontmatter.
+    let mut opened = false;
+    for l in &mut lines {
+        out.push(l.to_string());
+        if l.trim() == "---" {
+            opened = true;
+            break;
+        }
+        if !l.trim().is_empty() {
+            break;
+        }
+    }
+    if !opened {
+        let body = if template.is_empty() {
+            String::new()
+        } else {
+            format!("\n{template}")
+        };
+        return format!("---\n{line}\n---\n{body}");
+    }
+    let mut placed = false;
+    let mut closed = false;
+    for l in &mut lines {
+        if l.trim() == "---" {
+            if !placed {
+                out.push(line.clone());
+                placed = true;
+            }
+            out.push(l.to_string());
+            closed = true;
+            break;
+        }
+        if is_parent(l) {
+            if !placed {
+                out.push(line.clone());
+                placed = true;
+            }
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    if !closed && !placed {
+        out.push(line);
+    }
+    out.extend(lines.map(str::to_string));
+    let mut merged = out.join("\n");
+    if template.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged
 }
 
 /// Generate the markdown template for editing an existing task (without notes).
@@ -133,6 +213,8 @@ pub struct ParsedNewTask {
     pub tracking: bool,
     pub not_before: Option<DateTime<Utc>>,
     pub due: Option<DateTime<Utc>>,
+    /// Tag names from `tags:`, in the order written, empty when none.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -164,6 +246,7 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
     let mut tracking = false;
     let mut not_before = None;
     let mut due = None;
+    let mut tags = Vec::new();
     let mut errors = Vec::new();
 
     for line in frontmatter.lines() {
@@ -227,6 +310,14 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
                     not_before = parse_bound_field("not_before", value, WindowEdge::Start, &mut errors)
                 }
                 "due" => due = parse_bound_field("due", value, WindowEdge::End, &mut errors),
+                "tags" => {
+                    tags = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                }
                 _ => {}
             }
         }
@@ -251,6 +342,7 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
             tracking,
             not_before,
             due,
+            tags,
         })
     } else {
         ParseResult::Errors {
@@ -945,6 +1037,64 @@ mod tests {
                 assert_eq!(task.status, Some(TaskStatus::InProgress));
                 assert_eq!(task.priority, Some(5));
             }
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    // ----- stored templates -----
+
+    const PARENT: &str = "6f1c2a1e-0000-4000-8000-000000000001";
+
+    fn parent() -> Option<Uuid> {
+        Some(Uuid::parse_str(PARENT).unwrap())
+    }
+
+    #[test]
+    fn with_parent_replaces_a_commented_parent_line_in_place() {
+        let template = new_task(None);
+        let merged = with_parent(&template, parent());
+        assert_eq!(merged, new_task(parent()));
+    }
+
+    #[test]
+    fn with_parent_overrides_a_parent_the_template_wrote() {
+        let template = "---\nparent: 00000000-0000-4000-8000-00000000dead\nstatus: todo\nparent:\n---\n\n## Description:\n";
+        let merged = with_parent(template, parent());
+        assert_eq!(
+            merged,
+            format!("---\nparent: {PARENT}\nstatus: todo\n---\n\n## Description:\n")
+        );
+    }
+
+    #[test]
+    fn with_parent_inserts_a_missing_line_before_the_closing_fence() {
+        let merged = with_parent("---\ntags: todo\n---\nbody", None);
+        assert_eq!(merged, "---\ntags: todo\n# parent:\n---\nbody");
+    }
+
+    #[test]
+    fn with_parent_gives_a_bare_template_a_frontmatter() {
+        let merged = with_parent("## Description:\n", parent());
+        assert_eq!(merged, format!("---\nparent: {PARENT}\n---\n\n## Description:\n"));
+    }
+
+    #[test]
+    fn a_template_saved_unchanged_creates_nothing() {
+        let template = with_parent("---\ntags: todo\n---\n\n## Description:\n", parent());
+        assert!(matches!(
+            parse_new_task(&template, &template),
+            ParseResult::Aborted
+        ));
+    }
+
+    #[test]
+    fn parse_new_task_reads_tags_as_a_comma_list() {
+        let template = new_task(None);
+        let content = template
+            .replace("tags:", "tags: todo, work ,, home")
+            .replace("## Description:\n", "## Description:\nBuy milk\n");
+        match parse_new_task(&content, &template) {
+            ParseResult::Ok(task) => assert_eq!(task.tags, ["todo", "work", "home"]),
             other => panic!("Expected Ok, got {other:?}"),
         }
     }

@@ -1,6 +1,6 @@
 # Plan: editor templates for create actions
 
-Status: planned, not started.
+Status: step 1 done (protocol + tasks adapter).
 
 ## Goal
 

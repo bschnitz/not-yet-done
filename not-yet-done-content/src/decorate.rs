@@ -202,6 +202,12 @@ pub trait AdapterDecorator: Send + Sync {
     fn extended_query_store(&self) -> Option<Box<dyn ExtendedQueryStore>> {
         self.inner().extended_query_store()
     }
+    fn template_store(&self, action_id: &str) -> Option<Box<dyn TemplateStore>> {
+        self.inner().template_store(action_id)
+    }
+    fn template_suffix(&self) -> &str {
+        self.inner().template_suffix()
+    }
     fn query_body_suffix(&self) -> &str {
         self.inner().query_body_suffix()
     }
@@ -383,6 +389,12 @@ impl<T: AdapterDecorator> ContentAdapter for T {
     fn extended_query_store(&self) -> Option<Box<dyn ExtendedQueryStore>> {
         <T as AdapterDecorator>::extended_query_store(self)
     }
+    fn template_store(&self, action_id: &str) -> Option<Box<dyn TemplateStore>> {
+        <T as AdapterDecorator>::template_store(self, action_id)
+    }
+    fn template_suffix(&self) -> &str {
+        <T as AdapterDecorator>::template_suffix(self)
+    }
     fn query_body_suffix(&self) -> &str {
         <T as AdapterDecorator>::query_body_suffix(self)
     }
@@ -446,6 +458,14 @@ pub trait NodeDecorator: Send + Sync {
     async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
         self.inner().prepare(action_id, args).await
     }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        self.inner().prepare_templated(action_id, args, template).await
+    }
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         self.inner().picker_options(action_id).await
     }
@@ -494,6 +514,14 @@ impl<T: NodeDecorator> Node for T {
     }
     async fn prepare(&self, action_id: &str, args: &ActionArgs) -> Result<EditorPrep> {
         <T as NodeDecorator>::prepare(self, action_id, args).await
+    }
+    async fn prepare_templated(
+        &self,
+        action_id: &str,
+        args: &ActionArgs,
+        template: &str,
+    ) -> Result<EditorPrep> {
+        <T as NodeDecorator>::prepare_templated(self, action_id, args, template).await
     }
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         <T as NodeDecorator>::picker_options(self, action_id).await
