@@ -898,6 +898,29 @@ A plain name matches every task with that description, so a name that exists twi
 
 Tree predicates work in both task and tracking filters. In tracking filters, they match against the tracked task's tree position. A misspelt name is rejected when the filter is read, rather than becoming a branch that matches nothing.
 
+### Tracking Predicates
+
+Moving a tracking (split, edit) soft-deletes it and inserts successors whose `predecessor_id` points back at it. A tracking moved several times is therefore the root of a chain of deleted trackings that ends in the live one(s).
+
+| Operator             | Example                      | Matches                                                                 |
+| -------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `has_live_successor` | `[has_live_successor, true]` | Trackings whose move chain still ends in at least one non-deleted tracking |
+
+`false` matches every other tracking. One live part of a split is enough. The predicate only exists in tracking filters; a task filter rejects it.
+
+Every tracking once, as originally tracked, without its moves:
+
+```yaml
+query:
+  and:
+    - [predecessor_id, is_null]
+    - or:
+        - [deleted, =, false]
+        - [has_live_successor, true]
+```
+
+The moved originals are deleted rows, so the trackings tab shows them dimmed with their original times.
+
 ### Compound Expressions
 
 ```yaml

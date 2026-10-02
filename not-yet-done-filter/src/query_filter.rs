@@ -16,7 +16,7 @@
 //! application implements, so a misspelt `in_tre` is a load error rather than a
 //! branch that quietly matches nothing.
 
-use crate::TREE_PREDICATES;
+use crate::HOST_PREDICATES;
 use rowsieve::FilterExpr;
 use rowsieve::dates::resolve_dates;
 
@@ -64,7 +64,7 @@ pub fn parse(content: &str) -> Result<ParsedQuery, QueryError> {
         message: format!("Invalid query: {e}"),
     })?;
 
-    expr.validate_custom(TREE_PREDICATES)
+    expr.validate_custom(HOST_PREDICATES)
         .map_err(|e| QueryError::Field {
             message: e.to_string(),
         })?;

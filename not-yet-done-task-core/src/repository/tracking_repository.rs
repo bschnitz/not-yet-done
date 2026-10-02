@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::entity::tracking::{self, ActiveModel};
 use crate::error::AppError;
-use crate::filter::{ColumnRegistry, FilterExpr};
+use crate::filter::{ColumnRegistry, FilterExpr, Literal};
+use not_yet_done_filter::HAS_LIVE_SUCCESSOR;
 
 #[async_trait]
 pub trait TrackingRepository: shaku::Interface {
@@ -423,4 +424,83 @@ impl ColumnRegistry for TrackingWithTaskRegistry {
             _ => None,
         }
     }
+
+    fn predicate(
+        &self,
+        name: &str,
+        arg: &Literal,
+    ) -> Option<Result<sea_orm::sea_query::SimpleExpr, AppError>> {
+        (name == HAS_LIVE_SUCCESSOR).then(|| has_live_successor(arg))
+    }
+}
+
+/// `[has_live_successor, true]` → `tracking.id IN (<moved, chain still alive>)`,
+/// `false` → `NOT IN`.
+///
+/// A move (split, edit) soft-deletes a tracking and inserts its successors
+/// with `predecessor_id` pointing back, so a tracking moved twice is the root
+/// of a chain `A ← B ← C`. The id set is one recursive CTE walked *upwards*
+/// from every live successor:
+///
+/// - anchor: the `predecessor_id` of each non-deleted tracking that has one;
+/// - step: the `predecessor_id` of each tracking already in the set.
+///
+/// Every tracking above a non-deleted one lands in the set, so one live branch
+/// of a split is enough. `UNION` (not `UNION ALL`) dedupes, which also ends the
+/// walk on a corrupt cyclic chain. The subquery is not correlated — the
+/// database evaluates it once per query — and the step joins on the primary
+/// key. Built with sea-query, so it renders for every backend SeaORM speaks.
+fn has_live_successor(arg: &Literal) -> Result<sea_orm::sea_query::SimpleExpr, AppError> {
+    use sea_orm::sea_query::{
+        Alias, BinOper, CommonTableExpression, Expr, ExprTrait, Query, SimpleExpr, UnionType,
+        WithClause,
+    };
+
+    let Literal::Bool(wanted) = arg else {
+        return Err(AppError::FilterError(format!(
+            "{HAS_LIVE_SUCCESSOR} takes true or false, got: {arg:?}"
+        )));
+    };
+
+    let chain = Alias::new("live_chain");
+    let chain_id = Alias::new("id");
+    let live = Alias::new("live");
+    let step = Alias::new("step");
+
+    // Own aliases inside the subquery, so no column can be read as the
+    // outer query's `tracking`.
+    let mut walk = Query::select()
+        .column((live.clone(), tracking::Column::PredecessorId))
+        .from_as(tracking::Entity, live.clone())
+        .and_where(Expr::col((live.clone(), tracking::Column::Deleted)).eq(false))
+        .and_where(Expr::col((live.clone(), tracking::Column::PredecessorId)).is_not_null())
+        .to_owned();
+    walk.union(
+        UnionType::Distinct,
+        Query::select()
+            .column((step.clone(), tracking::Column::PredecessorId))
+            .from_as(tracking::Entity, step.clone())
+            .inner_join(
+                chain.clone(),
+                Expr::col((step.clone(), tracking::Column::Id))
+                    .equals((chain.clone(), chain_id.clone())),
+            )
+            .and_where(Expr::col((step.clone(), tracking::Column::PredecessorId)).is_not_null())
+            .to_owned(),
+    );
+
+    let cte = CommonTableExpression::new()
+        .query(walk)
+        .column(chain_id.clone())
+        .table_name(chain.clone())
+        .to_owned();
+    let ids = Query::select()
+        .column(chain_id)
+        .from(chain)
+        .to_owned()
+        .with(WithClause::new().recursive(true).cte(cte).to_owned());
+
+    let op = if *wanted { BinOper::In } else { BinOper::NotIn };
+    Ok(Expr::col((Alias::new("tracking"), tracking::Column::Id))
+        .binary(op, SimpleExpr::SubQuery(None, Box::new(ids.into()))))
 }

@@ -189,6 +189,8 @@ without `core`; the _language_ was later lifted one level further out, into
 - **`not-yet-done-filter`** — what is genuinely about _tasks_, layered on top:
   the saved-query document (`name:` + `query:`), the `has_ancestor`/`in_tree`
   predicates and their resolution against the materialized `path` column, the
+  tracking predicate `has_live_successor` (a recursive CTE over
+  `predecessor_id`, built in the tracking repository's column registry), the
   date-field list for `extract_date_bounds`, and the AST → SeaORM translation.
   Everything else is re-exported, so call sites see one crate. Used by
   `task-core`, `local-adapter`, `cli` and `tui`.

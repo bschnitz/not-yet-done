@@ -19,6 +19,13 @@ use not_yet_done_filter::{ColRef, FilterExpr, FilterLeaf, Literal, Operator, Rhs
 /// in `not-yet-done-macros`.
 pub trait ColumnRegistry {
     fn resolve(&self, table: Option<&str>, column: &str) -> Option<SqColumnRef>;
+
+    /// Translate a host predicate (`[name, argument]`) this registry's entity
+    /// implements in SQL. `None` means the entity does not know `name`; the
+    /// builder then reports it as untranslatable.
+    fn predicate(&self, _name: &str, _arg: &Literal) -> Option<Result<SimpleExpr, AppError>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -55,11 +62,14 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
                 }
                 Ok(cond)
             }
-            FilterExpr::Custom { name, .. } => Err(AppError::FilterError(format!(
-                "'{name}' is a predicate SQL cannot express. \
-                 The tree predicates are resolved by resolve_tree_operators(), \
-                 which must run before the filter reaches this builder."
-            ))),
+            FilterExpr::Custom { name, arg } => match self.registry.predicate(name, arg) {
+                Some(expr) => Ok(Condition::all().add(expr?)),
+                None => Err(AppError::FilterError(format!(
+                    "'{name}' is not a predicate of this list. \
+                     (The tree predicates are resolved by resolve_tree_operators(), \
+                     which must run before the filter reaches this builder.)"
+                ))),
+            },
             FilterExpr::Not(inner) => {
                 let inner_cond = self.build_expr(inner)?;
                 Ok(Condition::all().not().add(inner_cond))

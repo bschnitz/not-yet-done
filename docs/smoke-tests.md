@@ -8320,6 +8320,24 @@ tracking today.
 - [ ] CLI parity: `nyd adapter trackings ls -q '<query>'` with the same
       four bodies gives the same rows as the tab.
 
+## Tracking predicate — `[has_live_successor, true]`
+
+Needs a tracking moved twice (move it, then move the result again), a
+tracking split once with one part deleted afterwards, and one moved
+tracking whose result was deleted.
+
+- [ ] Trackings tab, query `[has_live_successor, true]` → the twice-moved
+      original **and** its intermediate move, the split original; not the
+      one whose result was deleted.
+- [ ] Query from the README ("every tracking once, without its moves") →
+      each original once, dimmed with its original times, plus every
+      never-moved live tracking; no successor rows.
+- [ ] `[has_live_successor, maybe]` → load error naming `true or false`.
+- [ ] Tasks tab, `[has_live_successor, true]` → load error naming the
+      predicate, not an empty list.
+- [ ] CLI parity: `nyd adapter trackings ls -q '<query>'` gives the same
+      rows as the tab.
+
 ## CLI — a view file that does not parse is named, not dropped
 
 Put a `views/broken.yaml` with `tab:` + `adapter:` and a bad head, e.g.

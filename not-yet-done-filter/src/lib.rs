@@ -10,6 +10,8 @@
 //!   [`FilterExpr::Custom`] leaves to `rowsieve`, which carries them through
 //!   untouched; `not-yet-done-task-core` resolves them against the task
 //!   hierarchy before any SQL is built.
+//! - [`HAS_LIVE_SUCCESSOR`] — the tracking predicate over the move chain
+//!   (`predecessor_id`); the tracking repository translates it into SQL.
 //! - [`extract_date_bounds`] — the date window, over the task entity's own
 //!   date columns.
 //!
@@ -37,12 +39,21 @@ pub const HAS_ANCESTOR: &str = "has_ancestor";
 /// `[in_tree, <description>]` — the named task and everything below it.
 pub const IN_TREE: &str = "in_tree";
 
+/// The two task-tree predicates.
+pub const TREE_PREDICATES: &[&str] = &[HAS_ANCESTOR, IN_TREE];
+
+/// `[has_live_successor, true]` — trackings that were moved (split or edited:
+/// soft-deleted, replaced by successors pointing back via `predecessor_id`)
+/// and whose chain still ends in at least one non-deleted tracking. `false`
+/// selects the complement.
+pub const HAS_LIVE_SUCCESSOR: &str = "has_live_successor";
+
 /// Every host predicate this application understands.
 ///
 /// Pass it to [`FilterExpr::validate_custom`] wherever a filter is loaded: a
 /// misspelt `in_tre` is otherwise a predicate nobody implements, which
 /// evaluates to `false` and looks like a query that simply found nothing.
-pub const TREE_PREDICATES: &[&str] = &[HAS_ANCESTOR, IN_TREE];
+pub const HOST_PREDICATES: &[&str] = &[HAS_ANCESTOR, IN_TREE, HAS_LIVE_SUCCESSOR];
 
 /// The task columns that hold a date.
 const DATE_COLUMNS: &[&str] = &["started_at", "ended_at", "created_at"];
