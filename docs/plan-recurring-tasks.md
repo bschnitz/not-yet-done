@@ -124,3 +124,51 @@ decide when implementing whether `recur` set joins that selection.
 
 - Copy subtasks into the successor (a checklist per occurrence)? Proposal: not
   in the first version.
+
+## Implementation notes (from reading the code, 2026-10-02)
+
+Answers the user gave after the plan: subtasks are **not** copied (v1); the
+deadlines-widget question (show a `recur` task without `due` in the deadlines corner?)
+is still open — ask when that step comes.
+
+- **Schema**: `bootstrap::open_module` syncs the entity registry, so adding
+  `recur: Option<String>` and `series_id: Option<Uuid>` to
+  `entity/task.rs` adds the columns. Commit `3ee1f7c` (time window) is the
+  template for everything a new task column touches: every `task::Model` /
+  `ActiveModel` literal in tests (task_path.rs, notes.rs, tree_edit/\*,
+  tracking.rs, tests/filter_integration.rs), `TrackingWithTaskRegistry`
+  column list, `task_metadata` + `task_columns` in the adapter's task.rs,
+  editor buffers, README, view spec, smoke tests.
+- **Status is written in three places** in `repository/task_repository.rs`:
+  `insert`, `update_task`, `apply_batch` (`TaskOp::Update`, tree edit). One
+  private helper `advance_series(db, before, after)` called from
+  `update_task` and `apply_batch`:
+  - open → done/cancelled with `recur` set: parse, compute window, insert
+    the successor (copy `task_global_tag`, `task_project_tag`,
+    `task_project` rows).
+  - done/cancelled → open: the successor is the newest task with the same
+    `series_id` created after this one; delete it if untouched
+    (`updated_at == created_at`, `last_tracked_at` none, status todo).
+- **Pure module `recur.rs` in task-core** (no clock, zone as a parameter,
+  `chrono::Local` passed in by the repository):
+  - `Rule { schedule, due: Option<Duration> }`;
+    `Schedule::Fixed { pattern, at }` with `pattern` = every N days
+    (`daily` = 1), weekday set every N weeks (`weekdays` = mon–fri), day of
+    month (clamped to the month's last day);
+    `Schedule::AfterDone { amount, unit, at: Option<NaiveTime> }`, `at`
+    refused with an hour unit.
+  - "every N days/weeks" needs an anchor: the task's own `not_before`, else
+    the reference instant.
+  - fixed: reference = max(completed_at, own not_before); successor slot =
+    first slot strictly after it. after done: exact = completed + amount;
+    with `at` = (local completion date + days) at `at`.
+  - DST gap: take the earliest valid local time after the gap.
+  - `due = not_before + offset`; offsets `+4h`, `+30m`, `+1d`, `+2d12h`.
+  - first window on create (no explicit window in the buffer): fixed = first
+    slot after now; after done = `not_before` now.
+- **Service**: `set_task_recur(id, Option<String>)` validates via the parser
+  (new `AppError::InvalidRecurrence`) and sets `series_id` to the task's own
+  id when it has none.
+- **Refresh**: `TaskChanged` is published by the adapter (task.rs ~1075), not
+  the repository — the successor's creation must publish (or invalidate the
+  parent/list) too, or it only shows after the next snapshot rebuild.
