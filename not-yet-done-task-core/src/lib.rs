@@ -19,6 +19,7 @@ pub mod events;
 pub mod filter;
 pub mod local_context;
 pub mod module;
+pub mod recur;
 pub mod repository;
 pub mod service;
 pub mod task_path;
