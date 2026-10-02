@@ -102,6 +102,9 @@ where
         let date = now.date_naive() + Duration::days(days);
         return build(date, NaiveTime::from_hms_opt(0, 0, 0)?, now);
     }
+    if let Some(rest) = todays_weekday(s, now) {
+        return resolve_core(&rest, now);
+    }
     if let Some(d) = in_prefix(s, now) {
         return Some(d);
     }
@@ -153,6 +156,23 @@ fn normalize(s: &str) -> String {
         }
     }
     t
+}
+
+/// A phrase that starts with today's weekday ("friday", "fri 17:00" on a
+/// Friday), rewritten to start with `today` instead. chrono-english reads a
+/// bare weekday as the *next* one, which on that very day is a week away;
+/// someone naming today's weekday means today. `next friday` doesn't
+/// start with the weekday and keeps its week jump.
+fn todays_weekday<Tz>(s: &str, now: DateTime<Tz>) -> Option<String>
+where
+    Tz: TimeZone,
+    Tz::Offset: Copy,
+{
+    let (word, rest) = s.split_once(' ').unwrap_or((s, ""));
+    if word.parse::<Weekday>().ok()? != now.weekday() {
+        return None;
+    }
+    Some(if rest.is_empty() { "today".to_string() } else { format!("today {rest}") })
 }
 
 /// `in <n> <unit>`: `now` + a duration. `a`/`an` count as 1.

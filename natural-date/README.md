@@ -38,7 +38,7 @@ On top of the phrasings inherited from
 - **Business days** — `next business day`, `in 2 working days`.
 - **`now` / `asap`**.
 
-Two readings differ from a plain `chrono-english` pass, on purpose:
+Three readings differ from a plain `chrono-english` pass, on purpose:
 
 - **Day words are calendar days.** `today`, `yesterday` and `tomorrow` resolve
   to midnight of that day, not to the reference time of day — so that
@@ -48,6 +48,9 @@ Two readings differ from a plain `chrono-english` pass, on purpose:
   `date-periods` and resolve to the first instant of that period. Left to
   `chrono-english`, `last month` reads as `last mon…` and answers with a
   Monday.
+- **Today's weekday is today.** `friday` (or `fri 17:00`, `friday noon`) on a
+  Friday resolves to that same day, not to the Friday a week later. `next
+friday` still jumps a week.
 
 ## API
 
