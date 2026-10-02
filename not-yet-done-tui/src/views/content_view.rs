@@ -10008,6 +10008,7 @@ impl ContentView {
             })
             .collect();
         self.query_menu_mode = QueryMenuMode::SavedQueries;
+        self.query_menu.set_title("Queries");
         self.query_menu.open(&entries, &self.query_menu_kb);
     }
 
@@ -10018,6 +10019,7 @@ impl ContentView {
     /// selectable.
     pub fn open_node_scripts_popup(&mut self, node_id: String, entries: Vec<QueryMenuEntry>) {
         self.query_menu_mode = QueryMenuMode::NodeScripts { node_id };
+        self.query_menu.set_title("Scripts");
         // Scripts are files, not queries — no default-query semantics.
         self.query_menu
             .open_without_default(&entries, &self.query_menu_kb);
@@ -10035,6 +10037,7 @@ impl ContentView {
             action_name,
             action_id,
         };
+        self.query_menu.set_title("Templates");
         // A template is a starting buffer, not a filter — no default.
         self.query_menu
             .open_without_default(&entries, &self.query_menu_kb);

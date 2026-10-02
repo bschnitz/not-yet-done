@@ -143,6 +143,12 @@ impl QueryMenuComponent {
         self.popup.is_some()
     }
 
+    /// Title of the popups opened from now on. An embedder that repurposes
+    /// the menu (scripts, editor templates) names what it lists.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = title.into();
+    }
+
     pub fn close(&mut self) {
         self.popup = None;
         self.recording_target = None;
@@ -784,6 +790,25 @@ mod tests {
                 eprintln!("{line}");
             }
         }
+    }
+
+    /// The popup carries the title set before it opened, so a repurposed
+    /// menu does not announce itself as "Queries".
+    #[test]
+    fn set_title_names_the_next_popup() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut menu = QueryMenuComponent::new(theme(), "Queries");
+        menu.set_title("Templates");
+        menu.open_without_default(&entries(), &make_kb());
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| menu.render(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|p| buf[p].symbol().to_string())
+            .collect();
+        assert!(text.contains("Templates"));
+        assert!(!text.contains("Queries"));
     }
 
     #[test]
