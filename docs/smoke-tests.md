@@ -351,21 +351,28 @@ Every tick below was read that way, not from a screenshot.
 
 Needs `templates: { menu_key: 'a t' }` on the `a a` action in `tasks.yaml`.
 
-- [ ] `a t` in the tree view → the template menu opens, empty on first use
+- [x] `a t` in the tree view → the template menu opens, empty on first use
+      Finding: the menu title says "Queries", not "Templates".
 - [ ] Type `todo` + enter → the editor opens with the plain add buffer
       (`# parent:`, empty `tags:`); fill in `tags: todo`, save → template stored under
       `<data>/…/templates/add/todo.md`, menu lists it
-- [ ] `a t`, enter on `todo` → editor with the template, `parent:` set to
+      (not run yet: `todo` was written as a file, not through the menu)
+- [x] `a t`, enter on `todo` → editor with the template, `parent:` set to
       the selected task; type a title, save → child created with tag `todo`
-- [ ] Same, but save without typing → nothing created
-- [ ] `tags:` naming an unknown tag → the editor reopens with the error,
+- [x] Same, but save without typing → nothing created
+- [x] `tags:` naming an unknown tag → the editor reopens with the error,
       nothing created
-- [ ] `ctrl+s` on `todo`, press `a o` → the menu shows `[a o]`; `a o` on a
+      Finding: fixing the cause elsewhere (e.g. creating the tag) and saving
+      the reopened buffer unchanged answers "No changes" and drops the typed
+      task.
+- [x] `ctrl+s` on `todo`, press `a o` → the menu shows `[a o]`; `a o` on a
       task creates under it with the template, like enter in the menu
-- [ ] `a o` colliding with an existing key → rejected
-- [ ] `ctrl+u` duplicates, `ctrl+e` edits, `ctrl+d` deletes (its chord goes
+- [x] `a o` colliding with an existing key → rejected
+      Finding: the conflict dialog lists `a a — add task` three times.
+- [x] `ctrl+u` duplicates, `ctrl+e` edits, `ctrl+d` deletes (its chord goes
       with it: `a o` no longer fires)
-- [ ] Flat list `a a` without `templates:` → `a t` does nothing there
+- [x] Flat list with `templates:` on its `a a` → `a t` / `a o` open the
+      template with `# parent:` (top level)
 
 ## EditSession — trackings
 
