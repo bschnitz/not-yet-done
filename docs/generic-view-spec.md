@@ -2989,6 +2989,43 @@ mtime of the temp file). Default `false` — only set the flag where this
 behaviour is wanted; on a Jira ticket edit it would push a half-finished body on
 every `:w`.
 
+### Stored templates for a create action (`templates:`)
+
+```yaml
+actions:
+  - name: add task
+    key: "a a"
+    type: create
+    id: add
+    under_selection: true
+    inherit: true
+    templates: { menu_key: "a t" }
+```
+
+A `type: create` action whose adapter action is marked templated
+(`NodeAction::templated()`, e.g. the tasks adapter's `add`/`add-sibling`) can
+start from one of several **stored templates** instead of the adapter's single
+built-in buffer. `templates.menu_key` opens the template menu — the shared query
+menu in a third mode. Enter on an entry runs **the same create action** as its
+own key (same parent resolution, `inherit`, `commit_on_save`); only the starting
+buffer differs. `templates:` is only valid on `type: create`.
+
+- **Storage:** one directory per adapter instance and action,
+  `<instance data dir>/templates/<action id>/<name><suffix>` (the suffix is the
+  adapter's, `.md` for tasks). A template is a complete buffer in the adapter's
+  format; the adapter merges the context into it (tasks writes `parent:` from
+  the selection — a `parent:` in the template is ignored).
+- **Menu keys** as in the query menu: typing a new name creates a template
+  (seeded from the adapter's plain buffer) and opens it in the editor, `ctrl+e`
+  edits, `ctrl+d` deletes, `ctrl+u` duplicates, `ctrl+s` binds a chord,
+  `ctrl+x` clears it. There is no ★ default (`ctrl+t` does nothing).
+- **Shortcuts:** a chord is stored in `query_shortcut` under the scope
+  `template:<adapter>/<instance>/<action id>` with the template name. While
+  the focus sits on a level offering that create action, the chord runs it with
+  the template directly. Deleting a template drops its chord.
+- **Aborting:** saving the buffer unchanged creates nothing, as with the
+  built-in buffer.
+
 ### Fuzzy filter
 
 ```yaml

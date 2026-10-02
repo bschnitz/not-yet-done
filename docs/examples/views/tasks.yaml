@@ -361,12 +361,15 @@ views:
       # a *child* of the selected task (the adapter's `add` re-parents onto the
       # highlighted row); with no selection it falls back to a top-level
       # task. The buffer's `parent:` field can still override.
+      # `templates:` adds a menu (`a t`) of stored starting buffers for the
+      # same create — e.g. a `todo` template that pre-sets `tags: todo`.
       - name: add task
         key: 'a a'
         type: create
         id: add
         under_selection: true
         inherit: true
+        templates: { menu_key: 'a t' }
       # Run a script against the selected task. Opens the generic `:script`
       # fuzzy menu (also reachable via the `:script` cmdline). Scripts live
       # under `<data>/not_yet_done/scripts/tasks/task_item/` — one dir per

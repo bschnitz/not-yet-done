@@ -1,6 +1,6 @@
 # Plan: editor templates for create actions
 
-Status: steps 1–2 done (protocol + tasks adapter, TUI menu + create path).
+Status: steps 1–4 done; smoke tests (docs/smoke-tests.md "Editor templates") still to run.
 
 ## Goal
 
@@ -189,3 +189,16 @@ tests green.
 - Create path: app/mod.rs:10019 loads the body from the store and calls a new
   `NodeActionEditSession::new_templated(…, template)` (node_action.rs:76),
   which checks `declared.templates` and calls `prepare_templated`.
+
+## Step 4 — done
+
+Docs: `generic-view-spec.md` "Stored templates for a create action
+(`templates:`)", `examples/views/tasks.yaml` (`a t` on the tree's `a a`),
+smoke-test section "Editor templates". TUI + CLI installed. User config:
+`templates: {menu_key: 'a t'}` on both `a a` actions in
+`~/.config/not_yet_done/views/tasks.yaml`; global tag `todo` created; template
+`tasks/tasks/templates/add/todo.md` (`tags: todo`) written directly and `a o`
+bound by a `query_shortcut` row (`template:tasks/tasks/add`, `todo`) instead of
+through the menu. deadlines-widget: `sources/nyd-deadlines.sh` takes `due set OR tag
+todo`, undated after dated (oldest first), `when: todo`, level 1, menu group
+"Ohne Deadline" before "Erledigt".
