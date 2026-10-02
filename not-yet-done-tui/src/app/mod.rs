@@ -7335,6 +7335,7 @@ impl App {
                     || self.resolve_db_shortcut(&c.source).is_some(),
             });
         }
+        crate::components::key_conflict::disambiguate(&mut items);
         items
     }
 

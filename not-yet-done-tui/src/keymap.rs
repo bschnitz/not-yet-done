@@ -368,6 +368,45 @@ impl KeySource {
         }
     }
 
+    /// Where in the view files this shortcut is declared, for telling apart
+    /// two that share a name: `view` or `view › child › …`. `None` for
+    /// sources that are not tied to a view level.
+    pub fn place(&self) -> Option<String> {
+        let (view, child_path): (&str, &[String]) = match self {
+            Self::YamlAction {
+                view, child_path, ..
+            }
+            | Self::TemplateMenuKey {
+                view, child_path, ..
+            }
+            | Self::YamlPreviewKey { view, child_path }
+            | Self::YamlCardKey { view, child_path }
+            | Self::YamlChildKeybinding {
+                view, child_path, ..
+            }
+            | Self::PaneSearchJump {
+                view, child_path, ..
+            } => (view, child_path),
+            Self::SavedQueryShortcut { view, .. }
+            | Self::YamlMenuKey { view }
+            | Self::YamlSubtab { view } => (view, &[]),
+            Self::AppActionChain { scope_path, .. } => match scope_path.split_first() {
+                Some((view, rest)) => (view, rest),
+                None => return None,
+            },
+            _ => return None,
+        };
+        if view.is_empty() {
+            return None;
+        }
+        Some(
+            std::iter::once(view)
+                .chain(child_path.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" \u{203a} "),
+        )
+    }
+
     /// A friendly, human-facing action name for the shortcut menu — as
     /// opposed to [`human`], which yields the diagnostic config path used
     /// in conflict messages. YAML/query/script sources use their declared

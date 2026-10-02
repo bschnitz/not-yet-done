@@ -80,6 +80,23 @@ impl<K> ConflictPrompt<K> {
     }
 }
 
+/// Append its [`place`](KeySource::place) to every item whose name another
+/// item shares. One action declared on several levels (`a a — add task` on
+/// the tree's root, its children and the flat list) is several bindings, all
+/// of which confirming drops — the prompt must not show them as one line
+/// repeated.
+pub fn disambiguate(items: &mut [ConflictItem]) {
+    let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+    for item in items.iter_mut() {
+        if names.iter().filter(|n| **n == item.name).count() < 2 {
+            continue;
+        }
+        if let Some(place) = item.source.place() {
+            item.name = format!("{} ({place})", item.name);
+        }
+    }
+}
+
 /// The `⚠ binding conflict` heading every host renders above the prompt.
 pub fn conflict_heading(t: &Theme) -> Line<'static> {
     Line::from(vec![Span::styled(
@@ -164,6 +181,41 @@ mod tests {
             name: "Quit".into(),
             removable,
         }
+    }
+
+    fn action(view: &str, child_path: &[&str]) -> ConflictItem {
+        ConflictItem {
+            source: KeySource::YamlAction {
+                view: view.into(),
+                child_path: child_path.iter().map(|s| s.to_string()).collect(),
+                name: "add task".into(),
+            },
+            current: vec!["a a".into()],
+            drop: "a a".into(),
+            name: "add task".into(),
+            removable: true,
+        }
+    }
+
+    #[test]
+    fn disambiguate_names_the_place_of_shared_names_only() {
+        let mut items = vec![
+            action("tree", &[]),
+            action("tree", &["subtasks"]),
+            action("flat", &[]),
+            item(true),
+        ];
+        disambiguate(&mut items);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "add task (tree)",
+                "add task (tree \u{203a} subtasks)",
+                "add task (flat)",
+                "Quit",
+            ]
+        );
     }
 
     #[test]
