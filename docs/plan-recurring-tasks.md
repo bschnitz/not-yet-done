@@ -172,3 +172,29 @@ is still open — ask when that step comes.
 - **Refresh**: `TaskChanged` is published by the adapter (task.rs ~1075), not
   the repository — the successor's creation must publish (or invalidate the
   parent/list) too, or it only shows after the next snapshot rebuild.
+
+## Progress (2026-10-02)
+
+- Done, committed: `recur.rs` (29546b1), columns + `advance_series` +
+  `set_task_recur` + `tests/recurring.rs` (eb02f6b). Deviation: the
+  successor is not written in one transaction with the status (the
+  repository uses none anywhere).
+- Done, **not committed yet** (build + tests green, untested in the TUI):
+  `recur:` key in both editor buffers (`editor_templates.rs`, parse error =
+  `FieldError`), `start_series` on create (first window when the buffer
+  names none), recur set before the status on edit, `recur` column/field in
+  `task.rs`, new `DomainEvent::SeriesAdvanced` (task bridge + lib → `All`,
+  tracking bridge ignores it) published when a recurring task closes or
+  reopens; a reopen whose successor was touched says so in the message.
+- Done since (uncommitted, tests green): unit tests for the `recur:` buffer
+  key; `edit-tree` publishes `SeriesAdvanced` for every recurring task whose
+  status crossed open/closed (integration test; the test schema gained
+  `task_project`, which the successor copy needs); `recur` column in the
+  example view (+ TUI parity test), README section "Recurring tasks",
+  smoke-test section (TUI items still open). Schema sync + JSON field checked
+  on a copy of the real DB.
+- deadlines-widget step done (uncommitted in deadlines-widget): decided 2026-10-03 — a `recur`
+  task without `due` joins the deadlines corner once its `not_before` has
+  passed, among the undated ones, ordered by `not_before`. Checked against a
+  DB copy with fixtures.
+- Next: the TUI smoke items; install the new nyd (migrates the real DB).

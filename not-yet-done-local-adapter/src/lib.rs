@@ -469,7 +469,8 @@ pub fn domain_event_to_invalidation(ev: &DomainEvent) -> Option<Invalidation> {
         DomainEvent::TrackingStarted { .. }
         | DomainEvent::TrackingStopped { .. }
         | DomainEvent::TrackingChanged { .. }
-        | DomainEvent::ProjectChanged { .. } => Invalidation::All,
+        | DomainEvent::ProjectChanged { .. }
+        | DomainEvent::SeriesAdvanced { .. } => Invalidation::All,
         DomainEvent::TrackingTick => Invalidation::Repaint,
     })
 }

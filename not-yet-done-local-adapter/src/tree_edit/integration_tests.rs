@@ -14,7 +14,7 @@ use uuid::Uuid;
 use not_yet_done_task_core::entity::{
     global_tag, project, project_tag,
     task::{self, TaskStatus},
-    task_global_tag, task_project_tag, tracking,
+    task_global_tag, task_project, task_project_tag, tracking,
 };
 use not_yet_done_task_core::module::TaskDomainModule;
 use not_yet_done_task_core::repository::{
@@ -53,6 +53,8 @@ async fn setup() -> (
         schema.create_table_from_entity(project_tag::Entity),
         schema.create_table_from_entity(task_global_tag::Entity),
         schema.create_table_from_entity(task_project_tag::Entity),
+        // A recurring task's successor copies its project memberships.
+        schema.create_table_from_entity(task_project::Entity),
     ] {
         db.execute(&stmt).await.expect("schema creation failed");
     }
@@ -743,11 +745,32 @@ fn build_task_adapter(
     db: &sea_orm::DatabaseConnection,
     policy: TrackingPolicy,
 ) -> Box<dyn not_yet_done_content::ContentAdapter> {
-    use not_yet_done_content::InMemoryHostBus;
+    let bus = std::sync::Arc::new(not_yet_done_content::InMemoryHostBus::default());
+    build_task_adapter_on(
+        service,
+        tracking_service,
+        tag_service,
+        project_service,
+        db,
+        policy,
+        bus,
+    )
+}
+
+/// [`build_task_adapter`] over a bus the test keeps, to watch what the
+/// adapter publishes on channel `"test"`.
+fn build_task_adapter_on(
+    service: Arc<dyn TaskService>,
+    tracking_service: Arc<dyn TrackingService>,
+    tag_service: Arc<dyn not_yet_done_task_core::service::TagService>,
+    project_service: Arc<dyn not_yet_done_task_core::service::ProjectService>,
+    db: &sea_orm::DatabaseConnection,
+    policy: TrackingPolicy,
+    bus: Arc<not_yet_done_content::InMemoryHostBus>,
+) -> Box<dyn not_yet_done_content::ContentAdapter> {
     // The self-contained factory would open its *own* database; the test
     // needs the adapter over the very `service`/`tracking` of its in-memory
     // DB, so build the handle and adapter directly.
-    let bus = std::sync::Arc::new(InMemoryHostBus::default());
     let tracking: Arc<dyn TrackingRepository> = tracking_repo_for(&db);
     let handle = crate::CoreHandle::new(
         service,
@@ -1212,4 +1235,61 @@ async fn outline_tracking_flags_follow_the_policy() {
     .await
     .unwrap();
     assert_eq!(tracking_now(&repo, &tasks).await, vec!["A", "C"]);
+}
+
+/// Ticking off a recurring task in the outline creates its successor beside
+/// it, which the subtree reload does not reach — so the edit announces
+/// `SeriesAdvanced`, and only for the task that actually closed.
+#[tokio::test]
+async fn adapter_edit_tree_announces_a_series_that_advanced() {
+    use not_yet_done_content::{ActionInput, HostEventBus, InMemoryHostBus};
+    use not_yet_done_task_core::events::DomainEvent;
+    let (service, tracking, tag_service, db) = setup().await;
+    let root = insert_task(&db, "Root", None, TaskStatus::Todo, 0).await;
+    let chore = insert_task(&db, "Water plants", Some(root.id), TaskStatus::Todo, 0).await;
+    service
+        .set_task_recur(chore.id, Some("daily at 08:00".to_string()))
+        .await
+        .unwrap();
+
+    let bus = Arc::new(InMemoryHostBus::default());
+    let mut events = bus.subscribe("test");
+    let adapter = build_task_adapter_on(
+        service,
+        tracking,
+        tag_service,
+        project_service_for(&db),
+        &db,
+        TrackingPolicy::Exclusive,
+        bus.clone(),
+    );
+    let mut node = adapter.get_by_id(&root.id.to_string()).await.unwrap();
+    let prep = node.prepare("edit-tree", &Default::default()).await.unwrap();
+    let text = prep.template.replace("- [ ] Water plants", "- [x] Water plants");
+    assert_ne!(text, prep.template);
+    node.execute(
+        "edit-tree",
+        ActionInput::Edited {
+            text,
+            original: prep.template,
+            version: prep.version,
+        },
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut advanced = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        if let Some(DomainEvent::SeriesAdvanced { id }) = ev.downcast_ref::<DomainEvent>() {
+            advanced.push(*id);
+        }
+    }
+    assert_eq!(advanced, [chore.id]);
+    let open: Vec<_> = all_tasks(&db)
+        .await
+        .into_iter()
+        .filter(|t| t.description == "Water plants" && t.status == TaskStatus::Todo)
+        .collect();
+    assert_eq!(open.len(), 1, "the successor is open");
 }

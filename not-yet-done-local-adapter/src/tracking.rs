@@ -2737,6 +2737,8 @@ fn spawn_tracking_bridge(
                         }
                     }
                 }
+                // A new or withdrawn successor has no trackings yet.
+                DomainEvent::SeriesAdvanced { .. } => {}
                 DomainEvent::TaskChanged { .. }
                 | DomainEvent::TrackingChanged { .. }
                 // A project rename/cascade-delete can change a task's path or

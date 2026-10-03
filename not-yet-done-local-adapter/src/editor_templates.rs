@@ -1,5 +1,6 @@
 //! The `TaskAdapter`'s editor-buffer format: a markdown document with a
-//! `---` frontmatter (status / priority / tracking / parent / time window) and a
+//! `---` frontmatter (status / priority / tracking / parent / time window /
+//! recurrence) and a
 //! `## Description:` / `## Notes:` body. Rendering (`new_task`/`edit_task`)
 //! and parsing (`parse_new_task`/`parse_edit_task`) are the two halves of
 //! the [`InputSpec::Editor`](not_yet_done_content::InputSpec::Editor)
@@ -19,6 +20,7 @@
 
 use chrono::{DateTime, Utc};
 use not_yet_done_task_core::entity::task::{Model as Task, TaskStatus};
+use not_yet_done_task_core::recur::Rule;
 use not_yet_done_task_core::service::check_window;
 use uuid::Uuid;
 
@@ -27,6 +29,10 @@ use crate::datetime::{WindowEdge, fmt_window_bound, parse_window_bound};
 /// Comment line above the two window keys, shared by both templates.
 const WINDOW_HINT: &str = "# time window: not_before = don't start earlier, due = finish by \
 (e.g. 2026-10-15, friday, friday 17:00; empty = open)";
+
+/// Comment line above `recur:`, shared by both templates.
+const RECUR_HINT: &str = "# recur: done creates the next one (e.g. daily at 08:00, \
+mon,wed,fri at 18:00, 3d after done, …, due +4h; empty = once)";
 
 fn window_line(key: &str, bound: Option<DateTime<Utc>>, edge: WindowEdge) -> String {
     match bound {
@@ -51,6 +57,8 @@ tags:
 {WINDOW_HINT}
 not_before:
 due:
+{RECUR_HINT}
+recur:
 ---
 
 ## Description:
@@ -169,6 +177,10 @@ fn edit_task_inner(task: &Task, is_tracked: bool) -> String {
     };
     let not_before_line = window_line("not_before", task.not_before, WindowEdge::Start);
     let due_line = window_line("due", task.due, WindowEdge::End);
+    let recur_line = match &task.recur {
+        Some(rule) => format!("recur: {rule}"),
+        None => "recur:".to_string(),
+    };
 
     format!(
         r#"---
@@ -180,6 +192,8 @@ tracking: {}
 {WINDOW_HINT}
 {not_before_line}
 {due_line}
+{RECUR_HINT}
+{recur_line}
 ---
 
 ## Description:
@@ -202,6 +216,9 @@ pub struct ParsedEditTask {
     /// The new time window `(not_before, due)` as a whole, `None` when
     /// neither bound changed.
     pub window: Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>)>,
+    /// The new recurrence rule, `Some(None)` to end the series here; `None`
+    /// when unchanged.
+    pub recur: Option<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -213,6 +230,8 @@ pub struct ParsedNewTask {
     pub tracking: bool,
     pub not_before: Option<DateTime<Utc>>,
     pub due: Option<DateTime<Utc>>,
+    /// Recurrence rule from `recur:`, already checked to parse.
+    pub recur: Option<String>,
     /// Tag names from `tags:`, in the order written, empty when none.
     pub tags: Vec<String>,
 }
@@ -246,6 +265,7 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
     let mut tracking = false;
     let mut not_before = None;
     let mut due = None;
+    let mut recur = None;
     let mut tags = Vec::new();
     let mut errors = Vec::new();
 
@@ -307,9 +327,11 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
                     }
                 }
                 "not_before" => {
-                    not_before = parse_bound_field("not_before", value, WindowEdge::Start, &mut errors)
+                    not_before =
+                        parse_bound_field("not_before", value, WindowEdge::Start, &mut errors)
                 }
                 "due" => due = parse_bound_field("due", value, WindowEdge::End, &mut errors),
+                "recur" => recur = parse_recur_field(value, &mut errors),
                 "tags" => {
                     tags = value
                         .split(',')
@@ -343,6 +365,7 @@ pub fn parse_new_task(content: &str, template: &str) -> ParseResult<ParsedNewTas
             tracking,
             not_before,
             due,
+            recur,
             tags,
         })
     } else {
@@ -375,6 +398,7 @@ pub fn parse_edit_task(
     // over, must not wipe a window it never mentioned.
     let mut parsed_not_before: Option<Option<DateTime<Utc>>> = None;
     let mut parsed_due: Option<Option<DateTime<Utc>>> = None;
+    let mut parsed_recur: Option<Option<String>> = None;
     let mut errors = Vec::new();
 
     for line in frontmatter.lines() {
@@ -457,6 +481,12 @@ pub fn parse_edit_task(
                     parsed_due =
                         edited_bound("due", value, original.due, WindowEdge::End, &mut errors)
                 }
+                "recur" => {
+                    let rule = parse_recur_field(value, &mut errors);
+                    if rule != original.recur {
+                        parsed_recur = Some(rule);
+                    }
+                }
                 _ => {}
             }
         }
@@ -505,6 +535,7 @@ pub fn parse_edit_task(
         && parsed_parent.is_none()
         && parsed_tracking.is_none()
         && window.is_none()
+        && parsed_recur.is_none()
     {
         return ParseResult::Aborted;
     }
@@ -516,7 +547,27 @@ pub fn parse_edit_task(
         priority,
         tracking: parsed_tracking,
         window,
+        recur: parsed_recur,
     })
+}
+
+/// `recur:`'s value; empty = not recurring. A rule that does not parse is
+/// recorded against the key, so the buffer reopens with the parser's message.
+fn parse_recur_field(value: &str, errors: &mut Vec<FieldError>) -> Option<String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    match v.parse::<Rule>() {
+        Ok(_) => Some(v.to_string()),
+        Err(e) => {
+            errors.push(FieldError {
+                field: "recur",
+                message: e.to_string(),
+            });
+            None
+        }
+    }
 }
 
 /// Parse one window bound's value; empty = no bound. A bad value is recorded
@@ -1189,7 +1240,10 @@ mod tests {
     #[test]
     fn with_parent_gives_a_bare_template_a_frontmatter() {
         let merged = with_parent("## Description:\n", parent());
-        assert_eq!(merged, format!("---\nparent: {PARENT}\n---\n\n## Description:\n"));
+        assert_eq!(
+            merged,
+            format!("---\nparent: {PARENT}\n---\n\n## Description:\n")
+        );
     }
 
     #[test]
@@ -1210,6 +1264,103 @@ mod tests {
         match parse_new_task(&content, &template) {
             ParseResult::Ok(task) => assert_eq!(task.tags, ["todo", "work", "home"]),
             other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    // ----- recur -----
+
+    fn with_description(template: &str) -> String {
+        template.replace("## Description:\n", "## Description:\nWater the plants\n")
+    }
+
+    #[test]
+    fn parse_new_task_reads_recur() {
+        let template = new_task(None);
+        let content =
+            with_description(&template).replace("\nrecur:\n", "\nrecur: daily at 08:00\n");
+        match parse_new_task(&content, &template) {
+            ParseResult::Ok(task) => assert_eq!(task.recur.as_deref(), Some("daily at 08:00")),
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_new_task_with_empty_recur_is_once() {
+        let template = new_task(None);
+        match parse_new_task(&with_description(&template), &template) {
+            ParseResult::Ok(task) => assert!(task.recur.is_none()),
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_new_task_rejects_a_bad_rule() {
+        let template = new_task(None);
+        let content = with_description(&template).replace("\nrecur:\n", "\nrecur: whenever\n");
+        match parse_new_task(&content, &template) {
+            ParseResult::Errors { errors, .. } => {
+                assert!(errors.iter().any(|e| e.field == "recur"))
+            }
+            other => panic!("Expected Errors, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_task_shows_the_rule() {
+        let mut task = make_task("Task", TaskStatus::Todo, 0, None);
+        task.recur = Some("daily at 08:00".to_string());
+        assert!(edit_task(&task, false).contains("\nrecur: daily at 08:00\n"));
+    }
+
+    #[test]
+    fn edit_task_unchanged_rule_is_no_change() {
+        let mut task = make_task("Task", TaskStatus::Todo, 0, None);
+        task.recur = Some("daily at 08:00".to_string());
+        let template = edit_task(&task, false);
+        assert!(matches!(
+            parse_edit_task(&template, &template, &task),
+            ParseResult::Aborted
+        ));
+        // Another edit leaves the rule alone.
+        let content = template.replace("priority: 0", "priority: 3");
+        match parse_edit_task(&content, &template, &task) {
+            ParseResult::Ok(parsed) => assert!(parsed.recur.is_none()),
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_task_sets_and_clears_the_rule() {
+        let task = make_task("Task", TaskStatus::Todo, 0, None);
+        let template = edit_task(&task, false);
+        let content = template.replace("\nrecur:\n", "\nrecur: 3d after done\n");
+        match parse_edit_task(&content, &template, &task) {
+            ParseResult::Ok(parsed) => {
+                assert_eq!(parsed.recur, Some(Some("3d after done".to_string())))
+            }
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+
+        let mut task = make_task("Task", TaskStatus::Todo, 0, None);
+        task.recur = Some("daily at 08:00".to_string());
+        let template = edit_task(&task, false);
+        let content = template.replace("recur: daily at 08:00", "recur:");
+        match parse_edit_task(&content, &template, &task) {
+            ParseResult::Ok(parsed) => assert_eq!(parsed.recur, Some(None)),
+            other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_task_rejects_a_bad_rule() {
+        let task = make_task("Task", TaskStatus::Todo, 0, None);
+        let template = edit_task(&task, false);
+        let content = template.replace("\nrecur:\n", "\nrecur: whenever\n");
+        match parse_edit_task(&content, &template, &task) {
+            ParseResult::Errors { errors, .. } => {
+                assert!(errors.iter().any(|e| e.field == "recur"))
+            }
+            other => panic!("Expected Errors, got {other:?}"),
         }
     }
 }

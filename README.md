@@ -383,6 +383,42 @@ defines under `theme.styles`. Rows also carry a hidden `status_key` field with
 the stored status (`todo`, `in_progress`, `done`, `cancelled`), for scripts
 that cannot read the status glyph.
 
+### Recurring tasks
+
+A task with a `recur:` rule comes back: completing it — `done` or `cancelled`,
+from the editor, the tree editor, the CLI or deadlines-widget — creates its successor,
+the same task (description, priority, parent, tags, projects) as `todo` with a
+new time window. There is never more than one open task in a series, and
+nothing is created by the clock: an overdue task stays overdue, and missed
+slots are skipped rather than made up.
+
+```yaml
+recur: daily at 08:00, due +4h
+recur: mon,wed,fri at 18:00
+recur: every 2 weeks on sat at 10:00
+recur: monthly on 1 at 09:00
+recur: 3d after done
+recur: 3 days after done at 07:00, due +12h
+```
+
+- **Fixed rhythm** (`daily`, `weekdays`, a weekday list, `every N days|weeks
+  [on …]`, `monthly on <day>`, always `at HH:MM`): the successor's `not_before`
+  is the first slot after the later of the completion and the task's own
+  `not_before`.
+- **After done** (`<N><unit> after done`, unit `h`/`d`/`w`): without `at`, the
+  successor opens exactly that long after the completion; with `at HH:MM`
+  (days and weeks only), on the day that many days later at that time.
+- **`due +<offset>`** sets `due` that long after `not_before`; without it the
+  successor has no `due`.
+
+Times are local wall-clock times. A new task with a rule and no window gets
+its first window as if it had been completed now; a window written in the
+buffer wins. Reopening a completed occurrence withdraws its successor if
+nobody has touched it yet, otherwise both stay open and the save says so.
+Changing `recur:` affects only the next successor; clearing it ends the
+series. A rule that does not parse is refused in the buffer. The rule shows
+as the `recur` column; every occurrence shares a `series_id`.
+
 ### Filtering
 
 **Fuzzy filter** — press `f` to type a fuzzy filter. Matches are shown instantly. Press `Enter` to accept, `Esc` to cancel.
@@ -954,7 +990,7 @@ String values are automatically resolved as natural-language dates:
 
 ### Available Fields
 
-**Task filters**: `id`, `description`, `status`, `deleted`, `deleted_at`, `priority`, `parent_id`, `path`, `created_at`, `updated_at`, `last_tracked_at`, `not_before`, `due`
+**Task filters**: `id`, `description`, `status`, `deleted`, `deleted_at`, `priority`, `parent_id`, `path`, `created_at`, `updated_at`, `last_tracked_at`, `not_before`, `due`, `recur`, `series_id`
 
 **Tracking filters**: `id`, `task_id`, `predecessor_id`, `started_at`, `ended_at`, `deleted`, `created_at`
 

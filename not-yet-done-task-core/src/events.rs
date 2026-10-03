@@ -36,6 +36,11 @@ pub enum DomainEvent {
     /// A task's own fields changed (created, edited, reparented, deleted,
     /// restored). Consumers refetch the affected subtree/list.
     TaskChanged { id: Uuid },
+    /// A recurring task was closed or reopened, so its successor appeared
+    /// or vanished beside it (see [`crate::recur`]). Structural, and not
+    /// confined to the task's own subtree — the successor is a sibling,
+    /// possibly at the top level — so consumers reload the task list.
+    SeriesAdvanced { id: Uuid },
     /// A task's tag set changed (a tag was assigned or unassigned) but its
     /// fields and forest position did not. Non-structural, exactly like
     /// `TrackingStarted`/`Stopped`: only the task's own `T` tag column

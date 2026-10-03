@@ -6207,6 +6207,36 @@ level's script menu. `window-pending` and `window-overdue` defined under
       its shape, the colours still land.
 - [x] Filter `[due, <, today]` in `Q`: only tasks with a past due date.
 
+## Recurring tasks (`recur:`)
+
+Completing a task with a rule creates its successor; reopening withdraws it
+again while it is untouched. Preparation: the Recur column in
+`views/tasks.yaml` (as in the example view).
+
+- [x] Start against an existing `tasks.db` without `recur` / `series_id`: the
+      schema sync adds them, every task is still there (run 2026-10-02 on a copy
+      of the real DB through the CLI: 1617 tasks before and after).
+- [ ] `a`: the buffer shows the recur hint and an empty `recur:` line.
+      `recur: daily at 08:00, due +4h` without a window saves; From is the
+      next 08:00, Due four hours later, the Recur column shows the rule as
+      written.
+- [ ] The same with an explicit `not_before:` in the buffer: the written
+      window wins.
+- [ ] `recur: whenever` (new and `e e`): the buffer reopens with the parser's
+      message on the `recur:` line; nothing else changed.
+- [ ] `e e` → status done on a recurring task → `:wq`: a new `todo` sibling
+      with the same description, priority, tags and rule appears at once
+      (also at top level), with the next window.
+- [ ] Reopen that done task (`e e` → todo): the untouched successor disappears
+      at once; the message is plain "Task updated".
+- [ ] Close it again, edit the successor (e.g. priority), reopen the first:
+      both stay open and the message says the next occurrence stays.
+- [ ] `Ctrl+n` tree editor, `[ ]` → `[x]` on a recurring task: the successor
+      appears without `r`.
+- [ ] `3d after done`: done at 19:20 → From is 19:20 three days later.
+- [ ] Clear `recur:` on the open task, close it: no successor.
+- [x] `nyd adapter tasks:flat ls -o json` shows `recur` on the rows.
+
 ## A script on the `row_change` hook (the cursor moved)
 
 The third hook: it fires from navigation, not from a load, runs detached, and

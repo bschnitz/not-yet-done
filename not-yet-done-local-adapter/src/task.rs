@@ -63,6 +63,7 @@ use not_yet_done_content::{
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
 use not_yet_done_task_core::events::DomainEvent;
+use not_yet_done_task_core::recur::Rule;
 use not_yet_done_task_core::service::TrackingPolicy;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
@@ -781,6 +782,8 @@ fn task_metadata(
                 t.due.map(|d| d.to_rfc3339()).unwrap_or_default(),
                 "Due",
             ),
+            // Recurrence rule as written, empty when the task happens once.
+            field("recur", t.recur.clone().unwrap_or_default(), "Recur"),
             field("id", t.id.to_string(), "ID"),
             // Deleted flag (`"true"`/`""`) — not a visible column, a styling
             // signal: the TUI renders rows whose `deleted` field is `"true"`
@@ -818,6 +821,7 @@ fn task_columns() -> Vec<ColumnSchema> {
         ("updated", "Updated", "datetime"),
         ("not_before", "Not before", "datetime"),
         ("due", "Due", "datetime"),
+        ("recur", "Recur", "text"),
     ]
     .into_iter()
     .map(|(key, label, value_type)| ColumnSchema::new(key, label).typed(value_type))
@@ -1071,6 +1075,87 @@ fn would_create_cycle(snapshot: &ForestSnapshot, moving: Uuid, new_parent: Uuid)
     false
 }
 
+fn is_open(status: &task::TaskStatus) -> bool {
+    matches!(
+        status,
+        task::TaskStatus::Todo | task::TaskStatus::InProgress
+    )
+}
+
+/// The open occurrence that follows `task` in its series — the one a reopen
+/// of `task` would withdraw, if nobody has touched it.
+fn open_successor(snapshot: &ForestSnapshot, task: &task::Model) -> Option<Uuid> {
+    let series = task.series_id?;
+    snapshot
+        .by_id
+        .values()
+        .map(|r| &r.task)
+        .filter(|t| {
+            t.series_id == Some(series)
+                && t.id != task.id
+                && !t.deleted
+                && is_open(&t.status)
+                && t.created_at > task.created_at
+        })
+        .max_by_key(|t| t.created_at)
+        .map(|t| t.id)
+}
+
+/// Gives a new task its rule and, when the buffer named no window, the first
+/// window the rule implies — the next slot, or open at once.
+async fn start_series(
+    handle: &CoreHandle,
+    id: Uuid,
+    rule: &str,
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
+    due: Option<chrono::DateTime<chrono::Utc>>,
+) -> std::result::Result<task::Model, AppError> {
+    let created = handle
+        .task_service
+        .set_task_recur(id, Some(rule.to_string()))
+        .await?;
+    if not_before.is_some() || due.is_some() {
+        return Ok(created);
+    }
+    let parsed = rule
+        .parse::<Rule>()
+        .map_err(|e| AppError::InvalidRecurrence(e.to_string()))?;
+    let window = parsed.first(chrono::Utc::now(), &chrono::Local);
+    handle
+        .task_service
+        .set_task_window(id, Some(window.not_before), window.due)
+        .await
+}
+
+/// After an outline edit: one `SeriesAdvanced` per recurring task whose
+/// status crossed between open and closed, since the core then created or
+/// withdrew a successor the subtree reload does not reach. A failed reload
+/// announces every recurring task — a spare full reload is harmless.
+async fn publish_series_advanced(handle: &CoreHandle, originals: &[task::Model]) {
+    let recurring: Vec<&task::Model> = originals
+        .iter()
+        .filter(|t| t.recur.is_some() || t.series_id.is_some())
+        .collect();
+    if recurring.is_empty() {
+        return;
+    }
+    let fresh: Option<HashMap<Uuid, task::Model>> = handle
+        .task_service
+        .list_tasks_including_deleted(None)
+        .await
+        .ok()
+        .map(|tasks| tasks.into_iter().map(|t| (t.id, t)).collect());
+    for t in recurring {
+        let crossed = match fresh.as_ref().and_then(|f| f.get(&t.id)) {
+            Some(now) => !now.deleted && is_open(&now.status) != is_open(&t.status),
+            None => fresh.is_none(),
+        };
+        if crossed {
+            handle.publish(DomainEvent::SeriesAdvanced { id: t.id });
+        }
+    }
+}
+
 fn emit_task_changed(handle: &CoreHandle, id: Uuid) {
     handle.publish(DomainEvent::TaskChanged { id });
 }
@@ -1322,6 +1407,17 @@ async fn execute_add(
             } else {
                 created
             };
+            let created = match &parsed.recur {
+                Some(rule) => {
+                    match start_series(handle, created.id, rule, parsed.not_before, parsed.due)
+                        .await
+                    {
+                        Ok(c) => c,
+                        Err(e) => return Ok(reopen_service_error(text, e)),
+                    }
+                }
+                None => created,
+            };
             for tag_id in tag_ids {
                 if let Err(e) = handle
                     .task_service
@@ -1419,6 +1515,26 @@ async fn execute_edit(
                 }
             }
 
+            // Before the status: a save that sets a rule and marks the task
+            // done in one go means the new rule.
+            if let Some(recur) = parsed.recur.clone() {
+                if let Err(e) = handle.task_service.set_task_recur(id, recur).await {
+                    return Ok(reopen_service_error(text, e));
+                }
+            }
+            let recurring = task.series_id.is_some()
+                || parsed.recur.clone().unwrap_or(task.recur.clone()).is_some();
+            let advances = recurring
+                && parsed
+                    .status
+                    .as_ref()
+                    .is_some_and(|s| is_open(s) != is_open(&task.status));
+            let successor = parsed
+                .status
+                .as_ref()
+                .filter(|s| advances && is_open(s))
+                .and_then(|_| open_successor(snapshot, &task));
+
             let updated = match handle
                 .task_service
                 .update_task(
@@ -1458,8 +1574,26 @@ async fn execute_edit(
                 }
             }
             emit_task_changed(handle, updated.id);
+            if advances {
+                handle.publish(DomainEvent::SeriesAdvanced { id: updated.id });
+            }
+            // Reopening withdraws an untouched successor; one that was
+            // already worked on stays, and the series now has two open tasks.
+            let kept = match successor {
+                Some(next) => handle
+                    .task_service
+                    .get_subtree(next, None)
+                    .await
+                    .is_ok_and(|rows| !rows.is_empty()),
+                None => false,
+            };
+            let message = if kept {
+                "Task updated — its next occurrence was already changed and stays open"
+            } else {
+                "Task updated"
+            };
             Ok(ActionOutcome::Done {
-                message: Some("Task updated".to_string()),
+                message: Some(message.to_string()),
             })
         }
     }
@@ -1522,6 +1656,7 @@ async fn execute_edit_tree(
             // a single `TaskChanged` can't name them all — the bridge maps
             // it to a full reload, which is what a structural edit needs.
             emit_task_changed(handle, id);
+            publish_series_advanced(handle, &originals).await;
             Ok(ActionOutcome::Done {
                 message: Some(message),
             })
@@ -2401,7 +2536,10 @@ fn spawn_task_bridge(
                 DomainEvent::TrackingChanged { .. }
                 // A cascade project delete soft-deletes that project's tasks,
                 // and a rename can shift task paths — resync the whole forest.
-                | DomainEvent::ProjectChanged { .. } => {
+                | DomainEvent::ProjectChanged { .. }
+                // A successor appeared or vanished as a sibling, possibly at
+                // the top level, which no `Node` refetch reaches.
+                | DomainEvent::SeriesAdvanced { .. } => {
                     *snapshot.write().await = None;
                     let _ = inv_tx.send(Invalidation::All);
                 }

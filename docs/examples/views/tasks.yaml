@@ -322,6 +322,11 @@ views:
         format: "%Y-%m-%d"
         style: secondary
         sizing: max
+      # Recurrence rule as written (`recur:` in `e e`), empty for a one-off.
+      - key: recur
+        label: Recur
+        style: tertiary
+        sizing: max
       # Notes marker: `📝` when a notes file exists for the task, blank else.
       - key: notes
         label: N
@@ -596,6 +601,11 @@ views:
         kind: datetime
         format: "%Y-%m-%d"
         style: secondary
+        sizing: max
+      # Recurrence rule as written (`recur:` in `e e`), empty for a one-off.
+      - key: recur
+        label: Recur
+        style: tertiary
         sizing: max
       - key: notes
         label: N
