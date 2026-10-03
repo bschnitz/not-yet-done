@@ -197,4 +197,4 @@ is still open — ask when that step comes.
   task without `due` joins the deadlines corner once its `not_before` has
   passed, among the undated ones, ordered by `not_before`. Checked against a
   DB copy with fixtures.
-- Next: the TUI smoke items; install the new nyd (migrates the real DB).
+- TUI smoke items done 2026-10-03; new nyd CLI + TUI installed.

@@ -6216,26 +6216,30 @@ again while it is untouched. Preparation: the Recur column in
 - [x] Start against an existing `tasks.db` without `recur` / `series_id`: the
       schema sync adds them, every task is still there (run 2026-10-02 on a copy
       of the real DB through the CLI: 1617 tasks before and after).
-- [ ] `a`: the buffer shows the recur hint and an empty `recur:` line.
+- [x] `a`: the buffer shows the recur hint and an empty `recur:` line.
       `recur: daily at 08:00, due +4h` without a window saves; From is the
       next 08:00, Due four hours later, the Recur column shows the rule as
       written.
-- [ ] The same with an explicit `not_before:` in the buffer: the written
+- [x] The same with an explicit `not_before:` in the buffer: the written
       window wins.
-- [ ] `recur: whenever` (new and `e e`): the buffer reopens with the parser's
+- [x] `recur: whenever` (new and `e e`): the buffer reopens with the parser's
       message on the `recur:` line; nothing else changed.
-- [ ] `e e` → status done on a recurring task → `:wq`: a new `todo` sibling
+- [x] `e e` → status done on a recurring task → `:wq`: a new `todo` sibling
       with the same description, priority, tags and rule appears at once
       (also at top level), with the next window.
-- [ ] Reopen that done task (`e e` → todo): the untouched successor disappears
+- [x] Reopen that done task (`e e` → todo): the untouched successor disappears
       at once; the message is plain "Task updated".
-- [ ] Close it again, edit the successor (e.g. priority), reopen the first:
+- [x] Close it again, edit the successor (e.g. priority), reopen the first:
       both stay open and the message says the next occurrence stays.
-- [ ] `Ctrl+n` tree editor, `[ ]` → `[x]` on a recurring task: the successor
+- [x] `Ctrl+n` tree editor, `[ ]` → `[x]` on a recurring task: the successor
       appears without `r`.
-- [ ] `3d after done`: done at 19:20 → From is 19:20 three days later.
-- [ ] Clear `recur:` on the open task, close it: no successor.
+- [x] `3d after done`: done at 19:20 → From is 19:20 three days later.
+- [x] Clear `recur:` on the open task, close it: no successor.
 - [x] `nyd adapter tasks:flat ls -o json` shows `recur` on the rows.
+
+Run 2026-10-03 in the isolated TUI (built-in editor): all items as written.
+A save that sets `recur: 3d after done` and `status: done` together uses the
+new rule for the successor (exactly three days after the save, no Due).
 
 ## A script on the `row_change` hook (the cursor moved)
 
