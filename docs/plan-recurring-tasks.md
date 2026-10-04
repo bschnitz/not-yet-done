@@ -117,13 +117,13 @@ open one matters for creating the next.
 
 The deadlines source (`deadlines-widget/sources/nyd-deadlines.sh`) selects `due set OR
 tag todo`. A successor with a `due` shows up as-is. A rule without `due +…`
-gives a task with only a `not_before`, which the source does not select —
-decide when implementing whether `recur` set joins that selection.
+gives a task with only a `not_before`. Decided 2026-10-03 and done (deadlines-widget
+`afddae2`): such a task joins the deadlines corner once its `not_before` has
+passed, among the undated ones, ordered by `not_before`.
 
 ## Open questions
 
-- ~~Copy subtasks into the successor?~~ Decided 2026-10-04, see
-  "Subtasks" below.
+None. Subtasks were decided and built 2026-10-04, see "Subtasks" below.
 
 ## Subtasks (decided and implemented 2026-10-04)
 
@@ -207,28 +207,17 @@ is still open — ask when that step comes.
   the repository — the successor's creation must publish (or invalidate the
   parent/list) too, or it only shows after the next snapshot rebuild.
 
-## Progress (2026-10-02)
+## Progress
 
-- Done, committed: `recur.rs` (29546b1), columns + `advance_series` +
-  `set_task_recur` + `tests/recurring.rs` (eb02f6b). Deviation: the
-  successor is not written in one transaction with the status (the
-  repository uses none anywhere).
-- Done, **not committed yet** (build + tests green, untested in the TUI):
-  `recur:` key in both editor buffers (`editor_templates.rs`, parse error =
-  `FieldError`), `start_series` on create (first window when the buffer
-  names none), recur set before the status on edit, `recur` column/field in
-  `task.rs`, new `DomainEvent::SeriesAdvanced` (task bridge + lib → `All`,
-  tracking bridge ignores it) published when a recurring task closes or
-  reopens; a reopen whose successor was touched says so in the message.
-- Done since (uncommitted, tests green): unit tests for the `recur:` buffer
-  key; `edit-tree` publishes `SeriesAdvanced` for every recurring task whose
-  status crossed open/closed (integration test; the test schema gained
-  `task_project`, which the successor copy needs); `recur` column in the
-  example view (+ TUI parity test), README section "Recurring tasks",
-  smoke-test section (TUI items still open). Schema sync + JSON field checked
-  on a copy of the real DB.
-- deadlines-widget step done (uncommitted in deadlines-widget): decided 2026-10-03 — a `recur`
-  task without `due` joins the deadlines corner once its `not_before` has
-  passed, among the undated ones, ordered by `not_before`. Checked against a
-  DB copy with fixtures.
-- TUI smoke items done 2026-10-03; new nyd CLI + TUI installed.
+Done and committed:
+- `recur.rs` (29546b1); columns, `advance_series`, `set_task_recur`,
+  `tests/recurring.rs` (eb02f6b). Deviation: the successor is not written in
+  one transaction with the status (the repository uses none anywhere).
+- `recur:` in both editor buffers, first window on create,
+  `DomainEvent::SeriesAdvanced` from the edit buffer and the tree editor, the
+  `recur` column, README, smoke tests (8d2f356); smoke-tested in the TUI
+  2026-10-03 (5cce463).
+- deadlines-widget: a `recur` task without `due` in the deadlines corner (deadlines-widget
+  afddae2).
+- Subtask copy with `subtasks …` / `reopen` (7d86180); smoke-tested in the TUI
+  2026-10-04; CLI and TUI installed.
