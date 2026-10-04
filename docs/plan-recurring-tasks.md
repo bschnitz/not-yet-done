@@ -122,8 +122,35 @@ decide when implementing whether `recur` set joins that selection.
 
 ## Open questions
 
-- Copy subtasks into the successor (a checklist per occurrence)? Proposal: not
-  in the first version.
+- ~~Copy subtasks into the successor?~~ Decided 2026-10-04, see
+  "Next: subtasks" below.
+
+## Next: subtasks (decided 2026-10-04, not implemented)
+
+The successor gets a copy of its predecessor's subtree. Decisions:
+
+1. **Configurable which children are copied**: `all` (default) / `open` (only
+   todo/in_progress) / `none`. Deleted children are never copied.
+2. **Reopen option** for copied children that were done/cancelled: off by
+   default, i.e. a copied done child stays done; with the option on, every
+   copy starts as `todo`.
+3. **Child windows shift** by the same delta as the mother's window
+   (`new.not_before - old.not_before`); no mother `not_before` → child
+   window copied unchanged? (decide while implementing, say so).
+4. **A copied child drops `recur` / `series_id`** — its own series must not
+   get a second open task.
+5. **Notes files are not copied** (mother or children).
+6. Copy tags/projects of each child like the mother's. Withdraw on reopen:
+   the successor counts as untouched only if every copied descendant is
+   untouched too (todo-or-copied-status, `updated_at == created_at`, never
+   tracked) — then the whole subtree is deleted for good.
+
+Still open (ask before implementing): **where the two settings live** —
+per task in the buffer (e.g. `recur:` suffix like `…, subtasks open,
+reopen`, or separate keys `recur_subtasks:` / `recur_reopen:` + columns) vs.
+one global setting in the tasks adapter config. Recommendation to offer:
+per task as part of the `recur:` rule (no new columns, travels with the
+rule, parsed by `recur.rs`).
 
 ## Implementation notes (from reading the code, 2026-10-02)
 
