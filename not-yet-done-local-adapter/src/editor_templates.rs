@@ -32,7 +32,8 @@ const WINDOW_HINT: &str = "# time window: not_before = don't start earlier, due 
 
 /// Comment line above `recur:`, shared by both templates.
 const RECUR_HINT: &str = "# recur: done creates the next one (e.g. daily at 08:00, \
-mon,wed,fri at 18:00, 3d after done, …, due +4h; empty = once)";
+mon,wed,fri at 18:00, 3d after done, …, due +4h, subtasks all|open|none, reopen; \
+empty = once)";
 
 fn window_line(key: &str, bound: Option<DateTime<Utc>>, edge: WindowEdge) -> String {
     match bound {

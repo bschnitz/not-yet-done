@@ -15,6 +15,7 @@
 //! monthly on 1 at 09:00
 //! 3d after done
 //! 3 days after done at 07:00, due +12h
+//! weekly at 09:00, subtasks open, reopen
 //! ```
 
 use std::fmt;
@@ -34,6 +35,20 @@ pub struct Rule {
     pub schedule: Schedule,
     /// `due` lies this long after `not_before`; `None` = no deadline.
     pub due: Option<Duration>,
+    /// Which children of a completed occurrence its successor gets a copy of.
+    pub subtasks: Subtasks,
+    /// Every copied child starts as `todo`; without it a done child stays done.
+    pub reopen: bool,
+}
+
+/// `subtasks all|open|none`. Deleted children are never copied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Subtasks {
+    #[default]
+    All,
+    /// Only children still `todo` or `in_progress`.
+    Open,
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +113,7 @@ impl FromStr for Rule {
         if text.is_empty() {
             return err("empty recurrence rule");
         }
-        let (head, due) = split_due(&text)?;
+        let (head, options) = split_options(&text)?;
         let (head, at) = split_at(head)?;
         let schedule = if let Some(after) = head.strip_suffix("after done") {
             parse_after_done(after.trim(), at)?
@@ -109,23 +124,63 @@ impl FromStr for Rule {
             };
             Schedule::Fixed { pattern, at }
         };
-        Ok(Rule { schedule, due })
+        let Options { due, subtasks, reopen } = options;
+        Ok(Rule { schedule, due, subtasks: subtasks.unwrap_or_default(), reopen })
     }
 }
 
-/// Splits off a trailing `, due +<offset>`.
-fn split_due(text: &str) -> Result<(&str, Option<Duration>), RecurError> {
-    let Some(pos) = text.rfind("due") else {
-        return Ok((text, None));
-    };
-    let Some(head) = text[..pos].trim_end().strip_suffix(',') else {
-        return err("'due' must follow the schedule after a comma: '…, due +4h'");
-    };
-    let offset = text[pos + "due".len()..].trim();
-    let Some(offset) = offset.strip_prefix('+') else {
-        return err(format!("due offset '{offset}' must start with '+', e.g. 'due +4h'"));
-    };
-    Ok((head.trim_end(), Some(parse_offset(offset)?)))
+#[derive(Default)]
+struct Options {
+    due: Option<Duration>,
+    subtasks: Option<Subtasks>,
+    reopen: bool,
+}
+
+/// Splits off the trailing `, due +<offset>`, `, subtasks …` and `, reopen`
+/// clauses, in any order. A comma inside the schedule (`mon,wed at 18:00`)
+/// ends the peeling, because what follows it is not an option.
+fn split_options(text: &str) -> Result<(&str, Options), RecurError> {
+    let mut options = Options::default();
+    let mut head = text;
+    while let Some(pos) = head.rfind(',') {
+        let clause = head[pos + 1..].trim();
+        let (word, arg) = clause.split_once(char::is_whitespace).unwrap_or((clause, ""));
+        let arg = arg.trim();
+        match word {
+            "due" => {
+                let Some(offset) = arg.strip_prefix('+') else {
+                    return err(format!("due offset '{arg}' must start with '+', e.g. 'due +4h'"));
+                };
+                if options.due.replace(parse_offset(offset)?).is_some() {
+                    return err("'due' is given twice");
+                }
+            }
+            "subtasks" => {
+                let which = match arg {
+                    "all" => Subtasks::All,
+                    "open" => Subtasks::Open,
+                    "none" => Subtasks::None,
+                    _ => return err(format!("'subtasks {arg}' (expected all, open or none)")),
+                };
+                if options.subtasks.replace(which).is_some() {
+                    return err("'subtasks' is given twice");
+                }
+            }
+            "reopen" if arg.is_empty() => {
+                if std::mem::replace(&mut options.reopen, true) {
+                    return err("'reopen' is given twice");
+                }
+            }
+            _ => break,
+        }
+        head = head[..pos].trim_end();
+    }
+    for word in ["due", "subtasks", "reopen"] {
+        if head.split(|c: char| c == ',' || c.is_whitespace()).any(|w| w == word) {
+            return err(format!("'{word}' must follow the schedule after a comma: '…, {word} …'"));
+        }
+    }
+    Ok((head, options))
 }
 
 /// `4h`, `30m`, `1d`, `2d12h`, `1w` — a sum of `<N><unit>` terms.
@@ -422,6 +477,8 @@ mod tests {
             Rule {
                 schedule: Schedule::Fixed { pattern: Pattern::EveryDays(1), at: t(8, 0) },
                 due: Some(Duration::hours(4)),
+                subtasks: Subtasks::All,
+                reopen: false,
             }
         );
         assert_eq!(
@@ -450,6 +507,8 @@ mod tests {
             Rule {
                 schedule: Schedule::AfterDone { amount: 3, unit: Unit::Days, at: None },
                 due: None,
+                subtasks: Subtasks::All,
+                reopen: false,
             }
         );
         assert_eq!(
@@ -457,6 +516,8 @@ mod tests {
             Rule {
                 schedule: Schedule::AfterDone { amount: 3, unit: Unit::Days, at: Some(t(7, 0)) },
                 due: Some(Duration::hours(12)),
+                subtasks: Subtasks::All,
+                reopen: false,
             }
         );
     }
@@ -497,6 +558,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_subtask_options_in_any_order() {
+        let r = rule("weekly at 09:00, subtasks open, reopen");
+        assert_eq!((r.subtasks, r.reopen, r.due), (Subtasks::Open, true, None));
+        let r = rule("mon,thu at 09:00, reopen, due +1h, subtasks none");
+        assert_eq!((r.subtasks, r.reopen, r.due), (Subtasks::None, true, Some(Duration::hours(1))));
+        assert_eq!(
+            r.schedule,
+            Schedule::Fixed {
+                pattern: Pattern::Weekdays { days: vec![Weekday::Mon, Weekday::Thu], every: 1 },
+                at: t(9, 0),
+            }
+        );
+        let r = rule("3d after done, subtasks all");
+        assert_eq!((r.subtasks, r.reopen), (Subtasks::All, false));
+    }
+
+    #[test]
     fn rejects_bad_rules() {
         for bad in [
             "",
@@ -517,6 +595,13 @@ mod tests {
             "daily at 08:00, due +4",
             "daily at 08:00, due +4x",
             "daily at 08:00 due +4h",        // comma before due
+            "daily at 08:00, subtasks some",
+            "daily at 08:00, subtasks",
+            "daily at 08:00, reopen, reopen",
+            "daily at 08:00, subtasks open, subtasks all",
+            "daily at 08:00, due +1h, due +2h",
+            "daily at 08:00 reopen",         // comma before reopen
+            "daily at 08:00, reopen now",
             "every 1000 days at 08:00",
         ] {
             assert!(bad.parse::<Rule>().is_err(), "accepted {bad:?}");

@@ -872,7 +872,8 @@ impl TaskRepositoryImpl {
         db: &DatabaseConnection,
         closed: &task::Model,
     ) -> Result<(), AppError> {
-        use crate::entity::{task_global_tag, task_project_tag};
+        use crate::entity::task::Column;
+        use crate::recur::Subtasks;
 
         // The rule was validated when it was set; one that no longer parses
         // must not make the task impossible to complete.
@@ -880,12 +881,12 @@ impl TaskRepositoryImpl {
             return Ok(());
         };
         let window = rule.successor(closed.updated_at, closed.not_before, &chrono::Local);
-        let id = Uuid::new_v4();
-        // One instant for both stamps: `updated_at == created_at` is how a
-        // reopen recognises a successor nobody has touched.
+        // One instant for every stamp of the new subtree: `updated_at ==
+        // created_at` is how a reopen recognises a copy nobody has touched,
+        // and the shared `created_at` tells a copy from a child added later.
         let now = chrono::Utc::now();
-        ActiveModel {
-            id: Set(id),
+        let successor = ActiveModel {
+            id: Set(Uuid::new_v4()),
             description: Set(closed.description.clone()),
             status: Set(TaskStatus::Todo),
             deleted: Set(false),
@@ -899,13 +900,81 @@ impl TaskRepositoryImpl {
             due: Set(window.due),
             recur: Set(closed.recur.clone()),
             series_id: Set(Some(closed.series_id.unwrap_or(closed.id))),
-            path: Set(Some(child_path(db, id, closed.parent_id).await?)),
+            path: Set(None),
+        };
+        let root = self.insert_copy(db, closed.id, successor).await?;
+
+        // Children's windows move with the mother's; without a window of her
+        // own there is nothing to measure the move by, so they stay put.
+        let shift = closed.not_before.map(|nb| window.not_before - nb);
+        let mut pending = vec![(closed.id, root)];
+        while let Some((old_parent, new_parent)) = pending.pop() {
+            let children = task::Entity::find()
+                .filter(Column::ParentId.eq(old_parent))
+                .filter(Column::Deleted.eq(false))
+                .all(db)
+                .await?;
+            for child in children {
+                let copied = match rule.subtasks {
+                    Subtasks::All => true,
+                    Subtasks::Open => is_open(&child.status),
+                    Subtasks::None => false,
+                };
+                if !copied {
+                    continue;
+                }
+                // A copy is a fresh start: `in_progress` claims work begun.
+                let status = match child.status {
+                    _ if rule.reopen => TaskStatus::Todo,
+                    TaskStatus::InProgress => TaskStatus::Todo,
+                    ref s => s.clone(),
+                };
+                let moved = |at: Option<chrono::DateTime<chrono::Utc>>| match shift {
+                    Some(d) => at.map(|t| t + d),
+                    None => at,
+                };
+                let copy = ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    description: Set(child.description.clone()),
+                    status: Set(status),
+                    deleted: Set(false),
+                    deleted_at: Set(None),
+                    priority: Set(child.priority),
+                    parent_id: Set(Some(new_parent)),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    last_tracked_at: Set(None),
+                    not_before: Set(moved(child.not_before)),
+                    due: Set(moved(child.due)),
+                    // A series of its own would get a second open task.
+                    recur: Set(None),
+                    series_id: Set(None),
+                    path: Set(None),
+                };
+                let id = self.insert_copy(db, child.id, copy).await?;
+                pending.push((child.id, id));
+            }
         }
-        .insert(db)
-        .await?;
+        Ok(())
+    }
+
+    /// Inserts `copy` (its path computed here) with the tag and project
+    /// links of `source`; returns the new id.
+    async fn insert_copy(
+        &self,
+        db: &DatabaseConnection,
+        source: Uuid,
+        mut copy: ActiveModel,
+    ) -> Result<Uuid, AppError> {
+        use crate::entity::{task_global_tag, task_project_tag};
+
+        let id = *copy.id.as_ref();
+        let parent_id = *copy.parent_id.as_ref();
+        copy.path = Set(Some(child_path(db, id, parent_id).await?));
+        copy.insert(db).await?;
 
         for link in task_global_tag::Entity::find()
-            .filter(task_global_tag::Column::TaskId.eq(closed.id))
+            .filter(task_global_tag::Column::TaskId.eq(source))
             .all(db)
             .await?
         {
@@ -914,7 +983,7 @@ impl TaskRepositoryImpl {
                 .await?;
         }
         for link in task_project_tag::Entity::find()
-            .filter(task_project_tag::Column::TaskId.eq(closed.id))
+            .filter(task_project_tag::Column::TaskId.eq(source))
             .all(db)
             .await?
         {
@@ -923,7 +992,7 @@ impl TaskRepositoryImpl {
                 .await?;
         }
         for link in task_project::Entity::find()
-            .filter(task_project::Column::TaskId.eq(closed.id))
+            .filter(task_project::Column::TaskId.eq(source))
             .all(db)
             .await?
         {
@@ -931,12 +1000,13 @@ impl TaskRepositoryImpl {
                 .insert(db)
                 .await?;
         }
-        Ok(())
+        Ok(id)
     }
 
     /// Removes the successor of a reopened occurrence — the newest later task
-    /// of its series — unless it has been edited, tracked, given subtasks or
-    /// started. A touched successor stays, and the series has two open tasks.
+    /// of its series — together with its copied subtree, unless any of it has
+    /// been edited, tracked or started, or a child was added to it. A touched
+    /// successor stays, and the series has two open tasks.
     async fn withdraw_successor(
         &self,
         db: &DatabaseConnection,
@@ -960,39 +1030,56 @@ impl TaskRepositoryImpl {
         else {
             return Ok(());
         };
-        let untouched = successor.status == TaskStatus::Todo
-            && successor.updated_at == successor.created_at
-            && successor.last_tracked_at.is_none();
+        if successor.status != TaskStatus::Todo {
+            return Ok(());
+        }
+
+        // The whole subtree, parents before children, deleted ones included:
+        // deleting a copied child is touching it too.
+        let mut subtree = vec![successor.clone()];
+        let mut next = 0;
+        while next < subtree.len() {
+            let children =
+                task::Entity::find().filter(Column::ParentId.eq(subtree[next].id)).all(db).await?;
+            subtree.extend(children);
+            next += 1;
+        }
+        // A child added by hand has a later `created_at` than the copies.
+        let untouched = subtree.iter().all(|t| {
+            t.created_at == successor.created_at
+                && t.updated_at == t.created_at
+                && t.last_tracked_at.is_none()
+                && !t.deleted
+        });
         if !untouched {
             return Ok(());
         }
-        let children = task::Entity::find()
-            .filter(Column::ParentId.eq(successor.id))
-            .count(db)
-            .await?;
+        let ids: Vec<Uuid> = subtree.iter().map(|t| t.id).collect();
         let trackings = tracking::Entity::find()
-            .filter(tracking::Column::TaskId.eq(successor.id))
+            .filter(tracking::Column::TaskId.is_in(ids.clone()))
             .count(db)
             .await?;
-        if children > 0 || trackings > 0 {
+        if trackings > 0 {
             return Ok(());
         }
 
         // Deleted for good, not soft-deleted: `undelete_last` would bring it
         // back as a second open task.
         task_global_tag::Entity::delete_many()
-            .filter(task_global_tag::Column::TaskId.eq(successor.id))
+            .filter(task_global_tag::Column::TaskId.is_in(ids.clone()))
             .exec(db)
             .await?;
         task_project_tag::Entity::delete_many()
-            .filter(task_project_tag::Column::TaskId.eq(successor.id))
+            .filter(task_project_tag::Column::TaskId.is_in(ids.clone()))
             .exec(db)
             .await?;
         task_project::Entity::delete_many()
-            .filter(task_project::Column::TaskId.eq(successor.id))
+            .filter(task_project::Column::TaskId.is_in(ids.clone()))
             .exec(db)
             .await?;
-        task::Entity::delete_by_id(successor.id).exec(db).await?;
+        for id in ids.into_iter().rev() {
+            task::Entity::delete_by_id(id).exec(db).await?;
+        }
         Ok(())
     }
 

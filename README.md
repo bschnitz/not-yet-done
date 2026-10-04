@@ -388,7 +388,7 @@ that cannot read the status glyph.
 A task with a `recur:` rule comes back: completing it — `done` or `cancelled`,
 from the editor, the tree editor, the CLI or deadlines-widget — creates its successor,
 the same task (description, priority, parent, tags, projects) as `todo` with a
-new time window. There is never more than one open task in a series, and
+new time window, together with a copy of its subtasks. There is never more than one open task in a series, and
 nothing is created by the clock: an overdue task stays overdue, and missed
 slots are skipped rather than made up.
 
@@ -399,6 +399,7 @@ recur: every 2 weeks on sat at 10:00
 recur: monthly on 1 at 09:00
 recur: 3d after done
 recur: 3 days after done at 07:00, due +12h
+recur: weekly at 09:00, subtasks open, reopen
 ```
 
 - **Fixed rhythm** (`daily`, `weekdays`, a weekday list, `every N days|weeks
@@ -410,11 +411,23 @@ recur: 3 days after done at 07:00, due +12h
   (days and weeks only), on the day that many days later at that time.
 - **`due +<offset>`** sets `due` that long after `not_before`; without it the
   successor has no `due`.
+- **`subtasks all|open|none`** picks which children are copied, at every
+  level: all of them (the default), only those still `todo`/`in_progress`, or
+  none. Deleted children are never copied. A copy keeps its description,
+  priority, tags and projects; its window moves by as much as the mother's
+  did (it stays as it was when the mother had no `not_before`). It gets no
+  `recur:` of its own and no notes.
+- **`reopen`** starts every copied child as `todo`. Without it a copy keeps
+  its child's status — a done step stays done — except that `in_progress`
+  starts over as `todo`.
+
+The clauses after the schedule are separated by commas, in any order.
 
 Times are local wall-clock times. A new task with a rule and no window gets
 its first window as if it had been completed now; a window written in the
-buffer wins. Reopening a completed occurrence withdraws its successor if
-nobody has touched it yet, otherwise both stay open and the save says so.
+buffer wins. Reopening a completed occurrence withdraws its successor and the
+copied subtasks if nobody has touched any of them yet (a child added to the
+successor counts as touching it), otherwise both stay open and the save says so.
 Changing `recur:` affects only the next successor; clearing it ends the
 series. A rule that does not parse is refused in the buffer. The rule shows
 as the `recur` column; every occurrence shares a `series_id`.

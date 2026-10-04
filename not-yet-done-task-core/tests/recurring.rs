@@ -229,3 +229,174 @@ async fn tree_edit_batch_advances_too() {
     f.repo.apply_batch(vec![update(TaskStatus::Todo)]).await.unwrap();
     assert_eq!(f.series(first.id).await.len(), 1);
 }
+
+// ── subtasks ────────────────────────────────────────────────────────────
+
+impl Fixture {
+    async fn child(&self, parent: Uuid, description: &str, status: TaskStatus) -> task::Model {
+        self.repo.insert(description.into(), Some(parent), Some(status), None).await.unwrap()
+    }
+
+    /// Live children of `parent`, by description.
+    async fn children(&self, parent: Uuid) -> Vec<task::Model> {
+        let mut all = task::Entity::find()
+            .filter(task::Column::ParentId.eq(parent))
+            .filter(task::Column::Deleted.eq(false))
+            .all(&self.db)
+            .await
+            .unwrap();
+        all.sort_by(|a, b| a.description.cmp(&b.description));
+        all
+    }
+
+    /// Completes `first` and returns its successor.
+    async fn complete(&self, first: &task::Model) -> task::Model {
+        self.set_status(first.id, TaskStatus::Done).await;
+        self.open_in(first.series_id.unwrap()).await.remove(0)
+    }
+}
+
+fn shape(tasks: &[task::Model]) -> Vec<(&str, TaskStatus)> {
+    tasks.iter().map(|t| (t.description.as_str(), t.status.clone())).collect()
+}
+
+#[tokio::test]
+async fn the_successor_gets_a_copy_of_the_subtree() {
+    let f = setup().await;
+    let first = f.recurring("1d after done").await;
+    f.child(first.id, "a stretch", TaskStatus::Done).await;
+    let run = f.child(first.id, "b run", TaskStatus::Todo).await;
+    let lap = f.child(run.id, "lap", TaskStatus::InProgress).await;
+    f.service.set_task_recur(lap.id, Some("daily at 07:00".into())).await.unwrap();
+    let tag = global_tag::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("outdoor".into()),
+        ..Default::default()
+    }
+    .insert(&f.db)
+    .await
+    .unwrap();
+    f.repo.assign_global_tag(lap.id, tag.id).await.unwrap();
+    let gone = f.child(first.id, "c gone", TaskStatus::Todo).await;
+    f.repo.soft_delete(gone.id).await.unwrap();
+
+    let next = f.complete(&first).await;
+
+    let kids = f.children(next.id).await;
+    assert_eq!(
+        shape(&kids),
+        [("a stretch", TaskStatus::Done), ("b run", TaskStatus::Todo)],
+        "a done child stays done, a deleted one is not copied"
+    );
+    let laps = f.children(kids[1].id).await;
+    assert_eq!(shape(&laps), [("lap", TaskStatus::Todo)], "in_progress starts over");
+    assert_eq!(laps[0].recur, None);
+    assert_eq!(laps[0].series_id, None);
+    assert!(laps[0].path.as_deref().unwrap().starts_with(kids[1].path.as_deref().unwrap()));
+    let tags = f.repo.find_tags_by_task_ids(&[laps[0].id]).await.unwrap();
+    assert_eq!(tags.get(&laps[0].id).map(Vec::len), Some(1), "tags are copied");
+    assert_eq!(f.children(run.id).await.len(), 1, "the original subtree is left alone");
+}
+
+#[tokio::test]
+async fn subtasks_open_copies_only_open_children() {
+    let f = setup().await;
+    let first = f.recurring("1d after done, subtasks open").await;
+    let done = f.child(first.id, "done", TaskStatus::Done).await;
+    f.child(done.id, "under done", TaskStatus::Todo).await;
+    let open = f.child(first.id, "open", TaskStatus::Todo).await;
+    f.child(open.id, "closed", TaskStatus::Cancelled).await;
+    f.child(open.id, "pending", TaskStatus::Todo).await;
+
+    let next = f.complete(&first).await;
+
+    let kids = f.children(next.id).await;
+    assert_eq!(shape(&kids), [("open", TaskStatus::Todo)]);
+    assert_eq!(shape(&f.children(kids[0].id).await), [("pending", TaskStatus::Todo)]);
+}
+
+#[tokio::test]
+async fn subtasks_none_copies_nothing() {
+    let f = setup().await;
+    let first = f.recurring("1d after done, subtasks none").await;
+    f.child(first.id, "warm up", TaskStatus::Todo).await;
+    let next = f.complete(&first).await;
+    assert!(f.children(next.id).await.is_empty());
+}
+
+#[tokio::test]
+async fn reopen_starts_every_copy_as_todo() {
+    let f = setup().await;
+    let first = f.recurring("1d after done, reopen").await;
+    let done = f.child(first.id, "done", TaskStatus::Done).await;
+    f.child(done.id, "cancelled", TaskStatus::Cancelled).await;
+    let next = f.complete(&first).await;
+    let kids = f.children(next.id).await;
+    assert_eq!(shape(&kids), [("done", TaskStatus::Todo)]);
+    assert_eq!(shape(&f.children(kids[0].id).await), [("cancelled", TaskStatus::Todo)]);
+}
+
+#[tokio::test]
+async fn child_windows_move_with_the_mother() {
+    let f = setup().await;
+    let first = f.recurring("12h after done").await;
+    let opens = first.created_at - Duration::hours(2);
+    f.service.set_task_window(first.id, Some(opens), None).await.unwrap();
+    let first = f.repo.find_by_id(first.id).await.unwrap();
+    let child = f.child(first.id, "prep", TaskStatus::Todo).await;
+    f.service
+        .set_task_window(child.id, Some(opens + Duration::hours(1)), Some(opens + Duration::hours(3)))
+        .await
+        .unwrap();
+    let bare = f.child(first.id, "unbounded", TaskStatus::Todo).await;
+
+    let next = f.complete(&first).await;
+
+    let shift = next.not_before.unwrap() - opens;
+    let kids = f.children(next.id).await;
+    assert_eq!(kids[0].description, "prep");
+    assert_eq!(kids[0].not_before, Some(opens + Duration::hours(1) + shift));
+    assert_eq!(kids[0].due, Some(opens + Duration::hours(3) + shift));
+    assert_eq!((kids[1].not_before, kids[1].due), (bare.not_before, bare.due));
+}
+
+#[tokio::test]
+async fn child_windows_stay_put_without_a_mother_window() {
+    let f = setup().await;
+    let first = f.recurring("12h after done").await;
+    assert_eq!(first.not_before, None);
+    let child = f.child(first.id, "prep", TaskStatus::Todo).await;
+    let at = first.created_at + Duration::days(2);
+    f.service.set_task_window(child.id, Some(at), None).await.unwrap();
+
+    let next = f.complete(&first).await;
+
+    assert_eq!(f.children(next.id).await[0].not_before, Some(at));
+}
+
+#[tokio::test]
+async fn reopening_withdraws_the_copied_subtree_too() {
+    let f = setup().await;
+    let first = f.recurring("1d after done").await;
+    let run = f.child(first.id, "run", TaskStatus::Done).await;
+    f.child(run.id, "lap", TaskStatus::Todo).await;
+    f.complete(&first).await;
+    assert_eq!(task::Entity::find().all(&f.db).await.unwrap().len(), 6);
+
+    f.set_status(first.id, TaskStatus::Todo).await;
+    assert_eq!(task::Entity::find().all(&f.db).await.unwrap().len(), 3, "copies gone for good");
+}
+
+#[tokio::test]
+async fn reopening_keeps_a_successor_whose_copy_was_touched() {
+    let f = setup().await;
+    let first = f.recurring("1d after done").await;
+    let run = f.child(first.id, "run", TaskStatus::Todo).await;
+    f.child(run.id, "lap", TaskStatus::Todo).await;
+    let next = f.complete(&first).await;
+    let lap = f.children(f.children(next.id).await[0].id).await.remove(0);
+    f.set_status(lap.id, TaskStatus::Done).await;
+
+    f.set_status(first.id, TaskStatus::Todo).await;
+    assert_eq!(f.open_in(first.id).await.len(), 2);
+}

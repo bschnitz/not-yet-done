@@ -123,9 +123,9 @@ decide when implementing whether `recur` set joins that selection.
 ## Open questions
 
 - ~~Copy subtasks into the successor?~~ Decided 2026-10-04, see
-  "Next: subtasks" below.
+  "Subtasks" below.
 
-## Next: subtasks (decided 2026-10-04, not implemented)
+## Subtasks (decided and implemented 2026-10-04)
 
 The successor gets a copy of its predecessor's subtree. Decisions:
 
@@ -145,16 +145,23 @@ The successor gets a copy of its predecessor's subtree. Decisions:
    untouched too (todo-or-copied-status, `updated_at == created_at`, never
    tracked) — then the whole subtree is deleted for good.
 
-Still open (ask before implementing): **where the two settings live** —
-per task in the buffer (e.g. `recur:` suffix like `…, subtasks open,
-reopen`, or separate keys `recur_subtasks:` / `recur_reopen:` + columns) vs.
-one global setting in the tasks adapter config. Recommendation to offer:
-per task as part of the `recur:` rule (no new columns, travels with the
-rule, parsed by `recur.rs`).
+Where the settings live (decided 2026-10-04): per task, as clauses of the
+`recur:` rule — `…, subtasks all|open|none, reopen`, in any order after the
+schedule, parsed by `recur.rs`; no new columns.
+
+Implemented as decided, plus four calls made while building it:
+- No mother `not_before` → the children's windows are copied unchanged.
+- Without `reopen`, an `in_progress` child is copied as `todo`: the copy is a
+  new occurrence, nobody has started it.
+- `subtasks open` filters at every level, and a child that is not copied
+  takes its subtree with it.
+- "Untouched" for the withdrawal: every task in the successor's subtree
+  (deleted ones included) has the successor's `created_at`, `updated_at ==
+  created_at`, no tracking — so a child added by hand keeps the successor.
 
 ## Implementation notes (from reading the code, 2026-10-02)
 
-Answers the user gave after the plan: subtasks are **not** copied (v1); the
+Answers the user gave after the plan: subtasks are **not** copied (v1, superseded by "Subtasks" above); the
 deadlines-widget question (show a `recur` task without `due` in the deadlines corner?)
 is still open — ask when that step comes.
 

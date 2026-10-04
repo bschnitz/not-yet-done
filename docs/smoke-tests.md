@@ -6236,6 +6236,16 @@ again while it is untouched. Preparation: the Recur column in
 - [x] `3d after done`: done at 19:20 → From is 19:20 three days later.
 - [x] Clear `recur:` on the open task, close it: no successor.
 - [x] `nyd adapter tasks:flat ls -o json` shows `recur` on the rows.
+- [ ] A recurring task with a done and an open child (the open one with a
+      child of its own): `e e` → done → the successor appears with both
+      children copied, the done one still done, the grandchild under the
+      copy.
+- [ ] The same with `, subtasks open`: only the open child and its subtree;
+      with `, subtasks none`: no children; with `, reopen`: every copy `todo`.
+- [ ] A child with a From one hour after the mother's: the copy's From is one
+      hour after the successor's.
+- [ ] Reopen the first task: successor and copies disappear at once. Again
+      with a copied child ticked off first: everything stays.
 
 Run 2026-10-03 in the isolated TUI (built-in editor): all items as written.
 A save that sets `recur: 3d after done` and `status: done` together uses the
