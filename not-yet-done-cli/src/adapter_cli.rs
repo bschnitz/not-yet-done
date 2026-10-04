@@ -1828,12 +1828,15 @@ fn pick_type<'a>(child_types: &'a [NodeType], filter: Option<&str>) -> Result<&'
 /// its root is addressed by id — the calendar discovers the calendars it can
 /// write to only then, so its `create` form has a target. The TUI opens a form
 /// through that round-trip, and an action here takes the same one. A root that
-/// is not addressable by id keeps the snapshot.
+/// is not addressable by id keeps the snapshot -- and so does one whose id
+/// resolves to some other kind of node: Confluence reads any word as a space
+/// key, so `get_by_id("root")` answers with a space, whose actions are not the
+/// root's.
 async fn action_root(adapter: &dyn ContentAdapter) -> Result<Box<dyn Node>> {
     let root = adapter.root().await?;
     match adapter.get_by_id(root.id()).await {
-        Ok(node) => Ok(node),
-        Err(_) => Ok(root),
+        Ok(node) if node.node_type().type_id == root.node_type().type_id => Ok(node),
+        _ => Ok(root),
     }
 }
 
@@ -2472,6 +2475,21 @@ mod tests {
             snapshot: root_labelled("snapshot"),
             complete: MockAdapterBuilder::new("deferring")
                 .node(MockNodeData::new("elsewhere", "other"))
+                .build(),
+        };
+        assert_eq!(action_root(&adapter).await.unwrap().label(), "snapshot");
+    }
+
+    /// A root whose id resolves to a node of another type keeps the snapshot:
+    /// Confluence answers `get_by_id("root")` with a space of that name, and
+    /// the root's own actions (`find`, `page_by_title`) were then not found.
+    #[tokio::test]
+    async fn a_root_id_resolving_to_another_type_falls_back_to_the_snapshot() {
+        use not_yet_done_content::mock::{issue_type, MockAdapterBuilder, MockNodeData};
+        let adapter = DeferringRoot {
+            snapshot: root_labelled("snapshot"),
+            complete: MockAdapterBuilder::new("deferring")
+                .node(MockNodeData::new("root", "a space").node_type(issue_type()))
                 .build(),
         };
         assert_eq!(action_root(&adapter).await.unwrap().label(), "snapshot");
