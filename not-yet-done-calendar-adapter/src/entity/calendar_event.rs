@@ -34,6 +34,15 @@ pub struct Model {
     /// token; `None` for an event held in no online meeting.
     pub meeting_provider: Option<String>,
     pub meeting_url: Option<String>,
+    /// One line per attendee, `<response token> <name>` — the form
+    /// `attendee_lines` writes and `attendees_of` reads. `None` for an event
+    /// stored before attendees were kept, or one nobody is invited to.
+    pub attendees: Option<String>,
+    /// [`Response::as_str`](not_yet_done_calendar_core::Response::as_str)
+    /// token of the account's own answer.
+    pub my_response: Option<String>,
+    /// Nullable so the column can join a table that already has rows.
+    pub cancelled: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

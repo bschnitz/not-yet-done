@@ -11,7 +11,7 @@
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 
 use not_yet_done_calendar_core::{
-    CalEvent, EventDraft, EventPatch, EventTimes, OnlineMeeting, ShowAs,
+    Attendee, CalEvent, EventDraft, EventPatch, EventTimes, OnlineMeeting, Response, ShowAs,
 };
 
 /// Serialise an [`EventDraft`] into a one-`VEVENT` iCalendar document for a
@@ -287,6 +287,20 @@ pub(crate) struct ParsedEvent {
     /// The meeting's join link, from `CONFERENCE` (RFC 7986) or a vendor
     /// property (`X-MICROSOFT-SKYPETEAMSMEETINGURL`, `X-GOOGLE-CONFERENCE`).
     join_url: Option<String>,
+    /// The organizer's address, to tell whether the account itself invited.
+    organizer_address: Option<String>,
+    attendees: Vec<ParsedAttendee>,
+    /// `STATUS:CANCELLED`.
+    cancelled: bool,
+}
+
+/// One `ATTENDEE` line: the name shown, the address it is reached at, and
+/// its `PARTSTAT`.
+#[derive(Debug, Clone)]
+struct ParsedAttendee {
+    name: String,
+    address: String,
+    response: Response,
 }
 
 impl Default for ParsedEvent {
@@ -305,6 +319,9 @@ impl Default for ParsedEvent {
             show_as: ShowAs::Unknown,
             duration: None,
             join_url: None,
+            organizer_address: None,
+            attendees: Vec::new(),
+            cancelled: false,
         }
     }
 }
@@ -312,8 +329,27 @@ impl Default for ParsedEvent {
 impl ParsedEvent {
     /// Turn this into a `CalEvent` for `calendar`, if it has the minimum
     /// viable shape (a uid and a start). Events without a start are skipped by
-    /// the caller (they cannot be placed on a timeline).
-    pub(crate) fn into_cal_event(self, calendar: &str) -> Option<CalEvent> {
+    /// the caller (they cannot be placed on a timeline). `me` is the
+    /// connection's own address, which finds the account's own answer among
+    /// the attendees.
+    pub(crate) fn into_cal_event(self, calendar: &str, me: Option<&str>) -> Option<CalEvent> {
+        let is_me = |address: &str| me.is_some_and(|me| address.eq_ignore_ascii_case(me.trim()));
+        let my_response = if self.organizer_address.as_deref().is_some_and(is_me) {
+            Some(Response::Organizer)
+        } else {
+            self.attendees
+                .iter()
+                .find(|a| is_me(&a.address))
+                .map(|a| a.response)
+        };
+        let attendees = self
+            .attendees
+            .into_iter()
+            .map(|a| Attendee {
+                name: a.name,
+                response: a.response,
+            })
+            .collect();
         let start = self.start?;
         // Derive the end: explicit DTEND wins; else DTSTART+DURATION; else a
         // zero-length event (all-day with no DTEND spans the single start day).
@@ -340,6 +376,9 @@ impl ParsedEvent {
             body: self.description.filter(|s| !s.trim().is_empty()),
             url: self.url.filter(|s| !s.trim().is_empty()),
             online_meeting: self.join_url.as_deref().map(OnlineMeeting::from_join_url),
+            attendees,
+            my_response,
+            cancelled: self.cancelled,
         })
     }
 }
@@ -397,7 +436,16 @@ fn apply_property(ev: &mut ParsedEvent, name: &str, params: &[(String, String)],
         "LOCATION" => ev.location = Some(unescape(value)),
         "DESCRIPTION" => ev.description = Some(unescape(value)),
         "URL" => ev.url = Some(value.to_string()),
-        "ORGANIZER" => ev.organizer = Some(organizer_display(params, value)),
+        "ORGANIZER" => {
+            ev.organizer = Some(organizer_display(params, value));
+            ev.organizer_address = Some(address_of(value));
+        }
+        "ATTENDEE" => {
+            if let Some(attendee) = attendee(params, value) {
+                ev.attendees.push(attendee);
+            }
+        }
+        "STATUS" => ev.cancelled = value.trim().eq_ignore_ascii_case("CANCELLED"),
         "DTSTART" => {
             if let Some((dt, all_day)) = parse_ical_datetime(params, value) {
                 ev.start = Some(dt);
@@ -452,6 +500,40 @@ fn map_busystatus(v: &str) -> ShowAs {
         "OOF" => ShowAs::OutOfOffice,
         "WORKINGELSEWHERE" => ShowAs::WorkingElsewhere,
         _ => ShowAs::Unknown,
+    }
+}
+
+/// An `ATTENDEE` line as someone invited, or `None` for a room or other
+/// resource booked through the same property.
+fn attendee(params: &[(String, String)], value: &str) -> Option<ParsedAttendee> {
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.to_ascii_uppercase())
+    };
+    if matches!(param("CUTYPE").as_deref(), Some("ROOM" | "RESOURCE")) {
+        return None;
+    }
+    let response = match param("PARTSTAT").as_deref() {
+        Some("ACCEPTED") => Response::Accepted,
+        Some("TENTATIVE") => Response::Tentative,
+        Some("DECLINED") => Response::Declined,
+        _ => Response::Pending,
+    };
+    Some(ParsedAttendee {
+        name: organizer_display(params, value),
+        address: address_of(value),
+        response,
+    })
+}
+
+/// A `CAL-ADDRESS` without its `mailto:` scheme.
+fn address_of(value: &str) -> String {
+    let value = value.trim();
+    match value.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("mailto:") => value[7..].to_string(),
+        _ => value.to_string(),
     }
 }
 
@@ -651,7 +733,7 @@ mod tests {
     fn parses_folded_event_with_all_fields() {
         let evs = parse_events(SAMPLE);
         assert_eq!(evs.len(), 1);
-        let ev = evs[0].clone().into_cal_event("Personal").unwrap();
+        let ev = evs[0].clone().into_cal_event("Personal", None).unwrap();
         assert_eq!(ev.uid, "abc-123");
         // Folded SUMMARY was rejoined without the fold whitespace.
         assert_eq!(ev.title, "Sprint planning");
@@ -677,7 +759,7 @@ mod tests {
     fn all_day_date_value_spans_one_day() {
         let ics =
             "BEGIN:VEVENT\nUID:d1\nSUMMARY:Holiday\nDTSTART;VALUE=DATE:20240301\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c").unwrap();
+        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
         assert!(ev.all_day);
         assert_eq!(
             ev.start.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
@@ -693,7 +775,7 @@ mod tests {
     #[test]
     fn derives_end_from_duration() {
         let ics = "BEGIN:VEVENT\nUID:d2\nDTSTART:20240115T090000Z\nDURATION:PT1H30M\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c").unwrap();
+        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
         assert_eq!(ev.end.format("%H:%M").to_string(), "10:30");
     }
 
@@ -701,7 +783,7 @@ mod tests {
     fn transp_falls_back_when_no_busystatus() {
         let ics =
             "BEGIN:VEVENT\nUID:d3\nDTSTART:20240115T090000Z\nTRANSP:TRANSPARENT\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c").unwrap();
+        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
         assert_eq!(ev.show_as, ShowAs::Free);
     }
 
@@ -714,7 +796,7 @@ mod tests {
     #[test]
     fn event_without_start_is_dropped() {
         let ics = "BEGIN:VEVENT\nUID:no-start\nSUMMARY:x\nEND:VEVENT\n";
-        assert!(parse_events(ics).remove(0).into_cal_event("c").is_none());
+        assert!(parse_events(ics).remove(0).into_cal_event("c", None).is_none());
     }
 
     #[test]
@@ -744,7 +826,7 @@ mod tests {
         let ics = to_ics(&draft, "uid-1@nyd", utc("2024-01-10T08:00:00Z"));
         let ev = parse_events(&ics)
             .remove(0)
-            .into_cal_event("Personal")
+            .into_cal_event("Personal", None)
             .unwrap();
         assert_eq!(ev.uid, "uid-1@nyd");
         // TEXT special chars round-trip (escaped on write, unescaped on read).
@@ -772,7 +854,7 @@ mod tests {
         assert!(ics.contains("DTSTART;VALUE=DATE:20240301"));
         // End defaults to the following day when not after the start date.
         assert!(ics.contains("DTEND;VALUE=DATE:20240302"));
-        let ev = parse_events(&ics).remove(0).into_cal_event("c").unwrap();
+        let ev = parse_events(&ics).remove(0).into_cal_event("c", None).unwrap();
         assert!(ev.all_day);
         assert_eq!(ev.show_as, ShowAs::Free);
     }
@@ -794,7 +876,7 @@ mod tests {
             "every line folds under 75"
         );
         // And it still reads back whole.
-        let ev = parse_events(&ics).remove(0).into_cal_event("c").unwrap();
+        let ev = parse_events(&ics).remove(0).into_cal_event("c", None).unwrap();
         assert_eq!(ev.title, "x".repeat(200));
     }
 
@@ -803,7 +885,62 @@ mod tests {
             "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m-1\r\nDTSTART:20240115T090000Z\r\n\
              {extra}END:VEVENT\r\nEND:VCALENDAR\r\n"
         );
-        parse_events(&ics).remove(0).into_cal_event("Work").unwrap()
+        parse_events(&ics).remove(0).into_cal_event("Work", None).unwrap()
+    }
+
+    const INVITED: &str = "ORGANIZER;CN=Jane Doe:mailto:jane@example.invalid\r\n\
+        ATTENDEE;CN=\"Doe, Jane\";PARTSTAT=ACCEPTED:mailto:jane@example.invalid\r\n\
+        ATTENDEE;PARTSTAT=TENTATIVE:MAILTO:Me@Example.invalid\r\n\
+        ATTENDEE;CN=Bob;PARTSTAT=DECLINED:mailto:bob@example.invalid\r\n\
+        ATTENDEE;CN=Carol:mailto:carol@example.invalid\r\n\
+        ATTENDEE;CUTYPE=ROOM;CN=Room 1;PARTSTAT=ACCEPTED:mailto:room@example.invalid\r\n";
+
+    fn invited(me: Option<&str>) -> CalEvent {
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m-1\r\nDTSTART:20240115T090000Z\r\n\
+             {INVITED}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        parse_events(&ics).remove(0).into_cal_event("Work", me).unwrap()
+    }
+
+    #[test]
+    fn attendees_come_with_their_answer_and_rooms_are_left_out() {
+        let ev = invited(None);
+        let attendees: Vec<_> = ev
+            .attendees
+            .iter()
+            .map(|a| (a.name.as_str(), a.response))
+            .collect();
+        assert_eq!(
+            attendees,
+            [
+                ("Doe, Jane", Response::Accepted),
+                ("Me@Example.invalid", Response::Tentative),
+                ("Bob", Response::Declined),
+                ("Carol", Response::Pending),
+            ]
+        );
+        assert_eq!(ev.my_response, None, "nobody to compare with");
+        assert!(!ev.cancelled);
+    }
+
+    #[test]
+    fn the_own_answer_is_found_by_address_and_the_organizer_answers_nothing() {
+        assert_eq!(
+            invited(Some("me@example.invalid")).my_response,
+            Some(Response::Tentative)
+        );
+        assert_eq!(
+            invited(Some("jane@example.invalid")).my_response,
+            Some(Response::Organizer)
+        );
+        assert_eq!(invited(Some("nobody@example.invalid")).my_response, None);
+    }
+
+    #[test]
+    fn a_cancelled_status_calls_the_event_off() {
+        assert!(one_event("STATUS:CANCELLED\r\n").cancelled);
+        assert!(!one_event("STATUS:CONFIRMED\r\n").cancelled);
     }
 
     #[test]
@@ -869,7 +1006,7 @@ mod tests {
         };
         let out = apply_patch(STORED, &patch, utc("2030-01-10T08:00:00Z")).unwrap();
         assert!(!out.contains("TZID=Europe/Berlin:") && !out.contains("DURATION"));
-        let ev = parse_events(&out).remove(0).into_cal_event("cal").unwrap();
+        let ev = parse_events(&out).remove(0).into_cal_event("cal", None).unwrap();
         assert_eq!(ev.start, utc("2030-01-16T13:00:00Z"));
         assert_eq!(ev.end, utc("2030-01-16T14:30:00Z"));
         assert_eq!(ev.show_as, ShowAs::Free);

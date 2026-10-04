@@ -132,6 +132,51 @@ impl ShowAs {
     }
 }
 
+/// How someone answered an invitation (iCalendar `PARTSTAT`, Exchange's and
+/// Graph's response type). [`Response::Pending`] covers both "not answered
+/// yet" and "the service does not say".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Response {
+    Accepted,
+    Tentative,
+    Declined,
+    Pending,
+    /// The one who invited; they have nothing to answer.
+    Organizer,
+}
+
+impl Response {
+    /// Stable lower-case token used as the metadata field value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Response::Accepted => "accepted",
+            Response::Tentative => "tentative",
+            Response::Declined => "declined",
+            Response::Pending => "pending",
+            Response::Organizer => "organizer",
+        }
+    }
+
+    /// Inverse of [`as_str`](Self::as_str); an unrecognised token maps to
+    /// [`Response::Pending`].
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "accepted" => Response::Accepted,
+            "tentative" => Response::Tentative,
+            "declined" => Response::Declined,
+            "organizer" => Response::Organizer,
+            _ => Response::Pending,
+        }
+    }
+}
+
+/// Someone invited to an event, by the name the calendar shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attendee {
+    pub name: String,
+    pub response: Response,
+}
+
 /// One calendar event, normalised across protocols. `start`/`end` are always
 /// UTC instants — the adapter renders them in local time and groups on them.
 /// `uid` is the backend-local stable identifier; the adapter namespaces it
@@ -158,6 +203,13 @@ pub struct CalEvent {
     /// The online meeting the event is held in, if any — set by a backend that
     /// knows, otherwise found in the text by [`meeting::detect`].
     pub online_meeting: Option<OnlineMeeting>,
+    /// Who is invited, as far as the backend knows; empty when it does not.
+    pub attendees: Vec<Attendee>,
+    /// How the connection's own account answered, when the backend can tell.
+    pub my_response: Option<Response>,
+    /// The organizer called the event off; it stays in the calendar until
+    /// someone removes it.
+    pub cancelled: bool,
 }
 
 /// A calendar collection a connection exposes as a possible **write target**.

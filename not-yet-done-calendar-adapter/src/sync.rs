@@ -263,6 +263,9 @@ mod tests {
                     body: None,
                     url: None,
                     online_meeting: None,
+                    attendees: Vec::new(),
+                    my_response: None,
+                    cancelled: false,
                 })
                 .collect())
         }

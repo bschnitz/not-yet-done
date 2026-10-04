@@ -220,7 +220,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::TimeZone;
-    use not_yet_done_calendar_core::{CalEvent, ShowAs};
+    use not_yet_done_calendar_core::{Attendee, CalEvent, Response, ShowAs};
     use tokio::sync::RwLock;
 
     use crate::store::connect;
@@ -253,6 +253,9 @@ mod tests {
                 body: None,
                 url: None,
                 online_meeting: None,
+                attendees: Vec::new(),
+                my_response: None,
+                cancelled: false,
             },
         }
     }
@@ -294,6 +297,37 @@ mod tests {
         assert_eq!(stored.event.show_as, ShowAs::Busy);
 
         assert!(!catch_up(&fresh, Some(&other)).await, "nothing new the second time");
+    }
+
+    #[tokio::test]
+    async fn attendees_the_own_answer_and_a_cancellation_survive_the_store() {
+        let (db, p) = persisted("cal_store_attendees", "calendar").await;
+        let mut called_off = event("a", "1", 10, 9, "Standup");
+        called_off.event.attendees = vec![
+            Attendee {
+                name: "Doe, Jane".to_string(),
+                response: Response::Accepted,
+            },
+            Attendee {
+                name: "Bob Example".to_string(),
+                response: Response::Pending,
+            },
+        ];
+        called_off.event.my_response = Some(Response::Tentative);
+        called_off.event.cancelled = true;
+        let events = [called_off.clone(), event("a", "2", 11, 9, "Review")];
+        ingest(&empty_cache(), Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
+
+        let fresh = empty_cache();
+        catch_up(&fresh, Some(&Persisted::new(EventStore::new(db, "calendar")))).await;
+        let stored = fresh.read().await.get("calendar:a:1").cloned().expect("by id");
+        assert_eq!(stored.event.attendees, called_off.event.attendees);
+        assert_eq!(stored.event.my_response, Some(Response::Tentative));
+        assert!(stored.event.cancelled);
+        let plain = fresh.read().await.get("calendar:a:2").cloned().expect("by id");
+        assert!(plain.event.attendees.is_empty());
+        assert_eq!(plain.event.my_response, None);
+        assert!(!plain.event.cancelled);
     }
 
     #[tokio::test]

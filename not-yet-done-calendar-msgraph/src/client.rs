@@ -524,6 +524,9 @@ fn map_event(ev: GraphEvent, label: &str) -> Result<CalEvent, CalendarError> {
         body: ev.body_preview.filter(|s| !s.trim().is_empty()),
         url: ev.web_link.filter(|s| !s.trim().is_empty()),
         online_meeting,
+        attendees: Vec::new(),
+        my_response: None,
+        cancelled: false,
     })
 }
 

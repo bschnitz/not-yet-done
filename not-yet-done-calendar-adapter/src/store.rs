@@ -22,7 +22,9 @@ use sea_orm::{
     QueryFilter, TransactionTrait,
 };
 
-use not_yet_done_calendar_core::{CalEvent, MeetingProvider, OnlineMeeting, ShowAs, TimeRange};
+use not_yet_done_calendar_core::{
+    Attendee, CalEvent, MeetingProvider, OnlineMeeting, Response, ShowAs, TimeRange,
+};
 
 use crate::adapter::MergedEvent;
 use crate::entity::{calendar_event, calendar_sync};
@@ -128,6 +130,9 @@ impl EventStore {
                         calendar_event::Column::Url,
                         calendar_event::Column::MeetingProvider,
                         calendar_event::Column::MeetingUrl,
+                        calendar_event::Column::Attendees,
+                        calendar_event::Column::MyResponse,
+                        calendar_event::Column::Cancelled,
                     ])
                     .to_owned(),
                 )
@@ -322,6 +327,9 @@ impl EventStore {
                 .as_ref()
                 .map(|m| m.provider.as_str().to_string())),
             meeting_url: Set(e.online_meeting.as_ref().and_then(|m| m.join_url.clone())),
+            attendees: Set(Some(attendee_lines(&e.attendees)).filter(|s| !s.is_empty())),
+            my_response: Set(e.my_response.map(|r| r.as_str().to_string())),
+            cancelled: Set(Some(e.cancelled)),
         }
     }
 }
@@ -350,6 +358,34 @@ fn from_row(r: calendar_event::Model) -> MergedEvent {
                 provider: MeetingProvider::from_token(&provider),
                 join_url: r.meeting_url,
             }),
+            attendees: r.attendees.as_deref().map(attendees_of).unwrap_or_default(),
+            my_response: r.my_response.as_deref().map(Response::from_token),
+            cancelled: r.cancelled.unwrap_or(false),
         },
     }
+}
+
+/// Attendees one per line, `<response token> <name>`: the stored form, and
+/// the metadata field `attendees` too. A line break in a name would start a
+/// new attendee, so it becomes a space.
+pub(crate) fn attendee_lines(attendees: &[Attendee]) -> String {
+    attendees
+        .iter()
+        .map(|a| format!("{} {}", a.response.as_str(), a.name.replace(['\r', '\n'], " ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Inverse of [`attendee_lines`].
+fn attendees_of(lines: &str) -> Vec<Attendee> {
+    lines
+        .lines()
+        .filter_map(|line| {
+            let (token, name) = line.split_once(' ')?;
+            Some(Attendee {
+                name: name.to_string(),
+                response: Response::from_token(token),
+            })
+        })
+        .collect()
 }

@@ -195,6 +195,9 @@ impl CalDavClient {
             body: draft.body.clone(),
             url: Some(target.as_str().to_string()),
             online_meeting: None,
+            attendees: Vec::new(),
+            my_response: None,
+            cancelled: false,
         })
     }
 
@@ -633,6 +636,9 @@ impl CalDavClient {
             responses.len(),
             resp.len()
         );
+        // The login is the account's address on the servers we talk to; it
+        // finds the account's own answer among an event's attendees.
+        let me = self.user.resolve().await.ok();
         let mut out = Vec::new();
         let mut parsed_total = 0usize;
         for r in responses {
@@ -652,7 +658,7 @@ impl CalDavClient {
             }
             for parsed in ical::parse_events(&data) {
                 parsed_total += 1;
-                if let Some(ev) = parsed.into_cal_event(label) {
+                if let Some(ev) = parsed.into_cal_event(label, me.as_deref()) {
                     out.push(ev);
                 }
             }

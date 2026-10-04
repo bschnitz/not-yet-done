@@ -245,6 +245,9 @@ mod tests {
             body: Some("Bring the card.\nAnd the letter.".into()),
             url: None,
             online_meeting: None,
+            attendees: Vec::new(),
+            my_response: None,
+            cancelled: false,
         }
     }
 

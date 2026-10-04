@@ -1477,6 +1477,8 @@ fn signature(merged: &[MergedEvent]) -> u64 {
         m.event.title.hash(&mut hasher);
         m.event.show_as.as_str().hash(&mut hasher);
         m.event.online_meeting.hash(&mut hasher);
+        m.event.my_response.map(|r| r.as_str()).hash(&mut hasher);
+        m.event.cancelled.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1540,6 +1542,21 @@ fn event_summary(m: &MergedEvent) -> NodeSummary {
         // the web gives a preview only). For tools reading `ls -o json`, such
         // as a menu that shows the whole event on hover.
         field("body", e.body.clone().unwrap_or_default(), "Notes"),
+        // One line per attendee, `<response> <name>`, the response one of
+        // `accepted`, `tentative`, `declined`, `pending`, `organizer`.
+        field(
+            "attendees",
+            crate::store::attendee_lines(&e.attendees),
+            "Attendees",
+        ),
+        field(
+            "my_response",
+            e.my_response
+                .map(|r| r.as_str().to_string())
+                .unwrap_or_default(),
+            "My response",
+        ),
+        field("cancelled", e.cancelled.to_string(), "Cancelled"),
     ];
 
     NodeSummary {
@@ -1590,6 +1607,15 @@ fn render_body(m: &MergedEvent) -> String {
         s.push_str(&format!("- **Organizer:** {org}\n"));
     }
     s.push_str(&format!("- **Show as:** {}\n", e.show_as.as_str()));
+    if e.cancelled {
+        s.push_str("- **Cancelled**\n");
+    }
+    if let Some(response) = e.my_response {
+        s.push_str(&format!("- **My response:** {}\n", response.as_str()));
+    }
+    if !e.attendees.is_empty() {
+        s.push_str(&format!("- **Attendees:** {}\n", e.attendees.len()));
+    }
     if let Some(meeting) = &e.online_meeting {
         match meeting.join_url.as_deref() {
             Some(url) => s.push_str(&format!(
@@ -1791,7 +1817,7 @@ impl Content for EventNode {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use not_yet_done_calendar_core::{CalendarRef, EventPatch, ShowAs};
+    use not_yet_done_calendar_core::{Attendee, CalendarRef, EventPatch, Response, ShowAs};
     use not_yet_done_content::children;
 
     /// Assemble a `CalendarAdapter` from the individual state pieces a test
@@ -1871,6 +1897,9 @@ mod tests {
                 body: Some("agenda".to_string()),
                 url: Some("https://example.invalid/x".to_string()),
                 online_meeting: None,
+                attendees: Vec::new(),
+                my_response: None,
+                cancelled: false,
             },
         }
     }
@@ -1919,8 +1948,45 @@ mod tests {
         assert_eq!(get("location").as_deref(), Some("Room 1"));
         assert_eq!(get("all_day").as_deref(), Some("false"));
         assert_eq!(get("body").as_deref(), Some("agenda"));
+        assert_eq!(get("attendees").as_deref(), Some(""));
+        assert_eq!(get("my_response").as_deref(), Some(""));
+        assert_eq!(get("cancelled").as_deref(), Some("false"));
         // start present and RFC3339-shaped (date + 'T').
         assert!(get("start").unwrap().starts_with("2030-01-15T"));
+    }
+
+    #[test]
+    fn attendees_are_one_line_each_with_their_answer_first() {
+        let mut m = sample("AAA", 9, "Sprint planning");
+        m.event.attendees = vec![
+            Attendee {
+                name: "Doe, Jane".to_string(),
+                response: Response::Accepted,
+            },
+            Attendee {
+                name: "Bob\nExample".to_string(),
+                response: Response::Declined,
+            },
+        ];
+        m.event.my_response = Some(Response::Organizer);
+        m.event.cancelled = true;
+        let row = event_summary(&m);
+        let get = |key: &str| {
+            row.metadata
+                .fields
+                .iter()
+                .find(|f| f.key == key)
+                .map(|f| f.value.clone())
+        };
+        assert_eq!(
+            get("attendees").as_deref(),
+            Some("accepted Doe, Jane\ndeclined Bob Example")
+        );
+        assert_eq!(get("my_response").as_deref(), Some("organizer"));
+        assert_eq!(get("cancelled").as_deref(), Some("true"));
+        let body = render_body(&m);
+        assert!(body.contains("- **Cancelled**"));
+        assert!(body.contains("- **Attendees:** 2"));
     }
 
     #[test]
@@ -2422,6 +2488,9 @@ mod tests {
                 body: draft.body.clone(),
                 url: None,
                 online_meeting: None,
+                attendees: Vec::new(),
+                my_response: None,
+                cancelled: false,
             })
         }
     }
