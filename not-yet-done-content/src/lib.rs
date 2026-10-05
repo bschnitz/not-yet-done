@@ -1052,6 +1052,11 @@ pub struct NodeHit {
     /// the adapter has no such notion. Cosmetic only — `path[0]` is
     /// the canonical addressing.
     pub group_key: String,
+    /// Extra `(name, value)` cells a listing of the hits shows next to the
+    /// label (the tasks adapter: status, due, tags, …), in display order.
+    /// Empty when the adapter has nothing to add; a frontend that only
+    /// walks the hits ignores them.
+    pub columns: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------

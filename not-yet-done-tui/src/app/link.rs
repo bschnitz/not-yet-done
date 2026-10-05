@@ -828,6 +828,7 @@ impl App {
                     path,
                     label: label.to_string(),
                     group_key: String::new(),
+                    columns: Vec::new(),
                 }],
                 false,
             );

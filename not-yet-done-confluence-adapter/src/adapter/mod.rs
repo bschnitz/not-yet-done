@@ -842,6 +842,7 @@ fn row_to_hit(row: crate::client::SearchResultMeta) -> Option<NodeHit> {
         path,
         label: row.title,
         group_key: row.space_key,
+        columns: Vec::new(),
     })
 }
 
@@ -1204,6 +1205,7 @@ mod tests {
             path,
             label: label.to_string(),
             group_key: space.to_string(),
+            columns: Vec::new(),
         }
     }
 

@@ -1359,7 +1359,10 @@ async fn cmd_do(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
         InputSpec::FilePicker { multi } => {
             do_files(node.as_mut(), &action_id, multi, inv, &action_args).await
         }
-        InputSpec::None => do_dispatch(node.as_mut(), &action_id, inv, action_args).await,
+        InputSpec::None => {
+            let query = action_query(adapter, inv).await?;
+            do_dispatch(node.as_mut(), &action_id, inv, query, action_args).await
+        }
     }
 }
 
@@ -1553,6 +1556,28 @@ async fn do_files(
     report_outcome(outcome, action_id)
 }
 
+/// The query an action runs under, the way a pane's active query scopes it
+/// in the TUI: `--query` or a stored `--query-name`, variables bound from
+/// `--var`. An extended document is no single native query, so it is
+/// refused here rather than dropped.
+async fn action_query(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<Option<String>> {
+    let body = match (&inv.query_name, &inv.query) {
+        (Some(name), _) => {
+            let stored = adapter_query::load(adapter, name).await?;
+            if stored.kind == not_yet_done_content::QueryKind::Extended {
+                return Err(anyhow!(
+                    "'{name}' is an extended query — an action runs under a saved query only"
+                ));
+            }
+            stored.text
+        }
+        (None, Some(text)) => text.clone(),
+        (None, None) => return Ok(None),
+    };
+    let bindings = adapter_query::bindings(&inv.vars);
+    adapter_query::render_native(adapter, &body, &bindings).map(Some)
+}
+
 /// `InputSpec::None`: the shortcut/dispatch path. Build an [`ActionContext`]
 /// from the CLI flags, call [`Node::invoke_action`], and act on the returned
 /// [`ActionDispatch`].
@@ -1560,12 +1585,13 @@ async fn do_dispatch(
     node: &mut dyn Node,
     action_id: &str,
     inv: &Invocation,
+    query: Option<String>,
     args: ActionArgs,
 ) -> Result<()> {
     let ctx = ActionContext {
         marked: None,
         confirmed: inv.yes,
-        query: inv.query.clone(),
+        query,
         value: inv.value.clone(),
         text: inv.text.clone(),
         args,
@@ -2215,17 +2241,24 @@ fn output_actions(actions: &[NodeAction], output: Output) {
 /// path is the addressing — joined with `/`, it is what `--path` takes
 /// back — so it is the first column and stays unabridged; `label` is
 /// only there to recognise the hit. `group_key` is printed when the
-/// adapter fills it (Confluence spaces) and dropped when it doesn't.
+/// adapter fills it (Confluence spaces) and dropped when it doesn't; the
+/// hits' extra `columns` (tasks: status, due, tags, …) follow.
 fn output_hits(hits: &[NodeHit], truncated: bool, message: Option<&str>, output: Output) {
     match output {
         Output::Json => {
             let arr: Vec<serde_json::Value> = hits
                 .iter()
                 .map(|h| {
+                    let columns: serde_json::Map<String, serde_json::Value> = h
+                        .columns
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone().into()))
+                        .collect();
                     serde_json::json!({
                         "path": h.path,
                         "label": h.label,
                         "group_key": h.group_key,
+                        "columns": columns,
                     })
                 })
                 .collect();
@@ -2239,16 +2272,32 @@ fn output_hits(hits: &[NodeHit], truncated: bool, message: Option<&str>, output:
         }
         Output::Table => {
             let grouped = hits.iter().any(|h| !h.group_key.is_empty());
+            // Extra cells in the order the adapter first names them; a
+            // column no hit fills is left out.
+            let mut extra: Vec<&str> = Vec::new();
+            for (name, value) in hits.iter().flat_map(|h| &h.columns) {
+                if !value.is_empty() && !extra.contains(&name.as_str()) {
+                    extra.push(name);
+                }
+            }
             let mut cols = vec!["path".to_string(), "label".to_string()];
             if grouped {
                 cols.push("group".to_string());
             }
+            cols.extend(extra.iter().map(|c| c.to_string()));
             let rows: Vec<Vec<String>> = hits
                 .iter()
                 .map(|h| {
-                    let mut row = vec![h.path.join("/"), h.label.clone()];
+                    // A table row is one line: a multi-line label shows its
+                    // first line (JSON keeps the whole text).
+                    let label = h.label.lines().next().unwrap_or("").to_string();
+                    let mut row = vec![h.path.join("/"), label];
                     if grouped {
                         row.push(h.group_key.clone());
+                    }
+                    for name in &extra {
+                        let cell = h.columns.iter().find(|(k, _)| k == name);
+                        row.push(cell.map(|(_, v)| v.clone()).unwrap_or_default());
                     }
                     row
                 })

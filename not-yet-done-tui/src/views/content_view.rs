@@ -24014,6 +24014,7 @@ mod tests {
             path: path.iter().map(|s| s.to_string()).collect(),
             label: label.to_string(),
             group_key: space.to_string(),
+            columns: Vec::new(),
         }
     }
 

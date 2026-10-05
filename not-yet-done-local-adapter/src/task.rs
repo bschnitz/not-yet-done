@@ -56,7 +56,7 @@ use not_yet_done_content::HostEvent;
 use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec,
-    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeHit, NodeSummary, NodeType,
+    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
     ParamSpec, QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode,
     TypedAdapterFactory, apply_sort,
 };
@@ -70,6 +70,8 @@ use uuid::Uuid;
 
 use crate::editor_templates::{self, FieldError, ParseResult};
 use crate::{CoreHandle, as_domain_event, notes, publish_row_patches, tree_edit};
+
+mod find;
 
 /// Indent width for the subtree-restructure outline buffer (`edit-tree`).
 /// The `tree_edit` parser infers depth from indentation per level, so any
@@ -483,83 +485,6 @@ impl ForestSnapshot {
         chain.reverse();
         chain
     }
-
-    /// Pure tree-search backing the root's `find` action. Returns the
-    /// hits plus whether `limit` cut the list short. Two modes, switched
-    /// on the query shape:
-    ///
-    /// - **`id:<uuid>`** — exact node match, independent of the
-    ///   (possibly drifted) description. Scripted jumps that already
-    ///   resolved the task id via the CLI (e.g. the Taiga `goto_task`
-    ///   script) use this so the jump stays exact even when the Taiga
-    ///   subject and the local description diverge. Yields 0 or 1 hit.
-    /// - **anything else** — case-insensitive, whitespace-tokenised
-    ///   AND-substring match against task descriptions, sorted into
-    ///   tree-render order (parents before children) and capped at
-    ///   `limit`.
-    ///
-    /// Both modes are scoped by `visible` — the pane's active query
-    /// resolved through [`resolve_visible_set`], the very set
-    /// [`Self::child_summaries`] filters each level by. Without it the
-    /// search would offer hits no level ever yields (the shipped
-    /// default query hides deleted tasks, so a deleted namesake of a
-    /// live task used to strand the caller's expand walk), and the
-    /// user had to press `n` past every phantom. `None` = no active
-    /// query, whole forest addressable.
-    ///
-    /// Testing the leaf id alone is enough: the visible set is
-    /// ancestor-closed by construction, so a contained leaf has every
-    /// id on its `path_to` chain contained too.
-    fn tree_search(
-        &self,
-        query: &str,
-        limit: u32,
-        visible: Option<&HashSet<Uuid>>,
-    ) -> (Vec<NodeHit>, bool) {
-        let addressable = |id: &Uuid| visible.map_or(true, |v| v.contains(id));
-        if let Some(rest) = query.trim().strip_prefix("id:") {
-            let hits = match Uuid::parse_str(rest.trim()) {
-                Ok(uuid) => self
-                    .by_id
-                    .get(&uuid)
-                    .filter(|_| addressable(&uuid))
-                    .map(|row| NodeHit {
-                        path: self.path_to(uuid),
-                        label: row.task.description.clone(),
-                        group_key: String::new(),
-                    })
-                    .into_iter()
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
-            return (hits, false);
-        }
-        let tokens: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
-        if tokens.is_empty() {
-            return (Vec::new(), false);
-        }
-        let mut hits: Vec<NodeHit> = self
-            .by_id
-            .iter()
-            .filter(|(id, row)| {
-                if !addressable(id) {
-                    return false;
-                }
-                let hay = row.task.description.to_lowercase();
-                tokens.iter().all(|t| hay.contains(t))
-            })
-            .map(|(id, row)| NodeHit {
-                path: self.path_to(*id),
-                label: row.task.description.clone(),
-                group_key: String::new(),
-            })
-            .collect();
-        // Tree-render order: parents before children, siblings together.
-        hits.sort_by(|a, b| a.path.cmp(&b.path));
-        let truncated = hits.len() > limit as usize;
-        hits.truncate(limit as usize);
-        (hits, truncated)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -948,11 +873,6 @@ async fn list_item_children(
 /// through the view config's `type: create` to create a *top-level* task
 /// (the new node's parent comes from the buffer's `parent:` field, blank
 /// by default).
-/// Hit cap for the root's `find` action. The adapter picks it, not the
-/// caller: a frontend has no basis for a number here, and the
-/// `truncated` flag on [`ActionDispatch::Nodes`] says when it bit.
-const FIND_LIMIT: u32 = 200;
-
 fn task_root_actions() -> Vec<NodeAction> {
     vec![
         NodeAction::new("add", "Add task", InputSpec::Editor).templated(),
@@ -965,11 +885,11 @@ fn task_root_actions() -> Vec<NodeAction> {
         // Container action: snapshot the whole task database (see
         // `invoke_backup`). DB-wide, so it lives on the root, not a task row.
         NodeAction::new("backup", "Backup database", InputSpec::None),
-        // Tree-wide search over the task descriptions. Like every other
-        // action it declares no widget: the search string arrives in
-        // `ctx.text`, sourced however the frontend likes (TUI prompt,
-        // CLI `--text`), and the answer is a set of node references.
-        NodeAction::new("find", "find tasks", InputSpec::None),
+        // Tree-wide search. Like every other action it declares no widget:
+        // its conditions are optional parameters (see `find::find_params`),
+        // the free text may also arrive in `ctx.text` (TUI prompt, CLI
+        // `--text`), and the answer is a set of node references.
+        NodeAction::new("find", "find tasks", InputSpec::None).params(find::find_params()),
     ]
 }
 
@@ -2152,30 +2072,33 @@ impl Node for TaskRootNode {
         outcome
     }
     /// `find` searches the whole forest and answers with the matching
-    /// nodes; the search string is [`ActionContext::text`], the pane's
-    /// active query ([`ActionContext::query`]) scopes it to the same set
-    /// the tree levels show — otherwise the hits and the tree disagree
-    /// about what exists (see [`ForestSnapshot::tree_search`]).
+    /// nodes; its conditions are the action's arguments (free text may
+    /// also come as [`ActionContext::text`]). The pane's active query
+    /// ([`ActionContext::query`]) scopes it to the set the tree levels
+    /// show — matches plus their ancestors — otherwise the hits and the
+    /// tree disagree about what exists and the expand walk dead-ends.
     async fn invoke_action(&self, name: &str, ctx: &ActionContext) -> Result<ActionDispatch> {
         Ok(match name {
             // Container action: back up the whole task database. No data
             // changes, so it returns `Notify` (the path) rather than `Reload`.
             "backup" => crate::invoke_backup(&self.handle).await,
             "find" => {
-                let Some(needle) = ctx.text.as_deref().map(str::trim).filter(|s| !s.is_empty())
-                else {
-                    return Ok(ActionDispatch::Error(
-                        "Search text must not be empty".to_string(),
-                    ));
+                let query = match find::FindQuery::parse(
+                    &ctx.args,
+                    ctx.text.as_deref(),
+                    chrono::Local::now(),
+                ) {
+                    Ok(q) => q,
+                    Err(msg) => return Ok(ActionDispatch::Error(msg)),
                 };
                 let visible = resolve_visible_set(&self.snapshot, &self.handle, &ctx.query).await?;
-                let (hits, truncated) =
-                    self.snapshot
-                        .tree_search(needle, FIND_LIMIT, visible.as_ref());
-                ActionDispatch::Nodes {
-                    hits,
-                    truncated,
-                    message: None,
+                match find::run(&self.snapshot, &query, visible.as_ref()) {
+                    Ok((hits, truncated)) => ActionDispatch::Nodes {
+                        hits,
+                        truncated,
+                        message: None,
+                    },
+                    Err(msg) => ActionDispatch::Error(msg),
                 }
             }
             _ => ActionDispatch::Noop,
@@ -3346,56 +3269,93 @@ mod tests {
         );
     }
 
+    /// Run `find` with `args` (as `key=value` pairs, lists comma-separated)
+    /// at a fixed `now` and return the hit labels.
+    fn find_labels(
+        snap: &ForestSnapshot,
+        args: &[(&str, &str)],
+        text: Option<&str>,
+        visible: Option<&HashSet<Uuid>>,
+    ) -> std::result::Result<Vec<String>, String> {
+        let mut supplied = not_yet_done_content::ActionArgs::new();
+        for (k, v) in args {
+            supplied.insert(*k, *v);
+        }
+        let resolved = not_yet_done_content::resolve_args(&find::find_params(), &supplied)
+            .map_err(|p| not_yet_done_content::describe_problems(&p))?;
+        let tz = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = chrono::TimeZone::with_ymd_and_hms(&tz, 2026, 10, 5, 12, 0, 0).unwrap();
+        let query = find::FindQuery::parse(&resolved, text, now)?;
+        let (hits, _) = find::run(snap, &query, visible)?;
+        Ok(hits.into_iter().map(|h| h.label).collect())
+    }
+
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
     #[test]
-    fn tree_search_id_escape_matches_exactly_one_node() {
+    fn find_id_escape_matches_exactly_one_node() {
         let root = Uuid::from_u128(1);
         let child = Uuid::from_u128(2);
         let snap = snapshot_from(vec![
             row(root, "Work", None),
             row(child, "#42 - Fix the frobnicator", Some(root)),
         ]);
-
-        // `id:<uuid>` resolves the one node and its full root→leaf path,
-        // ignoring the description entirely.
-        let (hits, truncated) = snap.tree_search(&format!("id:{child}"), 50, None);
+        let q = find::FindQuery::parse(
+            &Default::default(),
+            Some(&format!("id:{child}")),
+            chrono::Local::now(),
+        )
+        .unwrap();
+        let (hits, truncated) = find::run(&snap, &q, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, vec![root.to_string(), child.to_string()]);
-        assert_eq!(hits[0].label, "#42 - Fix the frobnicator");
         assert!(!truncated);
-
-        // Unknown / unparseable id → no hits (no panic, no fallback to
-        // description search).
+        // An unparseable id is an error, not a silent description search.
+        assert!(find_labels(&snap, &[], Some("id:not-a-uuid"), None).is_err());
         assert!(
-            snap.tree_search(&format!("id:{}", Uuid::from_u128(99)), 50, None)
-                .0
+            find_labels(&snap, &[], Some(&format!("id:{}", Uuid::from_u128(99))), None)
+                .unwrap()
                 .is_empty()
         );
-        assert!(snap.tree_search("id:not-a-uuid", 50, None).0.is_empty());
     }
 
     #[test]
-    fn tree_search_description_fallback_is_substring_and_path_sorted() {
+    fn find_text_is_case_insensitive_and_in_tree_order() {
         let root = Uuid::from_u128(1);
         let child = Uuid::from_u128(2);
         let snap = snapshot_from(vec![
             row(root, "Frobnicator project", None),
             row(child, "Fix the Frobnicator", Some(root)),
         ]);
-
-        // Case-insensitive AND-substring across descriptions; both rows
-        // contain "frobnicator", returned parent-before-child.
-        let (hits, _) = snap.tree_search("frobnicator", 50, None);
-        let labels: Vec<&str> = hits.iter().map(|h| h.label.as_str()).collect();
-        assert_eq!(labels, vec!["Frobnicator project", "Fix the Frobnicator"]);
+        // Free text from the prompt and the `text` argument mean the same.
+        let expected = vec!["Frobnicator project", "Fix the Frobnicator"];
+        assert_eq!(find_labels(&snap, &[], Some("frobnicator"), None).unwrap(), expected);
+        assert_eq!(find_labels(&snap, &[("text", "FROB")], None, None).unwrap(), expected);
+        assert_eq!(
+            find_labels(&snap, &[], Some("fix frob"), None).unwrap(),
+            vec!["Fix the Frobnicator"]
+        );
     }
 
     #[test]
-    fn tree_search_is_scoped_to_the_visible_set() {
-        // Two same-named siblings under one parent, one of them outside
-        // the pane's active query (the real case: a deleted namesake,
-        // hidden by the shipped `[deleted, =, false]` default). The
-        // hidden one is not addressable in the tree — its level never
-        // yields it — so the search must not offer it either.
+    fn find_without_conditions_lists_every_live_task() {
+        let snap = snapshot_from(vec![
+            row(Uuid::from_u128(1), "a", None),
+            deleted_row(Uuid::from_u128(2), "b", None),
+        ]);
+        assert_eq!(find_labels(&snap, &[], None, None).unwrap(), vec!["a"]);
+        assert_eq!(
+            find_labels(&snap, &[("include_deleted", "true")], None, None).unwrap(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn find_is_scoped_to_the_visible_set() {
+        // A same-named sibling outside the pane's active query is not
+        // addressable in the tree, so the search must not offer it.
         let root = Uuid::from_u128(1);
         let live = Uuid::from_u128(2);
         let hidden = Uuid::from_u128(3);
@@ -3404,34 +3364,94 @@ mod tests {
             row(live, "Fix the Frobnicator", Some(root)),
             row(hidden, "Fix the Frobnicator", Some(root)),
         ]);
-        // What `resolve_visible_set` would produce for a query matching
-        // only `live`: the match plus its ancestors.
         let visible: HashSet<Uuid> = [root, live].into_iter().collect();
-
-        let (hits, _) = snap.tree_search("frobnicator", 50, Some(&visible));
-        let paths: Vec<&Vec<String>> = hits.iter().map(|h| &h.path).collect();
         assert_eq!(
-            paths,
-            vec![&vec![root.to_string(), live.to_string()]],
-            "only the hit the tree can actually reach"
-        );
-
-        // Same for the `id:` mode — a scripted jump to a filtered-out
-        // task yields nothing rather than a hit that strands the walk.
-        assert!(
-            snap.tree_search(&format!("id:{hidden}"), 50, Some(&visible))
-                .0
-                .is_empty()
-        );
-        assert_eq!(
-            snap.tree_search(&format!("id:{live}"), 50, Some(&visible))
-                .0
+            find_labels(&snap, &[], Some("frobnicator"), Some(&visible))
+                .unwrap()
                 .len(),
             1
         );
+        assert_eq!(find_labels(&snap, &[], Some("frobnicator"), None).unwrap().len(), 2);
+    }
 
-        // No active query → the whole forest stays searchable.
-        assert_eq!(snap.tree_search("frobnicator", 50, None).0.len(), 2);
+    #[test]
+    fn find_due_today_covers_the_whole_local_day() {
+        // now = 2026-10-05 12:00 +02:00. "today" is 00:00..23:59:59 local.
+        let mk = |n: u128, desc: &str, due: &str| {
+            let (id, mut r) = row(Uuid::from_u128(n), desc, None);
+            r.task.due = Some(utc(due));
+            (id, r)
+        };
+        let snap = snapshot_from(vec![
+            mk(1, "yesterday late", "2026-10-04T21:30:00+00:00"), // 23:30 local, 4th
+            mk(2, "today early", "2026-10-04T22:30:00+00:00"),    // 00:30 local, 5th
+            mk(3, "tonight", "2026-10-05T21:30:00+00:00"),        // 23:30 local, 5th
+            mk(4, "tomorrow", "2026-10-05T22:30:00+00:00"),       // 00:30 local, 6th
+            row(Uuid::from_u128(5), "no due", None),
+        ]);
+        assert_eq!(
+            find_labels(&snap, &[("due", "today")], None, None).unwrap(),
+            vec!["today early", "tonight"]
+        );
+        assert_eq!(
+            find_labels(&snap, &[("due_to", "today")], None, None).unwrap(),
+            vec!["yesterday late", "today early", "tonight"]
+        );
+        assert_eq!(
+            find_labels(&snap, &[("due_from", "tomorrow")], None, None).unwrap(),
+            vec!["tomorrow"]
+        );
+        assert_eq!(
+            find_labels(&snap, &[("has_due", "false")], None, None).unwrap(),
+            vec!["no due"]
+        );
+        // Before 12:00 local today and still open.
+        assert_eq!(
+            find_labels(&snap, &[("overdue", "true")], None, None).unwrap(),
+            vec!["yesterday late", "today early"]
+        );
+        assert!(find_labels(&snap, &[("due", "someday maybe")], None, None).is_err());
+    }
+
+    #[test]
+    fn find_filters_status_tags_subtree_and_flags() {
+        let work = Uuid::from_u128(1);
+        let a = Uuid::from_u128(2);
+        let b = Uuid::from_u128(3);
+        let home = Uuid::from_u128(4);
+        let c = Uuid::from_u128(5);
+        let (_, mut ra) = row(a, "write report", Some(work));
+        ra.tag_names = "Urgent, office".to_string();
+        let (_, mut rb) = row(b, "file report", Some(work));
+        rb.task.status = task::TaskStatus::Done;
+        rb.tag_names = "office".to_string();
+        rb.task.recur = Some("daily".to_string());
+        let (_, mut rc) = row(c, "report taxes", Some(home));
+        rc.task.not_before = Some(utc("2026-11-01T00:00:00+00:00"));
+        rc.task.priority = 3;
+        let snap = snapshot_from(vec![
+            row(work, "Work", None),
+            (a, ra),
+            (b, rb),
+            row(home, "Home", None),
+            (c, rc),
+        ]);
+        let f = |args: &[(&str, &str)]| find_labels(&snap, args, Some("report"), None).unwrap();
+
+        assert_eq!(f(&[("status", "open")]), vec!["write report", "report taxes"]);
+        assert_eq!(f(&[("status", "done,cancelled")]), vec!["file report"]);
+        assert_eq!(f(&[("tag", "urgent,OFFICE")]), vec!["write report"]);
+        assert_eq!(f(&[("not_tag", "office")]), vec!["report taxes"]);
+        assert_eq!(f(&[("under", "work")]), vec!["write report", "file report"]);
+        assert_eq!(f(&[("under", "Home/report taxes")]), vec!["report taxes"]);
+        assert_eq!(f(&[("under", &c.to_string())]), vec!["report taxes"]);
+        assert!(find_labels(&snap, &[("under", "Nowhere")], None, None).is_err());
+        assert_eq!(f(&[("actionable", "false")]), vec!["report taxes"]);
+        assert_eq!(f(&[("priority_min", "1")]), vec!["report taxes"]);
+        assert_eq!(f(&[("recurring", "true")]), vec!["file report"]);
+        assert_eq!(f(&[("sort", "-priority"), ("limit", "1")]), vec!["report taxes"]);
+        assert!(find_labels(&snap, &[("status", "later")], None, None).is_err());
+        assert!(find_labels(&snap, &[("colour", "red")], None, None).is_err());
     }
 
     #[test]
