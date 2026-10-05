@@ -2449,8 +2449,11 @@ with a notification instead of sending a value with a hole in it. Braces that
 do not form a placeholder (`{}`, `{1}`, `{a b}`) are left as they are.
 
 `args:` reaches `type: node` actions and `on_container` custom actions (the
-two that arrive at the adapter through `invoke_action`) and `type: edit`
-actions, whose arguments go to the adapter's `prepare` and `execute`. On any
+two that arrive at the adapter through `invoke_action`), `type: edit`
+actions, whose arguments go to the adapter's `prepare` and `execute`, and
+`type: tree_find` bindings, whose arguments go to the search action beside the
+typed text (expanded when the input opens; with arguments, Enter on an empty
+input runs the search on them alone). On any
 other type — `create` among them — it is a config error reported like every
 other view-file problem, not a key that silently does nothing. Lifecycle hooks
 take the same block as `with: { args: {…} }` (no placeholders there: a hook

@@ -446,17 +446,29 @@ views:
         type: fuzzy_filter
         fuzzy_filter:
           fields: [description, tag_names]
-      # Tree-aware search: `/` opens a free-text input, the adapter matches
-      # task descriptions across the whole forest, the tree expands to the
-      # first hit, and n/N cycle the rest in tree-render order. Declared
-      # once here at the tree root (the validator rejects re-declaring
-      # search/fuzzy_filter on the recursive branch below).
+      # Tree-aware search: `/` opens a free-text input, the adapter's `find`
+      # action matches task descriptions across the whole forest, the tree
+      # expands to the first hit, and n/N cycle the rest in tree-render
+      # order. Declared once here at the tree root (the validator rejects
+      # re-declaring search/fuzzy_filter on the recursive branch below).
       # NOT inheritable — the validator restricts tree_find to the tree root.
       - name: tree find
         key: /
         type: tree_find
         tree_find:
           prompt: Search tasks
+      # The same search with fixed `args:` for `find` (every parameter is
+      # optional; `nyd adapter tasks help --full` lists them). The typed text
+      # narrows further; Enter on an empty input runs the arguments alone —
+      # here: every open task due by the end of today, overdue ones included.
+      - name: due today
+        key: D
+        type: tree_find
+        tree_find:
+          prompt: Due today
+        args:
+          due_to: today
+          status: open
       - name: refresh
         key: r
         type: reload

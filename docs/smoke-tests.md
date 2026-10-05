@@ -2350,6 +2350,35 @@ opens the path to a hit permanently.
       down ("tree find"); nothing of the old transient-expansion
       mechanism remains to test here.
 
+## Tasks search: `find` with parameters
+
+`find` on the tasks root takes optional parameters (README, "Searching tasks:
+`find`"); `/` and every other `type: tree_find` binding invoke it, with the
+binding's `args:` sent beside the typed text.
+
+- [x] `nyd adapter tasks find --arg due_to=today --arg status=open` lists the
+      open tasks due today, a task due tonight (23:59) included, with the
+      columns status, due, not_before and parents.
+- [x] `--arg overdue=true --arg sort=due` lists past-due open tasks, oldest
+      first; `--arg created_from="2 weeks ago"` and
+      `--arg tracked_from="last monday"` take natural dates.
+- [x] `--arg text=<word> --arg in=both` also finds a task whose notes alone
+      contain the word; without `in` the same word in the notes finds nothing.
+- [x] Refusals are messages, not empty results: an unknown parameter, an
+      unreadable date and `--arg under=<no such path>` ("under: no task named
+      …") each fail with a message.
+- [x] `--query-name <stored query>` narrows the search to that query's rows.
+- [ ] TUI, tasks tab: `/`, type a word, Enter → behaves as before (tree
+      expands to the first hit, `n`/`N` cycle).
+- [ ] A binding with `args:` (the example's `D`, "Due today"): Enter on the
+      empty input lands on the open tasks due today; typing a word first
+      narrows them further. `/` with an empty input still does nothing.
+- [ ] A binding whose `args:` name an unknown parameter shows the adapter's
+      message in the status bar instead of hits.
+- [ ] A saved query comparing a date (e.g. `[due, '<=', today]`) includes a
+      task due later today: dates are compared in UTC, so a local-offset
+      bound no longer sorts wrong against the stored UTC text.
+
 ## Tasks tree cut / paste (`:cut-node` / `:paste-node`)
 
 Re-parent tasks in the tree without the edit form: first `mc` (or

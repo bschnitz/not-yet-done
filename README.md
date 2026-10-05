@@ -825,6 +825,61 @@ tied to the adapter's bucket node type, so select it with `--type` — or hide
 that behind an alias (see below). The bucket key is ISO-formatted, so the
 group order is chronological.
 
+#### Searching tasks: `find`
+
+The tasks adapter's `find` action searches the **whole forest** at once and
+answers with every match plus its ancestor path. It is the action behind the
+TUI's `/` and works the same from the CLI. Every parameter is optional and they
+combine with AND; without any it lists every live task. `help --full` lists all
+parameters.
+
+```bash
+nyd adapter tasks find --text "invoice"                         # words in the description
+nyd adapter tasks find --arg text=invoice --arg in=both         # …or in description and notes
+nyd adapter tasks find --arg due_to=today --arg status=open     # open, due by end of today
+nyd adapter tasks find --arg overdue=true --arg sort=due        # past due, oldest first
+nyd adapter tasks find --arg under=Work/Acme --arg tag=urgent   # one subtree, tagged
+nyd adapter tasks find --arg tracked_from="last monday"         # worked on this week
+nyd adapter tasks find --arg not_before_to=today --arg actionable=true
+nyd adapter tasks find --query-name open --arg priority_min=3   # inside a stored query
+```
+
+| Group    | Parameters                                                                 |
+| -------- | -------------------------------------------------------------------------- |
+| Text     | `text` (all words, case-insensitive; `id:<uuid>` = one task), `in`         |
+| State    | `status` (`open` = todo + in_progress), `include_deleted`, `recurring`     |
+| Tags     | `tag` (all of), `not_tag` (none of)                                        |
+| Due      | `due`, `due_from`, `due_to`, `has_due`, `overdue`                          |
+| Start    | `not_before_from`, `not_before_to`, `actionable`                           |
+| Activity | `created_from`/`_to`, `updated_from`/`_to`, `tracked_from`/`_to`           |
+| Tree     | `under` (task id, description, or `/`-separated description path)          |
+| Other    | `priority_min`, `priority_max`, `has_notes`, `sort`, `limit` (default 200) |
+
+**Why so many parameters on one action:** a saved query is SQL over single
+rows, but "where is the task due today" is a question about the forest — the
+answer needs the path to each hit so a front-end can expand the tree to it.
+`find` keeps both in one round-trip. See
+[decision 0013](docs/decisions/0013-parameterised-find.md).
+
+- **Dates** take the same natural forms as queries (`today`, `friday`,
+  `2 weeks ago`, `2026-10-05`). A `_to` bound that names a whole day (local
+  midnight) covers that day, so `due_to=today` includes a task due tonight;
+  `due=X` is shorthand for that one day.
+- **Text is the only slow parameter.** Without `text` nothing beyond the
+  in-memory rows is read; notes are read only for `in=notes` or `in=both`.
+- **Lists** (`status`, `tag`, `not_tag`) are comma-separated:
+  `--arg status=done,cancelled`.
+- **`sort`** is `tree` (default), `due`, `not_before`, `created`, `updated`,
+  `tracked`, `priority` or `description`; a leading `-` reverses it.
+- **Scope:** `--query`/`--query-name` narrow the search to what that query
+  shows, exactly as the pane's active query does in the TUI.
+- **Errors, not guesses:** an unknown parameter, an unreadable date or an
+  `under` that names no task fails with a message instead of matching nothing.
+
+In the TUI, a `type: tree_find` binding takes the same parameters as fixed
+`args:`, sent beside the typed text — so one key can open "search among the
+open tasks due today" (see `docs/examples/views/tasks.yaml`).
+
 ### Aliases & `config edit`
 
 The generic verbs are deliberately explicit. **Aliases** give a short name to a

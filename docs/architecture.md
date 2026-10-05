@@ -242,6 +242,12 @@ factory plus YAML — no core code changes.
   walk strands on them. The front-end still skips a hit it cannot reach (an
   adapter cannot always predict permissions or pagination caps), it just costs
   a round-trip each.
+  The search string is not all the action can take: the tasks adapter's
+  `find` also declares optional parameters (status, tags, date ranges,
+  subtree, …) as ordinary `ParamSpec`s, so a search is _any_ combination of
+  conditions and the free text is only one of them. A TUI `tree_find`
+  binding fixes some of them in its `args:`; the CLI passes `--arg`. See
+  [ADR 0013](decisions/0013-parameterised-find.md).
 - `locate_node_path(node_id)` — where a node sits in the tree, in the same
   path shape as a search hit. Its only purpose is to let a **link** follow
   into a subtree that is not expanded yet; the default `Ok(None)` means "I
