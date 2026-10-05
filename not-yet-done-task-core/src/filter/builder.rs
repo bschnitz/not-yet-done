@@ -183,7 +183,7 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
     fn lit_to_value(&self, lit: &Literal) -> Result<Value, AppError> {
         match lit {
             // SeaORM 2.x: Value::String(Option<String>) — no Box
-            Literal::String(s) => Ok(Value::String(Some(s.clone()))),
+            Literal::String(s) => Ok(Value::String(Some(normalize_instant(s)))),
             Literal::Int(i) => Ok(Value::BigInt(Some(*i))),
             Literal::Float(f) => Ok(Value::Double(Some(*f))),
             Literal::Bool(b) => Ok(Value::Bool(Some(*b))),
@@ -206,6 +206,51 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
         match lit {
             Literal::List(items) => items.iter().map(|i| self.lit_to_value(i)).collect(),
             single => Ok(vec![self.lit_to_value(single)?]),
+        }
+    }
+}
+
+/// A string literal that is an RFC 3339 instant, rewritten to UTC in the
+/// layout the store writes (`2026-10-05T07:00:00+00:00`); any other string
+/// unchanged.
+///
+/// The store keeps `DateTimeUtc` columns as text and SQL compares them as
+/// text, while a resolved natural date (`today`, `end of next week`) carries
+/// the local offset (`…+02:00`). Compared as strings the two disagree by that
+/// offset, so `[due, '<', tomorrow]` missed a task due late today. In UTC the
+/// textual order is the order in time.
+fn normalize_instant(s: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => dt
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false),
+        Err(_) => s.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_instant;
+
+    #[test]
+    fn an_instant_with_an_offset_is_rewritten_to_utc() {
+        assert_eq!(
+            normalize_instant("2026-10-06T00:00:00+02:00"),
+            "2026-10-05T22:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn utc_text_orders_like_the_stored_values() {
+        // A task due 23:30 local (21:30 UTC) is before local midnight.
+        let bound = normalize_instant("2026-10-06T00:00:00+02:00");
+        assert!("2026-10-05T21:30:00+00:00" < bound.as_str());
+    }
+
+    #[test]
+    fn other_strings_stay_as_written() {
+        for s in ["todo", "2026-10-05", "%foo%", ""] {
+            assert_eq!(normalize_instant(s), s);
         }
     }
 }
