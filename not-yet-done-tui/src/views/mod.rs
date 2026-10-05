@@ -693,6 +693,10 @@ pub enum ViewRequest {
         view_index: usize,
         pane_id: PaneId,
         query: String,
+        /// Adapter action the binding names (default `find`).
+        action: String,
+        /// The binding's fixed arguments, sent beside `query`.
+        args: not_yet_done_content::ActionArgs,
     },
 
     /// Land a set of node references an action answered with

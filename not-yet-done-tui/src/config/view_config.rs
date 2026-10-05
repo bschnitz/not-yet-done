@@ -768,12 +768,12 @@ fn check_action(
     // Arguments reach the adapter through `ActionContext`, which only the
     // `invoke_action` path carries today. Refuse them elsewhere rather than
     // let a configured value silently go nowhere.
-    let args_reach = matches!(a.action_type.as_str(), "node" | "edit")
+    let args_reach = matches!(a.action_type.as_str(), "node" | "edit" | "tree_find")
         || (a.action_type == "custom" && a.on_container);
     if !a.args.is_empty() && !args_reach {
         errors.push(format!(
-            "{scope}: `args:` reaches only `type: node` and `type: edit` actions (and \
-             `on_container` custom ones) so far — see docs/plan-action-args.md"
+            "{scope}: `args:` reaches only `type: node`, `type: edit` and `type: tree_find` \
+             actions (and `on_container` custom ones) so far — see docs/plan-action-args.md"
         ));
     }
     match a.action_type.as_str() {
@@ -2506,9 +2506,11 @@ pub struct SearchConfig {
     pub prev_key: Option<String>,
 }
 
-/// CT-10: per-action config for the `tree_find` action type. Today
-/// only `prompt` is honoured (mirrors `TextSearchConfig::prompt`);
-/// future tuning knobs like `limit:` would land here too.
+/// CT-10: per-action config for the `tree_find` action type: the
+/// input's prompt and the adapter action behind it. Fixed arguments for
+/// that action go in the binding's ordinary `args:` map, sent beside the
+/// typed text — a `tree_find` with `args:` and an empty input runs the
+/// search on its arguments alone.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TreeFindActionConfig {
     /// UI label shown inside the input bar while typing. Falls back
@@ -4842,6 +4844,29 @@ views:
             "got: {}",
             errs[0]
         );
+    }
+
+    #[test]
+    fn validate_accepts_args_on_tree_find() {
+        // A search binding's `args:` travel with the typed text to its
+        // action, so they are not a dead end.
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: t
+    tree_label: name
+    columns: [{ key: name }]
+    actions:
+      - { name: due, key: D, type: tree_find, args: { due_to: today, status: open } }
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let res = cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        );
+        assert!(res.is_ok(), "got: {res:?}");
     }
 
     #[test]

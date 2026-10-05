@@ -102,11 +102,16 @@ pub struct TreeFindHits {
 async fn run_tree_find(
     adapter: &dyn not_yet_done_content::ContentAdapter,
     action_id: &str,
-    ctx: &not_yet_done_content::ActionContext,
+    mut ctx: not_yet_done_content::ActionContext,
 ) -> not_yet_done_content::Result<Option<TreeFindHits>> {
     use not_yet_done_content::{ActionDispatch, ContentError};
     let root = adapter.root().await?;
-    match root.invoke_action(action_id, ctx).await? {
+    let declared = adapter
+        .actions_for_type(root.node_type())
+        .into_iter()
+        .find(|a| a.id == action_id);
+    ctx.args = resolve_action_args(declared.as_ref(), &ctx.args)?;
+    match root.invoke_action(action_id, &ctx).await? {
         ActionDispatch::Nodes {
             hits,
             truncated,
@@ -4331,14 +4336,21 @@ impl App {
         {
             pane.tree_find_begin(query.clone());
         }
-        self.spawn_tree_find(view_index, pane_id, query);
+        // `:tree-find` is a plain text search: the view's search action,
+        // without the arguments any one key binding fixes.
+        self.spawn_tree_find(view_index, pane_id, query, None, Default::default());
     }
 
+    /// `action` is the adapter action to invoke (`None` = the view's
+    /// [`ContentView::tree_find_action_id`]); `args` are sent beside the
+    /// typed `query` and checked against what the action declares.
     pub fn spawn_tree_find(
         &self,
         view_index: usize,
         pane_id: crate::views::content_view::PaneId,
         query: String,
+        action: Option<String>,
+        args: not_yet_done_content::ActionArgs,
     ) {
         let cv = match self.content_view(view_index) {
             Some(cv) => cv,
@@ -4348,7 +4360,7 @@ impl App {
             Some(a) => Arc::clone(a),
             None => return,
         };
-        let action_id = cv.tree_find_action_id();
+        let action_id = action.unwrap_or_else(|| cv.tree_find_action_id());
         let tx = self.load_tx.clone();
         // The pane's active query scopes the search exactly as it scopes
         // every tree level — without it the adapter offers hits that no
@@ -4358,11 +4370,13 @@ impl App {
             confirmed: false,
             query: self.pane_active_query(view_index, pane_id),
             value: None,
-            text: Some(query.clone()),
-            args: Default::default(),
+            // An empty input (a binding that runs on its arguments alone)
+            // sends no text, so the action does not filter on "".
+            text: Some(query.clone()).filter(|q| !q.trim().is_empty()),
+            args,
         };
         tokio::spawn(async move {
-            let result = run_tree_find(adapter.as_ref(), &action_id, &ctx)
+            let result = run_tree_find(adapter.as_ref(), &action_id, ctx)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(LoadMsg::TreeFindResult {
@@ -9688,6 +9702,8 @@ impl App {
                 view_index,
                 pane_id,
                 query,
+                action,
+                args,
             } => {
                 // Stamp the loading state synchronously so the status
                 // hint shows the moment the user hits Enter — the
@@ -9697,7 +9713,7 @@ impl App {
                         pane.tree_find_begin(query.clone());
                     }
                 }
-                self.spawn_tree_find(view_index, pane_id, query);
+                self.spawn_tree_find(view_index, pane_id, query, Some(action), args);
                 EditorRequest::None
             }
             ViewRequest::TreeFindLand {

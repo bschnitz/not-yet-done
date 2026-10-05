@@ -229,8 +229,14 @@ enum SearchMode {
     /// the pane's [`TreeFindState`] cache (CT-5) drives the
     /// subsequent `n`/`N` navigation. Only registered on
     /// tree-enabled views; the validator rejects `tree_find` outside
-    /// a tree chain.
-    TreeFind { prompt: Option<String> },
+    /// a tree chain. `action` and `args` are the binding's: the adapter
+    /// action to invoke and the fixed arguments it gets beside the typed
+    /// text, already expanded when the input opened.
+    TreeFind {
+        prompt: Option<String>,
+        action: String,
+        args: not_yet_done_content::ActionArgs,
+    },
 }
 
 /// What [`ContentPane::root_load_request`] / drill-down handlers feed
@@ -7767,12 +7773,14 @@ impl ContentPane {
             (SearchKeyResult::Cancelled, SearchMode::Adapter { .. }) => {
                 self.search_mode = SearchMode::Local;
             }
-            (SearchKeyResult::Accepted, SearchMode::TreeFind { .. }) => {
+            (SearchKeyResult::Accepted, SearchMode::TreeFind { action, args, .. }) => {
                 let q = self.search.state().query;
                 self.search.clear();
                 self.search_mode = SearchMode::Local;
-                // Empty query → no point dispatching; act like Cancel.
-                if q.trim().is_empty() {
+                // Empty query and no fixed arguments → nothing to search
+                // for; act like Cancel. With arguments the binding itself
+                // is the search, so an empty input runs it as configured.
+                if q.trim().is_empty() && args.is_empty() {
                     self.tree_find_clear();
                     return SubViewMessage::SelectionChanged(None);
                 }
@@ -7780,6 +7788,8 @@ impl ContentPane {
                     view_index,
                     pane_id,
                     query: q,
+                    action,
+                    args,
                 });
             }
             (SearchKeyResult::Cancelled, SearchMode::TreeFind { .. }) => {
@@ -8238,8 +8248,23 @@ impl ContentPane {
                 // tree-find cache so re-opening doesn't surface
                 // yesterday's hits.
                 let prompt = action.tree_find.as_ref().and_then(|c| c.prompt.clone());
+                let action_id = action
+                    .tree_find
+                    .as_ref()
+                    .and_then(|c| c.action.clone())
+                    .unwrap_or_else(|| "find".to_string());
+                // Placeholders read the row under the cursor *now*, before
+                // the input bar takes the keys.
+                let args = match self.expand_action_args(action, None, view_defs) {
+                    Ok(args) => args,
+                    Err(msg) => return SubViewMessage::Request(ViewRequest::Notify(msg)),
+                };
                 self.tree_find_clear();
-                self.search_mode = SearchMode::TreeFind { prompt };
+                self.search_mode = SearchMode::TreeFind {
+                    prompt,
+                    action: action_id,
+                    args,
+                };
                 self.search.clear();
                 self.search.open();
                 return SubViewMessage::SelectionChanged(None);
@@ -8638,7 +8663,7 @@ impl ContentView {
                         .unwrap_or_else(|| "free-text search…".to_string());
                     (Some("? ".to_string()), Some(placeholder), false)
                 }
-                SearchMode::TreeFind { prompt } => {
+                SearchMode::TreeFind { prompt, .. } => {
                     let placeholder = prompt.clone().unwrap_or_else(|| "tree search…".to_string());
                     (Some("? ".to_string()), Some(placeholder), false)
                 }
@@ -22335,6 +22360,64 @@ mod tests {
         // Any other query ends the search — no explicit reset needed.
         view.set_query("assignee = me".into(), None);
         assert!(!view.resolve_active(&ActiveSurface::TextSearch));
+    }
+
+    #[test]
+    fn tree_find_sends_the_binding_action_and_args_beside_the_input() {
+        // A `/` binding with fixed `args:` hands them to its action along
+        // with what was typed; with nothing typed the arguments alone are
+        // the search. A binding without arguments still ignores an empty
+        // input.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let view_defs = config.views.clone();
+        let pane_id = view.active_pane_id();
+        let mut args = not_yet_done_content::ActionArgs::new();
+        args.insert("due_to", "today");
+        let mut run = |keys: &[&str], args: &not_yet_done_content::ActionArgs| {
+            let pane = view.active_pane_mut();
+            pane.search_mode = SearchMode::TreeFind {
+                prompt: None,
+                action: "find".into(),
+                args: args.clone(),
+            };
+            pane.search.open();
+            let mut last = SubViewMessage::Unhandled;
+            for key in keys {
+                last = view
+                    .active_pane_mut()
+                    .handle_search_key(key, 0, pane_id, &view_defs);
+            }
+            last
+        };
+
+        match run(&["x", "enter"], &args) {
+            SubViewMessage::Request(ViewRequest::TreeFindStart {
+                query,
+                action,
+                args: sent,
+                ..
+            }) => {
+                assert_eq!(query, "x");
+                assert_eq!(action, "find");
+                assert_eq!(sent, args);
+            }
+            _ => panic!("typed input must start the search"),
+        }
+        assert!(
+            matches!(
+                run(&["enter"], &args),
+                SubViewMessage::Request(ViewRequest::TreeFindStart { .. })
+            ),
+            "arguments alone are a search"
+        );
+        assert!(
+            !matches!(
+                run(&["enter"], &Default::default()),
+                SubViewMessage::Request(ViewRequest::TreeFindStart { .. })
+            ),
+            "no input and no arguments: nothing to search for"
+        );
     }
 
     #[test]
