@@ -9962,3 +9962,18 @@ start` and nothing is sent.
 - [ ] **A new all-day event lands on its date.** `a a` with all-day ticked and
       start `tomorrow` creates the event on tomorrow's date in the calendar's
       own UI, not the day before.
+
+## Date words — German
+
+Any date field with a preview (a task's due date in the add/edit form), and
+the trackings query (`q e`).
+
+- [ ] `morgen 18 Uhr` previews tomorrow 18:00; `übermorgen` the day after
+      tomorrow; `Fr` the coming Friday (today, on a Friday).
+- [ ] `morgen früh` is tomorrow 09:00, `heute morgen` today 09:00 — `morgen`
+      on its own stays tomorrow.
+- [ ] `Ende nächster Woche`, `Monatsende`, `nächster Werktag`, `in 3 Tagen`,
+      `8.10.`, `08.10.2026 14:30` and `halb 3` (02:30) all resolve.
+- [ ] `[started_at, gt, letzten Montag]` in the trackings query matches the
+      same rows as `last monday`.
+- [ ] English is unchanged: `tomorrow morning`, `next friday 8pm`, `eod`.
