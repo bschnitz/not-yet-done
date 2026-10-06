@@ -30,6 +30,10 @@ fn german_phrases() {
         ("uebermorgen", "2026-10-08 00:00:00 date"),
         ("gestern", "2026-10-05 00:00:00 date"),
         ("vorgestern", "2026-10-04 00:00:00 date"),
+        ("übermorgen 18 Uhr", "2026-10-08 18:00:00 time"),
+        ("übermorgen 00:00", "2026-10-08 00:00:00 time"),
+        ("vorgestern um 9 Uhr", "2026-10-04 09:00:00 time"),
+        ("heute 00:00", "2026-10-06 00:00:00 time"),
         // the instant
         ("jetzt", "2026-10-06 10:00:00 time"),
         ("sofort", "2026-10-06 10:00:00 time"),
@@ -134,6 +138,7 @@ fn english_is_unchanged_by_german() {
     assert_eq!(de("5pm"), "2026-10-06 17:00:00 time");
     assert_eq!(de("2 weeks"), "2026-10-20 10:00:00 date");
     assert_eq!(de("day after tomorrow"), "2026-10-08 00:00:00 date");
+    assert_eq!(de("day after tomorrow 9am"), "2026-10-08 09:00:00 time");
     assert_eq!(de("this friday"), "2026-10-09 00:00:00 date");
 }
 

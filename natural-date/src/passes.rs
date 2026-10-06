@@ -34,17 +34,32 @@ fn now(s: &str, _: &Context) -> Option<Reading> {
 
 /// A day named on its own is a calendar day, so it starts at midnight.
 /// chrono-english would keep the reference time of day, which turns `> today`
-/// in a filter into "later than this very moment".
+/// in a filter into "later than this very moment". A day word followed by a
+/// time (`day after tomorrow 18:00`) takes whatever `today <time>` takes and
+/// moves it by the day's offset — chrono-english knows only some of the words.
 fn day_word(s: &str, cx: &Context) -> Option<Reading> {
-    let days = match s {
-        "today" => 0,
-        "tomorrow" => 1,
-        "yesterday" => -1,
-        "day after tomorrow" | "overmorrow" => 2,
-        "day before yesterday" => -2,
-        _ => return None,
-    };
-    Some(Reading::day(cx.today() + Duration::days(days)))
+    const WORDS: [(&str, i64); 6] = [
+        ("day after tomorrow", 2),
+        ("day before yesterday", -2),
+        ("overmorrow", 2),
+        ("today", 0),
+        ("tomorrow", 1),
+        ("yesterday", -1),
+    ];
+    let (rest, days) = WORDS
+        .iter()
+        .find_map(|&(word, days)| Some((s.strip_prefix(word)?, days)))?;
+    if rest.is_empty() {
+        return Some(Reading::day(cx.today() + Duration::days(days)));
+    }
+    // `today <time>` is what the others are resolved through, so it must not
+    // come back here.
+    if days == 0 {
+        return None;
+    }
+    let time = rest.strip_prefix(' ')?;
+    let r = cx.resolve(&format!("today {time}"))?;
+    Some(Reading::wall(r.local(cx.now()) + Duration::days(days), r.has_time))
 }
 
 /// A phrase that starts with today's weekday (`friday`, `fri 17:00` on a
