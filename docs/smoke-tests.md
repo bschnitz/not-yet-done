@@ -150,7 +150,7 @@ start on every YAML file recognised as a view config (has `tab` +
       → `a` on the comments child now has `id: create_comment`,
       re-test. **Needs a live Jira**: the drill levels only exist under
       a real ticket row, and in the isolated copy the adapter never got
-      one — the `sso-plugin` auth plugin returned nothing within its 120 s
+      one — the configured auth plugin returned nothing within its 120 s
       deadline on two attempts, so the tab stayed empty. The plugin's
       browser keeps its own session on disk and only asks a person when
       that has expired, so the way to unblock this is a single sign-on
