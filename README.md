@@ -386,7 +386,7 @@ that cannot read the status glyph.
 ### Recurring tasks
 
 A task with a `recur:` rule comes back: completing it — `done` or `cancelled`,
-from the editor, the tree editor, the CLI or deadlines-widget — creates its successor,
+from the editor, the tree editor, the CLI or any other front-end — creates its successor,
 the same task (description, priority, parent, tags, projects) as `todo` with a
 new time window, together with a copy of its subtasks. There is never more than one open task in a series, and
 nothing is created by the clock: an overdue task stays overdue, and missed
@@ -2515,7 +2515,7 @@ Two limits are worth knowing:
 
 - **Someone has to be listening.** The question travels on the adapter's prompt
   stream, so the adapter must offer one (the calendar's `caldav` and
-  `office365-web` backends do). With no stream an unlocked store still
+  `external` backends do). With no stream an unlocked store still
   resolves; a locked one fails with "no interactive frontend" instead of
   hanging on a dialog nobody will show. The CLI answers the stream on the
   terminal; with no terminal (a timer, a pipe) it declines at once, and the
@@ -2597,7 +2597,7 @@ auth:
   session_cache: { kind: ttl, ttl_secs: 28800 }
   plugins:
     - name: sso
-      command: nyd-auth-browser --flow jira-sso
+      command: my-auth-plugin --flow jira-sso
       timeout_secs: 60 # optional; per step, not per login
       attention_timeout_secs: 300 # optional; while it waits on you
   bindings:
@@ -2651,47 +2651,6 @@ an extension of it: a session known to be dead is not worth an attempt,
 whatever the policy would have allowed. And unlike a prompt's, a plugin's
 values are not cached between logins — what it fetches _is_ the session, and
 replaying an expired cookie would only mint the same expired session again.
-
-##### `nyd-auth-browser` — logging in with a browser
-
-The plugin that ships with nyd, and the one ADR 0010 was written for. It runs a
-[browser-automation](https://example.invalid/browser-automation) flow and turns it
-into the conversation above: the step the flow began becomes a `step`, a `tell:`
-becomes an `attention`, a value the run asks for becomes a `form`, and what the
-flow `yields:` becomes the `result`.
-
-```yaml
-plugins:
-  - name: sso
-    command: nyd-auth-browser --flow ~/flows/jira-sso --field cookie=session
-    attention_timeout_secs: 600
-```
-
-| Option                   | Meaning                                                                                                                                         |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--flow <path>`          | The flow to run. The only required option.                                                                                                      |
-| `--field <name>[=<yld>]` | Which yield answers which of the fields nyd asked for. A field nobody names is answered by the yield of its own name.                           |
-| `--data <name>=<value>`  | A fact for the run, read as `{{data.<name>}}`. Never a secret — a run's facts are shown as it goes.                                             |
-| `--show <when>`          | When a window goes up: `needed` (default), `always`, `never`.                                                                                   |
-| `--socket <path>`        | Drive a browser already running on this socket instead of starting one. For working on a flow; a login that runs unattended should own its own. |
-| `--browser <command>`    | How to start one. Default `browser-automation`.                                                                                                    |
-| `--start-timeout <secs>` | How long to wait for that browser to open its socket. Default 60.                                                                               |
-
-Four things about it are worth knowing before writing a flow for it:
-
-- **It starts its own browser and quits it again**, headless, on a private
-  socket. A login cannot borrow the browser you are reading the news in: the
-  flow would open tabs in your session, and quitting would close it.
-- **The window goes up only when the run needs you** — it is telling you
-  something, or asking for a value — and comes down when the run moves on.
-  `--show always` is for watching a flow you are still writing.
-- **A yield named `expires_at_unix_ms` is the expiry, not a value.** A flow that
-  can read when its session dies says so under that name, and nyd caps the
-  session cache with it.
-- **The session nyd offers back is ignored.** A browser's session is its
-  profile, which is on disk and outlives every one of these processes; handing
-  the blob back would mean putting a live cookie through the run's facts, which
-  are shown as the run goes.
 
 #### Session cache
 

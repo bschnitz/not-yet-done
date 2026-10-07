@@ -13,7 +13,7 @@ scripts — and each template can get its own chord there (ctrl+s), stored in
 
 First user: tasks. `a t` opens the template menu for the same flow as `a a`
 (create under the selection, `inherit: true`); the template `todo` pre-sets the
-tag `todo` and is bound to `a o`. deadlines-widget' deadline corner then shows open tasks
+tag `todo` and is bound to `a o`. The desktop deadlines widget then shows open tasks
 that have a deadline **or** the `todo` tag (union).
 
 ## Decisions (agreed with the user, 2026-10-02)
@@ -28,7 +28,7 @@ that have a deadline **or** the `todo` tag (union).
    template there would overwrite content.
 4. `a t` behaves exactly like `a a` (same YAML create action, same parent
    resolution, `inherit`, `commit_on_save`), only the starting buffer differs.
-5. deadlines-widget (separate repo) filters `due set OR tag todo`.
+5. The deadlines widget (separate repo) filters `due set OR tag todo`.
 
 ## Design
 
@@ -108,7 +108,7 @@ that have a deadline **or** the `todo` tag (union).
   the `a a` action (tree :249-254, flat :458-465); commit in that repo.
 - Create the tag `todo` if missing; create template `todo` (`tags: todo`) in
   the menu and bind `a o`.
-- deadlines-widget: `sources/nyd-deadlines.sh` selects `due set OR tag_names has todo`
+- Deadlines widget: its nyd source script selects `due set OR tag_names has todo`
   (filter in jq — saved-query FilterExpr has no tag column); open todos without
   a deadline sort after the dated ones, oldest first, get level 1 and no time;
   menu group "Ohne Deadline" before "Erledigt". Update
@@ -119,7 +119,7 @@ that have a deadline **or** the `todo` tag (union).
 1. Protocol + tasks adapter + unit tests; build; commit.
 2. TUI: YAML key, menu mode, create path; build; commit.
 3. TUI: template shortcuts; build; commit.
-4. Docs, smoke-test section; install; user config; deadlines-widget script.
+4. Docs, smoke-test section; install; user config; deadlines widget script.
 
 ## Step 1 — done (697d220)
 
@@ -199,7 +199,7 @@ smoke-test section "Editor templates". TUI + CLI installed. User config:
 `~/.config/not_yet_done/views/tasks.yaml`; global tag `todo` created; template
 `tasks/tasks/templates/add/todo.md` (`tags: todo`) written directly and `a o`
 bound by a `query_shortcut` row (`template:tasks/tasks/add`, `todo`) instead of
-through the menu. deadlines-widget: `sources/nyd-deadlines.sh` takes `due set OR tag
+through the menu. Deadlines widget: its nyd source script takes `due set OR tag
 todo`, undated after dated (oldest first), `when: todo`, level 1, menu group
 "Ohne Deadline" before "Erledigt".
 

@@ -43,7 +43,8 @@
 #     and no connection — and no browser, for the browser-backed backends — is
 #     opened. The background poll also stays dormant until that first load, so
 #     the browser only ever appears on demand. Best for expensive or
-#     interactive-login backends (e.g. office365-web) you don't want spun up on
+#     interactive-login backends (e.g. an `external` one signing in through a
+#     browser) you don't want spun up on
 #     every launch.
 
 tab:
@@ -191,7 +192,7 @@ views:
         style: secondary
         sizing: "fixed(20)"
       # Event creator/organizer. Populated for meetings that carry an ORGANIZER
-      # (Teams/Outlook invites via the microsoft/office365-web backends); empty
+      # (Teams/Outlook invites via the microsoft backend); empty
       # for personal CalDAV events that have no organizer.
       - key: organizer
         label: Organizer
@@ -213,18 +214,16 @@ views:
       ratio: 50
       keybinding: p
 
-    # Bus event → action bindings (rule engine). When the office365-web backend
-    # reaches a Microsoft Authenticator *number-match* challenge during a
-    # sign-on, the browser run says what to do ("Tap 42 on your phone to sign
-    # in") and the backend publishes that sentence as
-    # `office365-web:mfa:number-match`. Bind it to the `show auth number` action
-    # below so the sentence appears in the notification bar; the same action
-    # auto-clears when the run is over (`office365-web:mfa:resolved`). No key
-    # is pressed — this is a purely event-driven reaction. Only relevant for
-    # the office365-web calendar backend; harmless for msgraph connections
-    # (they never publish it).
+    # Bus event → action bindings (rule engine). Anything that publishes on the
+    # event bus can drive an action without a key being pressed. Say a plugin
+    # publishes `acme:mfa:number-match` with the sentence "Tap 42 on your phone
+    # to sign in" when a sign-in reaches a number-match challenge, and
+    # `acme:mfa:resolved` once it is over: the binding below puts the sentence
+    # in the notification bar and the action clears it again. (An `external`
+    # calendar backend needs none of this — what it asks of you shows as the
+    # tab's sign-in banner on its own.)
     event_actions:
-      - on: "office365-web:mfa:number-match"
+      - on: "acme:mfa:number-match"
         run: show auth number
 
     actions:
@@ -239,9 +238,9 @@ views:
         # `notifications.alert_enabled: false` in tui.yaml) to use the ordinary
         # bottom notification bar instead.
         prominent: true
-        message: "Microsoft Authenticator: {message}"
+        message: "Sign-in: {message}"
         on_event:
-          "office365-web:mfa:resolved": close
+          "acme:mfa:resolved": close
       # Local filter-while-typing over the loaded rows.
       # Create a calendar event (form popup → `execute("create", …)`). The
       # adapter advertises this action on the calendar root with a full
@@ -280,9 +279,9 @@ views:
           # `inline` = radio list, every option visible (Show as / Calendar
           # render as inline radios); `dropdown` (default) = collapsed.
           select_style: inline
-      # Show or hide the browser window behind a browser-driven connection
-      # (`office365-web`): `execute("toggle_window")` flips every connection
-      # that has one, so a stuck sign-in can be watched — and hidden again.
+      # Show or hide the window behind a connection that has one (an
+      # `external` backend driving a browser, say): `execute("toggle_window")`
+      # flips every connection that has one, so a stuck sign-in can be watched — and hidden again.
       # `on_container: true` dispatches it against the adapter root, like
       # `create` above.
       - name: toggle browser
@@ -307,7 +306,7 @@ views:
         on_container: true
       # Delete the event under the cursor at its source, after a confirm. An
       # occurrence of a series is deleted alone where the backend addresses
-      # occurrences (Graph, Outlook on the web); CalDAV stores a series as
+      # occurrences (Graph); CalDAV stores a series as
       # one resource, so there the whole series goes. Nobody is sent a
       # cancellation. An event the server no longer has (deleted elsewhere)
       # is removed from nyd all the same. From the command line:
@@ -320,8 +319,8 @@ views:
       # Graph edits one occurrence of a series alone. CalDAV stores a series
       # as one resource, so it refuses to edit a recurring event rather than
       # move every occurrence; it also refuses when the event changed on the
-      # server since the last fetch — refresh and edit again. Outlook on the
-      # web (`office365-web`) edits one occurrence alone, like Graph. From
+      # server since the last fetch — refresh and edit again. An `external`
+      # backend decides for itself. From
       # the command line, only the named fields change:
       #   nyd adapter calendar <event id> edit --field location="Room 2"
       - name: edit

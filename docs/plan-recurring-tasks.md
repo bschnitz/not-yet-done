@@ -26,7 +26,7 @@ of rule, because two kinds of habit exist:
    - after done: the completion time plus the interval.
 3. **The window is the existing `not_before` / `due` pair.** A rule says when
    a successor's `not_before` lies and, optionally, how long after it `due`
-   lies. Nothing new is needed to show it: the deadlines-widget deadlines corner
+   lies. Nothing new is needed to show it: the desktop deadlines widget
    already lists tasks before their `not_before`, and turns them overdue at
    `due`.
 4. **Two occurrences a day are two series.** Morning and evening supplements
@@ -105,7 +105,7 @@ open one matters for creating the next.
   without a database, `completed_at` and the zone passed in (no clock read
   inside).
 - The successor is created where status changes are written, so every path
-  gets it: `TaskRepository::update_task` (editor, CLI, deadlines-widget' done click)
+  gets it: `TaskRepository::update_task` (editor, CLI, the deadlines widget's done click)
   and `apply_batch` (tree edit). One helper, called from both.
 - `not-yet-done-local-adapter`: `recur:` in the new/edit buffers
   (`editor_templates.rs`), parse errors as `FieldError`, a `recur` column in
@@ -113,12 +113,12 @@ open one matters for creating the next.
 - Docs: README (tasks section), view spec / example config if the column is
   shown by default, `docs/smoke-tests.md`.
 
-## deadlines-widget
+## Deadlines widget
 
-The deadlines source (`deadlines-widget/sources/nyd-deadlines.sh`) selects `due set OR
+The widget's nyd source script selects `due set OR
 tag todo`. A successor with a `due` shows up as-is. A rule without `due +…`
-gives a task with only a `not_before`. Decided 2026-10-03 and done (deadlines-widget
-`afddae2`): such a task joins the deadlines corner once its `not_before` has
+gives a task with only a `not_before`. Decided 2026-10-03 and done in the widget's
+repository: such a task joins the deadlines corner once its `not_before` has
 passed, among the undated ones, ordered by `not_before`.
 
 ## Open questions
@@ -217,7 +217,7 @@ Done and committed:
   `DomainEvent::SeriesAdvanced` from the edit buffer and the tree editor, the
   `recur` column, README, smoke tests (8d2f356); smoke-tested in the TUI
   2026-10-03 (5cce463).
-- deadlines-widget: a `recur` task without `due` in the deadlines corner (deadlines-widget
-  afddae2).
+- Deadlines widget: a `recur` task without `due` in the deadlines corner (in
+  the widget's repository).
 - Subtask copy with `subtasks …` / `reopen` (7d86180); smoke-tested in the TUI
   2026-10-04; CLI and TUI installed.

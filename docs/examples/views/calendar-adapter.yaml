@@ -8,7 +8,8 @@
 # same backend — the example below connects TWO Microsoft 365 mailboxes
 # (Teams/Outlook show the same calendar), each its own connection.
 #
-# Backends are compiled in via cargo features (default: `microsoft`). A
+# Backends are compiled in via cargo features (default: `microsoft`, `caldav`,
+# `external`). A
 # connection whose `backend:` isn't compiled into the build is a startup error.
 #
 # Each connection's `config:` sub-tree is opaque to the adapter and handed
@@ -31,63 +32,32 @@
 # in-process OAuth2 device-code flow can be added later as a second `token`
 # mechanism without touching the view or this file's shape.
 #
-# For `backend: office365-web` (browser-driven; for tenants where Graph is
-# blocked by device-compliance Conditional Access and the calendar lives behind
-# Outlook on the web) the `config:` sub-tree is instead:
+# For `backend: external` (any calendar neither Graph nor CalDAV reaches — a
+# web UI behind a browser sign-in, a proprietary API, a local file) nyd starts
+# a program of your choosing and talks to it over JSON lines on stdin/stdout:
+# it asks for events and calendars, creates, edits and deletes events, and
+# relays what the program reports — load progress, a "waiting for you" state
+# (shown as the tab's sign-in banner) and forms. The protocol is described in
+# docs/decisions/0014-external-calendar-backends.md and typed in
+# `not_yet_done_calendar_external::protocol`. Enable with the `external` cargo
+# feature (on by default). The `config:` sub-tree is:
 #
-#   account_key   — session registry key (required). Connections sharing a key
-#                   share ONE browser, so a single interactive sign-on serves
-#                   them all (e.g. a calendar and a future mail backend).
-#   name          — display label for the "Account" column (optional).
-#   account       — the account the flow signs on as (optional; becomes the
-#                   flow's `{{data.account}}`). Leave it out only when the
-#                   browser's own values file names the account — with two
-#                   connections each must name its own.
-#   profile_dir   — persistent browser data directory (required); the sign-on
-#                   and its cookies survive here across restarts. `~/` is
-#                   expanded against $HOME.
-#   headless      — rest hidden (optional; true). `false` always shows the
-#                   browser window, for a fully manual setup.
-#   auto_headed   — while resting hidden, show the window the moment the run
-#                   has something to say to you (the second factor) and hide
-#                   it again once the run is over (optional; true). `false`
-#                   never pops a window: what the run says then reaches you
-#                   through the event bus alone (see calendar.yaml).
-#   secrets       — one credential provider per secret the flow may ask for,
-#                   keyed by the name the flow declares (optional). Any
-#                   provider works; `command` wrapping `pass`/`op` is the
-#                   intended default.
-#   flow          — the flow a calendar read runs: a name on the browser's
-#                   shelf or a path to a flow directory (optional;
-#                   `nyd-calendar`).
-#   create_flow   — the flow that creates an event, named the same way
-#                   (optional; `nyd-calendar-create`).
-#   delete_flow   — the flow that deletes an event, named the same way
-#                   (optional; `nyd-calendar-delete`).
-#   update_flow   — the flow that edits an event, named the same way
-#                   (optional; `nyd-calendar-update`).
-#   browser       — the `browser-automation` binary (optional; found on PATH).
+#   command           — the backend program, run under `sh -c` (required).
+#   name              — display label for the "Account" column (optional).
+#   share             — connections with the same `command` and `share` talk to
+#                       ONE process, so one sign-in serves them all (optional;
+#                       defaults to the connection id).
+#   secrets           — one credential provider per secret the backend needs,
+#                       keyed by the name it knows it by (optional). nyd
+#                       resolves them and hands them over when the process
+#                       starts; they never touch its command line or
+#                       environment.
+#   config            — handed to the backend verbatim (optional); its shape is
+#                       the backend's business.
+#   call_timeout_secs — how long one call may take (optional; 600, since a call
+#                       may wait on an interactive sign-in).
 #
-# This backend starts one hidden `browser-automation` per account_key and drives
-# it over its socket: every calendar read runs the `nyd-calendar` flow from the
-# browser's shelf, which signs on if it has to, fetches the calendar view and
-# yields the events. Creating an event runs `nyd-calendar-create` the same way;
-# it writes to the account's default calendar, the one calendar this backend
-# offers on the "New event" form. Editing an event runs `nyd-calendar-update`,
-# which sends only the changed fields (one occurrence of a series alone), and
-# deleting one runs `nyd-calendar-delete`. Secrets never touch the browser's command line or
-# environment: each one listed under `secrets:` is resolved here and handed to
-# every run over the socket before it starts, so nobody is asked for it and no
-# question reaches the desktop. List exactly the secrets the flows declare under
-# `requires: secrets:` — the browser refuses a run handed one its flow never
-# reads. The browser's own values file (`~/.config/browsertest/values.yaml`)
-# needs no entry for them; a browser too old to take secrets up front asks
-# instead, and this backend answers.
-# When the sign-on reaches the second factor the run says so ("Tap 42 on your
-# phone to sign in"); the sentence is published on the event bus as
-# `office365-web:mfa:number-match` and, with `auto_headed`, the window comes up
-# for it. Enable the backend with the `office365-web` cargo feature (on by
-# default).
+# The program's stderr goes to `<log dir>/calendar-<name>.log`.
 
 # Every connection entry may also say when it touches the network:
 #
@@ -124,29 +94,25 @@ connections:
           --tenant <SIDE_TENANT_ID>
           --query accessToken -o tsv
 
-  # A tenant reachable only through the browser (Graph blocked). No token — the
-  # browser signs on itself and keeps the session in profile_dir. The flow asks
-  # for the password by the name it declares (`calendar-password`); the
-  # provider below answers. Drop `secrets` to type the password by hand in the
-  # browser window.
+  # A calendar served by a program of your own (backend: external). The
+  # program gets the `config:` block below as-is and the resolved `secrets:`
+  # when it starts; it signs in however it has to and keeps its own state.
   - id: web
-    backend: office365-web
+    backend: external
     fetch: on_demand
     config:
-      account_key: web
+      command: my-calendar-backend --verbose
       name: Web calendar
-      account: user@example.com
-      profile_dir: ~/.local/state/not_yet_done/office365-web/web
-      headless: true
-      auto_headed: true
+      share: web
       secrets:
-        calendar-password:
+        password:
           # `command` runs a shell command and uses its trimmed stdout — here a
           # password manager. Any credential provider works (env, file, keyring).
           type: command
-          script: pass show example/office365/password
-      # flow: nyd-calendar
-      # browser: ~/.cargo/bin/browser-automation
+          script: pass show example/calendar/password
+      config:
+        account: user@example.com
+        state_dir: ~/.local/state/my-calendar-backend
 
   # A CalDAV server (backend: caldav) — mail.de, Nextcloud, Baïkal, Fastmail,
   # iCloud, Radicale, … Auth is HTTP Basic. `url` is the entry point: a

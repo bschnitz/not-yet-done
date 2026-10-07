@@ -185,7 +185,7 @@ without `core`; the _language_ was later lifted one level further out, into
   makes the same filter usable against SQL, an API result and a list in memory
   without three implementations disagreeing about what it means. A workspace
   member here, published on crates.io as `rowsieve`, and used from outside this
-  repository too (the `deadlines-widget` notification bar filters its sections with it).
+  repository too.
 - **`not-yet-done-filter`** — what is genuinely about _tasks_, layered on top:
   the saved-query document (`name:` + `query:`), the `has_ancestor`/`in_tree`
   predicates and their resolution against the materialized `path` column, the
@@ -514,14 +514,16 @@ declared under `auth.plugins`. See
 [ADR 0010](decisions/0010-out-of-process-auth-plugins.md) for why it lives in
 the orchestrator rather than in a resolver, and the README for the protocol.
 
-The plugin that motivated it ships with nyd as `not-yet-done-auth-browser`
-(binary `nyd-auth-browser`): it drives a
-[browser-automation](https://example.invalid/browser-automation) flow over that
-browser's control socket and reports the flow's own steps as nyd's. It depends
-on `not-yet-done-content` for the line protocol and on none of the browser's
-crates — the coupling is the socket, on purpose, so the two programs can be
-built and broken apart. It is also the only crate in this workspace that talks
-to a browser at all: every adapter goes on speaking HTTP.
+nyd ships no plugin itself: a plugin is any program speaking that protocol,
+built and released on its own, and `not-yet-done-content` holds the protocol
+types a Rust plugin can link against. Every adapter goes on speaking HTTP.
+
+The calendar applies the same idea one level up. A calendar that neither Graph
+nor CalDAV reaches is served by an **external calendar backend**
+(`backend: external`, crate `not-yet-done-calendar-external`): a long-lived
+program the adapter starts and talks to over JSON lines, asking it for events
+and calendars and relaying its progress, its "waiting for you" state and its
+forms. See [ADR 0014](decisions/0014-external-calendar-backends.md).
 
 ### Anonymization (`NYD_ANON`)
 

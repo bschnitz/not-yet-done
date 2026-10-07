@@ -1220,7 +1220,7 @@ unit is active the instant it execs, so both stamps are the same microsecond and
 the span is a true zero. `blame` omits such units entirely, which is why the
 discrepancy was not obvious — comparing the column against `blame` showed
 agreement on every row `blame` printed, and 18 running services (pipewire,
-gpg-agent, desktop-shell, …) blank. With `>=` the column reads `0` for them; an
+gpg-agent, a desktop shell, …) blank. With `>=` the column reads `0` for them; an
 empty cell now means only "never started", which on this machine is exactly 5
 units, all `inactive` with a zero timestamp. The distinction is the point of the
 column: `0` is a fact about a fast unit, blank is a fact about an idle one.

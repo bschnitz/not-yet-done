@@ -7,7 +7,7 @@
   `AdapterStatus`, `status_reporter.rs`; the TUI and CLI status renderers;
   the `auth_session` table of the jira, confluence, stoat and taiga adapters;
   the `cookie` mechanisms of `not-yet-done-jira-adapter` and
-  `not-yet-done-confluence-adapter`; `not-yet-done-auth-browser` (new)
+  `not-yet-done-confluence-adapter`; a first plugin binary (new)
 
 ## Context
 
@@ -26,9 +26,9 @@ library has, and today means one of two providers:
   opening its own `pinentry` window.
 
 The case neither covers is an interactive SSO login that only a real browser
-can perform. It is not hypothetical: it is why `not-yet-done-office365-web`
-exists at all — Conditional Access closes the Graph route that
-`not-yet-done-calendar-msgraph` takes. And the slot for it is already cut on
+can perform. It is not hypothetical: Conditional Access can close the Graph
+route that `not-yet-done-calendar-msgraph` takes, leaving a browser as the
+only way in. And the slot for it is already cut on
 the other adapters. The `cookie` mechanism of `jira` and `confluence`
 documents itself as
 
@@ -123,7 +123,7 @@ auth:
   session_cache: { type: ttl, ttl_secs: 28800 }
   plugins:
     - name: sso
-      command: nyd-auth-browser --flow jira-sso
+      command: my-auth-plugin --flow jira-sso
       timeout_secs: 60 # per step, not per login
       attention_timeout_secs: 300 # while it waits on the user
   bindings:
@@ -215,8 +215,8 @@ cap on `form` lines, so a plugin that keeps asking cannot loop forever.
 Only `result` carries secret values. `step`, `attention` and `form` reach the
 status channel, the log and possibly a desktop notification, so a plugin must
 put no value into them. nyd cannot verify this, which makes it part of the
-plugin contract — and for the first plugin the flow language enforces it
-anyway: browser-automation's `tell:` refuses to say a secret.
+plugin contract — and for the first plugin the browser automation it drives
+enforces it anyway: its user-facing messages refuse to carry a secret.
 
 ### Where it lives
 
@@ -271,49 +271,27 @@ share one script.
 - **Jira and Confluence get an interactive SSO login with no adapter code.**
   Their `cookie` mechanism is unchanged; the script its doc has always
   promised becomes writable.
-- **The first plugin is `nyd-auth-browser`, a binary in this repo**
-  (`not-yet-done-auth-browser`). The protocol is nyd's, and browser-automation
-  stays an external program reached over its own documented socket wire;
-  nothing of it is linked in here, and the JSON of that wire is written by
-  hand. Two programs that share a socket can be built, released and broken
-  separately; two that share a crate cannot. The translation is close to a
-  table, because that wire already carries the same four kinds of message:
+- **The first plugin was a binary in this workspace.** It drove an external
+  browser automation tool over that tool's own documented socket wire;
+  nothing of the tool was linked in, because two programs that share a socket
+  can be built, released and broken separately, and two that share a crate
+  cannot. Its translation was close to a table: the tool's run steps became
+  `step`, its user-facing messages `attention`, its questions `form`, and
+  what the run produced `result`. Only a step the run _began_ became a
+  `step` — every action inside one would be a status changing faster than
+  anybody can read it. (It has since moved out of this repository; see the
+  2026-10 amendment.)
 
-  | This protocol | browser-automation `News`      |
-  | ------------- | --------------------------- |
-  | `step`        | `Run { happened }`, `began` |
-  | `attention`   | `Told { said }`             |
-  | `form`        | `Asking { hole }`           |
-  | `input`       | `Ask::FlowAnswer`           |
-  | `result`      | `Over { yielded }`          |
-
-  Only a step the run _began_ becomes a `step`: every action inside one would
-  be a status changing faster than anybody can read it, and the step is what
-  the flow's author named. A `tell:` has no end of its own, so the next thing
-  the run does is what withdraws the attention.
-
-- **The nyd half of the protocol is a dependency of the plugin, the browser
-  half is not.** `ToPlugin` and the line a plugin writes are public and
-  round-trip, so a plugin written in Rust reads what nyd wrote instead of
-  transcribing its shape into a second set of types. Writing one protocol
-  down twice inside one workspace is how two spellings of it start to differ
-  — which is the argument _against_ linking browser-automation turned around,
-  and lands the other way because that code is on the far side of a release
-  boundary and this is not.
-
-- **This plugin declines the session nyd offers it.** A browser's session is
-  its profile, which is on disk and outlives the process; handing the blob
-  back would mean putting a live cookie through the run's facts, which are
-  shown as the run goes. The offer stands for plugins that can use it.
+- **The nyd half of the protocol is a dependency of the plugin.** `ToPlugin`
+  and the line a plugin writes are public and round-trip, so a plugin written
+  in Rust reads what nyd wrote instead of transcribing its shape into a second
+  set of types.
 
 - **A browser a plugin starts is a browser a plugin quits.** It runs headless
   on a private socket and puts a window up only while the run needs a person,
   because a login that runs unattended cannot borrow the browser the user is
   reading the news in.
 
-- **`not-yet-done-office365-web` is not touched.** It drives a browser for
-  the _data_, not for a secret, and this protocol is about a secret. It may
-  later hand its login half to a plugin; that is a separate decision.
 - **A cancelled login gets a chance to clean up.** `cancel` plus a grace
   period before the child is killed, because a plugin that owns a browser
   leaves a browser process behind when its parent dies without a word.
@@ -352,5 +330,15 @@ somewhere to look.
 
 The mechanics — roll the file over before a child starts, keep exactly one
 previous generation, fall back to `/dev/null` when it cannot be opened — are
-in `child-log`, a crate of its own: `not-yet-done-office365-web` had already
-written them once for the browser it starts, and this was the second caller.
+in `child-log`, a crate of its own: a browser-driving calendar backend had
+already written them once for the browser it starts, and this was the second
+caller.
+
+## Amendment (2026-10-07) — plugins live outside this repository
+
+nyd ships the protocol, not the plugins. The first plugin, and the
+browser-driving calendar backend mentioned above, moved to a repository of
+their own: they serve one particular setup, and this workspace must build,
+test and run without them. A plugin links `not-yet-done-content` for the
+protocol types and is installed as any other program on `PATH`. The calendar
+side of the same move is [ADR 0014](0014-external-calendar-backends.md).

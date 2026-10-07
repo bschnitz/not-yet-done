@@ -9881,8 +9881,8 @@ four rounds.
 ## Calendar — deleting an event (`d`)
 
 Every backend deletes: CalDAV by the event's UID (the whole series, which a
-CalDAV server stores as one resource), Graph and Outlook on the web by the id a
-read listed (that occurrence alone). Nobody is sent a cancellation. Use test
+CalDAV server stores as one resource), Graph and an `external` backend by the
+id a read listed (that occurrence alone). Nobody is sent a cancellation. Use test
 events you created for the purpose.
 
 - [x] **The command line asks first.** `nyd adapter calendar <event id> delete`
@@ -9890,8 +9890,8 @@ events you created for the purpose.
       deletes nothing; with `--yes` it prints `Deleted “<title>”`.
 - [x] **A CalDAV event is gone at the source.** After the delete, a
       `nyd adapter calendar root sync` does not bring it back.
-- [x] **An Outlook-on-the-web event is deleted by the `nyd-calendar-delete`
-      flow.** The connection's event count at the next sync is one lower.
+- [x] **An event of an `external` connection is deleted by its backend.**
+      The connection's event count at the next sync is one lower.
 - [x] **Deleting a connection's last event empties it.** The row disappears
       at once, although a re-fetch of an empty calendar keeps the known events.
 - [x] **`d` in the calendar tab.** The confirm popup names the event; `y`
@@ -9902,19 +9902,19 @@ events you created for the purpose.
       `nyd adapter calendar <event id> delete --yes` for real prints
       `“<title>” was already gone from the calendar; removed it here`, and
       `ls` no longer lists it.
-- [ ] **An Outlook-on-the-web event purged elsewhere is still removed.**
-      Delete a test event in Outlook and empty Deleted Items there, then
+- [ ] **An `external` event purged elsewhere is still removed.**
+      Delete a test event at the source (and empty its trash, if it has one), then
       `nyd adapter calendar <event id> delete --yes` prints `“<title>” was
     already gone from the calendar; removed it here`. (An event that only
-      sits in Deleted Items still has its id: deleting it again succeeds and
-      prints `Deleted`.) The backend half is verified: an id the service
+      sits in a trash may still have its id: deleting it again then succeeds
+      and prints `Deleted`.) The backend half is verified: an id the service
       does not know comes back as not found, not as a failed run.
 - [x] **A title with `&` reads back whole.** An event created as `A & B` in a
       CalDAV calendar lists as `A & B`, not `A  B`.
 
 ## Calendar — editing an event (`a e`)
 
-CalDAV, Graph and Outlook on the web (the `nyd-calendar-update` flow) edit.
+CalDAV, Graph and `external` backends edit.
 Only the fields the form changed are sent. Use test events you created for the
 purpose.
 
@@ -9943,17 +9943,17 @@ start` and nothing is sent.
       error asks to reload and edit again. After `r`, the edit goes through.
 - [ ] **A Graph edit changes one occurrence.** On a Graph connection, editing
       one occurrence of a series moves only that occurrence.
-- [x] **An Outlook-on-the-web edit lands at the source.** On an
-      `office365-web` connection, title, start and end, show-as, location and
+- [x] **An edit through an external backend lands at the source.** On an
+      `external` connection, title, start and end, show-as, location and
       notes each change, and after a `nyd adapter calendar root sync` the
       event reads back with the new values. An emptied location or note reads
       back empty.
-- [x] **Outlook on the web, timed to all-day and back.** `all_day=true` with
+- [x] **An `external` backend, timed to all-day and back.** `all_day=true` with
       start and end `tomorrow` reads back as a one-day event on tomorrow's
       date (not the day before); `all_day=false` with times makes it timed
       again.
-- [ ] **Outlook on the web, an event deleted elsewhere.** Delete a test event
-      in Outlook and empty Deleted Items there, then edit it from nyd: the
+- [ ] **An `external` backend, an event deleted elsewhere.** Delete a test
+      event at the source and empty its trash, then edit it from nyd: the
       error says the event is not on the server any more, not that the run
       failed.
 - [x] **From the command line.**
