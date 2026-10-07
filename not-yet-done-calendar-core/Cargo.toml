@@ -12,7 +12,10 @@ edition = "2024"
 
 [dependencies]
 async-trait = { workspace = true }
-chrono      = { workspace = true }
+chrono      = { workspace = true, features = ["serde"] }
+# The DTOs serialise so an out-of-process backend (see
+# not-yet-done-calendar-external) hands them over as JSON in one spelling.
+serde       = { workspace = true }
 thiserror   = { workspace = true }
 # Only for the `broadcast` channel type in `CalendarBackend::subscribe_ready`'s
 # signature — the async "data became ready" seam. No runtime is started here.
@@ -23,3 +26,6 @@ tokio       = { workspace = true }
 # shares one input model instead of a parallel one. content does not depend on
 # this crate, so there is no cycle.
 not-yet-done-content = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

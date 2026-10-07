@@ -7,13 +7,15 @@
 
 /// The service an online meeting is held on. `Other` is a meeting the source
 /// flagged as online without saying where, or a link no rule knows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MeetingProvider {
     Teams,
     Zoom,
     Meet,
     Webex,
     Jitsi,
+    #[serde(other)]
     Other,
 }
 
@@ -64,9 +66,10 @@ impl MeetingProvider {
 
 /// An event's online meeting: where it is held and, when known, the link that
 /// joins it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct OnlineMeeting {
     pub provider: MeetingProvider,
+    #[serde(default)]
     pub join_url: Option<String>,
 }
 

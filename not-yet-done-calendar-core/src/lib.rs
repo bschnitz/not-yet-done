@@ -20,6 +20,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 pub mod meeting;
 
@@ -28,7 +29,7 @@ pub use meeting::{MeetingProvider, OnlineMeeting};
 /// Half-open time window `[start, end)` an event listing is scoped to. The
 /// adapter derives it from its configured look-behind / look-ahead window and
 /// passes the same range to every backend so their results line up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeRange {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
@@ -54,12 +55,14 @@ impl TimeRange {
 /// as a percentage and `None` as an indeterminate "still loading" cue (no
 /// number). `done` marks the terminal fire (the load settled — clear the
 /// banner), which a backend sets even when it never produced a clean `1.0`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoadProgress {
     /// Best-effort completion estimate clamped to `[0, 1]`, or `None` when the
     /// load is running but not yet quantifiable (an interactive sign-in).
+    #[serde(default)]
     pub fraction: Option<f32>,
     /// True on the final fire, once no more data is coming for this load.
+    #[serde(default)]
     pub done: bool,
 }
 
@@ -94,17 +97,28 @@ impl LoadProgress {
 /// How the organiser marks the time an event occupies (Microsoft Graph
 /// `showAs`, iCalendar `TRANSP`/`STATUS`). Surfaced as a sortable/groupable
 /// column. Anything a backend can't map lands in [`ShowAs::Unknown`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Serialised as its [`as_str`](Self::as_str) token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ShowAs {
     Free,
     Tentative,
     Busy,
+    #[serde(rename = "oof")]
     OutOfOffice,
+    #[serde(rename = "elsewhere")]
     WorkingElsewhere,
+    #[serde(other)]
     Unknown,
 }
 
 impl ShowAs {
+    /// [`ShowAs::Unknown`], as a serde default.
+    fn unknown() -> Self {
+        ShowAs::Unknown
+    }
+
     /// Stable lower-case token used as the metadata field value (so sorting
     /// and grouping are deterministic across backends).
     pub fn as_str(&self) -> &'static str {
@@ -135,17 +149,24 @@ impl ShowAs {
 /// How someone answered an invitation (iCalendar `PARTSTAT`, Exchange's and
 /// Graph's response type). [`Response::Pending`] covers both "not answered
 /// yet" and "the service does not say".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Response {
     Accepted,
     Tentative,
     Declined,
-    Pending,
     /// The one who invited; they have nothing to answer.
     Organizer,
+    #[serde(other)]
+    Pending,
 }
 
 impl Response {
+    /// [`Response::Pending`], as a serde default.
+    fn pending() -> Self {
+        Response::Pending
+    }
+
     /// Stable lower-case token used as the metadata field value.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -171,9 +192,10 @@ impl Response {
 }
 
 /// Someone invited to an event, by the name the calendar shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attendee {
     pub name: String,
+    #[serde(default = "Response::pending")]
     pub response: Response,
 }
 
@@ -181,34 +203,48 @@ pub struct Attendee {
 /// UTC instants — the adapter renders them in local time and groups on them.
 /// `uid` is the backend-local stable identifier; the adapter namespaces it
 /// with the connection id so ids from different connections never collide.
-#[derive(Clone, Debug)]
+///
+/// Serialisable so an out-of-process backend can hand events over as JSON;
+/// everything but `uid`, `title`, `start` and `end` may be left out there.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalEvent {
     /// Backend-local stable id (Graph event id, iCal UID, …). Unique within
     /// one connection; the adapter prefixes the connection id for global
     /// uniqueness.
     pub uid: String,
     /// Display name of the calendar/mailbox this event belongs to.
+    #[serde(default)]
     pub calendar: String,
     pub title: String,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
+    #[serde(default)]
     pub all_day: bool,
+    #[serde(default)]
     pub location: Option<String>,
+    #[serde(default)]
     pub organizer: Option<String>,
+    #[serde(default = "ShowAs::unknown")]
     pub show_as: ShowAs,
     /// Plain-text body for the preview pane, if the backend fetched one.
+    #[serde(default)]
     pub body: Option<String>,
     /// Web link to open the event in the source app, if any.
+    #[serde(default)]
     pub url: Option<String>,
     /// The online meeting the event is held in, if any — set by a backend that
     /// knows, otherwise found in the text by [`meeting::detect`].
+    #[serde(default)]
     pub online_meeting: Option<OnlineMeeting>,
     /// Who is invited, as far as the backend knows; empty when it does not.
+    #[serde(default)]
     pub attendees: Vec<Attendee>,
     /// How the connection's own account answered, when the backend can tell.
+    #[serde(default)]
     pub my_response: Option<Response>,
     /// The organizer called the event off; it stays in the calendar until
     /// someone removes it.
+    #[serde(default)]
     pub cancelled: bool,
 }
 
@@ -220,7 +256,7 @@ pub struct CalEvent {
 /// connection — a new event lands in. `id` is the backend-local handle the same
 /// backend later resolves in [`CalendarBackend::create_event`] (a CalDAV
 /// collection URL, a Graph calendar id); the adapter treats it as opaque.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalendarRef {
     /// Backend-local id of the collection — passed back verbatim as
     /// `create_event`'s `calendar_id`. Opaque to the adapter.
@@ -231,6 +267,7 @@ pub struct CalendarRef {
     pub name: String,
     /// Whether new events may be created here. A backend that can't tell
     /// reports `true`; the create attempt then surfaces any server refusal.
+    #[serde(default = "yes")]
     pub writable: bool,
 }
 
@@ -238,7 +275,7 @@ pub struct CalendarRef {
 /// the write counterpart of the read-only [`CalEvent`] (no `uid`/`url`/
 /// `organizer`/`calendar`: those are assigned by the server, and the target
 /// calendar is passed separately to [`CalendarBackend::create_event`]).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventDraft {
     pub title: String,
     /// Start instant (UTC). For an all-day event only the date part is used.
@@ -259,15 +296,45 @@ pub struct EventDraft {
 ///
 /// Start, end and the all-day flag travel together in [`EventTimes`], since a
 /// backend writes them as one (an all-day event's bounds are dates).
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// Serialised, a field left alone is absent and a cleared one is `null`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub times: Option<EventTimes>,
     /// `Some(None)` clears the location.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub location: Option<Option<String>>,
     /// `Some(None)` clears the notes.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub body: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_as: Option<ShowAs>,
+}
+
+/// Deserialize a field that is present, `null` included, into `Some` — so an
+/// explicit `null` (clear it) stays apart from an absent key (leave it).
+/// Paired with `#[serde(default)]`, which supplies the `None` for the latter.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl EventPatch {
@@ -280,7 +347,7 @@ impl EventPatch {
 /// When an event takes place, as an edit sets it — the same conventions as
 /// [`EventDraft`]: UTC instants, the end exclusive, and for an all-day event
 /// only the date part of each counts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventTimes {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
@@ -345,8 +412,8 @@ pub trait CalendarBackend: Send + Sync {
     /// as the backend now sees it (server-assigned `uid`, canonical times).
     ///
     /// The default is a hard read-only error, so a backend gains write support
-    /// only by overriding this — existing read-only backends (and the
-    /// browser-driven office365-web wrapper) inherit the refusal unchanged.
+    /// only by overriding this — existing read-only backends inherit the
+    /// refusal unchanged.
     async fn create_event(
         &self,
         calendar_id: Option<&str>,
@@ -396,7 +463,7 @@ pub trait CalendarBackend: Send + Sync {
     /// Put the backend's window on screen if it is off, take it off if it is on;
     /// answered with whether it is on now.
     ///
-    /// A backend that drives a browser — `office365-web` — keeps it hidden and
+    /// A backend that drives a browser keeps it hidden and
     /// only brings it up when the run has something to say. Whoever attends the
     /// session may still want to look (a sign-in that got stuck) or stop looking;
     /// this is that switch, exposed as an ordinary action so any frontend can
@@ -409,8 +476,8 @@ pub trait CalendarBackend: Send + Sync {
 
     /// Subscribe to the backend's "data became ready" signal, if it has one.
     ///
-    /// A backend whose data arrives *asynchronously and out of band* — e.g. the
-    /// browser-driven `office365-web` backend, where an interactive sign-in may
+    /// A backend whose data arrives *asynchronously and out of band* — e.g. one
+    /// driving a browser, where an interactive sign-in may
     /// complete minutes after a `list_events` call already returned empty —
     /// returns a [`broadcast::Receiver`] that fires once the source is freshly
     /// loaded and a subsequent `list_events` would succeed. The aggregating
@@ -430,9 +497,23 @@ pub trait CalendarBackend: Send + Sync {
         None
     }
 
+    /// Subscribe to the backend's "waiting on a person" signal, if it has one.
+    ///
+    /// The value is a sentence for the user — "Approve the sign-in on your
+    /// phone" — while the backend waits on someone acting where this program
+    /// cannot reach, and `None` once it no longer does. There is nothing to
+    /// submit: the backend carries on by itself once the person has acted.
+    /// The adapter shows the sentence as the connection's status, the way an
+    /// auth plugin's `attention` is shown.
+    ///
+    /// Default `None`: a backend that never waits on a person says nothing.
+    fn subscribe_attention(&self) -> Option<tokio::sync::watch::Receiver<Option<String>>> {
+        None
+    }
+
     /// Take this backend's stream of mid-operation user-input prompts, if it
-    /// has one — e.g. the `office365-web` backend raising an MFA prompt during
-    /// an interactive sign-in, mid-`list_events`.
+    /// has one — e.g. a backend asking for a one-time code during an
+    /// interactive sign-in, mid-`list_events`.
     ///
     /// Reuses the content layer's [`PromptRequest`](not_yet_done_content::PromptRequest)
     /// (built on the Action `InputSpec`/`ActionInput` vocabulary) so the whole
@@ -493,9 +574,8 @@ pub trait CalendarBackendFactory: Send + Sync {
     /// Construct the backend. `ctx` carries the host capabilities the adapter
     /// received in [`AdapterFactory::create`](not_yet_done_content::AdapterFactory::create)
     /// — chiefly the cross-adapter [`HostEventBus`](not_yet_done_content::HostEventBus).
-    /// Backends that coordinate with the UI over the bus (e.g. the office365-web
-    /// login's MFA number-match prompt) take it here; a non-interactive backend
-    /// (msgraph device-code) ignores it.
+    /// Backends that coordinate with the UI over the bus take it here; one
+    /// that does not (msgraph device-code) ignores it.
     fn create(
         &self,
         connection_id: &str,
@@ -531,6 +611,40 @@ mod tests {
         let p = LoadProgress::indeterminate();
         assert_eq!(p.fraction, None, "no percentage is known yet");
         assert!(!p.done, "still loading");
+    }
+
+    #[test]
+    fn a_patch_tells_a_cleared_field_from_one_left_alone() {
+        let patch = EventPatch {
+            title: Some("Retro".into()),
+            location: Some(None),
+            ..EventPatch::default()
+        };
+        let json = serde_json::to_value(&patch).expect("serialises");
+        assert_eq!(json, serde_json::json!({ "title": "Retro", "location": null }));
+        let back: EventPatch = serde_json::from_value(json).expect("reads back");
+        assert_eq!(back, patch, "null clears, absent leaves alone");
+    }
+
+    #[test]
+    fn an_event_reads_from_its_four_required_fields_and_tokens() {
+        let event: CalEvent = serde_json::from_value(serde_json::json!({
+            "uid": "a", "title": "Standup",
+            "start": "2026-09-07T07:00:00Z", "end": "2026-09-07T07:15:00Z",
+            "show_as": "oof", "my_response": "nonsense",
+            "attendees": [{ "name": "Jane Doe" }],
+            "online_meeting": { "provider": "teams" }
+        }))
+        .expect("parses");
+        assert_eq!(event.show_as, ShowAs::OutOfOffice);
+        assert_eq!(event.my_response, Some(Response::Pending));
+        assert_eq!(event.attendees[0].response, Response::Pending);
+        assert_eq!(event.online_meeting.unwrap().provider, MeetingProvider::Teams);
+        assert!(!event.all_day && !event.cancelled && event.calendar.is_empty());
+        assert_eq!(
+            serde_json::to_value(ShowAs::WorkingElsewhere).unwrap(),
+            serde_json::json!(ShowAs::WorkingElsewhere.as_str())
+        );
     }
 
     /// A backend that overrides nothing has no window, and says so.
