@@ -775,6 +775,9 @@ nyd tasks do add -m -                     # editor action, body from stdin
 nyd tasks do toggle-tracking <id>         # no-input action
 nyd tasks do delete <id> --yes            # confirm-gated action needs --yes
 nyd pg do run --field name=report --field db=live   # form action
+# A form action's fields — key, kind, required, default and, for a select,
+# the values it accepts — are listed by `actions -o json`:
+nyd adapter calendar root actions -o json | jq '.[] | select(.id == "create") | .fields'
 
 # Jira tickets round-trip through Markdown from the CLI, sharing the exact
 # buffer and write-back pipeline of the TUI `edit (markdown)` action:

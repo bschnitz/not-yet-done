@@ -2217,11 +2217,15 @@ fn output_actions(actions: &[NodeAction], output: Output) {
             let arr: Vec<serde_json::Value> = actions
                 .iter()
                 .map(|a| {
-                    serde_json::json!({
+                    let mut v = serde_json::json!({
                         "id": a.id,
                         "label": a.label,
                         "input": input_kind(a),
-                    })
+                    });
+                    if let not_yet_done_content::InputSpec::Form { fields } = &a.input {
+                        v["fields"] = fields.iter().map(form_field_json).collect();
+                    }
+                    v
                 })
                 .collect();
             print_json(&serde_json::Value::Array(arr));
@@ -2368,6 +2372,40 @@ fn input_kind(a: &NodeAction) -> String {
         InputSpec::Form { fields } => format!("form({})", fields.len()),
         InputSpec::ColumnForm => "form(columns)".into(),
     }
+}
+
+/// One form field as `actions -o json` lists it: enough for a front-end of
+/// its own to build the form and fill `--field` — key, widget, whether it is
+/// required, its default and, for a choice, the values it accepts.
+fn form_field_json(f: &not_yet_done_content::FormFieldSpec) -> serde_json::Value {
+    use not_yet_done_content::FormFieldKind as K;
+    let (kind, options) = match &f.kind {
+        K::Text => ("text", None),
+        K::Select { allowed_values } => ("select", Some(allowed_values)),
+        K::Toggle => ("toggle", None),
+        K::DateTime { with_time: true } => ("datetime", None),
+        K::DateTime { with_time: false } => ("date", None),
+        K::Number { .. } => ("number", None),
+        K::Decimal { .. } => ("decimal", None),
+        K::Duration => ("duration", None),
+        K::Multiline { .. } => ("multiline", None),
+        K::MultiSelect { allowed_values } => ("multi_select", Some(allowed_values)),
+        K::File { multi: false } => ("file", None),
+        K::File { multi: true } => ("files", None),
+    };
+    let mut v = serde_json::json!({
+        "key": f.key,
+        "label": f.label,
+        "kind": kind,
+        "required": f.required,
+    });
+    if let Some(default) = &f.default {
+        v["default"] = default.clone().into();
+    }
+    if let Some(options) = options {
+        v["options"] = options.clone().into();
+    }
+    v
 }
 
 fn summary_json(s: &NodeSummary) -> serde_json::Value {
@@ -2977,6 +3015,27 @@ mod tests {
         print_table(
             &["a".into(), "bb".into()],
             &[vec!["1".into(), "2".into()], vec!["xxx".into(), "y".into()]],
+        );
+    }
+
+    #[test]
+    fn a_form_field_lists_its_options_and_default() {
+        let f = not_yet_done_content::FormFieldSpec::select(
+            "calendar",
+            "Calendar",
+            vec!["Work".into(), "Home".into()],
+        )
+        .with_default("Work".to_string());
+        assert_eq!(
+            form_field_json(&f),
+            serde_json::json!({
+                "key": "calendar",
+                "label": "Calendar",
+                "kind": "select",
+                "required": true,
+                "default": "Work",
+                "options": ["Work", "Home"],
+            })
         );
     }
 }
