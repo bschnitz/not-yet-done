@@ -1147,7 +1147,7 @@ script: >-
 mechanism: cookie
 plugins:
   - name: sso
-    command: nyd-auth-browser --flow jira-sso
+    command: my-auth-plugin --flow jira-sso
     timeout_secs: 90
 bindings:
   - field: cookie
@@ -1178,7 +1178,7 @@ bindings:
 mechanism: cookie
 plugins:
   - name: sso
-    command: nyd-auth-browser --flow jira-sso
+    command: my-auth-plugin --flow jira-sso
 bindings:
   - field: cookie
     provider: { type: plugin, use: sso-typo }
@@ -1198,7 +1198,7 @@ bindings:
 mechanism: cookie
 plugins:
   - name: sso
-    command: nyd-auth-browser --flow jira-sso
+    command: my-auth-plugin --flow jira-sso
 bindings:
   - field: cookie
     provider: { type: literal, value: "session=abc" }
@@ -1219,7 +1219,7 @@ bindings:
 mechanism: basic-auth
 plugins:
   - name: sso
-    command: nyd-auth-browser --flow sso
+    command: my-auth-plugin --flow sso
 bindings:
   - field: username
     provider: { type: plugin, use: sso }

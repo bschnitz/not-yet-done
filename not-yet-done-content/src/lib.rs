@@ -3959,8 +3959,8 @@ pub trait HostEventBus: Send + Sync {
 
     /// How many live subscribers `channel` currently has.
     ///
-    /// Lets an emitter that *waits for a reply* (e.g. the office365-web login
-    /// waiting for a typed MFA code) abort cleanly when nobody is listening,
+    /// Lets an emitter that *waits for a reply* (e.g. a sign-in waiting for a
+    /// typed MFA code) abort cleanly when nobody is listening,
     /// instead of blocking forever on an answer that can never arrive — the
     /// "no consumer → clean cancel" contract. Fire-and-forget publishers ignore
     /// it. Zero is a valid transient answer (a subscriber may arm a moment
@@ -3995,7 +3995,7 @@ pub const EVENT_CHANNEL: &str = "events";
 /// [`from_host_event`](BusEvent::from_host_event).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BusEvent {
-    /// Namespaced routing key, e.g. `"office365-web:mfa:number-match"`. The
+    /// Namespaced routing key, e.g. `"acme:mfa:number-match"`. The
     /// rule engine matches an `event_actions` binding's `on:` against this.
     pub topic: String,
     /// Who emitted it — typically the emitting adapter instance's id. Lets a
@@ -4348,7 +4348,7 @@ mod bus_event_tests {
         publish_event(
             &bus,
             BusEvent::new(
-                "office365-web:mfa:number-match",
+                "acme:mfa:number-match",
                 "conn-a",
                 serde_json::json!({ "number": 42 }),
             )
@@ -4356,7 +4356,7 @@ mod bus_event_tests {
         );
         let got = rx.recv().await.expect("event delivered");
         let ev = BusEvent::from_host_event(&got).expect("downcasts to BusEvent");
-        assert_eq!(ev.topic, "office365-web:mfa:number-match");
+        assert_eq!(ev.topic, "acme:mfa:number-match");
         assert_eq!(ev.source, "conn-a");
         assert_eq!(ev.correlation_id.as_deref(), Some("req-1"));
         assert_eq!(ev.payload["number"], 42);

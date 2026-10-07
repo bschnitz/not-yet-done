@@ -12,13 +12,14 @@ edition = "2024"
 #
 # Backends are pulled in as optional, feature-gated dependencies so each
 # calendar protocol is an independent unit; the backend registry only offers
-# the ones compiled in.
+# the ones compiled in. A calendar that needs code nyd does not carry runs as
+# its own program behind the `external` backend.
 
 [features]
-default = ["microsoft", "office365-web", "caldav"]
+default = ["microsoft", "caldav", "external"]
 microsoft = ["dep:not-yet-done-calendar-msgraph"]
-office365-web = ["dep:not-yet-done-calendar-office365-web"]
 caldav = ["dep:not-yet-done-calendar-caldav"]
+external = ["dep:not-yet-done-calendar-external"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -41,5 +42,5 @@ not-yet-done-calendar-core = { path = "../not-yet-done-calendar-core" }
 # resolves them on submit via `resolve_datetime`.
 natural-date               = { path = "../natural-date" }
 not-yet-done-calendar-msgraph = { path = "../not-yet-done-calendar-msgraph", optional = true }
-not-yet-done-calendar-office365-web = { path = "../not-yet-done-calendar-office365-web", optional = true }
 not-yet-done-calendar-caldav = { path = "../not-yet-done-calendar-caldav", optional = true }
+not-yet-done-calendar-external = { path = "../not-yet-done-calendar-external", optional = true }

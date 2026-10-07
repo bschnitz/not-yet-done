@@ -4264,16 +4264,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
-name = "not-yet-done-auth-browser"
-version = "0.1.0"
-dependencies = [
- "not-yet-done-content",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "not-yet-done-calendar-adapter"
 version = "0.1.0"
 dependencies = [
@@ -4285,8 +4275,8 @@ dependencies = [
  "natural-date",
  "not-yet-done-calendar-caldav",
  "not-yet-done-calendar-core",
+ "not-yet-done-calendar-external",
  "not-yet-done-calendar-msgraph",
- "not-yet-done-calendar-office365-web",
  "not-yet-done-content",
  "not-yet-done-filter",
  "sea-orm",
@@ -4317,7 +4307,25 @@ dependencies = [
  "async-trait",
  "chrono",
  "not-yet-done-content",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "not-yet-done-calendar-external"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "child-log",
+ "chrono",
+ "not-yet-done-calendar-core",
+ "not-yet-done-content",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
  "tokio",
 ]
 
@@ -4330,21 +4338,6 @@ dependencies = [
  "not-yet-done-calendar-core",
  "not-yet-done-content",
  "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
-]
-
-[[package]]
-name = "not-yet-done-calendar-office365-web"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "not-yet-done-calendar-core",
- "not-yet-done-content",
- "not-yet-done-office365-web",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4616,20 +4609,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "not-yet-done-office365-web"
-version = "0.1.0"
-dependencies = [
- "child-log",
- "chrono",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

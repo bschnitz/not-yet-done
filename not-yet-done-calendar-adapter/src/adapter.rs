@@ -13,7 +13,7 @@
 //! layer's broadcast channel — the frontend's generic watcher reloads, with no
 //! calendar-specific code on that side.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -355,6 +355,12 @@ struct LoadState {
     /// transition), so the banner's elapsed time counts from the first
     /// connection that started rather than resetting on every tick.
     started_at: u64,
+    /// connection id → its label and the sentence it waits on a person with,
+    /// present only while it does. Outranks loading: nothing moves until the
+    /// person acts.
+    attention: BTreeMap<String, (String, String)>,
+    /// Unix ms when the current wait on a person began.
+    attention_since: u64,
 }
 
 impl LoadState {
@@ -370,11 +376,59 @@ impl LoadState {
         } else {
             self.loading.insert(conn_id.to_string(), progress.fraction);
         }
+        if was_empty && !self.loading.is_empty() {
+            self.started_at = now_ms;
+        }
+        self.status()
+    }
+
+    /// Fold one backend's attention into the state and return the banner to
+    /// publish: `Some` sentence marks the connection as waiting on a person,
+    /// `None` withdraws it.
+    fn attend(
+        &mut self,
+        conn_id: &str,
+        label: &str,
+        said: Option<String>,
+        now_ms: u64,
+    ) -> AdapterStatus {
+        let was_empty = self.attention.is_empty();
+        match said {
+            Some(said) => {
+                self.attention
+                    .insert(conn_id.to_string(), (label.to_string(), said));
+            }
+            None => {
+                self.attention.remove(conn_id);
+            }
+        }
+        if was_empty && !self.attention.is_empty() {
+            self.attention_since = now_ms;
+        }
+        self.status()
+    }
+
+    /// The banner for the whole state: a wait on a person first, as an auth
+    /// plugin's attention is shown; then loading; Ready once neither remains.
+    fn status(&self) -> AdapterStatus {
+        if !self.attention.is_empty() {
+            let step = self
+                .attention
+                .values()
+                .map(|(label, said)| format!("{label}: {said}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return AdapterStatus::Connecting {
+                retry: 1,
+                max_retries: 1,
+                timeout_secs: 0,
+                started_at_unix_ms: self.attention_since,
+                step: Some(step),
+                attention: true,
+            };
+        }
         if self.loading.is_empty() {
             return AdapterStatus::Ready;
-        }
-        if was_empty {
-            self.started_at = now_ms;
         }
         // Represent the cohort by its least-advanced member: indeterminate if
         // any loading connection hasn't reported a fraction, else the minimum.
@@ -732,7 +786,7 @@ impl CalendarAdapter {
     /// periodic poll.
     ///
     /// This is what makes freshness after an asynchronous browser login correct:
-    /// the office365-web backend signals [`LoadProgress`] as its interactive
+    /// a backend driving a browser signals [`LoadProgress`] as its interactive
     /// sign-in runs and the calendar surface pages in (see
     /// [`CalendarBackend::subscribe_ready`]). Every fire drives the frontend
     /// banner: [`AdapterStatus::Busy`] carrying the fraction while `!done`
@@ -750,6 +804,11 @@ impl CalendarAdapter {
     /// catching *external* changes on its interval — and it never touches the
     /// status, so the banner is exclusive to genuine loads.
     ///
+    /// A backend's [`attention`](CalendarBackend::subscribe_attention) shares
+    /// the banner: while any connection waits on a person, the status is
+    /// [`AdapterStatus::Connecting`] with `attention` set and the sentence as
+    /// its step, ahead of any loading.
+    ///
     /// One detached task per backend that offers a signal; backends that resolve
     /// synchronously (`subscribe_ready` → `None`) contribute none. No-op outside
     /// a Tokio runtime (e.g. a sync unit test).
@@ -766,6 +825,26 @@ impl CalendarAdapter {
         // "press r to reload" placeholder) mid-login.
         let load_state = Arc::new(std::sync::Mutex::new(LoadState::default()));
         for (idx, backend) in self.backends.iter().enumerate() {
+            // A backend waiting on a person (approve a sign-in on the phone)
+            // says so as the adapter's status, like an auth plugin does.
+            if let Some(mut attention_rx) = backend.subscribe_attention() {
+                let conn_id = backend.connection_id().to_string();
+                let label = backend.connection_label().to_string();
+                let status_tx = self.status_tx.clone();
+                let load_state = Arc::clone(&load_state);
+                handle.spawn(async move {
+                    while attention_rx.changed().await.is_ok() {
+                        let said = attention_rx.borrow_and_update().clone();
+                        let status = load_state.lock().unwrap().attend(
+                            &conn_id,
+                            &label,
+                            said,
+                            now_unix_ms(),
+                        );
+                        let _ = status_tx.send(status);
+                    }
+                });
+            }
             let Some(mut ready_rx) = backend.subscribe_ready() else {
                 continue;
             };
@@ -2262,6 +2341,57 @@ mod tests {
             AdapterStatus::Busy { progress, .. } => assert_eq!(progress, None),
             _ => panic!("expected Busy"),
         }
+    }
+
+    #[test]
+    fn load_state_waiting_on_a_person_outranks_loading() {
+        let mut st = LoadState::default();
+        st.update("a", &LoadProgress::indeterminate(), 1_000);
+
+        let s = st.attend("a", "Work", Some("Approve the sign-in".into()), 2_000);
+        match s {
+            AdapterStatus::Connecting {
+                step,
+                attention,
+                started_at_unix_ms,
+                ..
+            } => {
+                assert_eq!(step.as_deref(), Some("Work: Approve the sign-in"));
+                assert!(attention);
+                assert_eq!(started_at_unix_ms, 2_000);
+            }
+            other => panic!("expected Connecting, got {other:?}"),
+        }
+
+        // Withdrawn: back to the load still under way, then Ready.
+        let s = st.attend("a", "Work", None, 3_000);
+        assert!(matches!(s, AdapterStatus::Busy { .. }), "{s:?}");
+        let s = st.update("a", &LoadProgress::complete(), 4_000);
+        assert!(matches!(s, AdapterStatus::Ready));
+    }
+
+    #[test]
+    fn load_state_names_every_connection_waiting_on_a_person() {
+        let mut st = LoadState::default();
+        st.attend("a", "Work", Some("Approve 42".into()), 1_000);
+        let s = st.attend("b", "Team", Some("Approve 17".into()), 1_500);
+        match s {
+            AdapterStatus::Connecting {
+                step,
+                started_at_unix_ms,
+                ..
+            } => {
+                assert_eq!(step.as_deref(), Some("Work: Approve 42; Team: Approve 17"));
+                assert_eq!(started_at_unix_ms, 1_000, "the wait counts from the first");
+            }
+            other => panic!("expected Connecting, got {other:?}"),
+        }
+        let s = st.attend("a", "Work", None, 2_000);
+        assert!(
+            matches!(&s, AdapterStatus::Connecting { step, .. } if step.as_deref() == Some("Team: Approve 17")),
+            "{s:?}"
+        );
+        assert!(matches!(st.attend("b", "Team", None, 2_500), AdapterStatus::Ready));
     }
 
     #[test]

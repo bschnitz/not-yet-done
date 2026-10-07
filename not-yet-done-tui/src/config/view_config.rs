@@ -2408,7 +2408,7 @@ impl ActionDef {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmitConfig {
-    /// Topic of the emitted event (e.g. `office365-web:mfa:otc-provided`).
+    /// Topic of the emitted event (e.g. `acme:mfa:otc-provided`).
     pub topic: String,
     /// Static payload for the event. Values may use `{…}` templates
     /// resolved from the action's input at emit time (e.g. `{code}` /
@@ -2433,7 +2433,7 @@ pub enum OnEventReaction {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventActionBinding {
-    /// Bus topic to match (e.g. `office365-web:mfa:number-match`).
+    /// Bus topic to match (e.g. `acme:mfa:number-match`).
     pub on: String,
     /// Name of the action (in this view's `actions:`) to run when the topic
     /// fires. The event's payload is exposed to the action as `{…}` template
@@ -4472,7 +4472,7 @@ views: []
         let binding = events
             .event_actions
             .iter()
-            .find(|b| b.on == "office365-web:mfa:number-match")
+            .find(|b| b.on == "acme:mfa:number-match")
             .expect("calendar.yaml binds the number-match topic");
         assert_eq!(binding.run, "show auth number");
         // The bound action is event-only (no key), type notify, and closes on
@@ -4490,7 +4490,7 @@ views: []
                 .on_event
                 .as_ref()
                 .unwrap()
-                .get("office365-web:mfa:resolved"),
+                .get("acme:mfa:resolved"),
             Some(&OnEventReaction::Close)
         );
 
@@ -5278,17 +5278,17 @@ views:
     actions:
       - name: show-auth-number
         type: notify
-        on_event: { "office365-web:mfa:resolved": close }
+        on_event: { "acme:mfa:resolved": close }
       - name: enter-otc
         key: o
         type: custom
         id: noop
         emit:
-          topic: office365-web:mfa:otc-provided
+          topic: acme:mfa:otc-provided
           payload: { code: "{code}" }
     event_actions:
-      - { on: "office365-web:mfa:number-match", run: show-auth-number }
-      - { on: "office365-web:mfa:otc-required", run: enter-otc }
+      - { on: "acme:mfa:number-match", run: show-auth-number }
+      - { on: "acme:mfa:otc-required", run: enter-otc }
 "#;
         let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
         cfg.validate(
@@ -5300,13 +5300,13 @@ views:
         // Event-only action: no key, no keymap presence.
         assert!(view.actions[0].key.is_none());
         assert_eq!(
-            view.actions[0].on_event.as_ref().unwrap()["office365-web:mfa:resolved"],
+            view.actions[0].on_event.as_ref().unwrap()["acme:mfa:resolved"],
             OnEventReaction::Close
         );
         // Emitting action carries the reply topic + templated payload.
         assert_eq!(
             view.actions[1].emit.as_ref().unwrap().topic,
-            "office365-web:mfa:otc-provided"
+            "acme:mfa:otc-provided"
         );
         assert_eq!(view.event_actions.len(), 2);
         assert_eq!(view.event_actions[0].run, "show-auth-number");

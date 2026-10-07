@@ -20,11 +20,6 @@ cargo install --path not-yet-done-tui
 # because a hand-copied `nyd-t` that cargo does not own blocks the install, and
 # an old one keeps reading the legacy core DB without saying so.
 cargo install --force --path not-yet-done-task-cli
-# The browser auth plugin, which a user configures by writing its *name* into
-# `auth.plugins[].command` — so it has to be on the PATH, not merely built.
-# Installed whether or not anybody has configured one: a plugin that is
-# missing surfaces as a login failing at the moment somebody needs to log in.
-cargo install --path not-yet-done-auth-browser
 
 echo "── waybar module ──"
 cargo build --release -p not-yet-done-waybar

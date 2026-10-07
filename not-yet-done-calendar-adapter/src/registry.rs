@@ -20,14 +20,14 @@ pub(crate) fn backend_factories() -> Vec<Box<dyn CalendarBackendFactory>> {
         not_yet_done_calendar_msgraph::MsGraphBackendFactory::new(),
     ));
 
-    #[cfg(feature = "office365-web")]
-    factories.push(Box::new(
-        not_yet_done_calendar_office365_web::Office365WebBackendFactory::new(),
-    ));
-
     #[cfg(feature = "caldav")]
     factories.push(Box::new(
         not_yet_done_calendar_caldav::CalDavBackendFactory::new(),
+    ));
+
+    #[cfg(feature = "external")]
+    factories.push(Box::new(
+        not_yet_done_calendar_external::ExternalBackendFactory::new(),
     ));
 
     factories

@@ -1,0 +1,29 @@
+[package]
+name = "not-yet-done-calendar-external"
+version = "0.1.0"
+edition = "2024"
+
+# Calendar backend (backend type `external`) that runs another program and
+# speaks a JSON-lines protocol with it on its stdio. Whatever that program
+# talks to — a browser, a vendor SDK, a service nyd has no business knowing
+# about — stays in that program: this crate only knows the protocol (see
+# src/protocol.rs and ADR 0014), so a calendar that needs code of its own
+# plugs in without being compiled into nyd.
+#
+# The protocol types are public and both readable and writable, so a backend
+# written in Rust uses the same spelling nyd does.
+
+[dependencies]
+async-trait = { workspace = true }
+child-log   = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+tokio       = { workspace = true }
+
+not-yet-done-calendar-core = { path = "../not-yet-done-calendar-core" }
+not-yet-done-content       = { path = "../not-yet-done-content" }
+
+[dev-dependencies]
+chrono   = { workspace = true }
+tempfile = { workspace = true }
