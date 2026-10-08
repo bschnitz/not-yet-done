@@ -101,7 +101,7 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
                     .optional(),
                     FormFieldSpec::text(
                         "assignee",
-                        "Assignee username (blank: keep, '-': unassign)",
+                        "Assignee username or uu_ slug (blank: keep, '-': unassign)",
                     )
                     .optional(),
                     FormFieldSpec::text(

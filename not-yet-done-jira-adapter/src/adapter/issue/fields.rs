@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use not_yet_done_content::*;
 
 use super::super::util::other_err;
+use super::slugs::{build_slug_tables, USER_PREFIX};
 use super::JiraIssueNode;
 
 /// The value that means "empty this field" rather than "leave it alone".
@@ -94,14 +95,25 @@ impl JiraIssueNode {
                 split_labels(&raw)
             }
         });
-        let assignee = given(values, "assignee").map(|who| {
-            if who == CLEAR {
-                // `update_issue_full` reads the empty key as "unassign".
-                String::new()
-            } else {
-                who
+        let assignee = match given(values, "assignee") {
+            // `update_issue_full` reads the empty key as "unassign".
+            Some(who) if who == CLEAR => Some(String::new()),
+            // A `uu_` slug is how the editor and the CACHE legend name a
+            // user; a caller that copied one from there means that user.
+            // An unknown slug is an error, never sent on as a username.
+            Some(who) if who.starts_with(USER_PREFIX) => {
+                let users = build_slug_tables(&self.cache).users;
+                match users.original_for(&who) {
+                    Some(name) => Some(name.to_string()),
+                    None => {
+                        return Err(other_err(format!(
+                            "unknown user slug `{who}` -- see the CACHE legend"
+                        )))
+                    }
+                }
             }
-        });
+            other => other,
+        };
 
         let points = given_points(values, "story_points")?;
         let fix_versions = given_fix_versions(values);
