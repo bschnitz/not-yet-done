@@ -31,7 +31,7 @@ use not_yet_done_calendar_core::{
 use not_yet_done_content::*;
 
 use crate::config::{
-    CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_WINDOW_FUTURE_DAYS,
+    CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_STORE_POLL_SECS, DEFAULT_WINDOW_FUTURE_DAYS,
     DEFAULT_WINDOW_PAST_DAYS, FetchMode, Window, default_reminder_leads,
 };
 use crate::event_form::{
@@ -456,6 +456,7 @@ pub struct CalendarAdapter {
     backends: Arc<Vec<Box<dyn CalendarBackend>>>,
     window: Window,
     poll_interval: Duration,
+    store_poll: Duration,
     cache: Cache,
     inv_tx: broadcast::Sender<Invalidation>,
     /// Fires a [`Reminder`] ahead of each timed event's start. The frontend
@@ -586,6 +587,9 @@ impl CalendarAdapter {
                 .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
                 .max(1),
         );
+        let store_poll = Duration::from_secs(
+            cfg.store_poll_secs.unwrap_or(DEFAULT_STORE_POLL_SECS).max(1),
+        );
         let (inv_tx, _) = broadcast::channel(16);
         let (rem_tx, _) = broadcast::channel(64);
         let (armed_tx, _) = watch::channel(false);
@@ -613,6 +617,7 @@ impl CalendarAdapter {
             backends: Arc::new(backends),
             window,
             poll_interval,
+            store_poll,
             cache: Arc::new(RwLock::new(HashMap::new())),
             inv_tx,
             rem_tx,
@@ -712,9 +717,10 @@ impl CalendarAdapter {
     /// Kick off the background poll loop (no-op outside a Tokio runtime, e.g.
     /// in a sync unit test). Detached: it lives for the adapter's lifetime.
     ///
-    /// Each tick re-fetches the live connections (never the on-demand ones)
-    /// and loads whatever another process synced into the store meanwhile;
-    /// when the set the user sees changed, it invalidates the view.
+    /// Two clocks drive it: every `store_poll` it loads whatever another
+    /// process synced into the store meanwhile, and every `poll_interval` it
+    /// re-fetches the live connections (never the on-demand ones) from their
+    /// servers. When the set the user sees changed, it invalidates the view.
     fn spawn_poll(&self) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
@@ -722,6 +728,7 @@ impl CalendarAdapter {
         let fetcher = self.fetcher();
         let current_query = Arc::clone(&self.current_query);
         let interval = self.poll_interval;
+        let store_interval = self.store_poll;
         let mut armed_rx = self.armed_tx.subscribe();
 
         handle.spawn(async move {
@@ -733,37 +740,46 @@ impl CalendarAdapter {
                 }
             }
 
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // `interval()` fires immediately; the arming `list()` just fetched,
-            // so consume that first tick and let polling land one interval out
-            // rather than duplicating the load. The first real tick sets the
-            // baseline signature (no invalidation); later changes emit `All`.
-            ticker.tick().await;
+            let mut live_ticker = tokio::time::interval(interval);
+            live_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut store_ticker = tokio::time::interval(store_interval);
+            store_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // `interval()` fires immediately; the arming `list()` just loaded,
+            // so consume those first ticks and let polling land one interval
+            // out rather than duplicating the load. The first real tick sets
+            // the baseline signature (no invalidation); later changes emit `All`.
+            live_ticker.tick().await;
+            store_ticker.tick().await;
             let mut last_sig: Option<u64> = None;
 
             loop {
-                ticker.tick().await;
+                let live = tokio::select! {
+                    _ = live_ticker.tick() => true,
+                    _ = store_ticker.tick() => false,
+                };
                 let was_empty = fetcher.cache.read().await.is_empty();
-                let range = effective_range(&*current_query.read().await, &fetcher.window, Utc::now());
-                // Bound the fetches at half the poll window: a connection that
-                // can't answer within that budget is abandoned and retried next
-                // tick, so a wedged backend never stalls the loop for a whole
-                // interval. The initial interactive login is *not* subject to
-                // this — it runs on `list()`/the ready-watch, not the poll.
-                let round = futures::future::join_all(fetcher.fetchable(false).into_iter().map(
-                    |idx| {
-                        let fetcher = fetcher.clone();
-                        async move {
-                            let _ = tokio::time::timeout(
-                                interval / 2,
-                                fetcher.sync_one(idx, &range, Staleness::DropIfQueryMoved),
-                            )
-                            .await;
-                        }
-                    },
-                ));
-                round.await;
+                if live {
+                    let range = effective_range(&*current_query.read().await, &fetcher.window, Utc::now());
+                    // Bound the fetches at half the poll window: a connection
+                    // that can't answer within that budget is abandoned and
+                    // retried next tick, so a wedged backend never stalls the
+                    // loop for a whole interval. The initial interactive login
+                    // is *not* subject to this — it runs on `list()`/the
+                    // ready-watch, not the poll.
+                    let round = futures::future::join_all(fetcher.fetchable(false).into_iter().map(
+                        |idx| {
+                            let fetcher = fetcher.clone();
+                            async move {
+                                let _ = tokio::time::timeout(
+                                    interval / 2,
+                                    fetcher.sync_one(idx, &range, Staleness::DropIfQueryMoved),
+                                )
+                                .await;
+                            }
+                        },
+                    ));
+                    round.await;
+                }
                 fetcher.catch_up().await;
 
                 let sig = cache_signature(&fetcher.cache).await;
@@ -1920,6 +1936,7 @@ mod tests {
             backends,
             window,
             poll_interval: Duration::from_secs(60),
+            store_poll: Duration::from_secs(60),
             cache,
             inv_tx,
             rem_tx,

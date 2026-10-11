@@ -29,11 +29,15 @@ where
     })
 }
 
-/// How often the background task re-fetches every connection to detect
+/// How often the background task re-fetches the `live` connections to detect
 /// externally-made changes. Calendars change out-of-band and Graph offers no
 /// usable push, so the adapter polls itself; 5 minutes trades freshness for a
 /// gentle request rate.
 pub(crate) const DEFAULT_POLL_INTERVAL_SECS: u64 = 300;
+/// How often the background task loads what another process (a scheduled
+/// `sync`) stored meanwhile. A tick only compares stored revisions and reads
+/// the connections that moved, so it is cheap enough to run often.
+pub(crate) const DEFAULT_STORE_POLL_SECS: u64 = 30;
 /// Default look-behind / look-ahead of the event window (days).
 pub(crate) const DEFAULT_WINDOW_PAST_DAYS: i64 = 7;
 pub(crate) const DEFAULT_WINDOW_FUTURE_DAYS: i64 = 30;
@@ -62,6 +66,7 @@ pub(crate) fn default_reminder_leads() -> Vec<i64> {
 ///       token: { type: command, script: get-side-token.sh }
 ///       name: "Side project"
 /// poll_interval_secs: 300
+/// store_poll_secs: 30
 /// window_past_days: 7
 /// window_future_days: 30
 /// ```
@@ -71,8 +76,14 @@ pub struct CalendarConfig {
     /// One entry per calendar source. May mix backend types and multiple
     /// instances of the same backend — the whole point of this adapter.
     pub(crate) connections: Vec<ConnectionConfig>,
+    /// Seconds between re-fetches of the `live` connections from their
+    /// servers. Defaults to [`DEFAULT_POLL_INTERVAL_SECS`].
     #[serde(default)]
     pub(crate) poll_interval_secs: Option<u64>,
+    /// Seconds between loads of what another process stored meanwhile.
+    /// Defaults to [`DEFAULT_STORE_POLL_SECS`].
+    #[serde(default)]
+    pub(crate) store_poll_secs: Option<u64>,
     #[serde(default)]
     pub(crate) window_past_days: Option<i64>,
     #[serde(default)]
@@ -172,6 +183,7 @@ connections:
     config:
       token: { type: command, script: b.sh }
 poll_interval_secs: 120
+store_poll_secs: 15
 window_future_days: 14
 "#;
         let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("parses");
@@ -179,6 +191,7 @@ window_future_days: 14
         assert_eq!(cfg.connections[0].id, "work");
         assert_eq!(cfg.connections[1].backend, "microsoft");
         assert_eq!(cfg.poll_interval_secs, Some(120));
+        assert_eq!(cfg.store_poll_secs, Some(15));
         assert_eq!(cfg.window_future_days, Some(14));
         assert_eq!(cfg.window_past_days, None);
     }

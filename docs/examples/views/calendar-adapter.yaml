@@ -148,9 +148,14 @@ connections:
       # calendars:
       #   - /calendars/user@mail.de/private/
 
-# How often (seconds) the background task picks up what another process synced
-# into the store meanwhile, and re-fetches the `live` connections to detect
-# externally-made changes. Optional; defaults to 300.
+# How often (seconds) the background task loads what another process (a
+# scheduled `sync`) stored meanwhile. Only reads the local store, so it is
+# cheap. Optional; defaults to 30.
+# store_poll_secs: 30
+
+# How often (seconds) the background task re-fetches the `live` connections
+# from their servers to detect externally-made changes. Optional; defaults
+# to 300.
 # poll_interval_secs: 300
 
 # Event window: how many days back / forward the listing spans, resolved
