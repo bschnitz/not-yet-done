@@ -24,10 +24,11 @@
 # the already-loaded time window (`window_*_days` in the adapter config), so a
 # date bound outside that window matches nothing until the window is widened.
 #
-# Read-only for now. Live update is automatic and decoupled: the adapter polls
-# every connection in the background (`poll_interval_secs` in the adapter
-# config) and, when it detects an externally-made change, refreshes the view on
-# its own — no key press needed. `r` forces an immediate refresh.
+# Read-only for now. Live update is automatic and decoupled: in the background
+# (`poll_interval_secs` in the adapter config) the adapter loads what a
+# scheduled `sync` stored meanwhile and re-fetches the connections marked
+# `fetch: live`; when the set changed it refreshes the view on its own — no key
+# press needed. `r` fetches every connection from its server right away.
 #
 # Load mode — three choices, set by `adapter.auto_connect` below:
 #   * `startup`: the calendar loads as soon as the app starts, opening the

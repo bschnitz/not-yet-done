@@ -101,16 +101,17 @@ pub struct DbConfig {
 
 /// When a connection talks to its server.
 ///
-/// `live` connections are fetched whenever a view needs data and polled in
-/// the background. An `on_demand` connection is only fetched by an explicit
+/// An `on_demand` connection (the default) is only fetched by an explicit
 /// sync — the root's `sync` action or a hard reload (`r`); every other reader
-/// serves what the last sync stored. Meant for connections whose fetch is
-/// expensive or interactive (a browser sign-in).
+/// serves what the last sync stored, and the background poll picks up what
+/// another process (a scheduled `sync`) stored meanwhile. One scheduled
+/// fetcher then serves every reader. `live` connections are additionally
+/// fetched whenever a view needs data and polled in the background.
 #[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FetchMode {
-    #[default]
     Live,
+    #[default]
     OnDemand,
 }
 
@@ -188,15 +189,15 @@ window_future_days: 14
 connections:
   - id: work
     backend: microsoft
-    fetch: on_demand
+    fetch: live
   - id: side
     backend: caldav
 db:
   url: "sqlite::memory:"
 "#;
         let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("parses");
-        assert_eq!(cfg.connections[0].fetch, FetchMode::OnDemand);
-        assert_eq!(cfg.connections[1].fetch, FetchMode::Live);
+        assert_eq!(cfg.connections[0].fetch, FetchMode::Live);
+        assert_eq!(cfg.connections[1].fetch, FetchMode::OnDemand);
         assert_eq!(cfg.db.expect("db").url, "sqlite::memory:");
     }
 
@@ -206,6 +207,8 @@ db:
         let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("example parses");
         let web = cfg.connections.iter().find(|c| c.id == "web").expect("web");
         assert_eq!(web.fetch, FetchMode::OnDemand);
+        let mailde = cfg.connections.iter().find(|c| c.id == "mailde").expect("mailde");
+        assert_eq!(mailde.fetch, FetchMode::Live);
     }
 
     #[test]

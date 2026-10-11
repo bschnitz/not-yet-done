@@ -61,12 +61,13 @@
 
 # Every connection entry may also say when it touches the network:
 #
-#   fetch — `live` (default): listings and the background poll fetch it.
-#           `on_demand`: only a hard refresh (`r`) or the `sync` action does;
-#           everything else reads what the store holds. Meant for a backend
-#           that is expensive or intrusive to ask (a browser sign-in), synced
-#           on a schedule by something else (see the `sync` action in
-#           calendar.yaml).
+#   fetch — `on_demand` (default): only a hard refresh (`r`) or the `sync`
+#           action fetches it; everything else reads what the store holds,
+#           and the background poll picks up what another process synced
+#           into it meanwhile. Sync on a schedule with something else (see
+#           the `sync` action in calendar.yaml) and that one fetcher serves
+#           every reader.
+#           `live`: listings and the background poll fetch it as well.
 
 connections:
   - id: work
@@ -99,7 +100,6 @@ connections:
   # when it starts; it signs in however it has to and keeps its own state.
   - id: web
     backend: external
-    fetch: on_demand
     config:
       command: my-calendar-backend --verbose
       name: Web calendar
@@ -133,6 +133,8 @@ connections:
   #   request_timeout_secs — per-request timeout (optional; default 30).
   - id: mailde
     backend: caldav
+    # Fetched by every listing and the background poll, not only by a sync.
+    fetch: live
     config:
       name: mail.de
       url: https://kalender.mail.de/principals/user@mail.de
@@ -146,9 +148,9 @@ connections:
       # calendars:
       #   - /calendars/user@mail.de/private/
 
-# How often (seconds) the background task re-fetches the `live` connections to
-# detect externally-made changes, and picks up what another process synced into
-# the store meanwhile. Optional; defaults to 300.
+# How often (seconds) the background task picks up what another process synced
+# into the store meanwhile, and re-fetches the `live` connections to detect
+# externally-made changes. Optional; defaults to 300.
 # poll_interval_secs: 300
 
 # Event window: how many days back / forward the listing spans, resolved
