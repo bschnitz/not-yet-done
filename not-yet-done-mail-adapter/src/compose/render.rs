@@ -1,17 +1,15 @@
 //! From the buffer to the message that travels.
 //!
-//! Two conversions meet here and they are deliberately not symmetric. What
-//! the user wrote is Markdown and becomes HTML; the original that is quoted
-//! below it is *not* converted back from the text in the buffer — its own
-//! markup is taken and wrapped in a `<blockquote>`, which is why a mail
-//! thread still reads as a thread after four rounds through four clients.
+//! The buffer is Markdown from the first line to the last — the answer and
+//! the quote under it alike — and it becomes HTML in one conversion. What
+//! travels is therefore the simplified quote the writer saw and maybe edited,
+//! not the sender's original markup.
 
 use lettre::Message;
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, MultiPart, SinglePart};
 
 use crate::compose::buffer::Headers;
-use crate::compose::quote;
 use crate::config::{ComposeFormat, QuoteImages};
 use crate::error::{MailError, MailResult};
 use crate::mime::Original;
@@ -25,15 +23,12 @@ const QUOTE_STYLE: &str = "border-left: 1px solid #ccc; margin: 0 0 0 .8ex; padd
 /// and judged.
 pub(crate) struct Composition<'a> {
     pub headers: &'a Headers,
-    /// What the user wrote, as Markdown.
+    /// What the user wrote, as Markdown, the quote included.
     pub body: &'a str,
     /// The message this answers. Threading uses it even when the quote was
     /// dropped — a reply belongs in its thread whether or not it repeats it.
+    /// Its inline images are what a `cid:` in the body points at.
     pub original: Option<&'a Original>,
-    /// Whether the original travels back inside the reply.
-    pub quote: bool,
-    /// The attribution line, already filled in.
-    pub attribution: &'a str,
     pub format: ComposeFormat,
     pub images: QuoteImages,
 }
@@ -103,58 +98,32 @@ pub(crate) fn build(c: &Composition) -> MailResult<Message> {
     Ok(message)
 }
 
-/// The text half: what the user wrote, then the original with `> ` in front
-/// of every line. Both halves say the same thing, which is the whole promise
-/// of `multipart/alternative`.
+/// The text half: the Markdown as written, with an inline image standing
+/// as its alt text — a `cid:` reference means nothing in a text client. Both
+/// halves say the same thing, which is the whole promise of
+/// `multipart/alternative`.
 fn plain_body(c: &Composition) -> String {
-    let mut out = c.body.trim_end().to_string();
-    if let (true, Some(original)) = (c.quote, c.original) {
-        out.push_str("\n\n");
-        out.push_str(&quote::quoted_text(original, c.attribution));
-    }
+    let mut out = cid_images_as_alt(c.body.trim_end());
     out.push('\n');
     out
 }
 
-/// The markup half: the user's Markdown rendered, then the original's own
-/// markup inside a `<blockquote>`.
+/// The markup half: the whole buffer rendered.
 fn html_body(c: &Composition) -> String {
     let mut out = String::from(
         "<html><head><meta charset=\"utf-8\"></head>\
          <body style=\"font-family: sans-serif;\">\n",
     );
     out.push_str(&markdown_to_html(c.body));
-    if let (true, Some(original)) = (c.quote, c.original) {
-        out.push_str(&format!("<p>{}</p>\n", escape(c.attribution)));
-        out.push_str(&format!(
-            "<blockquote type=\"cite\" style=\"{QUOTE_STYLE}\">\n{}\n</blockquote>\n",
-            quoted_markup(c, original)
-        ));
-    }
     out.push_str("</body></html>\n");
     out
 }
 
-/// The original as it goes back out: its own markup where it has some,
-/// otherwise its text rendered — a plain original quoted inside an HTML
-/// reply is rare (the format follows the original), but a `compose_format`
-/// of `html` on a reply to a text mail would land here.
-fn quoted_markup(c: &Composition, original: &Original) -> String {
-    let Some(html) = &original.html else {
-        return markdown_to_html(&quote::readable(original));
-    };
-    let fragment = body_fragment(&html.html);
-    match c.images {
-        QuoteImages::Attach => fragment,
-        QuoteImages::Placeholder => placeholder_images(&fragment),
-    }
-}
-
-/// The images the quoted markup points at, re-attached under the very
-/// Content-IDs it names. Thunderbird does exactly this; the alternative is a
-/// reply full of broken-image boxes.
+/// The original's inline images that the body still points at, re-attached
+/// under the very Content-IDs it names. An image the writer cut out of the
+/// quote stays behind with it.
 fn inline_parts(c: &Composition) -> Vec<SinglePart> {
-    if !c.quote || c.images != QuoteImages::Attach {
+    if c.images != QuoteImages::Attach {
         return Vec::new();
     }
     let Some(html) = c.original.and_then(|o| o.html.as_ref()) else {
@@ -162,11 +131,39 @@ fn inline_parts(c: &Composition) -> Vec<SinglePart> {
     };
     html.inline
         .iter()
+        .filter(|part| c.body.contains(&format!("(cid:{})", part.id)))
         .filter_map(|part| {
             let ctype = ContentType::parse(part.content_type.as_deref()?).ok()?;
             Some(Attachment::new_inline(part.id.clone()).body(part.bytes.clone(), ctype))
         })
         .collect()
+}
+
+/// `![alt](cid:…)` → `alt`; every other image and link is left alone.
+fn cid_images_as_alt(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(at) = rest.find("![") {
+        let after = &rest[at + 2..];
+        let image = after.find("](cid:").and_then(|close| {
+            let alt = &after[..close];
+            let end = after[close..].find(')')?;
+            (!alt.contains(']')).then(|| (alt, close + end + 1))
+        });
+        match image {
+            Some((alt, len)) => {
+                out.push_str(&rest[..at]);
+                out.push_str(alt);
+                rest = &after[len..];
+            }
+            None => {
+                out.push_str(&rest[..at + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Markdown as mail: GFM, because tables and bare links are what people
@@ -194,101 +191,6 @@ fn style_blockquotes(html: &str) -> String {
         "<blockquote>",
         &format!("<blockquote type=\"cite\" style=\"{QUOTE_STYLE}\">"),
     )
-}
-
-/// What is inside the original's `<body>`, with `<script>` and `<style>`
-/// dropped.
-///
-/// A whole document nested inside ours is not valid HTML, and the original's
-/// stylesheet would restyle *our* half of the mail — a sender's `p { color:
-/// red }` has no business colouring the answer. Everything else is kept
-/// exactly as the sender wrote it.
-pub(crate) fn body_fragment(html: &str) -> String {
-    let stripped = strip_blocks(&strip_blocks(html, "script"), "style");
-    let lower = stripped.to_ascii_lowercase();
-    let start = match lower.find("<body") {
-        Some(at) => match stripped[at..].find('>') {
-            Some(close) => at + close + 1,
-            None => 0,
-        },
-        None => 0,
-    };
-    let end = lower[start..]
-        .find("</body>")
-        .map(|at| start + at)
-        .unwrap_or(stripped.len());
-    stripped[start..end].trim().to_string()
-}
-
-/// Remove every `<tag …> … </tag>` pair, case-insensitively. Not a parser:
-/// these two tags do not nest, which is what makes the naive scan correct
-/// for them and wrong for anything else.
-fn strip_blocks(html: &str, tag: &str) -> String {
-    let open = format!("<{tag}");
-    let close = format!("</{tag}>");
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len());
-    let mut pos = 0;
-    while let Some(offset) = lower[pos..].find(&open) {
-        let at = pos + offset;
-        // `<style` also prefixes nothing else, but `<script` would match a
-        // hypothetical `<scriptfoo`: only a delimiter may follow the name.
-        let after = lower[at + open.len()..].chars().next();
-        if !matches!(after, Some(c) if c.is_whitespace() || c == '>' || c == '/') {
-            out.push_str(&html[at..at + open.len()]);
-            pos = at + open.len();
-            continue;
-        }
-        out.push_str(&html[pos..at]);
-        pos = match lower[at..].find(&close) {
-            Some(end) => at + end + close.len(),
-            // An unclosed block swallows the rest of the document, which is
-            // what a browser does with it too.
-            None => html.len(),
-        };
-    }
-    out.push_str(&html[pos..]);
-    out
-}
-
-/// Replace every image the quote points at with a word, for the account that
-/// would rather not carry somebody else's signature logo back and forth.
-fn placeholder_images(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::with_capacity(html.len());
-    let mut pos = 0;
-    while let Some(offset) = lower[pos..].find("<img") {
-        let at = pos + offset;
-        let end = match tag_end(&html[at..]) {
-            Some(end) => at + end,
-            None => break,
-        };
-        out.push_str(&html[pos..at]);
-        if lower[at..end].contains("cid:") {
-            out.push_str("[image]");
-        } else {
-            out.push_str(&html[at..end]);
-        }
-        pos = end;
-    }
-    out.push_str(&html[pos..]);
-    out
-}
-
-/// The offset just past the `>` that closes the tag starting at `text[0]`,
-/// with `>` inside an attribute value ignored.
-fn tag_end(text: &str) -> Option<usize> {
-    let mut quote: Option<char> = None;
-    for (at, c) in text.char_indices() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '"') | (None, '\'') => quote = Some(c),
-            (None, '>') => return Some(at + 1),
-            _ => {}
-        }
-    }
-    None
 }
 
 /// `Re: ` unless it is already there.
@@ -373,14 +275,6 @@ fn mailbox(address: &str) -> MailResult<lettre::message::Mailbox> {
             "{address:?} is not an address — write it as Name <local@host> or as local@host"
         ))
     })
-}
-
-/// The four characters that turn text into markup.
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -470,28 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_body_of_the_original_is_quoted_and_its_stylesheet_is_dropped() {
-        let fragment = body_fragment(
-            "<html><head><style>p { color: red }</style></head>\
-             <body><p>Hallo</p><script>alert(1)</script></body></html>",
-        );
-        assert_eq!(fragment, "<p>Hallo</p>");
-    }
-
-    /// A document without `<body>` is still a document: whatever is there
-    /// has to survive, minus the two blocks that must not travel.
-    #[test]
-    fn a_fragment_without_a_body_tag_is_kept_as_it_is() {
-        assert_eq!(body_fragment("<p>Hallo</p>"), "<p>Hallo</p>");
-    }
-
-    #[test]
-    fn placeholders_replace_only_the_images_the_quote_carries() {
-        let html =
-            "<p><img src=\"cid:logo\" alt=\"a > b\"><img src=\"https://x.invalid/a.png\"></p>";
+    fn an_inline_image_is_its_alt_text_in_the_text_half() {
         assert_eq!(
-            placeholder_images(html),
-            "<p>[image]<img src=\"https://x.invalid/a.png\"></p>"
+            cid_images_as_alt("vor ![Logo](cid:logo) nach ![x](https://x.invalid/a.png)"),
+            "vor Logo nach ![x](https://x.invalid/a.png)"
         );
     }
 
@@ -516,10 +392,8 @@ mod tests {
         let msg = original(source.as_bytes());
         let built = build(&Composition {
             headers: &headers(),
-            body: "Danke!",
+            body: "Danke!\n\nOn 2026-09-03 14:22, Anna Muster wrote:\n> Hallo\n>\n> ![Logo](cid:logo)",
             original: Some(&msg),
-            quote: true,
-            attribution: "On 2026-09-03 14:22, Anna Muster wrote:",
             format: ComposeFormat::Html,
             images: QuoteImages::Attach,
         })
@@ -547,10 +421,8 @@ mod tests {
         let msg = original(source.as_bytes());
         let built = build(&Composition {
             headers: &headers(),
-            body: "Danke!",
+            body: "Danke!\n\nOn 2026-09-03 14:22, Anna Muster wrote:\n> Hallo\n>\n> ![Logo](cid:logo)",
             original: Some(&msg),
-            quote: true,
-            attribution: "On 2026-09-03 14:22, Anna Muster wrote:",
             format: ComposeFormat::Html,
             images: QuoteImages::Attach,
         })
@@ -571,17 +443,34 @@ mod tests {
             html.html
         );
         assert!(
-            html.html.contains("<p>Hallo</p>"),
-            "the original's own markup travels: {}",
+            html.html.contains("Hallo"),
+            "the quote travels as the buffer had it: {}",
             html.html
         );
         assert!(
             !html.html.contains("color: red"),
-            "the sender's stylesheet does not restyle our half: {}",
+            "nothing of the sender's markup comes along: {}",
             html.html
         );
         assert_eq!(html.inline.len(), 1, "the image the quote points at");
         assert_eq!(html.inline[0].id, "logo");
+    }
+
+    /// An image the writer cut out of the quote is not attached anyway.
+    #[test]
+    fn an_image_no_longer_in_the_buffer_stays_behind() {
+        let source = html_mail();
+        let msg = original(source.as_bytes());
+        let built = build(&Composition {
+            headers: &headers(),
+            body: "Danke!\n\n> Hallo",
+            original: Some(&msg),
+            format: ComposeFormat::Html,
+            images: QuoteImages::Attach,
+        })
+        .expect("the message builds");
+        let parsed = original(&built.formatted());
+        assert!(parsed.html.expect("an html half").inline.is_empty());
     }
 
     /// A reply to a text-only mail is a text-only mail, and its quote is the
@@ -598,10 +487,8 @@ mod tests {
         );
         let built = build(&Composition {
             headers: &headers(),
-            body: "Danke!",
+            body: "Danke!\n\nshe wrote:\n> Hallo",
             original: Some(&msg),
-            quote: true,
-            attribution: "she wrote:",
             format: ComposeFormat::Plain,
             images: QuoteImages::Attach,
         })
@@ -621,8 +508,6 @@ mod tests {
             headers: &headers,
             body: "Danke!",
             original: None,
-            quote: false,
-            attribution: "",
             format: ComposeFormat::Plain,
             images: QuoteImages::Attach,
         })
@@ -638,8 +523,6 @@ mod tests {
             headers: &headers,
             body: "x",
             original: None,
-            quote: false,
-            attribution: "",
             format: ComposeFormat::Plain,
             images: QuoteImages::Attach,
         })

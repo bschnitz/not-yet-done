@@ -1,20 +1,23 @@
 //! The editor buffer: what the user sees, and what comes back.
 //!
 //! A composed message is edited as one text file — a small header block, a
-//! blank line, the message as Markdown, and (for a reply) the original below a
-//! marker line. Everything in this module is string work: no MIME, no network,
-//! no adapter state. That is deliberate. The header block and the quote guard
-//! are the two places where a mistake costs the user text they have written,
-//! and they are the two cheapest things here to test.
+//! blank line, and the message as Markdown; for a reply the original follows
+//! as `> ` lines under its attribution. All of it below the header block is
+//! the message: the quote is ordinary Markdown, may be edited, trimmed or
+//! answered into, and goes out exactly as it stands. Everything in this
+//! module is string work: no MIME, no network, no adapter state.
 
 use crate::error::{MailError, MailResult};
 
-/// Separates the message from the quoted original.
+/// The marker lines older buffers carried between the answer and the quote.
 ///
-/// It reads as an instruction because it is one: the text below it is *not*
-/// what gets sent — the original's own markup is (see [`QuoteState`]).
-pub(crate) const QUOTE_MARKER: &str =
-    ">>> quoted original — sent verbatim as the sender wrote it; edits below are discarded";
+/// A draft written back then is still on disk and still answers its mail;
+/// the line was an instruction to the writer, never part of the message, so
+/// it is dropped on the way in rather than sent.
+const LEGACY_QUOTE_MARKERS: [&str; 2] = [
+    ">>> quoted original",
+    ">>> quoted from the original message",
+];
 
 /// The headers a composed message may carry. Deliberately five and not
 /// "whatever the user typed": a buffer is not a place to inject `Bcc`-alikes
@@ -31,32 +34,16 @@ pub(crate) struct Headers {
     pub(crate) subject: String,
 }
 
-/// What happened to the quoted region between the template and the save.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QuoteState {
-    /// Untouched: the original's own HTML is what gets quoted.
-    Intact,
-    /// The marker line is gone. Two readings, one behaviour: the user either
-    /// deleted the quote outright (nothing is quoted) or deleted just the
-    /// marker and kept the text — in which case those `> …` lines are now
-    /// ordinary Markdown in the body and travel as the user's own words.
-    /// Both are deliberate gestures, and both do what they look like.
-    Dropped,
-    /// The marker is there and the text below it is not the text we wrote.
-    /// Refused: sending would silently throw those edits away.
-    Modified,
-}
-
 /// One parsed buffer.
 #[derive(Clone, Debug)]
 pub(crate) struct Draft {
     pub(crate) headers: Headers,
-    /// The message itself, as Markdown, without the quoted region.
+    /// The whole message as Markdown, the quote included.
     pub(crate) body: String,
-    pub(crate) quote: QuoteState,
 }
 
-/// Build the buffer the editor opens on.
+/// Build the buffer the editor opens on: the headers, the answer, and — for
+/// a reply — a blank line and the quote.
 pub(crate) fn render(headers: &Headers, body: &str, quote: Option<&str>) -> String {
     let mut out = String::new();
     out.push_str(&format!("From: {}\n", headers.from));
@@ -73,8 +60,6 @@ pub(crate) fn render(headers: &Headers, body: &str, quote: Option<&str>) -> Stri
     }
     if let Some(quote) = quote {
         out.push('\n');
-        out.push_str(QUOTE_MARKER);
-        out.push('\n');
         out.push_str(quote);
         if !quote.ends_with('\n') {
             out.push('\n');
@@ -83,46 +68,14 @@ pub(crate) fn render(headers: &Headers, body: &str, quote: Option<&str>) -> Stri
     out
 }
 
-/// Read a saved buffer back, judging the quoted region against the template
-/// the editor was opened with.
-///
-/// `template` is what [`render`] produced — the frontend hands it back with
-/// the edit, so no state has to be kept between opening the editor and saving
-/// it.
-pub(crate) fn parse(text: &str, template: &str) -> MailResult<Draft> {
+/// Read a saved buffer back.
+pub(crate) fn parse(text: &str) -> MailResult<Draft> {
     let (head, rest) = split_head(text)?;
     let headers = parse_headers(head)?;
-    let (body, quote) = split_quote(rest);
-    let quote_state = match (
-        quote,
-        split_quote(split_head(template).map(|(_, r)| r).unwrap_or("")).1,
-    ) {
-        (None, _) => QuoteState::Dropped,
-        (Some(now), Some(before)) if now.trim_end() == before.trim_end() => QuoteState::Intact,
-        // A template that carried no quote cannot have had one edited: a
-        // marker the user typed themselves is text, not a promise we made.
-        (Some(_), None) => QuoteState::Dropped,
-        (Some(_), Some(_)) => QuoteState::Modified,
-    };
     Ok(Draft {
         headers,
-        body: body.trim_end().to_string(),
-        quote: quote_state,
+        body: drop_legacy_marker(rest).trim_end().to_string(),
     })
-}
-
-/// Read a saved buffer back, judging its quoted region against a quote
-/// rendered fresh from the original.
-///
-/// The difference to [`parse`] is which baseline the guard uses, and it
-/// matters exactly once: a draft that is resumed *is* the template the editor
-/// was handed, so an edit that was refused before would read as untouched the
-/// second time round and travel as the sender's own words. The original is
-/// re-read when a reply is sent anyway, so the quote can simply be rendered
-/// again — no state has to survive between the two.
-pub(crate) fn parse_with_quote(text: &str, quoted: Option<&str>) -> MailResult<Draft> {
-    let baseline = render(&Headers::default(), "", quoted);
-    parse(text, &baseline)
 }
 
 /// Split at the blank line that ends the header block.
@@ -143,17 +96,11 @@ fn split_head(text: &str) -> MailResult<(&str, &str)> {
     ))
 }
 
-/// Split the body from the quoted region at [`QUOTE_MARKER`].
-fn split_quote(text: &str) -> (&str, Option<&str>) {
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        if line.trim_end() == QUOTE_MARKER {
-            let after = offset + line.len();
-            return (&text[..offset], Some(&text[after..]));
-        }
-        offset += line.len();
-    }
-    (text, None)
+/// The body without the line [`LEGACY_QUOTE_MARKERS`] names.
+fn drop_legacy_marker(body: &str) -> String {
+    body.split_inclusive('\n')
+        .filter(|line| !LEGACY_QUOTE_MARKERS.iter().any(|m| line.starts_with(m)))
+        .collect()
 }
 
 fn parse_headers(head: &str) -> MailResult<Headers> {
@@ -270,88 +217,33 @@ mod tests {
     }
 
     /// The round trip every other test stands on: what is rendered parses
-    /// back into what it was built from.
+    /// back into what it was built from, the quote being part of the body.
     #[test]
     fn a_rendered_buffer_parses_back_to_its_own_values() {
         let text = render(&headers(), "Hallo,\n\ndanke!", Some("> alt\n"));
-        let draft = parse(&text, &text).expect("parses");
+        let draft = parse(&text).expect("parses");
         assert_eq!(draft.headers, headers());
-        assert_eq!(draft.body, "Hallo,\n\ndanke!");
-        assert_eq!(draft.quote, QuoteState::Intact);
+        assert_eq!(draft.body, "Hallo,\n\ndanke!\n\n> alt");
     }
 
-    /// The whole point of the marker: an untouched quote is quoted from the
-    /// original, an edited one is refused, and a deleted one is a decision.
+    /// An answer written between the quoted lines is the message, not an
+    /// error: what is in the buffer is what goes out.
     #[test]
-    fn the_quote_region_is_judged_against_the_template() {
-        let template = render(&headers(), "", Some("> alt\n> mehr\n"));
-
-        let untouched = render(&headers(), "Hallo", Some("> alt\n> mehr\n"));
-        assert_eq!(
-            parse(&untouched, &template).expect("parses").quote,
-            QuoteState::Intact
-        );
-
-        let edited = render(&headers(), "Hallo", Some("> alt\n> ANTWORT DAZWISCHEN\n"));
-        assert_eq!(
-            parse(&edited, &template).expect("parses").quote,
-            QuoteState::Modified
-        );
-
-        let dropped = render(&headers(), "Hallo", None);
-        assert_eq!(
-            parse(&dropped, &template).expect("parses").quote,
-            QuoteState::Dropped
-        );
+    fn an_edit_inside_the_quote_is_kept() {
+        let text = render(&headers(), "Hallo", Some("> alt\n\nja, gern!\n\n> mehr\n"));
+        let draft = parse(&text).expect("parses");
+        assert!(draft.body.contains("> alt\n\nja, gern!\n\n> mehr"), "{}", draft.body);
     }
 
-    /// An editor that adds or eats a trailing newline must not read as an
-    /// edit — that is the difference between "saved" and "changed".
+    /// A draft saved while buffers still carried a marker line sends without
+    /// it — the line was an instruction, never part of the message.
     #[test]
-    fn trailing_whitespace_is_not_an_edit() {
-        let template = render(&headers(), "", Some("> alt\n"));
-        let saved = format!("{}\n\n", template.trim_end());
-        assert_eq!(
-            parse(&saved, &template).expect("parses").quote,
-            QuoteState::Intact
-        );
-    }
-
-    /// A marker the user typed into a message that never had a quote is
-    /// text, not a promise the adapter made.
-    #[test]
-    fn a_marker_without_a_template_quote_is_not_a_modified_quote() {
-        let template = render(&headers(), "", None);
-        let typed = render(&headers(), "siehe unten", Some("> eigenes Zitat\n"));
-        assert_eq!(
-            parse(&typed, &template).expect("parses").quote,
-            QuoteState::Dropped
-        );
-    }
-
-    /// A resumed draft is its own template, so the guard cannot compare the
-    /// two: judged against the quote rendered fresh from the original, an
-    /// edit stays an edit however often the draft is re-opened.
-    #[test]
-    fn a_resumed_draft_is_judged_against_the_original_quote() {
-        let quoted = "> alt\n> mehr\n";
-        let edited = render(&headers(), "Hallo", Some("> alt\n> ANTWORT\n"));
-        assert_eq!(
-            parse(&edited, &edited).expect("parses").quote,
-            QuoteState::Intact,
-            "against itself a draft always looks untouched"
-        );
-        assert_eq!(
-            parse_with_quote(&edited, Some(quoted))
-                .expect("parses")
-                .quote,
-            QuoteState::Modified
-        );
-        let kept = render(&headers(), "Hallo", Some(quoted));
-        assert_eq!(
-            parse_with_quote(&kept, Some(quoted)).expect("parses").quote,
-            QuoteState::Intact
-        );
+    fn the_marker_line_of_an_older_draft_is_dropped() {
+        let text = "From: a@b.invalid\nTo: c@d.invalid\nSubject: hi\n\nHallo\n\n\
+                    >>> quoted original — sent verbatim as the sender wrote it; edits below are discarded\n\
+                    > alt\n";
+        let draft = parse(text).expect("parses");
+        assert_eq!(draft.body, "Hallo\n\n> alt");
     }
 
     #[test]
@@ -369,28 +261,28 @@ mod tests {
     #[test]
     fn an_unknown_header_is_refused_by_name() {
         let text = "From: a@b.invalid\nX-Spam: yes\n\ntext\n";
-        let err = parse(text, text).expect_err("unknown header");
+        let err = parse(text).expect_err("unknown header");
         assert!(err.to_string().contains("x-spam"), "names it: {err}");
     }
 
     #[test]
     fn a_buffer_without_a_blank_line_says_what_is_missing() {
         let text = "From: a@b.invalid\nTo: c@d.invalid\nSubject: hi\n";
-        let err = parse(text, text).expect_err("no body");
+        let err = parse(text).expect_err("no body");
         assert!(err.to_string().contains("blank line"), "explains it: {err}");
     }
 
     #[test]
     fn a_folded_recipient_list_stays_one_header() {
         let text = "From: a@b.invalid\nTo: one@x.invalid,\n  two@x.invalid\nSubject: hi\n\nhallo\n";
-        let draft = parse(text, text).expect("parses");
+        let draft = parse(text).expect("parses");
         assert_eq!(draft.headers.to.len(), 2, "both recipients survive folding");
     }
 
     #[test]
     fn the_same_header_twice_is_refused() {
         let text = "From: a@b.invalid\nTo: c@d.invalid\nTo: e@f.invalid\n\nhi\n";
-        let err = parse(text, text).expect_err("duplicate header");
+        let err = parse(text).expect_err("duplicate header");
         assert!(err.to_string().contains("twice"), "explains it: {err}");
     }
 }

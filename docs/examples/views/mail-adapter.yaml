@@ -42,8 +42,9 @@ retry:
 compose_format: html
 
 # What happens to the inline images (`cid:`) of a quoted original:
-#   attach      — sent back with the reply, so the quote still shows them.
-#                 What Thunderbird does.
+#   attach      — kept in the quote as `![alt](cid:…)` and sent back with
+#                 the reply, so the quote still shows them. Delete the line
+#                 in the buffer and that image stays behind.
 #   placeholder — replaced by their alt text. For a thread that would
 #                 otherwise carry the same signature logo on every round.
 quote_images: attach

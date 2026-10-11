@@ -7911,8 +7911,8 @@ reading text sees text, and the copy in Sent is the same message.
 
 - [ ] **`e r` opens on the right message**: cursor on a mail, `e r` → `$EDITOR`
       comes up with `From` (this account), `To` (the sender), `Subject`
-      prefixed `Re: `, an empty line for the answer, and below the marker line
-      the original quoted with `> `.
+      prefixed `Re: `, an empty line for the answer, and below it the
+      attribution line and the original quoted with `> ` — no marker line.
 - [ ] **`Re:` is not stacked**: answering a mail whose subject already begins
       `Re:` (any case) leaves it alone. A subject beginning with a non-ASCII
       letter (`Grüße`) survives too — it is a prefix check, not a byte slice.
@@ -7940,17 +7940,19 @@ reading text sees text, and the copy in Sent is the same message.
       the writer left them. The tidying above is for markup the adapter
       converted, not for text somebody typed.
 
-### The guard on the quote
+### The quote is part of the message
 
-- [ ] **Untouched is quoted**: write an answer above the marker, save → the
-      mail goes out and the recipient sees the original below the reply.
-- [ ] **Deleted is no quote**: delete the marker line and everything below it,
+- [ ] **Untouched is quoted**: write an answer above the quote, save → the
+      mail goes out and the recipient sees the quote below the reply.
+- [ ] **Deleted is no quote**: delete the attribution and every `>` line,
       save → the mail goes out with the answer only. Not an error.
-- [ ] **Edited is refused**: type a word INSIDE the quoted region, save → the
-      action is refused with a message naming the marker line, nothing is sent,
-      and `e r` re-opens the draft with that word still in it. Repeat the same
-      edit on the re-opened draft: it is refused again (the second attempt is
-      the one a template-against-template comparison would have let through).
+- [ ] **Edited is sent as edited**: trim the quote and type an answer BETWEEN
+      its lines, save → the mail goes out, and the recipient sees exactly the
+      trimmed quote with the answer in between.
+- [ ] **Nothing written is refused**: `e r` and save the template unchanged →
+      "the message is empty", nothing is sent, the draft stays.
+- [ ] **An old draft still sends**: a draft saved before this change (with the
+      `>>> quoted original …` line) sends without that line.
 
 ### What goes out
 
@@ -7959,14 +7961,14 @@ reading text sees text, and the copy in Sent is the same message.
       sees. No HTML alternative.
 - [ ] **An HTML mail is answered in HTML**: answer a newsletter or a mail from
       a web client → the received message is `multipart/alternative`, the HTML
-      part shows the reply above a `<blockquote>` with the original's own
-      formatting (tables, links, inline images intact), and the text part is
+      part shows the reply above a `<blockquote>` holding the simplified quote
+      from the buffer (not the sender's own markup), and the text part is
       readable on its own.
 - [ ] **Markdown is rendered**: `**bold**`, a list, a table and a fenced code
       block arrive as such in the HTML part, and as the source in the text
       part.
 - [ ] **Own quotes look like inherited ones**: a `> quoted line` written by
-      hand above the marker arrives as a `<blockquote>` styled like the
+      hand above the attribution arrives as a `<blockquote>` styled like the
       original's — same left border, same indent.
 - [ ] **The thread holds**: the answer appears IN the thread in the
       recipient's client (`In-Reply-To` and `References` are set), not as a new
@@ -7974,8 +7976,10 @@ reading text sees text, and the copy in Sent is the same message.
 - [ ] **Nesting**: answering a mail that is itself an answer produces a quote
       inside a quote, the way a mail client shows a thread.
 - [ ] **`quote_images: placeholder`**: set it on an account, answer a mail with
-      a signature logo → the reply is small and the image is a placeholder, not
-      a re-attached copy.
+      a signature logo → the quote shows its alt text instead of
+      `![…](cid:…)`, and the reply carries no image. With `attach` (default),
+      deleting the `![…](cid:…)` line from the buffer leaves that image behind
+      too.
 
 ### After the send
 

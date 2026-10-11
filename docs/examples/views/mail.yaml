@@ -234,14 +234,11 @@ views:
           # alternative beside it, as every client sends — as soon as the
           # original carried an HTML part.
           #
-          # Under the reply sits the original, quoted below a marker line.
-          # That text is there to READ while writing and is never what gets
-          # sent: the sent quote is built from the original's own HTML, so it
-          # keeps its tables, its links and its inline images. Deleting the
-          # whole quoted region is a deliberate reply without a quote and is
-          # fine; EDITING inside it is refused and the draft kept, because an
-          # answer typed between somebody else's lines would otherwise be
-          # dropped without a word.
+          # Under the reply sits the original, simplified to Markdown and
+          # quoted with `> `. It is part of the message: trim it, answer
+          # between its lines or delete it — what is in the buffer is what
+          # goes out, rendered to HTML with the rest. The sender's own
+          # markup does not travel back.
           #
           # A draft is a real file, not a temp file: an editor closed by
           # accident, or a send the SMTP server refused, is one `e r` away.

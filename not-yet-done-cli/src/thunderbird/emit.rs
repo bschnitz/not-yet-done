@@ -265,12 +265,10 @@ const FIRST_SUBTAB_BODY: &str = r#"    columns: &folder_columns
           # plain mail, HTML — with a `text/plain` alternative beside it — as
           # soon as the original carried an HTML part.
           #
-          # The quoted original below the marker line is there to READ while
-          # writing and is never what gets sent; the sent quote is built from
-          # the original's own HTML. Deleting the whole quoted region replies
-          # without a quote; editing inside it is refused and the draft kept,
-          # because an answer typed between somebody else's lines would
-          # otherwise be dropped without a word.
+          # Below the answer sits the original, simplified to Markdown and
+          # quoted with `> `. It is part of the message: trim it, answer
+          # between its lines or delete it; what is in the buffer is what
+          # goes out, rendered to HTML with the rest.
           - name: reply
             key: "e r"
             type: edit

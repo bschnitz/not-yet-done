@@ -50,6 +50,12 @@ Subject: Re: Angebot Q4
   accounts).
 - **Reply-all** needs no second action: the addresses are right there. A
   `reply_all` that prefills them is a later convenience, not a new mechanism.
+> **Superseded (2026-10-11):** marker line and guard are gone. The quote is
+> plain Markdown in the buffer, may be edited freely, and is rendered to HTML
+> with the rest of the reply; the sender's own markup no longer travels back.
+> An old draft's marker line is dropped on send. The README's "Answering and
+> composing" section describes the current behaviour.
+
 - **The marker line** is a single fixed line (`QUOTE_MARKER`). Everything from
   it to the end of the buffer is the quoted region.
 - **The guard** (the decision from the design discussion): on save the adapter

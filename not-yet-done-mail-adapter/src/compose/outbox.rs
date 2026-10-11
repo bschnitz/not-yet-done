@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use not_yet_done_content::EditorPrep;
 
-use crate::compose::buffer::{self, Headers, QuoteState};
+use crate::compose::buffer::{self, Headers};
 use crate::compose::render::Composition;
 use crate::compose::{quote, render, send};
 use crate::config::{AccountConfig, ComposeFormat, QuoteImages, SmtpConfig};
@@ -128,7 +128,7 @@ impl Outbox {
         self.account.compose_format.unwrap_or(self.defaults.format)
     }
 
-    fn images(&self) -> QuoteImages {
+    pub(crate) fn images(&self) -> QuoteImages {
         self.account.quote_images.unwrap_or(self.defaults.images)
     }
 
@@ -195,8 +195,8 @@ impl Outbox {
     /// Read the saved buffer, and — if it holds together — send it.
     ///
     /// `original` is the message being answered: it decides the format, it
-    /// supplies the quote that travels, and it is where the threading headers
-    /// come from. `answering` is the same message's coordinates, which is a
+    /// supplies the inline images the quote points at, and it is where the
+    /// threading headers come from. `answering` is the same message's coordinates, which is a
     /// separate argument because a reply to a message that has since been
     /// renumbered still sends; only its flag does not stick.
     pub(crate) async fn deliver(
@@ -206,23 +206,13 @@ impl Outbox {
         original: Option<&Original>,
         answering: Option<&MessageId>,
     ) -> MailResult<String> {
-        let attribution = original.map(|o| self.attribution(o)).unwrap_or_default();
-        // Judged against a freshly rendered quote rather than against the
-        // template the editor was handed: a resumed draft *is* that template,
-        // so comparing the two would call an edit that was already refused
-        // once "unchanged" the second time round.
-        let expected = original.map(|o| quote::quoted_text(o, &attribution));
-        let draft = buffer::parse_with_quote(text, expected.as_deref())?;
-        if draft.quote == QuoteState::Modified {
-            return Err(MailError::Draft(format!(
-                "the quoted original was edited, so nothing was sent — what travels is the \
-                 sender's own markup, not the text below the marker, and those edits would \
-                 be dropped without a trace. Move them above the `{}` line (or delete the \
-                 line to reply without a quote); the draft is kept.",
-                buffer::QUOTE_MARKER
-            )));
-        }
-        if draft.body.trim().is_empty() {
+        let draft = buffer::parse(text)?;
+        // An answer that is nothing but the untouched quote is no answer:
+        // the editor was closed without writing anything.
+        let untouched = original
+            .map(|o| quote::quoted_text(o, &self.attribution(o), self.images()))
+            .is_some_and(|q| q.trim() == draft.body.trim());
+        if draft.body.trim().is_empty() || untouched {
             return Err(MailError::Draft(
                 "the message is empty — write something above the quote".into(),
             ));
@@ -240,8 +230,6 @@ impl Outbox {
             headers: &draft.headers,
             body: &draft.body,
             original,
-            quote: draft.quote == QuoteState::Intact && original.is_some(),
-            attribution: &attribution,
             format,
             images: self.images(),
         })?;

@@ -456,16 +456,15 @@ impl MailMessageNode {
 impl MailMessageNode {
     /// The message this one answers, parsed out of its own source.
     ///
-    /// Fetched twice over one reply — once to fill the editor, once to build
-    /// what travels — and deliberately not cached: the second read is what
-    /// makes the quote guard stateless, and a body the server has since
-    /// changed is a body we should be quoting, not one we remember.
+    /// Fetched twice over one reply — once to fill the editor, once for the
+    /// threading headers and the inline images of what travels — and
+    /// deliberately not cached: nothing has to survive between the two.
     async fn original(&self) -> Result<Original> {
         Ok(crate::mime::original(&self.body.raw().await?))
     }
 
     /// The buffer a reply opens on: the addresses filled in, the subject
-    /// prefixed, and the original below the marker as readable text.
+    /// prefixed, and the original quoted below as Markdown.
     async fn reply_prep(&self) -> Result<EditorPrep> {
         let original = self.original().await?;
         let headers = Headers {
@@ -475,7 +474,11 @@ impl MailMessageNode {
             bcc: Vec::new(),
             subject: render::reply_subject(&original.subject),
         };
-        let quoted = quote::quoted_text(&original, &self.outbox.attribution(&original));
+        let quoted = quote::quoted_text(
+            &original,
+            &self.outbox.attribution(&original),
+            self.outbox.images(),
+        );
         self.outbox
             .prep(&reply_draft(&self.body.id), &headers, Some(&quoted))
             .map_err(super::mail_err)

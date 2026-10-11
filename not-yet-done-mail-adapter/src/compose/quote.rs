@@ -1,11 +1,11 @@
 //! The original, as the writer reads it while answering.
 //!
-//! Everything here produces text that is *read*, not text that is sent: the
-//! quoted region of the editor buffer, and the `text/plain` alternative of an
-//! HTML reply, which is the same text. That is why fidelity is not the goal —
-//! readability is. The markup that actually travels back out is the sender's
-//! own, and [`super::render`] handles it.
+//! What is produced here is the quoted region of the editor buffer, and
+//! since that region is part of the message it is also what travels back
+//! out: rendered to HTML like the rest of the answer. Fidelity to the
+//! sender's layout is not the goal — a readable, simplified quote is.
 
+use crate::config::QuoteImages;
 use crate::mime::Original;
 
 /// The line above a quote, and the one string in an outgoing mail that is
@@ -49,13 +49,13 @@ fn readable_date(rfc3339: Option<&str>) -> String {
 /// the `text/plain` part of the reply — because they are the same text. A
 /// reader on a text client and the writer in their editor see the message the
 /// same way, which is one thing fewer to keep in sync.
-pub(crate) fn quoted_text(original: &Original, attribution: &str) -> String {
+pub(crate) fn quoted_text(original: &Original, attribution: &str, images: QuoteImages) -> String {
     let mut out = String::new();
     if !attribution.trim().is_empty() {
         out.push_str(attribution);
         out.push('\n');
     }
-    out.push_str(&prefix(&readable(original)));
+    out.push_str(&prefix(&readable(original, images)));
     out
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn quoted_text(original: &Original, attribution: &str) -> String {
 /// The plain part wins even when the message also carries HTML — the sender
 /// wrote it, or their client did, and either way it is closer to what they
 /// meant than a conversion of the markup around it.
-pub(crate) fn readable(original: &Original) -> String {
+pub(crate) fn readable(original: &Original, images: QuoteImages) -> String {
     if let Some(text) = &original.text {
         return text.trim_end().to_string();
     }
@@ -74,7 +74,7 @@ pub(crate) fn readable(original: &Original) -> String {
     };
     // A conversion that fails leaves the reader with nothing to answer, so
     // the markup itself is the fallback: ugly, but the message is in there.
-    let markdown = to_markdown(&html.html).unwrap_or_else(|| html.html.clone());
+    let markdown = to_markdown(&html.html, images).unwrap_or_else(|| html.html.clone());
     tidy(&drop_empty_links(&markdown))
 }
 
@@ -90,22 +90,31 @@ const INVISIBLE: [&str; 5] = ["head", "title", "style", "script", "noscript"];
 ///
 /// The converter is built per message rather than kept around: one reply is
 /// one conversion, and it is the mailbox round trip that costs, not this.
-fn to_markdown(html: &str) -> Option<String> {
+fn to_markdown(html: &str, images: QuoteImages) -> Option<String> {
     htmd::HtmlToMarkdown::builder()
         .skip_tags(INVISIBLE.to_vec())
         // An image is a layout element in most mail: a logo, a spacer, a
         // tracking pixel. Its URL says nothing to a reader, so what stands
         // in the quote is what the sender wrote about it — the alt text —
-        // and nothing at all where there is none.
+        // and nothing at all where there is none. The exception is an image
+        // the mail carries itself (`cid:`) on an account that sends those
+        // back: it stays an image, and the reply re-attaches it.
         .add_handler(
             vec!["img"],
-            |_: &dyn htmd::element_handler::Handlers, el: htmd::Element| {
-                el.attrs
-                    .iter()
-                    .find(|a| &a.name.local == "alt")
-                    .map(|a| a.value.trim().to_string())
-                    .filter(|alt| !alt.is_empty())
-                    .map(Into::into)
+            move |_: &dyn htmd::element_handler::Handlers, el: htmd::Element| {
+                let attr = |name: &str| {
+                    el.attrs
+                        .iter()
+                        .find(|a| &a.name.local == name)
+                        .map(|a| a.value.trim().to_string())
+                };
+                let alt = attr("alt").unwrap_or_default();
+                if let Some(src) = attr("src").filter(|s| s.starts_with("cid:")) {
+                    if images == QuoteImages::Attach {
+                        return Some(format!("![{alt}]({src})").into());
+                    }
+                }
+                Some(alt).filter(|alt| !alt.is_empty()).map(Into::into)
             },
         )
         .build()
@@ -226,7 +235,7 @@ mod tests {
     fn every_line_of_the_quote_carries_its_marker_including_the_empty_ones() {
         let msg = parsed("From: a@example.invalid\r\n\r\none\r\n\r\ntwo\r\n");
         assert_eq!(
-            quoted_text(&msg, "she wrote:"),
+            quoted_text(&msg, "she wrote:", QuoteImages::Attach),
             "she wrote:\n> one\n>\n> two\n"
         );
     }
@@ -246,7 +255,7 @@ mod tests {
             "<p>the html one</p>\r\n",
             "--b--\r\n"
         ));
-        assert_eq!(readable(&msg), "the plain one");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "the plain one");
     }
 
     /// A mail template carries its stylesheet and its `<title>` in the body
@@ -262,11 +271,13 @@ mod tests {
             "<body><style>@media screen{.b{width:1px}}</style>\r\n",
             "<p>the one line that is a message</p></body></html>\r\n"
         ));
-        assert_eq!(readable(&msg), "the one line that is a message");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "the one line that is a message");
     }
 
     /// The alt text is what the sender said about the picture; the URL is
-    /// what their layout needed. One belongs in a quote, the other does not.
+    /// what their layout needed. One belongs in a quote, the other does not —
+    /// unless the mail carries the image itself and the account sends those
+    /// back, in which case it stays an image the reply can re-attach.
     #[test]
     fn an_image_is_quoted_by_its_alt_text_or_not_at_all() {
         let msg = parsed(concat!(
@@ -276,7 +287,14 @@ mod tests {
             "<p><img src=\"https://tracker.invalid/open.gif\" alt=\"\"></p>\r\n",
             "<p>after</p>\r\n"
         ));
-        assert_eq!(readable(&msg), "the floor plan\n\nafter");
+        assert_eq!(
+            readable(&msg, QuoteImages::Placeholder),
+            "the floor plan\n\nafter"
+        );
+        assert_eq!(
+            readable(&msg, QuoteImages::Attach),
+            "![the floor plan](cid:x)\n\nafter"
+        );
     }
 
     /// A logo linking to a home page is `[![](logo.png)](https://…)`. With
@@ -290,7 +308,7 @@ mod tests {
             "<p><a href=\"https://example.invalid/\"><img src=\"logo.png\"></a></p>\r\n",
             "<p><a href=\"https://example.invalid/x\">a real link</a></p>\r\n"
         ));
-        assert_eq!(readable(&msg), "[a real link](https://example.invalid/x)");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "[a real link](https://example.invalid/x)");
     }
 
     /// Spacer cells convert to lines that carry a non-breaking space. They
@@ -303,7 +321,7 @@ mod tests {
             "<p>&nbsp;</p><p>one</p><p>&nbsp;</p><p>&nbsp;</p><p>two</p><p>&nbsp;</p>\r\n"
         ));
         assert_eq!(
-            quoted_text(&msg, "she wrote:"),
+            quoted_text(&msg, "she wrote:", QuoteImages::Attach),
             "she wrote:\n> one\n>\n> two\n"
         );
     }
@@ -321,7 +339,7 @@ mod tests {
             ),
             "\u{200c} ".repeat(40)
         ));
-        assert_eq!(readable(&msg), "Read it online.");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "Read it online.");
     }
 
     /// A family emoji is single characters held together by zero-width
@@ -335,7 +353,7 @@ mod tests {
             "<p>us: \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}</p>\r\n"
         ));
         assert_eq!(
-            readable(&msg),
+            readable(&msg, QuoteImages::Attach),
             "us: \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"
         );
     }
@@ -348,7 +366,7 @@ mod tests {
             "From: a@example.invalid\r\n\r\n",
             "one\r\n\r\n\r\ntwo\r\n"
         ));
-        assert_eq!(readable(&msg), "one\n\n\ntwo");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "one\n\n\ntwo");
     }
 
     #[test]
@@ -358,6 +376,6 @@ mod tests {
             "Content-Type: text/html\r\n\r\n",
             "<h1>Titel</h1><p>ein <b>Wort</b></p>\r\n"
         ));
-        assert_eq!(readable(&msg), "# Titel\n\nein **Wort**");
+        assert_eq!(readable(&msg, QuoteImages::Attach), "# Titel\n\nein **Wort**");
     }
 }

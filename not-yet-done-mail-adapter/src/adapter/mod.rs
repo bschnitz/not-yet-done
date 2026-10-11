@@ -1594,8 +1594,9 @@ accounts:
             prep.template
         );
         assert!(
-            prep.template.contains(crate::compose::buffer::QUOTE_MARKER),
-            "the marker is what makes the region below it a quote"
+            !prep.template.contains(">>> "),
+            "no marker: the quote is ordinary Markdown: {}",
+            prep.template
         );
         assert!(
             prep.template.contains("> Grüße aus München"),
@@ -1666,14 +1667,12 @@ accounts:
         let _ = std::fs::remove_dir_all(&drafts);
     }
 
-    /// The guard the whole buffer design exists for: an answer written
-    /// *into* the quote would be dropped on the way out, because what
-    /// travels is the sender's own markup. So nothing is sent, the draft
-    /// stays, and the message says where to move the text.
+    /// Closing the editor on the untouched template is not an answer:
+    /// nothing is sent, and the draft stays.
     #[tokio::test]
-    async fn an_answer_written_into_the_quote_is_refused_and_the_draft_survives() {
+    async fn a_reply_that_is_only_the_quote_is_refused_and_the_draft_survives() {
         let server = FakeServer::start(scripted()).await;
-        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "edited-quote");
+        let (adapter, drafts) = adapter_with_drafts(server.addr.port(), "only-quote");
 
         let mut node = adapter
             .get_by_id("work/INBOX#42.1")
@@ -1684,19 +1683,13 @@ accounts:
             .await
             .expect("prepares");
         let path = prep.file_path.clone().expect("a persistent draft");
-        // Exactly the gesture a mail client user makes out of habit: answer
-        // between the quoted lines.
-        let edited = prep
-            .template
-            .replace("> Grüße aus München", "> Grüße aus München\n\nja, gern!")
-            .replace("\n\n\n", "\n\nAntwort oben\n\n");
-        std::fs::write(&path, &edited).expect("writes the draft");
+        std::fs::write(&path, &prep.template).expect("writes the draft");
 
         let Err(err) = node
             .execute(
                 "reply",
                 ActionInput::Edited {
-                    text: edited,
+                    text: prep.template.clone(),
                     original: prep.template,
                     version: String::new(),
                 },
@@ -1704,18 +1697,14 @@ accounts:
             )
             .await
         else {
-            panic!("an edited quote must not be sent");
+            panic!("an untouched template must not be sent");
         };
         assert!(
-            err.to_string().contains("quoted original was edited"),
+            err.to_string().contains("the message is empty"),
             "says what happened: {err}"
         );
-        assert!(path.exists(), "and the text is still on disk");
-        assert_eq!(
-            server.appended().len(),
-            0,
-            "nothing was filed, because nothing was sent"
-        );
+        assert!(path.exists(), "and the draft is still on disk");
+        assert_eq!(server.appended().len(), 0, "nothing was sent");
         let _ = std::fs::remove_dir_all(&drafts);
     }
 

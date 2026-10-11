@@ -120,6 +120,10 @@ pub enum ComposeFormat {
 }
 
 /// What happens to the `cid:` images of a quoted original.
+///
+/// Decided when the quote is written into the buffer: `attach` leaves them
+/// there as `![alt](cid:…)`, and whichever of them is still in the buffer
+/// at send time travels back.
 #[derive(Deserialize, Buildable, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum QuoteImages {
@@ -128,7 +132,7 @@ pub enum QuoteImages {
     /// does, and the reason a quoted mail does not turn into broken boxes.
     #[default]
     Attach,
-    /// Replaced by their alt text (or their file name). For a thread that
+    /// Replaced by their alt text. For a thread that
     /// would otherwise carry the same signature logo on every round.
     Placeholder,
 }

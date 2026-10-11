@@ -40,8 +40,8 @@ pub(crate) enum MailError {
     #[error("{0}")]
     Parse(String),
     /// The message the user wrote cannot be sent as it stands: a header the
-    /// buffer does not know, a `From` no account carries, a quoted original
-    /// that was edited. Nothing left the machine, and the draft is still on
+    /// buffer does not know, a `From` no account carries, an answer with
+    /// nothing written. Nothing left the machine, and the draft is still on
     /// disk — which is why this is never fatal and never repeated.
     #[error("{0}")]
     Draft(String),

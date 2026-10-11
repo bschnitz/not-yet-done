@@ -2055,9 +2055,7 @@ Subject: Re: The Q4 numbers
 
 <the answer, written as Markdown>
 
->>> quoted from the original message — sent verbatim, edits below are discarded
-> On 2026-09-03 14:22, Grace Hopper <grace@example.net> wrote:
->
+On 2026-09-03 14:22, Grace Hopper <grace@example.net> wrote:
 > ...
 ```
 
@@ -2072,28 +2070,22 @@ Markdown, the way every mail client does — a recipient reading text sees text
 rather than an empty message. A _new_ mail has no original to take the decision
 from and follows `compose_format:` (`html` by default).
 
-**The quote is two different things at once.** In the buffer it is the original
-turned into Markdown and prefixed with `> `, and it exists to be _read_ while
-writing. What actually goes out is the original's own HTML wrapped in
-`<blockquote type="cite">`, nested inside whatever quotes it already carried —
-so its tables, links and inline images survive, and a thread reads as a thread.
+**The quote is part of the message.** The original is turned into Markdown and
+prefixed with `> `, and what is in the buffer is what goes out: the whole
+buffer, quote included, is rendered to HTML in one go, the quote as
+`<blockquote type="cite">`. Trim it, answer between its lines, or delete it —
+there is no marker line and nothing is refused. The sender's own markup does not
+travel back; the reply carries the simplified quote.
 
-Because the buffer's half is there to be read, it carries the message and not
-the layout around it. A `<style>` block, a `<title>`, a spacer cell, a tracking
+The quote carries the message and not the layout around it. A `<style>` block, a `<title>`, a spacer cell, a tracking
 pixel, a logo linking to a home page, the few hundred zero-width characters a
 newsletter pads its preview line with — none of it is visible in the sender's
 own client, and none of it is quoted here. An image stands as its alt text
-where it has one, and as nothing where it does not. A message that arrived as
+where it has one, and as nothing where it does not — except an image the mail
+carries itself (`cid:`) with `quote_images: attach`: it stays `![alt](cid:…)`
+and is sent back as long as that line is still in the buffer. A message that arrived as
 plain text is quoted exactly as its writer typed it: the tidying is for markup
 we converted, never for text somebody wrote.
-
-That is also why the buffer's quoted region is guarded. Below the marker line:
-
-| What you do with it     | What happens                                                                                       |
-| ----------------------- | -------------------------------------------------------------------------------------------------- |
-| leave it alone          | the original's HTML is quoted, as above                                                            |
-| delete the whole region | a deliberate reply without a quote — fine, and not an error                                        |
-| edit inside it          | **refused**, and the draft is kept: an answer typed between somebody else's lines would be dropped |
 
 **A draft is a real file**, under `~/.local/share/not_yet_done/mail/drafts/`,
 not a temp file. An editor closed by accident, or a send the server refused, is
@@ -2164,7 +2156,7 @@ answer than a guessed host failing inside a handshake:
 | `smtp.from_name`          | account            | the account's `name` | The display name recipients see.                                                                   |
 | `sent_folder`             | account            | `\Sent` SPECIAL-USE  | For a server that advertises none, or whose Sent folder is not where it says.                      |
 | `compose_format`          | instance + account | `html`               | What a **new** mail is sent as. A reply takes it from the original instead.                        |
-| `quote_images`            | instance + account | `attach`             | Whether the quoted original's inline images travel back. `placeholder` keeps replies small.        |
+| `quote_images`            | instance + account | `attach`             | Whether the quoted original's inline images stay in the quote and travel back. `placeholder` keeps replies small. |
 | `reply_attribution`       | instance           | convention           | The `On <date>, <who> wrote:` line — a template, because it is pure convention.                    |
 
 ### Importing from Thunderbird
