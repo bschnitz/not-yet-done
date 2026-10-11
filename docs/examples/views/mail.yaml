@@ -42,8 +42,8 @@
 # SCOPE: this file covers what the adapter implements today — the folder tree,
 # the messages under a folder, reading a message and its attachments, and
 # writing one: `a r` answers the message under the cursor, `a n` starts a new
-# one. The other half of writing — marking read, flagging, moving — is phase 5
-# and is not here.
+# one. `a s` / `a f` / `a m` mark read, flag and move the message under the
+# cursor.
 
 tab:
   name: Mail
@@ -254,6 +254,20 @@ views:
             type: edit
             id: compose
             target: parent
+          # Marking, flagging, moving — the `a` leader acts on the row under
+          # the cursor. All three are writes to the server, and all three
+          # reload the pane afterwards, so what the gutter shows is what the
+          # mailbox says, not a locally patched guess.
+          #
+          # `a s` and `a f` are toggles: they flip what they find, because
+          # the action list belongs to the message *type* and cannot know
+          # which way one particular row would go.
+          - { name: toggle read, key: "a s", type: node, id: toggle_seen }
+          - { name: toggle flag, key: "a f", type: node, id: toggle_flag }
+          # Opens a picker over the account's selectable mailboxes, its own
+          # excluded. Deleting a mail is this action with the trash as the
+          # destination: what a mail client calls deleting IS a move.
+          - { name: move to folder, key: "a m", type: node, id: move }
           # Scripts. A level without this action can run none at all: the
           # script scope — and with it every script shortcut and every
           # script hook that could be bound here — exists only where a
@@ -274,7 +288,7 @@ views:
         #
         # The body is fetched with `BODY.PEEK[]`, so moving the cursor over a
         # mail does NOT mark it read — that stays a thing you do on purpose
-        # (phase 5). The last few bodies are cached, so walking a thread and
+        # (`a s`). The last few bodies are cached, so walking a thread and
         # coming back costs one fetch, not one per keystroke.
         preview:
           enabled: true
