@@ -44,7 +44,7 @@
 # split`/`nyd track move` commands ran, now adapter actions so the CLI's
 # generic `do split`/`do move` reach them too. `a m`/`a p` repack an interval
 # into another day's free slot (mark-move / paste-move). Scripts run via the
-# generic `:script` menu (`x`, `type: script`).
+# generic `:script` menu (`x m`, `type: script`).
 #
 # ## A2c scope (Condensed + Tree)
 #
@@ -225,7 +225,7 @@ views:
       # period equalizer) run unchanged. Scripts live under
       # `<data>/not_yet_done/scripts/trackings/tracking_entry/`.
       - name: script
-        key: x
+        key: "x m"
         type: script
         scope: filtered_set
       - name: refresh

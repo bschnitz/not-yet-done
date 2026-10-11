@@ -331,7 +331,7 @@ impl App {
         true
     }
 
-    /// Open the per-node scripts menu (the `q` keybind on a level with
+    /// Open the per-node scripts menu (the `q m` keybind on a level with
     /// `node_scripts: true`). Lists the scripts the adapter's
     /// [`ScriptStore`](not_yet_done_content::ScriptStore) holds for
     /// `node_id`, pairs them with their bound chords, and pushes the

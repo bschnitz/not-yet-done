@@ -1295,7 +1295,7 @@ impl Default for KeyBindingSection<ContentAction> {
         m.insert(ContentAction::PrevPage, KeyBinding::new("<"));
         m.insert(ContentAction::NextPage, KeyBinding::new(">"));
         m.insert(ContentAction::EditQuery, KeyBinding::new("Q"));
-        m.insert(ContentAction::OpenScriptsMenu, KeyBinding::new("q"));
+        m.insert(ContentAction::OpenScriptsMenu, KeyBinding::new("q m"));
         m.insert(ContentAction::TreeCollapse, KeyBinding::new("backspace"));
         m.insert(ContentAction::TreeCollapseAll, KeyBinding::new("zm"));
         m.insert(ContentAction::TreeExpandAll, KeyBinding::new("zr"));

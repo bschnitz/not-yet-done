@@ -41,7 +41,7 @@
 #
 # SCOPE: this file covers what the adapter implements today — the folder tree,
 # the messages under a folder, reading a message and its attachments, and
-# writing one: `e r` answers the message under the cursor, `e n` starts a new
+# writing one: `a r` answers the message under the cursor, `a n` starts a new
 # one. The other half of writing — marking read, flagging, moving — is phase 5
 # and is not here.
 
@@ -121,17 +121,17 @@ views:
         type: fuzzy_filter
         fuzzy_filter:
           fields: [name]
-      # `e` is the leader for writing mail: `e n` starts a new message here,
-      # `e r` answers one on the message level below. Both open the editor on
-      # a buffer whose first block is the headers — From / To / Cc / Subject —
-      # and the message that goes out is what that block says, not what the
-      # cursor happened to stand on.
+      # Writing mail sits on the `a` leader with the row actions: `a n`
+      # starts a new message here, `a r` answers one on the message level
+      # below. Both open the editor on a buffer whose first block is the
+      # headers — From / To / Cc / Subject — and the message that goes out
+      # is what that block says, not what the cursor happened to stand on.
       #
       # Sending needs an `smtp:` block on the account (mail-adapter.yaml). An
       # account without one reads mail perfectly well and says so when asked
       # to send, rather than failing somewhere inside a handshake.
       - name: new message
-        key: "e n"
+        key: "a n"
         type: edit
         id: compose
     # Auto-expanding costs one `STATUS` per folder brought on screen, so the
@@ -241,27 +241,27 @@ views:
           # markup does not travel back.
           #
           # A draft is a real file, not a temp file: an editor closed by
-          # accident, or a send the SMTP server refused, is one `e r` away.
+          # accident, or a send the SMTP server refused, is one `a r` away.
           - name: reply
-            key: "e r"
+            key: "a r"
             type: edit
             id: reply
           # Addressed to the FOLDER, not to the message under the cursor: a
           # new mail is not an answer to that message, and an empty folder has
           # no row to stand on at all.
           - name: new message
-            key: "e n"
+            key: "a n"
             type: edit
             id: compose
             target: parent
           # Scripts. A level without this action can run none at all: the
           # script scope — and with it every script shortcut and every
           # script hook that could be bound here — exists only where a
-          # `type: script` action does. `x` opens the menu (`ctrl+s` runs
+          # `type: script` action does. `x m` opens the menu (`ctrl+s` runs
           # the selected script, `ctrl+h` binds one to a hook); a script on
           # the `row_change` hook is how an external preview follows the
           # cursor from mail to mail.
-          - { name: script, key: x, type: script }
+          - { name: script, key: "x m", type: script }
         # Reading the mail. The pane shows a short header block (From / To /
         # Subject / Date, plus an `Attachments:` line when there are any) over
         # the text — `text/plain` when the mail has one, otherwise the HTML
@@ -280,7 +280,7 @@ views:
           enabled: true
           source: content
           markdown: false
-          keybinding: p
+          keybinding: "a p"
         # Sorting with `c s` reaches the PAGE, not the mailbox — the rows a
         # sort can compare are the ones already fetched, and the status line
         # says so. Unsorted, the newest mail is first: IMAP gives that away

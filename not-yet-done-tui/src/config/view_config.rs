@@ -4329,14 +4329,14 @@ views: []
             assert_eq!(col.format.as_deref(), Some("%Y-%m-%d"));
         }
         // A1c (scripts): a `type: script` action on both levels reaches the
-        // generic script menu (key `x`). The validator does not restrict
+        // generic script menu (key `x m`). The validator does not restrict
         // `script` to the tree root (unlike search/fuzzy_filter/tree_find).
         let root_script = root
             .actions
             .iter()
             .find(|a| a.action_type == "script")
             .unwrap();
-        assert_eq!(root_script.primary_key(), Some("x"));
+        assert_eq!(root_script.primary_key(), Some("x m"));
         assert!(child.actions.iter().any(|a| a.action_type == "script"));
         // Task-1 semantics: `a a` adds a child of the selected node in
         // the tree (`under_selection`, adapter id `add`); `A` adds a

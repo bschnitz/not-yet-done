@@ -33,7 +33,7 @@ retry:
   attempts: 2
   backoff_ms: 250
 
-# What a NEW message (`e n`) is sent as. A reply takes the decision from the
+# What a NEW message (`a n`) is sent as. A reply takes the decision from the
 # message it answers instead — HTML as soon as that one has an HTML part — so
 # this only ever decides a mail written from scratch.
 #   html  — Markdown, rendered, with the Markdown source as the text/plain
@@ -67,7 +67,7 @@ accounts:
     # exclude_folders: ["Junk", "Trash/*"]
 
     # Where this account submits outgoing mail. Without it the account can
-    # read but not write, and `e r` / `e n` say so instead of failing at the
+    # read but not write, and `a r` / `a n` say so instead of failing at the
     # moment the mail should leave.
     smtp:
       host: smtp.example.org

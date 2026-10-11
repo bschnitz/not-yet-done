@@ -20,7 +20,7 @@ adapter:
 # Lifecycle hooks work here too (see tasks.yaml for the full shape). The one
 # every instance fires is `action_invoked`: one event per action a user runs
 # on a node, with `action` (the id declared below; a node script from the
-# `x` menu as `script:<file name>`), `phase`, `node_id`, `node_type`, `label`.
+# `x m` menu as `script:<file name>`), `phase`, `node_id`, `node_type`, `label`.
 # `when.action` keeps the script from being spawned for every other action.
 # hooks:
 #   action_invoked:

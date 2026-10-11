@@ -3087,7 +3087,7 @@ is marked there.
 ```yaml
 actions:
   - name: script
-    key: x
+    key: "x m"
     type: script # opens the script menu; scripts live under
     #   <data>/not_yet_done/scripts/<tab>/<view-node-type…>/
 ```
@@ -3114,7 +3114,7 @@ way.
 **`scope:` — what is in that payload.** The default is `node`:
 
 ```yaml
-- { name: script, key: x, type: script } # scope: node (default)
+- { name: script, key: "x m", type: script } # scope: node (default)
 ```
 
 | `scope`        | payload JSON                                                                                                                                           |
@@ -3124,7 +3124,7 @@ way.
 | `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "selected_index": …, "selected_field": …}` — the **whole displayed table** with the cursor context |
 
 ```yaml
-- { name: script, key: x, type: script, scope: filtered_set }
+- { name: script, key: "x m", type: script, scope: filtered_set }
 ```
 
 `scope: filtered_set` is intended for **batch/aggregate scripts** that run over
@@ -3147,7 +3147,7 @@ path itself is generic, so that the historical trackings scripts
 (`daily_report.py`, `hours_report.py`, …) run unchanged through the adapter tab.
 
 ```yaml
-- { name: script, key: x, type: script, scope: table, default_field: name }
+- { name: script, key: "x m", type: script, scope: table, default_field: name }
 ```
 
 `scope: table` passes on the **whole currently displayed table together with the

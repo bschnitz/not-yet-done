@@ -8101,6 +8101,24 @@ back, and that is the only undo there is.
       changed under you, `a s`, `a f` and `a m` are refused with the
       "renumbered" error rather than acting on whatever now carries that uid.
 
+## Script menus on leaders (`x m` / `q m`) and the mail keys on `a`
+
+The view-script menu moved from a bare `x` to `x m`, the per-table SQL-script
+menu (`node_scripts`) from a bare `q` to `q m`, and the mail compose keys from
+the `e` leader onto `a`.
+
+- [ ] **Mail compose**: on the folder tree `a n` opens a new message; on the
+      message list `a n` opens a new message and `a r` a reply to the mail under
+      the cursor. `e n` / `e r` do nothing any more.
+- [ ] **Mail preview**: `a p` on the message list hides and shows the preview
+      pane; a bare `p` no longer toggles it.
+- [ ] **Script menu**: `x m` opens the script menu on the Mail message list,
+      on Tasks (both levels) and on Trackings. A bare `x` only starts the chord;
+      the which-key popup shows the `x` group ("Scripts ...").
+- [ ] **SQL-script menu**: SQLite, `Tables` → a table → `q m` opens that
+      table's SQL-script menu; inside `Rows` `x m` still opens the view scripts,
+      and the two menus are different lists.
+
 ## A view file that does not load: reading and copying the problems
 
 A broken `views/*.yaml` keeps its tab and draws a configuration-error panel

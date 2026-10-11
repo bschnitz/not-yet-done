@@ -82,7 +82,7 @@
 # adapter's per-instance data dir (scope `tasks/<id>/<view>`); manage them
 # with `:query new|edit|delete <name>` and the `q` menu.
 #
-# Scripts (`x` / `:script`) run against the selected task through the generic
+# Scripts (`x m` / `:script`) run against the selected task through the generic
 # script menu — the task is handed over as the uniform `{"node": …}` JSON
 # (see the `run script` action below). The node's `label` carries the task
 # description; `fields.ancestors` is a JSON-array string of
@@ -388,7 +388,7 @@ views:
       # uses the uniform node shape, not the bespoke
       # `{"task": …}` payload of the legacy native tab.
       - name: script
-        key: x
+        key: "x m"
         type: script
         inherit: true
       # Add a *sibling* of the selected task (adapter action `add-sibling`):
@@ -670,7 +670,7 @@ views:
           delete: delete-tag
           title: Tags
       - name: script
-        key: x
+        key: "x m"
         type: script
       - name: fuzzy filter
         key: f

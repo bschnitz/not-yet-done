@@ -108,7 +108,7 @@ views:
                 node_type: "postgres:table"
                 tree_label: name
                 # These rows own per-node SQL scripts: `Q` opens the query
-                # editor for the selected table, `q` its scripts menu. The
+                # editor for the selected table, `q m` its scripts menu. The
                 # keys stay live one level deeper (inside `Rows`) and then
                 # address this table. Nothing about Postgres is hardcoded in
                 # the host — this flag is what turns the keys on.
@@ -165,7 +165,7 @@ views:
                     # each row is a field/value pair.
                     actions:
                       - name: script
-                        key: x
+                        key: "x m"
                         type: script
                         scope: table
                       # The row editor. Like the view definition below it
@@ -305,7 +305,7 @@ views:
                         # one; see the `View` level above.
                         actions:
                           - name: script
-                            key: x
+                            key: "x m"
                             type: script
                             scope: table
                           - name: new row
@@ -366,7 +366,7 @@ views:
                 # buffer path — instead of editing in $TMPDIR with no context.
                 editor_in_place: true
                 actions:
-                  # `X`, not `x`: the row levels bind `x` to the view
+                  # `X`, not `x`: the row levels bind the `x` leader to the view
                   # scripts (see `type: script` above), and that binding
                   # wins tab-wide. Enter runs the script as well
                   # (`enter_action`), so the shifted key is the rare path.
@@ -413,7 +413,7 @@ views:
                 style: accent
                 sizing: max
             children:
-              # Result pane for `x` (execute). Synthetic node_type — the
+              # Result pane for `X` (execute). Synthetic node_type — the
               # adapter never lists nodes of this type; the entry only
               # anchors the split + pagination config for the auto-opened
               # result pane.

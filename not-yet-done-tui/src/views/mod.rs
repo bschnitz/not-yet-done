@@ -319,7 +319,7 @@ pub enum ViewRequest {
         pane_id: PaneId,
         parent_node_id: String,
     },
-    /// Open the per-node scripts menu (the `q` keybind on a level with
+    /// Open the per-node scripts menu (the `q m` keybind on a level with
     /// `node_scripts: true`). App lists the scripts the adapter's script
     /// store holds for `node_id` and calls back into the `ContentView` to
     /// populate the popup.
