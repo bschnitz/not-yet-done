@@ -47,6 +47,13 @@ pub enum Field<'a> {
     Number(f64),
     DateTime(DateTime<Utc>),
     Bool(bool),
+    /// Several values, such as the tags of a row or the names it links to.
+    ///
+    /// An operator holds if one element satisfies it, and the negated ones
+    /// (`!=`, `not_like`, `not_in`) if none does; `has_all` asks for every
+    /// value given among the elements. An empty list is no value at all and
+    /// reads as [`Field::Null`].
+    List(Vec<Field<'a>>),
     /// The row has no value for this field.
     Null,
 }
@@ -63,6 +70,15 @@ impl Field<'_> {
         match DateTime::from_timestamp(seconds, nanoseconds) {
             Some(dt) => Field::DateTime(dt),
             None => Field::Null,
+        }
+    }
+
+    /// Whether the row has no value here: a null, or an empty list.
+    fn is_null(&self) -> bool {
+        match self {
+            Field::Null => true,
+            Field::List(items) => items.iter().all(Field::is_null),
+            _ => false,
         }
     }
 }
@@ -96,8 +112,8 @@ fn matches_leaf<R: RowFields + ?Sized>(leaf: &FilterLeaf, row: &R) -> bool {
     // joins, so `tags.sender_pids` names one field of it. See [`ColRef::path`].
     let field = row.field(&leaf.lhs.path());
     match leaf.op {
-        Operator::IsNull => field == Field::Null,
-        Operator::IsNotNull => field != Field::Null,
+        Operator::IsNull => field.is_null(),
+        Operator::IsNotNull => !field.is_null(),
         // A pattern is written, never read out of the data: a regex taken from
         // a column would put one entry per row into the pattern cache and let
         // the rows decide what the filter means. A column reference here is
@@ -138,6 +154,10 @@ fn field_as_literal(field: &Field) -> Option<Literal> {
         // `eval_datetime` parses it back and compares instants rather than the
         // text of two timestamps.
         Field::DateTime(dt) => Some(Literal::String(dt.to_rfc3339())),
+        Field::List(items) => {
+            let items: Vec<_> = items.iter().filter_map(field_as_literal).collect();
+            (!items.is_empty()).then_some(Literal::List(items))
+        }
     }
 }
 
@@ -150,6 +170,7 @@ fn field_as_literal(field: &Field) -> Option<Literal> {
 fn matches_regex(field: &Field, pattern: &str) -> bool {
     let subject: Cow<str> = match field {
         Field::Null => return false,
+        Field::List(items) => return items.iter().any(|item| matches_regex(item, pattern)),
         Field::Text(s) => Cow::Borrowed(s.as_ref()),
         Field::Number(n) => Cow::Owned(format_number(*n)),
         Field::Bool(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
@@ -163,11 +184,43 @@ fn matches_regex(field: &Field, pattern: &str) -> bool {
 fn eval_op(field: &Field, op: &Operator, lit: &Literal) -> bool {
     match field {
         Field::Null => false,
+        Field::List(items) => eval_list(items, op, lit),
+        _ if *op == Operator::HasAll => has_all(std::slice::from_ref(field), lit),
         Field::DateTime(dt) => eval_datetime(*dt, op, lit),
         Field::Number(n) => eval_number(*n, op, lit),
         Field::Bool(b) => eval_bool(*b, op, lit),
         Field::Text(s) => eval_text(s, op, lit),
     }
+}
+
+/// A field of several values holds what one of them holds; a negated
+/// operator holds if none holds its positive half, so `[tags, '!=', sf]` keeps
+/// the rows without `sf` rather than every row with one other tag.
+fn eval_list(items: &[Field], op: &Operator, lit: &Literal) -> bool {
+    if items.iter().all(Field::is_null) {
+        return false;
+    }
+    let any = |op: &Operator| items.iter().any(|item| eval_op(item, op, lit));
+    match op {
+        Operator::Ne => !any(&Operator::Eq),
+        Operator::NotLike => !any(&Operator::Like),
+        Operator::NotIn => !any(&Operator::In),
+        Operator::HasAll => has_all(items, lit),
+        op => any(op),
+    }
+}
+
+/// Whether every value of `lit` — a list, or one value — equals one of
+/// `items`. Nothing given is nothing to find, not a match.
+fn has_all(items: &[Field], lit: &Literal) -> bool {
+    let wanted = match lit {
+        Literal::List(values) => values.as_slice(),
+        one => std::slice::from_ref(one),
+    };
+    !wanted.is_empty()
+        && wanted
+            .iter()
+            .all(|value| items.iter().any(|item| eval_op(item, &Operator::Eq, value)))
 }
 
 /// Datetime columns compare as instants. The right-hand side has already been
@@ -450,6 +503,67 @@ mod tests {
             ("done", Field::Bool(false)),
             ("note", Field::Null),
         ])
+    }
+
+    #[test]
+    fn a_field_of_several_values_holds_what_one_of_them_holds() {
+        let text = |s: &'static str| Field::Text(Cow::Borrowed(s));
+        let row = TestRow(vec![
+            ("tags", Field::List(vec![text("SF"), text("classic")])),
+            (
+                "years",
+                Field::List(vec![Field::Number(1965.0), Field::Number(1969.0)]),
+            ),
+            ("none", Field::List(vec![])),
+        ]);
+
+        assert!(matches(&expr("[tags, '=', sf]"), &row));
+        assert!(matches(&expr("[tags, in, [old, sf]]"), &row));
+        assert!(!matches(&expr("[tags, in, [old, new]]"), &row));
+        assert!(matches(&expr("[tags, has, class]"), &row));
+        assert!(matches(&expr("[years, '>', 1966]"), &row));
+        assert!(matches(&expr("[years, '<', 1966]"), &row));
+        // Negated, none of them: not "one of them is something else".
+        assert!(!matches(&expr("[tags, '!=', sf]"), &row));
+        assert!(matches(&expr("[tags, '!=', old]"), &row));
+        assert!(!matches(&expr("[tags, not_in, [sf, old]]"), &row));
+        assert!(matches(&expr("[tags, not_like, 'x%']"), &row));
+        assert!(matches(&expr("[tags, matches, '^S']"), &row));
+
+        // has_all: every value given, not just one.
+        assert!(matches(&expr("[tags, has_all, [sf, classic]]"), &row));
+        assert!(!matches(&expr("[tags, has_all, [sf, old]]"), &row));
+        assert!(matches(&expr("[tags, has_all, sf]"), &row));
+        assert!(!matches(&expr("[tags, has_all, []]"), &row));
+        assert!(matches(
+            &expr("[title, has_all, [sprint planning]]"),
+            &row_with_title()
+        ));
+        assert!(!matches(
+            &expr("[title, has_all, [sprint planning, x]]"),
+            &row_with_title()
+        ));
+
+        // An empty list is no value: null, and false for every comparison.
+        assert!(matches(&expr("[none, is_null]"), &row));
+        assert!(!matches(&expr("[none, is_not_null]"), &row));
+        assert!(!matches(&expr("[none, '!=', sf]"), &row));
+        assert!(!matches(&expr("[none, not_in, [sf]]"), &row));
+        assert!(matches(&expr("[tags, is_not_null]"), &row));
+
+        // Compared with another field, its values are a list to be in.
+        let both = TestRow(vec![
+            ("tags", Field::List(vec![text("sf"), text("old")])),
+            ("main", text("Old")),
+        ]);
+        assert!(matches(&expr("[main, in, '.tags']"), &both));
+    }
+
+    fn row_with_title() -> TestRow {
+        TestRow(vec![(
+            "title",
+            Field::Text(Cow::Borrowed("Sprint Planning")),
+        )])
     }
 
     #[test]

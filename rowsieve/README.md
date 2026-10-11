@@ -36,10 +36,10 @@ assert!(matches(&expr, &Task { title: "Deploy the bar".into(), priority: 5 }));
 
 ```toml
 [dependencies]
-rowsieve = "0.2"
+rowsieve = "0.3"
 
 # To write "end of next week" on the right-hand side of a comparison:
-# rowsieve = { version = "0.2", features = ["natural-dates"] }
+# rowsieve = { version = "0.3", features = ["natural-dates"] }
 ```
 
 ## The language
@@ -60,6 +60,7 @@ and: # every branch matches; `or` and `not` likewise
 | `like` `not_like`       | SQL wildcards: `%` for any run, `_` for one.          |
 | `has`                   | Substring — `like '%value%'` without the punctuation. |
 | `in` `not_in`           | Membership in a list.                                 |
+| `has_all`               | Every value of a list is among the field's.           |
 | `is_null` `is_not_null` | Whether the row has a value at all.                   |
 | `matches`               | A regular expression, against the raw value.          |
 
@@ -72,6 +73,10 @@ A few rules are worth knowing before writing a filter:
 - **Any comparison against a null is false**, `!=` included. A missing value is
   not "different from X", it is unknown — the three-valued logic SQL applies.
   `is_null` / `is_not_null` are the way to ask.
+- **A field can hold several values** — the tags of a row, the names it links
+  to. An operator then holds if one of them satisfies it, a negated one
+  (`!=`, `not_like`, `not_in`) if none does, and `has_all` if every value
+  given is among them. An empty list is no value: it is null.
 - **A field name is never guessed.** An unknown one reads as null and matches
   nothing; `eval::validate_fields` turns that into a load-time error, with the
   known names in the message.

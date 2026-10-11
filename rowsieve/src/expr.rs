@@ -205,6 +205,13 @@ pub enum Operator {
     IsNotNull,
     In,
     NotIn,
+    /// Every value given is among the field's: `[tags, has_all, [sf, old]]`.
+    ///
+    /// Made for a field that holds several values (see
+    /// [`Field::List`](crate::Field::List)), where `in` asks for any one of
+    /// them and this for all. Against a field of one value, each value given
+    /// must equal it.
+    HasAll,
     /// Regular-expression match against the raw field value:
     /// `[status, matches, '^(Blocked|On Hold)$']`.
     ///
@@ -254,6 +261,7 @@ impl std::str::FromStr for Operator {
             "is_not_null" | "IS NOT NULL" => Self::IsNotNull,
             "in" | "IN" => Self::In,
             "not_in" | "NOT IN" => Self::NotIn,
+            "has_all" | "HAS ALL" => Self::HasAll,
             "matches" | "~" => Self::Matches,
             other => return Err(UnknownOperator(other.to_string())),
         };
@@ -287,6 +295,7 @@ impl Operator {
             Self::IsNotNull => "is_not_null",
             Self::In => "in",
             Self::NotIn => "not_in",
+            Self::HasAll => "has_all",
             Self::Matches => "matches",
         }
     }
@@ -549,6 +558,14 @@ impl<'de> Visitor<'de> for FilterExprVisitor {
         } else {
             Rhs::None
         };
+        // A value too many is a filter misread — `[n, '>=', 1, 5]` for a
+        // decimal comma — and dropping it would answer a different question.
+        if seq.next_element::<serde_yaml::Value>()?.is_some() {
+            let most = if op.needs_rhs() { 3 } else { 2 };
+            return Err(de::Error::custom(format!(
+                "`{op}` takes {most} elements, and this leaf has more"
+            )));
+        }
 
         Ok(FilterExpr::Leaf(FilterLeaf { lhs, op, rhs }))
     }
@@ -633,6 +650,39 @@ mod tests {
                 rhs: Rhs::Lit(Literal::String("%ustav%".into())),
             })
         );
+    }
+
+    #[test]
+    fn has_all_takes_a_list_and_is_written_back_as_has_all() {
+        for spelling in ["has_all", "HAS ALL"] {
+            let expr = parse(&format!("[tags, '{spelling}', [sf, old]]"));
+            assert_eq!(
+                expr,
+                FilterExpr::Leaf(FilterLeaf {
+                    lhs: ColRef::unqualified("tags"),
+                    op: Operator::HasAll,
+                    rhs: Rhs::Lit(Literal::List(vec![
+                        Literal::String("sf".into()),
+                        Literal::String("old".into()),
+                    ])),
+                })
+            );
+            assert_eq!(
+                serde_yaml::to_string(&expr).unwrap(),
+                "- tags\n- has_all\n- - sf\n  - old\n"
+            );
+        }
+    }
+
+    #[test]
+    fn a_leaf_with_an_element_too_many_is_an_error() {
+        for yaml in ["[n, '>=', 1, 5]", "[n, is_null, x]"] {
+            let error = serde_yaml::from_str::<FilterExpr>(yaml).unwrap_err();
+            assert!(
+                error.to_string().contains("and this leaf has more"),
+                "{yaml}: {error}"
+            );
+        }
     }
 
     #[test]

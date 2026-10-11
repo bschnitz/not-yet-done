@@ -148,6 +148,14 @@ impl<'r, R: ColumnRegistry> FilterBuilder<'r, R> {
             // Set operators
             Operator::In => Ok(lhs.is_in(self.lit_to_value_list(lit)?)),
             Operator::NotIn => Ok(lhs.is_not_in(self.lit_to_value_list(lit)?)),
+            // A task column holds one value, so having all the values given
+            // is being each of them.
+            Operator::HasAll => self
+                .lit_to_value_list(lit)?
+                .into_iter()
+                .map(|value| lhs.clone().binary(BinOper::Equal, value))
+                .reduce(|all, one| all.and(one))
+                .ok_or_else(|| AppError::FilterError("has_all needs a value".to_string())),
             // Null-checks handled above, never reach here
             Operator::IsNull | Operator::IsNotNull => unreachable!(),
             // `matches` has no portable SQL form. It exists for in-memory
@@ -230,7 +238,41 @@ fn normalize_instant(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_instant;
+    use super::{ColumnRegistry, FilterBuilder, normalize_instant};
+    use sea_orm::sea_query::{
+        Alias, ColumnRef as SqColumnRef, IntoIden, Query, SqliteQueryBuilder,
+    };
+
+    struct Status;
+
+    impl ColumnRegistry for Status {
+        fn resolve(&self, _table: Option<&str>, column: &str) -> Option<SqColumnRef> {
+            (column == "status")
+                .then(|| SqColumnRef::Column(Alias::new("status").into_iden().into()))
+        }
+    }
+
+    fn sql(yaml: &str) -> String {
+        let expr = serde_yaml::from_str(yaml).unwrap();
+        let condition = FilterBuilder::new(&Status).build(&expr).unwrap();
+        Query::select()
+            .column(Alias::new("id"))
+            .from(Alias::new("task"))
+            .cond_where(condition)
+            .to_string(SqliteQueryBuilder)
+    }
+
+    #[test]
+    fn has_all_on_a_column_of_one_value_is_each_of_them() {
+        assert_eq!(
+            sql("[status, has_all, [todo]]"),
+            r#"SELECT "id" FROM "task" WHERE "status" = 'todo'"#
+        );
+        assert_eq!(
+            sql("[status, has_all, [todo, done]]"),
+            r#"SELECT "id" FROM "task" WHERE "status" = 'todo' AND "status" = 'done'"#
+        );
+    }
 
     #[test]
     fn an_instant_with_an_offset_is_rewritten_to_utc() {
