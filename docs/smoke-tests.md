@@ -9985,6 +9985,34 @@ start` and nothing is sent.
       start `tomorrow` creates the event on tomorrow's date in the calendar's
       own UI, not the day before.
 
+## Calendar — reading the store, sharing a browser read
+
+Connections are fetched on demand by default: only `r` and a `sync` ask the
+server. Between those, the adapter reloads what another process stored every
+`store_poll_secs` (30 by default). Two reads of an office365-web connection
+at the same time share one run in the account's browser. Listen to the
+browser's news with `socat -u UNIX-CONNECT:$XDG_RUNTIME_DIR/nyd-office365-<account>.sock -`.
+
+- [x] **The tab shows the store when it opens.** With `auto_connect: on_open`
+      and no connection `fetch: live`, opening the tab lists the stored events
+      at once and starts no browser.
+- [x] **A sync by another process shows up without a key.** Raise the
+      `revision` of a connection in `calendar_sync` (a `sync` does this) and
+      change a stored title: the tab shows the new title within 30 s.
+- [x] **A read asked while one is running joins it.** `r` in the tab, and two
+      seconds later `nyd adapter calendar root sync`: the browser says
+      `started` once, then `joined` with `ahead: 0`, and one `over` answers
+      both.
+- [x] **A read asked right after another takes its result.** A second
+      `nyd adapter calendar root sync` within two minutes of the last run's
+      start returns in a few seconds with the same counts, and the browser
+      says nothing.
+- [ ] **The sign-in banner comes down after a later run.** A browser whose
+      first run failed (or had no sign-in) and whose session then needs one:
+      approve the number, and the `Connecting… <account>: …` line disappears
+      once the run is over. It stayed up for good in a test on 2026-10-11 —
+      the attention is only withdrawn at the end of a browser's first run.
+
 ## Date words — German
 
 Any date field with a preview (a task's due date in the add/edit form), and
