@@ -1735,6 +1735,53 @@ board is not.
 Only the TUI honours it. The CLI and Waybar run one request and exit,
 so they have nothing to keep fresh.
 
+## Kimai Adapter
+
+Lists your Kimai timesheets, edits them (`e`) and creates new ones. Example
+view: [`docs/examples/views/kimai.yaml`](docs/examples/views/kimai.yaml).
+
+### Saved queries
+
+Kimai's API has no saved filters, so queries live as one YAML file each under
+`<XDG_DATA_HOME>/not_yet_done/kimai/<instance_id>/queries/`; the view's
+`query.menu_key` opens the menu, the same one Jira and the trackings tab use.
+A body has two halves: top-level keys are filters Kimai applies itself, and
+`where:` is a filter in the shared language
+([Filter DSL](#filter-dsl)) run on the rows Kimai returned —
+for what the server cannot do: OR across fields, duration ranges, substrings
+of project names.
+
+```yaml
+begin: start of month # natural date or ISO; Kimai filters on the begin
+end: today # a date without time covers the whole day
+customer: Acme # a name or '#<id>'; a list means any of them
+project: [Acme/Website, Intranet] # 'Customer/Project' picks one of equal names
+activity: Development
+tags: [backend]
+billable: true
+exported: false
+running: true # only entries still running
+term: "deploy !hotfix" # words in the description, '!' excludes one
+where:
+  or:
+    - [duration, ">=", 14400] # seconds
+    - [project, has, web]
+```
+
+| Key                               | Meaning                                                                                                           |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `begin`, `end`                    | time window on the entry's begin; without `begin`, `lookback_days` ago                                            |
+| `customer`, `project`, `activity` | names (case-insensitive) or `#<id>`; one name may match several                                                   |
+| `tags`                            | tag names                                                                                                         |
+| `billable`, `exported`, `running` | `true` / `false`                                                                                                  |
+| `term`                            | Kimai's description search                                                                                        |
+| `where`                           | local filter over `project`, `customer`, `activity`, `description`, `tags`, `duration`, `begin`, `end`, `running` |
+
+All server filters must hold together; the values of one list are
+alternatives. Bodies may use `${name:default}` placeholders, asked for when the
+query is applied. An unknown name or an unreadable date is an error in the
+status bar, not an empty list.
+
 ## Confluence Adapter
 
 Read/write adapter for Atlassian Confluence Server / Data-Center

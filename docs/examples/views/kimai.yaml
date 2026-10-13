@@ -12,9 +12,12 @@
 # trackings tab — `zg` cycles the bucket (Day/Week/Month/Year/None) and
 # `u` opens the direct-jump menu at runtime.
 #
-# The listing is time-boxed to the adapter's `lookback_days` window
-# (default ~3 months); there is no saved-query filter in this first
-# iteration — `f` narrows locally instead.
+# The view's `query:` block picks the time window and filters: `q m`
+# opens the saved-query menu (one YAML file per query under
+# ~/.local/share/not_yet_done/kimai/<instance>/queries/, format in the
+# README's "Kimai Adapter" section). Without a query — or with one that
+# sets no `begin` — the listing starts the adapter's `lookback_days` ago
+# (default ~3 months). `f` narrows locally on top.
 #
 # `v` toggles "long descriptions" in place: the description cell grows to
 # show the FULL multi-line body (soft-wrapped) while the header, columns,
@@ -49,6 +52,12 @@ views:
     node_type: "kimai:timesheet"
     default: true
     key: a
+
+    query:
+      editable: false
+      menu_key: 'q m'
+      default: |
+        begin: start of year
 
     # Day buckets, newest first, with the summed duration routed into the
     # `total` column on each day's last row (classic time-sheet layout).

@@ -11,7 +11,8 @@
 //! Endpoints used: `/api/version` (session validation), `/api/timesheets`
 //! (paged list `GET`, single `GET`, `PATCH` edit, `POST` create),
 //! `/api/projects` + `/api/activities` (id → name lookups — the timesheet
-//! list carries only numeric ids).
+//! list carries only numeric ids), `/api/customers` (resolving a query's
+//! customer names).
 
 use std::time::Duration;
 
@@ -80,6 +81,13 @@ pub struct KimaiActivity {
     pub project: Option<u64>,
     #[serde(default)]
     pub parent_title: Option<String>,
+}
+
+/// One entry of `GET /api/customers`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct KimaiCustomer {
+    pub id: u64,
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -194,22 +202,28 @@ impl KimaiClient {
     }
 
     /// All timesheets of the authenticated user starting at `begin_local`
-    /// (Kimai expects local time, `YYYY-MM-DDTHH:mm:ss`). Pages through the
-    /// listing until a short page; a 404 past page 1 also counts as the end
-    /// (some Kimai versions 404 on out-of-range pages instead of returning
-    /// an empty array).
-    pub async fn timesheets_since(&self, begin_local: &str) -> Result<Vec<KimaiTimesheet>, String> {
+    /// (Kimai expects local time, `YYYY-MM-DDTHH:mm:ss`) that also pass the
+    /// `filters` (further `/api/timesheets` parameters, e.g. `projects[]`).
+    /// Pages through the listing until a short page; a 404 past page 1 also
+    /// counts as the end (some Kimai versions 404 on out-of-range pages
+    /// instead of returning an empty array).
+    pub async fn timesheets_since(
+        &self,
+        begin_local: &str,
+        filters: &[(String, String)],
+    ) -> Result<Vec<KimaiTimesheet>, String> {
         let url = format!("{}/api/timesheets", self.base_url);
         let size = PAGE_SIZE.to_string();
         let mut out: Vec<KimaiTimesheet> = Vec::new();
         let mut page: u32 = 1;
         loop {
             let page_str = page.to_string();
-            let query = [
+            let mut query: Vec<(&str, &str)> = vec![
                 ("begin", begin_local),
                 ("size", size.as_str()),
                 ("page", page_str.as_str()),
             ];
+            query.extend(filters.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
             let resp = self
                 .send("GET", &url, self.http.get(&url).query(&query))
@@ -291,6 +305,12 @@ impl KimaiClient {
     /// All activities visible to the user (for the id → name lookup).
     pub async fn activities(&self) -> Result<Vec<KimaiActivity>, String> {
         let url = format!("{}/api/activities", self.base_url);
+        self.get_json(&url, &[]).await
+    }
+
+    /// All customers visible to the user (for resolving query names).
+    pub async fn customers(&self) -> Result<Vec<KimaiCustomer>, String> {
+        let url = format!("{}/api/customers", self.base_url);
         self.get_json(&url, &[]).await
     }
 }

@@ -8,6 +8,10 @@
 //! the local trackings adapter. Project and activity arrive as numeric
 //! ids from `/api/timesheets` and are resolved to names via the
 //! `/api/projects` + `/api/activities` lookups on every listing.
+//!
+//! Saved queries (`<data>/not_yet_done/kimai/<id>/queries/*.yaml`) narrow
+//! the listing: server filters go to `/api/timesheets`, a `where:` clause
+//! runs on the fetched rows — see [`query`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,11 +26,13 @@ use crate::client::{KimaiActivity, KimaiClient, KimaiProject, KimaiTimesheet};
 mod auth_bridge;
 pub mod config;
 mod factory;
+pub mod query;
 mod template;
 
 pub use factory::KimaiAdapterFactory;
 
 use auth_bridge::AuthBridge;
+use query::{KimaiQuery, TimesheetRow};
 
 /// Action set for a timesheet row. Shared between [`Node::actions`] and
 /// the adapter's instance-free [`ContentAdapter::actions_for_type`].
@@ -78,6 +84,9 @@ pub struct KimaiAdapter {
     connection_name: String,
     instance_id: String,
     lookback_days: u32,
+    /// Saved queries, one `<name>.yaml` per query under the instance's data
+    /// directory; the bodies are [`KimaiQuery`] documents.
+    saved_queries: FsQueryStore,
 }
 
 impl KimaiAdapter {
@@ -88,11 +97,18 @@ impl KimaiAdapter {
         instance_id: String,
         lookback_days: u32,
     ) -> Self {
+        let queries_root = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("not_yet_done")
+            .join("kimai")
+            .join(&instance_id)
+            .join("queries");
         Self {
             auth,
             connection_name,
             instance_id,
             lookback_days,
+            saved_queries: FsQueryStore::new(queries_root, ".yaml"),
         }
     }
 }
@@ -182,6 +198,20 @@ impl ContentAdapter for KimaiAdapter {
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn saved_query_store(&self) -> Option<&dyn SavedQueryStore> {
+        Some(&self.saved_queries)
+    }
+
+    /// Bodies may carry `${name:default}` placeholders wherever a value goes
+    /// (`begin: ${from}`); they are filled in before the body is parsed.
+    fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
+        not_yet_done_content::query_vars::parse_variables(query)
+    }
+
+    fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
+        not_yet_done_content::query_vars::render(query, vars)
     }
 
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
@@ -333,34 +363,56 @@ impl KimaiRoot {
     }
 }
 
-/// List the timesheet rows for the lookback window — the single fetch source
+/// List the timesheet rows the pane's query selects — the single fetch source
 /// behind both the root's `list` and the adapter's [`ContentAdapter::childs`]
-/// declaration. Sorting is always local; Kimai's server order (begin desc) is
-/// just the input order.
+/// declaration. Without a query, or one without `begin`, the window starts
+/// `lookback_days` ago. Sorting is always local; Kimai's server order (begin
+/// desc) is just the input order.
 async fn list_timesheets(
     client: &Arc<KimaiClient>,
     lookback_days: u32,
     params: ListParams,
 ) -> Result<ListResult> {
-    let begin_local = Local::now()
-        .checked_sub_days(Days::new(lookback_days as u64))
-        .unwrap_or_else(Local::now)
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let query = KimaiQuery::parse(params.query.as_deref().unwrap_or("")).map_err(other_err)?;
+    let begin_local = query.begin.clone().unwrap_or_else(|| {
+        Local::now()
+            .checked_sub_days(Days::new(lookback_days as u64))
+            .unwrap_or_else(Local::now)
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    });
 
-    let (timesheets, projects, activities) = tokio::try_join!(
-        client.timesheets_since(&begin_local),
-        client.projects(),
-        client.activities()
-    )
-    .map_err(other_err)?;
-
+    // The names in the query resolve against the lookups, so they come first.
+    let (projects, activities) =
+        tokio::try_join!(client.projects(), client.activities()).map_err(other_err)?;
+    let customers = if query.needs_customers() {
+        client.customers().await.map_err(other_err)?
+    } else {
+        Vec::new()
+    };
     let projects: HashMap<u64, KimaiProject> = projects.into_iter().map(|p| (p.id, p)).collect();
     let activities: HashMap<u64, KimaiActivity> =
         activities.into_iter().map(|a| (a.id, a)).collect();
 
+    let filters = query
+        .server_params(&customers, &projects, &activities)
+        .map_err(other_err)?;
+    let timesheets = client
+        .timesheets_since(&begin_local, &filters)
+        .await
+        .map_err(other_err)?;
+
     let mut items: Vec<NodeSummary> = timesheets
         .into_iter()
+        .filter(|ts| {
+            let names = entry_names(ts, &projects, &activities);
+            query.keeps(&TimesheetRow {
+                ts,
+                project: &names.project,
+                customer: &names.customer,
+                activity: &names.activity,
+            })
+        })
         .map(|ts| timesheet_summary(ts, &projects, &activities))
         .collect();
 
@@ -405,6 +457,35 @@ fn normalize_iso_offset(value: &str) -> String {
     value.to_string()
 }
 
+/// The names a timesheet's ids stand for.
+struct EntryNames {
+    project: String,
+    customer: String,
+    activity: String,
+}
+
+/// Resolve a timesheet's project, customer and activity names; an id missing
+/// from its map renders as `#<id>`, an unknown customer as empty.
+fn entry_names(
+    ts: &KimaiTimesheet,
+    projects: &HashMap<u64, KimaiProject>,
+    activities: &HashMap<u64, KimaiActivity>,
+) -> EntryNames {
+    let (project, customer) = projects
+        .get(&ts.project)
+        .map(|p| (p.name.clone(), p.parent_title.clone().unwrap_or_default()))
+        .unwrap_or_else(|| (format!("#{}", ts.project), String::new()));
+    let activity = activities
+        .get(&ts.activity)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| format!("#{}", ts.activity));
+    EntryNames {
+        project,
+        customer,
+        activity,
+    }
+}
+
 /// Map one API record to a list row. `project`/`activity` ids resolve via
 /// the lookup maps; an id missing from its map (deleted or invisible
 /// entity) renders as `#<id>`. `customer` is the project's `parentTitle`.
@@ -415,14 +496,11 @@ fn timesheet_summary(
     projects: &HashMap<u64, KimaiProject>,
     activities: &HashMap<u64, KimaiActivity>,
 ) -> NodeSummary {
-    let (project, customer) = projects
-        .get(&ts.project)
-        .map(|p| (p.name.clone(), p.parent_title.clone().unwrap_or_default()))
-        .unwrap_or_else(|| (format!("#{}", ts.project), String::new()));
-    let activity = activities
-        .get(&ts.activity)
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| format!("#{}", ts.activity));
+    let EntryNames {
+        project,
+        customer,
+        activity,
+    } = entry_names(&ts, projects, activities);
 
     let description = ts.description.unwrap_or_default();
     let label = description

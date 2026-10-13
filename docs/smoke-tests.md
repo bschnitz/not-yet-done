@@ -8532,6 +8532,24 @@ Trackings tab, `q e` on the active query (or `nyd adapter trackings ls -q`).
 - [ ] A token sharing no segment at all (`entry=nope`) → `for example:` with
       the first few tokens instead of the whole list.
 
+## Kimai — saved queries
+
+Kimai tab with the `query:` block of `docs/examples/views/kimai.yaml`.
+
+- [ ] Open the tab → the list starts at the view's `default` (`begin:`),
+      not `lookback_days` ago.
+- [ ] `q m` lists the files under
+      `~/.local/share/not_yet_done/kimai/<instance>/queries/`; enter on
+      `since [date]` → only entries from that date on; edit the file's
+      `begin:`, apply again → the window follows.
+- [ ] A query with `project: <a name two customers share>` → entries of both;
+      `<Customer>/<Project>` → only that one.
+- [ ] `where: [duration, '>=', 28800]` → only entries of 8 h and more; the day
+      totals sum only those.
+- [ ] `project: nope` → the status bar says `no project named 'nope'`; the
+      list is not silently empty.
+- [ ] `begin: ${from}` → applying asks for `from`.
+
 ## Notes — a renamed ancestor keeps its directory
 
 Tasks tab. Pick a task with notes (`n` opens the file) whose parent has
