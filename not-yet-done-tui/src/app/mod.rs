@@ -5587,21 +5587,22 @@ impl App {
                 .iter()
                 .find(|(_, b)| b.matches(&chord))
                 .map(|(a, _)| a.clone());
+            // An action the dispatcher leaves `Unhandled` (e.g.
+            // `open_scripts_menu`, which only the view's gated claim can
+            // serve) must not swallow the chord: it falls through to the
+            // view, where a YAML binding on the same chord (`query.menu_key:
+            // q m`) still gets its turn.
             if let Some(action) = content_chord {
                 let Tab::Content(idx) = self.active_tab;
-                let mut request = EditorRequest::None;
                 if let Some(cv) = self.content_view_mut(idx) {
                     let msg = cv.dispatch_content_action(action);
-                    match msg {
-                        SubViewMessage::Unhandled => {}
-                        other => {
-                            request = self.process_sub_view_message(other);
-                        }
+                    if !matches!(msg, SubViewMessage::Unhandled) {
+                        let request = self.process_sub_view_message(msg);
+                        self.drain_content_cursor_closes(idx);
+                        self.sync_components();
+                        return request;
                     }
-                    self.drain_content_cursor_closes(idx);
                 }
-                self.sync_components();
-                return request;
             }
             // Content-tab YAML `actions:` chords (e.g. `al` → new
             // channel). These keys live in the ContentView's pane/view

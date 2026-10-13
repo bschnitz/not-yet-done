@@ -8118,6 +8118,10 @@ the `e` leader onto `a`.
 - [ ] **SQL-script menu**: SQLite, `Tables` → a table → `q m` opens that
       table's SQL-script menu; inside `Rows` `x m` still opens the view scripts,
       and the two menus are different lists.
+- [x] **Saved-query menu on `q m`**: on Trackings (and Jira), where
+      `query.menu_key: q m` shares the chord with the default
+      `open_scripts_menu`, `q m` opens the saved-query menu instead of doing
+      nothing.
 
 ## A view file that does not load: reading and copying the problems
 
