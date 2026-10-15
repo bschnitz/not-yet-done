@@ -907,7 +907,17 @@ pub(super) fn normalize_ws(s: &str) -> String {
     // (`{{{}x{}}}` → `{{x}}`). It renders as nothing and the converter cannot
     // put it back, so — like the cosmetic table and panel padding below — it
     // has to be insignificant to the guard.
-    let s = W_MONO.replace_all(&s, "{{${1}}}").into_owned();
+    //
+    // A brace inside the span is canonicalized to its escaped form. Jira
+    // renders `{{'{'}}` and `{{'\{'}}` alike, but Markdown has no way to
+    // tell them apart, and the way back always escapes (see
+    // [`escape_braces`]) — so a bare brace from the source must not read as
+    // a divergence.
+    let s = W_MONO
+        .replace_all(&s, |c: &Captures| {
+            format!("{{{{{}}}}}", escape_braces(&unescape_braces(&c[1])))
+        })
+        .into_owned();
     let lines: Vec<&str> = s.split('\n').collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -2281,6 +2291,13 @@ a title-less panel whose sole attribute makes its opener marker long enough
         // A backslash in the content is *not* doubled — `\\` is Jira's line
         // break — and still survives the round-trip.
         assert_roundtrip("a {{c:\\tmp}} path", "a `c:\\tmp` path");
+        // A bare brace in the source comes back escaped: same rendering in
+        // Jira, so the guard must let it through.
+        assert_roundtrip("call {{strpos($s, '{')}} here", "call `strpos($s, '{')` here");
+        assert_eq!(
+            md_to_wiki("call `strpos($s, '{')` here"),
+            "call {{strpos($s, '\\{')}} here"
+        );
     }
 
     #[test]
