@@ -7961,6 +7961,44 @@ impl App {
         }
     }
 
+    /// `:reload [<Tab>]` — hard-reload the active pane of a content tab at
+    /// its current level: the active tab without an argument, else the tab
+    /// whose `tab_name` matches (case-insensitive) — without switching to
+    /// it, so a script can refresh the tab its writes landed in from
+    /// wherever it was started. Hard, because those writes come from another
+    /// process and a warm adapter cache would hand back the old rows.
+    ///
+    /// A named tab whose pane was never populated is left alone: it loads
+    /// on its first visit anyway, and loading it here could open a
+    /// credential prompt for a tab the user is not looking at.
+    fn reload_command(&mut self, target: Option<&str>) {
+        let view_index = match target {
+            None => {
+                let Tab::Content(view_index) = self.active_tab;
+                view_index
+            }
+            Some(name) => {
+                let idx = self
+                    .content_views
+                    .iter()
+                    .position(|slot| slot.tab_name().eq_ignore_ascii_case(name));
+                let Some(idx) = idx else {
+                    self.modal_message = Some(format!(":reload — unknown tab '{name}'"));
+                    return;
+                };
+                idx
+            }
+        };
+        let Some(cv) = self.content_view(view_index) else {
+            return;
+        };
+        if target.is_some() && !cv.active_pane().is_loaded() {
+            return;
+        }
+        let pane_id = cv.active_pane_id();
+        self.spawn_content_reload(view_index, pane_id);
+    }
+
     /// `:focus-node [-i] <Tab>[:<view>] /<col>|<pattern>[/...]` — switch
     /// to the named content tab/sub-view and park the cursor on the first
     /// row whose `col` matches `pattern`. Without an explicit column
@@ -13148,14 +13186,11 @@ impl App {
         // `:reload` once its synchronous writes are done, so the refresh
         // can't race ahead of them.
         if args[0] == "reload" || args[0] == "refresh" {
-            if args.len() > 1 {
-                self.modal_message = Some(format!(":{} takes no arguments", args[0]));
+            if args.len() > 2 {
+                self.modal_message = Some(format!(":{} takes at most one tab name", args[0]));
                 return;
             }
-            let Tab::Content(view_index) = self.active_tab;
-            if let Some(pane_id) = self.content_view(view_index).map(|cv| cv.active_pane_id()) {
-                self.reload_content_pane_current_level(view_index, pane_id);
-            }
+            self.reload_command(args.get(1).copied());
             return;
         }
 

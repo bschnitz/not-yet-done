@@ -2492,6 +2492,29 @@ subsequent `:focus-task`, so that the newly created task is seen.
       "reload-tasks — …"; the active `task_rows` stay unchanged (no
       wipe).
 
+## `:reload [<Tab>]`
+
+Hard-reloads the active pane of a content tab at its current level —
+without an argument the active tab, with one the tab whose name matches
+(case-insensitive), without switching to it. Meant for script answers:
+a script that wrote into another tab's backend refreshes that tab.
+
+- [ ] `:reload` in a content tab → the active pane reloads at its level
+      (inside a drill it stays in the drill), fresh from the adapter
+      (no warm cache).
+- [ ] In a second terminal create an entry through the CLI for a tab
+      that is open in the TUI; from a different tab run
+      `:reload <that tab>` → the active tab stays; switching over shows
+      the new entry without pressing `r`.
+- [ ] `:reload <tab>` for a tab never opened in this session → nothing
+      happens (no credential prompt); opening it loads as usual.
+- [ ] `:reload KiMaI` → matches the tab case-insensitively.
+- [ ] `:reload nope` → the modal "unknown tab 'nope'".
+- [ ] `:reload a b` → the modal "takes at most one tab name".
+- [ ] An `interactive+commands` script launched through a
+      `kitty @ launch` `interactive_command` sees `$NYD_OUTPUT_FILE`
+      (via `{env}`); a `:reload` it answers runs after the window closes.
+
 ## `:focus-node`
 
 The content-view counterpart to `:focus-task`. It switches to the named

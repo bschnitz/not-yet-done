@@ -1176,8 +1176,12 @@ impl App {
         // the daemon spawns the actual process with its own env (so
         // `cmd.envs()` below alone doesn't reach the script). See
         // `not_yet_done_ratatui::utils::open_editor` for the matching
-        // editor-path implementation.
-        let env_prefix = not_yet_done_ratatui::render_env_prefix(child_env);
+        // editor-path implementation. `NYD_OUTPUT_FILE` rides along for
+        // the same reason: an `interactive+commands` script spawned by the
+        // kitty daemon would otherwise never see where its answer goes.
+        let mut prefix_env = child_env.clone();
+        prefix_env.insert("NYD_OUTPUT_FILE".to_string(), output_path.clone());
+        let env_prefix = not_yet_done_ratatui::render_env_prefix(&prefix_env);
         let cmd = command_template
             .replace("{env}", &env_prefix)
             .replace("{script}", script_path)
