@@ -59,7 +59,10 @@ fn day_word(s: &str, cx: &Context) -> Option<Reading> {
     }
     let time = rest.strip_prefix(' ')?;
     let r = cx.resolve(&format!("today {time}"))?;
-    Some(Reading::wall(r.local(cx.now()) + Duration::days(days), r.has_time))
+    Some(Reading::wall(
+        r.local(cx.now()) + Duration::days(days),
+        r.has_time,
+    ))
 }
 
 /// A phrase that starts with today's weekday (`friday`, `fri 17:00` on a
