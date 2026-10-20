@@ -18,6 +18,7 @@
 //! nyd adapter jira:issue <issue-id> ls [--type T]    # list a node's children
 //! nyd adapter jira:issue:comment <comment-id> delete # run an action on a node
 //! nyd adapter jira:issue <id> show                   # [-o table|json]
+//! nyd adapter jira <id> show --field story_points     # one field's value
 //! nyd adapter jira values <source>                   # list value options
 //! ```
 //!
@@ -124,6 +125,9 @@ struct Invocation {
     message: Option<String>,
     /// `--field k=v` (repeatable): values for an `InputSpec::Form` action.
     fields: Vec<(String, String)>,
+    /// `--field k` without a value (repeatable), on `show`/`cat`: print only
+    /// these fields' values, one per line, instead of the whole node.
+    read_fields: Vec<String>,
     /// `--value`: an `InputSpec::Picker` selection, or `ActionContext::value`
     /// for a value-accepting `InputSpec::None` action.
     value: Option<String>,
@@ -420,6 +424,7 @@ fn print_adapter_help() {
     println!("  help [--full]       how to drive this level (--full: capabilities, sort columns)");
     println!("  ls                  list children (of the root, or of a node given by id)");
     println!("  show | cat          print a node's row / its raw content");
+    println!("  show --field KEY    print only that field's value (repeatable)");
     println!("  queries             list the stored queries (`ls --query-name NAME` runs one)");
     println!("  actions             list the actions available here");
     println!("  values <source>     list the option values for a source key");
@@ -520,6 +525,7 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
     let mut output = Output::Table;
     let mut message = None;
     let mut fields: Vec<(String, String)> = Vec::new();
+    let mut read_fields: Vec<String> = Vec::new();
     let mut action_args: Vec<(String, String)> = Vec::new();
     let mut value = None;
     let mut text = None;
@@ -571,11 +577,13 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
             }
             "--message" | "-m" => message = Some(take_value(&mut i, "--message")?),
             "--field" => {
+                // `key=value` answers a form; a bare `key` reads that field
+                // (`show`/`cat` only — checked once the verb is known).
                 let kv = take_value(&mut i, "--field")?;
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| anyhow!("--field expects key=value, got '{kv}'"))?;
-                fields.push((k.to_string(), v.to_string()));
+                match kv.split_once('=') {
+                    Some((k, v)) => fields.push((k.to_string(), v.to_string())),
+                    None => read_fields.push(kv),
+                }
             }
             "--arg" => {
                 let kv = take_value(&mut i, "--arg")?;
@@ -632,6 +640,13 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
         p.extend(id);
         ("do".to_string(), p)
     };
+    if let Some(key) = read_fields.first() {
+        if !is_read_verb(&verb) {
+            return Err(anyhow!(
+                "--field expects key=value, got '{key}' (a bare key only reads, with show/cat)"
+            ));
+        }
+    }
 
     Ok(Invocation {
         instance,
@@ -651,6 +666,7 @@ fn parse_adapter(args: &[String]) -> Result<Invocation> {
         output,
         message,
         fields,
+        read_fields,
         value,
         text,
         args: action_args,
@@ -730,6 +746,7 @@ fn print_level_usage(
     println!("  {base} <id> ls          list a node's children");
     println!("  {base} <id> show        print a node's row");
     println!("  {base} <id> cat         print its raw content");
+    println!("  {base} <id> show --field KEY   print only that field's value (repeatable)");
     println!("  {base} queries          list the stored queries of this instance");
     println!("  {base} actions          list the actions here");
     println!();
@@ -1088,7 +1105,47 @@ async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
         .ok_or_else(|| anyhow!("show requires a node id or --path /A/B"))?;
     // Fill display fields a lazily-built stub leaves as placeholders.
     node.hydrate().await;
+    if !inv.read_fields.is_empty() {
+        return print_field_values(node.as_ref(), &inv.read_fields);
+    }
     output_node(node.as_ref(), inv.output);
+    Ok(())
+}
+
+/// Whether a verb reads one node, so a bare `--field KEY` means "print that
+/// field" on it.
+fn is_read_verb(verb: &str) -> bool {
+    matches!(verb, "show" | "get" | "cat" | "read")
+}
+
+/// The values of `keys` in the node's row, in the order asked for. An unknown
+/// key fails and names the keys the node has, so a typo is not read as an
+/// empty field.
+fn field_values(node: &dyn Node, keys: &[String]) -> Result<Vec<String>> {
+    let fields = &node.metadata().fields;
+    keys.iter()
+        .map(|key| {
+            fields
+                .iter()
+                .find(|f| &f.key == key)
+                .map(|f| f.value.clone())
+                .ok_or_else(|| {
+                    let known: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+                    anyhow!(
+                        "node '{}' has no field '{key}' (fields: {})",
+                        node.id(),
+                        known.join(", ")
+                    )
+                })
+        })
+        .collect()
+}
+
+/// `show|cat --field KEY…` — print each value on a line of its own.
+fn print_field_values(node: &dyn Node, keys: &[String]) -> Result<()> {
+    for value in field_values(node, keys)? {
+        println!("{value}");
+    }
     Ok(())
 }
 
@@ -1097,10 +1154,15 @@ async fn cmd_show(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> 
 /// Generic across adapters: resolves the node, then writes
 /// `node.content().read_text()` verbatim (no trailing newline added). Errors
 /// when the node has no content body (e.g. a pure container or attachment).
+/// With `--field KEY` it prints that field of the row instead, like `show`.
 async fn cmd_cat(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
-    let node = resolve_target(adapter, inv, inv.positionals.first().map(String::as_str))
+    let mut node = resolve_target(adapter, inv, inv.positionals.first().map(String::as_str))
         .await?
         .ok_or_else(|| anyhow!("cat requires a node id or --path /A/B"))?;
+    if !inv.read_fields.is_empty() {
+        node.hydrate().await;
+        return print_field_values(node.as_ref(), &inv.read_fields);
+    }
     let content = node
         .content()
         .ok_or_else(|| anyhow!("node '{}' has no readable content", node.id()))?;
@@ -2912,6 +2974,32 @@ mod tests {
         assert_eq!(inv.value.as_deref(), Some("v1"));
         assert_eq!(inv.text.as_deref(), Some("hello"));
         assert_eq!(inv.files.len(), 2);
+    }
+
+    #[test]
+    fn parse_bare_field_reads_on_show_and_cat() {
+        for verb in ["show", "cat"] {
+            let args: Vec<String> = ["nyd", "adapter", "jira", "ABC-1", verb, "--field", "points"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let inv = parse_adapter(&args).unwrap();
+            assert_eq!(inv.read_fields, vec!["points".to_string()], "{verb}");
+            assert!(inv.fields.is_empty(), "{verb}");
+        }
+    }
+
+    #[tokio::test]
+    async fn field_values_reads_in_order_and_names_the_known_keys() {
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData};
+        let adapter = MockAdapterBuilder::new("t")
+            .node(MockNodeData::new("root", "Root").meta("status", "Open").meta("points", "3"))
+            .build();
+        let node = adapter.get_by_id("root").await.unwrap();
+        let keys = vec!["points".to_string(), "status".to_string()];
+        assert_eq!(field_values(node.as_ref(), &keys).unwrap(), vec!["3", "Open"]);
+        let err = field_values(node.as_ref(), &["nope".to_string()]).unwrap_err().to_string();
+        assert!(err.contains("no field 'nope'") && err.contains("status, points"), "{err}");
     }
 
     #[test]
