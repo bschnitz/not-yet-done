@@ -271,7 +271,10 @@ mod tests {
             "<body><style>@media screen{.b{width:1px}}</style>\r\n",
             "<p>the one line that is a message</p></body></html>\r\n"
         ));
-        assert_eq!(readable(&msg, QuoteImages::Attach), "the one line that is a message");
+        assert_eq!(
+            readable(&msg, QuoteImages::Attach),
+            "the one line that is a message"
+        );
     }
 
     /// The alt text is what the sender said about the picture; the URL is
@@ -308,7 +311,10 @@ mod tests {
             "<p><a href=\"https://example.invalid/\"><img src=\"logo.png\"></a></p>\r\n",
             "<p><a href=\"https://example.invalid/x\">a real link</a></p>\r\n"
         ));
-        assert_eq!(readable(&msg, QuoteImages::Attach), "[a real link](https://example.invalid/x)");
+        assert_eq!(
+            readable(&msg, QuoteImages::Attach),
+            "[a real link](https://example.invalid/x)"
+        );
     }
 
     /// Spacer cells convert to lines that carry a non-breaking space. They
@@ -376,6 +382,9 @@ mod tests {
             "Content-Type: text/html\r\n\r\n",
             "<h1>Titel</h1><p>ein <b>Wort</b></p>\r\n"
         ));
-        assert_eq!(readable(&msg, QuoteImages::Attach), "# Titel\n\nein **Wort**");
+        assert_eq!(
+            readable(&msg, QuoteImages::Attach),
+            "# Titel\n\nein **Wort**"
+        );
     }
 }

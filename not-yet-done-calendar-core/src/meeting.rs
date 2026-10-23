@@ -152,9 +152,18 @@ mod tests {
             of("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x"),
             Some(MeetingProvider::Teams)
         );
-        assert_eq!(of("https://example.zoom.us/j/123"), Some(MeetingProvider::Zoom));
-        assert_eq!(of("https://meet.google.com/abc-defg-hij"), Some(MeetingProvider::Meet));
-        assert_eq!(of("https://acme.webex.com/meet/x"), Some(MeetingProvider::Webex));
+        assert_eq!(
+            of("https://example.zoom.us/j/123"),
+            Some(MeetingProvider::Zoom)
+        );
+        assert_eq!(
+            of("https://meet.google.com/abc-defg-hij"),
+            Some(MeetingProvider::Meet)
+        );
+        assert_eq!(
+            of("https://acme.webex.com/meet/x"),
+            Some(MeetingProvider::Webex)
+        );
         assert_eq!(of("https://meet.jit.si/Room"), Some(MeetingProvider::Jitsi));
         assert_eq!(of("https://notzoom.us/j/1"), None);
         assert_eq!(of("https://example.invalid/teams.microsoft.com"), None);
@@ -172,7 +181,10 @@ mod tests {
         ] {
             assert_eq!(MeetingProvider::from_token(p.as_str()), p);
         }
-        assert_eq!(MeetingProvider::from_token("carrier-pigeon"), MeetingProvider::Other);
+        assert_eq!(
+            MeetingProvider::from_token("carrier-pigeon"),
+            MeetingProvider::Other
+        );
     }
 
     #[test]

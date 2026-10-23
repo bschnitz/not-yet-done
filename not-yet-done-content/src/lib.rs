@@ -1376,20 +1376,28 @@ impl FormFieldSpec {
 
     /// A required whole-number field.
     pub fn number(key: impl Into<String>, label: impl Into<String>) -> Self {
-        Self::of_kind(key, label, FormFieldKind::Number {
-            min: None,
-            max: None,
-            step: None,
-        })
+        Self::of_kind(
+            key,
+            label,
+            FormFieldKind::Number {
+                min: None,
+                max: None,
+                step: None,
+            },
+        )
     }
 
     /// A required fractional-number field.
     pub fn decimal(key: impl Into<String>, label: impl Into<String>) -> Self {
-        Self::of_kind(key, label, FormFieldKind::Decimal {
-            min: None,
-            max: None,
-            precision: None,
-        })
+        Self::of_kind(
+            key,
+            label,
+            FormFieldKind::Decimal {
+                min: None,
+                max: None,
+                precision: None,
+            },
+        )
     }
 
     /// A required duration field (submitted as whole minutes).

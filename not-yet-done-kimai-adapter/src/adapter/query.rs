@@ -397,8 +397,14 @@ mod tests {
         HashMap<u64, KimaiActivity>,
     ) {
         let customers = vec![
-            KimaiCustomer { id: 1, name: "Acme Corp".into() },
-            KimaiCustomer { id: 2, name: "Globex".into() },
+            KimaiCustomer {
+                id: 1,
+                name: "Acme Corp".into(),
+            },
+            KimaiCustomer {
+                id: 2,
+                name: "Globex".into(),
+            },
         ];
         let project = |id: u64, name: &str, customer: &str| {
             (
@@ -464,10 +470,8 @@ mod tests {
 
     #[test]
     fn names_resolve_to_ids() {
-        let got = params(
-            "customer: acme corp\nproject: Intranet\nactivity: [Development, '#4']\n",
-        )
-        .unwrap();
+        let got = params("customer: acme corp\nproject: Intranet\nactivity: [Development, '#4']\n")
+            .unwrap();
         assert_eq!(
             got,
             pairs(&[

@@ -33,9 +33,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use not_yet_done_calendar_core::{
-    CalendarError, EventDraft, EventPatch, LoadProgress, TimeRange,
-};
+use not_yet_done_calendar_core::{CalendarError, EventDraft, EventPatch, LoadProgress, TimeRange};
 use not_yet_done_content::auth::ScriptFormField;
 
 /// The protocol version nyd announces in `start`.
@@ -71,7 +69,11 @@ pub enum ToBackend {
         draft: EventDraft,
     },
     /// Change an event as the patch says. Replies with `null`.
-    UpdateEvent { id: u64, uid: String, patch: EventPatch },
+    UpdateEvent {
+        id: u64,
+        uid: String,
+        patch: EventPatch,
+    },
     /// Delete an event. Replies with `null`.
     DeleteEvent { id: u64, uid: String },
     /// Show the backend's window if it is hidden, hide it if it is shown.
@@ -227,7 +229,10 @@ mod tests {
         assert_eq!(said, FromBackend::Attention(None));
         let said: FromBackend =
             serde_json::from_str(r#"{"attention":"Tap 42 on your phone"}"#).unwrap();
-        assert_eq!(said, FromBackend::Attention(Some("Tap 42 on your phone".into())));
+        assert_eq!(
+            said,
+            FromBackend::Attention(Some("Tap 42 on your phone".into()))
+        );
     }
 
     #[test]

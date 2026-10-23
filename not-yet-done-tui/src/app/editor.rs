@@ -812,36 +812,38 @@ impl App {
         let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
         let listed: Result<(Vec<String>, std::collections::HashMap<String, String>), String> =
             tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let node = match &parent_node_id {
-                    Some(id) => adapter.get_by_id(id).await,
-                    None => adapter.root().await,
-                }
-                .map_err(|e| e.to_string())?;
-                let templated = adapter
-                    .actions_for_type(node.node_type())
-                    .iter()
-                    .any(|a| a.id == action_id && a.templates);
-                if !templated {
-                    return Err(format!("action '{action_id}' takes no editor templates here"));
-                }
-                let store = adapter
-                    .template_store(&action_id)
-                    .ok_or_else(|| "this adapter stores no editor templates".to_string())?;
-                let names = store.list().await.map_err(|e| e.to_string())?;
-                let shortcuts = match &scope {
-                    Some(scope) => shortcut_repo
-                        .list_by_scope(scope)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|m| (m.name, m.shortcut))
-                        .collect(),
-                    None => Default::default(),
-                };
-                Ok((names, shortcuts))
-            })
-        });
+                tokio::runtime::Handle::current().block_on(async {
+                    let node = match &parent_node_id {
+                        Some(id) => adapter.get_by_id(id).await,
+                        None => adapter.root().await,
+                    }
+                    .map_err(|e| e.to_string())?;
+                    let templated = adapter
+                        .actions_for_type(node.node_type())
+                        .iter()
+                        .any(|a| a.id == action_id && a.templates);
+                    if !templated {
+                        return Err(format!(
+                            "action '{action_id}' takes no editor templates here"
+                        ));
+                    }
+                    let store = adapter
+                        .template_store(&action_id)
+                        .ok_or_else(|| "this adapter stores no editor templates".to_string())?;
+                    let names = store.list().await.map_err(|e| e.to_string())?;
+                    let shortcuts = match &scope {
+                        Some(scope) => shortcut_repo
+                            .list_by_scope(scope)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| (m.name, m.shortcut))
+                            .collect(),
+                        None => Default::default(),
+                    };
+                    Ok((names, shortcuts))
+                })
+            });
         let (names, shortcuts) = match listed {
             Ok(v) => v,
             Err(e) => {
@@ -917,7 +919,12 @@ impl App {
     }
 
     /// Remove the stored editor template `template` of `action_id`.
-    pub fn delete_editor_template(&mut self, view_index: usize, action_id: String, template: String) {
+    pub fn delete_editor_template(
+        &mut self,
+        view_index: usize,
+        action_id: String,
+        template: String,
+    ) {
         let Some(store) = self
             .content_view(view_index)
             .and_then(|cv| cv.adapter.as_ref())
@@ -1025,7 +1032,11 @@ impl App {
         // child process we learn nothing from, so the buffer is all we have.
         // Critical for breaking out of validation-error reopen loops where
         // the disk content stays the same on `:q!`.
-        if reads_as_discard(CommitIntent::Unknown, self.last_editor_buffer.as_deref(), content) {
+        if reads_as_discard(
+            CommitIntent::Unknown,
+            self.last_editor_buffer.as_deref(),
+            content,
+        ) {
             self.cancel_pending_edit();
             return None;
         }

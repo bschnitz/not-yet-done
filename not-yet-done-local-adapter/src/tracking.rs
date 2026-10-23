@@ -84,8 +84,8 @@ use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket,
     GroupSpec, HostContext, HostEvent, InputSpec, Invalidation, MarkedNode, Metadata,
-    MetadataField, Node, NodeAction, NodeSummary, NodeType, QueryVariable, Result, SavedQueryStore, SortDirection,
-    SortKey, Subtree, SubtreeNode, TypedAdapterFactory, apply_sort, grouping,
+    MetadataField, Node, NodeAction, NodeSummary, NodeType, QueryVariable, Result, SavedQueryStore,
+    SortDirection, SortKey, Subtree, SubtreeNode, TypedAdapterFactory, apply_sort, grouping,
 };
 use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
@@ -5140,7 +5140,6 @@ mod restore_scope_tests {
     use shaku::HasComponent;
 
     use not_yet_done_content::InMemoryHostBus;
-    use not_yet_done_task_core::service::TrackingPolicy;
     use not_yet_done_task_core::entity::{
         task::{self, TaskStatus},
         tracking as tracking_entity,
@@ -5152,6 +5151,7 @@ mod restore_scope_tests {
         TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
     };
     use not_yet_done_task_core::service::TaskService;
+    use not_yet_done_task_core::service::TrackingPolicy;
 
     /// In-memory SQLite + a [`CoreHandle`], plus the raw connection (to insert
     /// task rows directly — the handle has no task-insert). Only the `task`
@@ -5231,11 +5231,7 @@ mod restore_scope_tests {
 
     /// A task under `parent`, so its label path has more than one segment —
     /// what a grouped policy matches its patterns against.
-    async fn insert_child_task(
-        db: &sea_orm::DatabaseConnection,
-        desc: &str,
-        parent: Uuid,
-    ) -> Uuid {
+    async fn insert_child_task(db: &sea_orm::DatabaseConnection, desc: &str, parent: Uuid) -> Uuid {
         let now = Utc::now();
         let model = task::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -5271,7 +5267,9 @@ mod restore_scope_tests {
             task_id: Set(task_id),
             predecessor_id: Set(None),
             started_at: Set(Utc.with_ymd_and_hms(2026, 3, 22, from_hour, 0, 0).unwrap()),
-            ended_at: Set(Some(Utc.with_ymd_and_hms(2026, 3, 22, to_hour, 0, 0).unwrap())),
+            ended_at: Set(Some(
+                Utc.with_ymd_and_hms(2026, 3, 22, to_hour, 0, 0).unwrap(),
+            )),
             deleted: Set(false),
             created_at: Set(Utc::now()),
         };
@@ -5551,7 +5549,11 @@ mod restore_scope_tests {
 
         let mut bound = HashMap::new();
         bound.insert("from".to_string(), "2026-03-22".to_string());
-        assert!(adapter.render_query(body, &bound).contains("\"2026-03-22\""));
+        assert!(
+            adapter
+                .render_query(body, &bound)
+                .contains("\"2026-03-22\"")
+        );
         // No binding falls back to the inline default, so a shortcut that
         // skips the popup still renders a valid document.
         assert!(

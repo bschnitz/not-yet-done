@@ -236,8 +236,14 @@ mod tests {
             uid: "u1".into(),
             calendar: "Work".into(),
             title: "Dentist".into(),
-            start: Local.with_ymd_and_hms(2030, 1, 15, 9, 0, 0).unwrap().to_utc(),
-            end: Local.with_ymd_and_hms(2030, 1, 15, 10, 30, 0).unwrap().to_utc(),
+            start: Local
+                .with_ymd_and_hms(2030, 1, 15, 9, 0, 0)
+                .unwrap()
+                .to_utc(),
+            end: Local
+                .with_ymd_and_hms(2030, 1, 15, 10, 30, 0)
+                .unwrap()
+                .to_utc(),
             all_day: false,
             location: Some("Main street".into()),
             organizer: None,
@@ -283,7 +289,13 @@ mod tests {
         let p = patch(&e, &values, now()).unwrap();
         assert_eq!(p.title.as_deref(), Some("Dentist (moved)"));
         let times = p.times.unwrap();
-        assert_eq!(times.start, Local.with_ymd_and_hms(2030, 1, 16, 14, 0, 0).unwrap().to_utc());
+        assert_eq!(
+            times.start,
+            Local
+                .with_ymd_and_hms(2030, 1, 16, 14, 0, 0)
+                .unwrap()
+                .to_utc()
+        );
         assert!(!times.all_day);
         assert_eq!(p.location, Some(None), "a blanked location is cleared");
         assert_eq!(p.body, None);
@@ -297,13 +309,22 @@ mod tests {
         e.start = Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap();
         e.end = Utc.with_ymd_and_hms(2030, 1, 17, 0, 0, 0).unwrap();
         let mut values = prefill(&e);
-        assert_eq!((values["start"].as_str(), values["end"].as_str()), ("2030-01-15", "2030-01-16"));
+        assert_eq!(
+            (values["start"].as_str(), values["end"].as_str()),
+            ("2030-01-15", "2030-01-16")
+        );
         assert!(patch(&e, &values, now()).unwrap().is_empty());
 
         values.insert("end".into(), "2030-01-15".into());
         let times = patch(&e, &values, now()).unwrap().times.unwrap();
-        assert_eq!(times.start, Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap());
-        assert_eq!(times.end, Utc.with_ymd_and_hms(2030, 1, 16, 0, 0, 0).unwrap());
+        assert_eq!(
+            times.start,
+            Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            times.end,
+            Utc.with_ymd_and_hms(2030, 1, 16, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]
@@ -313,8 +334,14 @@ mod tests {
         values.insert("all_day".into(), "true".into());
         let times = patch(&e, &values, now()).unwrap().times.unwrap();
         assert!(times.all_day);
-        assert_eq!(times.start, Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap());
-        assert_eq!(times.end, Utc.with_ymd_and_hms(2030, 1, 16, 0, 0, 0).unwrap());
+        assert_eq!(
+            times.start,
+            Utc.with_ymd_and_hms(2030, 1, 15, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            times.end,
+            Utc.with_ymd_and_hms(2030, 1, 16, 0, 0, 0).unwrap()
+        );
     }
 
     #[test]

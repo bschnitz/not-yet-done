@@ -220,7 +220,10 @@ impl NodeDecorator for ActionEventNode {
         args: &ActionArgs,
         template: &str,
     ) -> Result<EditorPrep> {
-        let prep = self.inner.prepare_templated(action_id, args, template).await?;
+        let prep = self
+            .inner
+            .prepare_templated(action_id, args, template)
+            .await?;
         self.emitter
             .publish(action_id, phase::PREPARE, &*self.inner);
         Ok(prep)

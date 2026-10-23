@@ -358,13 +358,21 @@ mod tests {
             .unwrap();
         tokio::fs::write(&path, "select 1").await.unwrap();
 
-        assert!(s.copy_node_script("main/users", "active", "copy").await.unwrap());
+        assert!(
+            s.copy_node_script("main/users", "active", "copy")
+                .await
+                .unwrap()
+        );
         let copy = s.node_script_path("main/users", "copy").unwrap();
         assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "select 1");
 
         // An existing target stays as it is.
         tokio::fs::write(&copy, "select 2").await.unwrap();
-        assert!(!s.copy_node_script("main/users", "active", "copy").await.unwrap());
+        assert!(
+            !s.copy_node_script("main/users", "active", "copy")
+                .await
+                .unwrap()
+        );
         assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "select 2");
 
         assert!(matches!(

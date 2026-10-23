@@ -133,7 +133,11 @@ impl MsGraphClient {
     /// `PATCH /me/events/{id}` with only what `patch` changes. Patching an
     /// occurrence's id changes that occurrence only. Graph sends no update to
     /// the attendees for a PATCH.
-    pub(crate) async fn update_event(&self, id: &str, patch: &EventPatch) -> Result<(), CalendarError> {
+    pub(crate) async fn update_event(
+        &self,
+        id: &str,
+        patch: &EventPatch,
+    ) -> Result<(), CalendarError> {
         let url = self.event_url(id);
         let body = serde_json::to_string(&build_patch_json(patch))
             .map_err(|e| CalendarError::Other(format!("encode event: {e}")))?;
@@ -194,7 +198,11 @@ impl MsGraphClient {
         )))
     }
 
-    async fn send_delete(&self, url: &str, token: &str) -> Result<reqwest::Response, CalendarError> {
+    async fn send_delete(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<reqwest::Response, CalendarError> {
         self.http
             .delete(url)
             .bearer_auth(token)
@@ -392,8 +400,14 @@ fn times_json(times: &EventTimes) -> serde_json::Map<String, serde_json::Value> 
         )
     };
     let mut map = serde_json::Map::new();
-    map.insert("start".into(), json!({ "dateTime": start_s, "timeZone": "UTC" }));
-    map.insert("end".into(), json!({ "dateTime": end_s, "timeZone": "UTC" }));
+    map.insert(
+        "start".into(),
+        json!({ "dateTime": start_s, "timeZone": "UTC" }),
+    );
+    map.insert(
+        "end".into(),
+        json!({ "dateTime": end_s, "timeZone": "UTC" }),
+    );
     map.insert("isAllDay".into(), json!(times.all_day));
     map
 }
@@ -689,9 +703,13 @@ mod tests {
     #[test]
     fn online_meeting_falls_back_to_the_link_and_is_absent_when_offline() {
         assert_eq!(
-            map_online_meeting(true, Some("unknown"), Some("https://example.zoom.us/j/1".into()))
-                .unwrap()
-                .provider,
+            map_online_meeting(
+                true,
+                Some("unknown"),
+                Some("https://example.zoom.us/j/1".into())
+            )
+            .unwrap()
+            .provider,
             MeetingProvider::Zoom
         );
         assert_eq!(

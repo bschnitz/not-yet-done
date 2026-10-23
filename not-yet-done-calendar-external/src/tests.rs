@@ -82,7 +82,10 @@ async fn events_come_back_labelled_with_the_connection() {
 
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].title, "Standup");
-    assert_eq!(events[0].calendar, "Work", "unnamed calendar takes the label");
+    assert_eq!(
+        events[0].calendar, "Work",
+        "unnamed calendar takes the label"
+    );
     assert_eq!(events[1].calendar, "Team");
     assert!(backend.empty_is_authoritative(), "taken from hello");
 }
@@ -133,7 +136,13 @@ async fn a_call_the_backend_does_not_offer_is_no_failure() {
     );
     assert!(heard(dir.path()).is_empty(), "toggling started nothing");
 
-    assert!(backend.list_calendars().await.expect("no targets").is_empty());
+    assert!(
+        backend
+            .list_calendars()
+            .await
+            .expect("no targets")
+            .is_empty()
+    );
     let window = backend.toggle_window().await;
     assert!(
         matches!(&window, Err(CalendarError::Other(m)) if m.contains("no window")),
@@ -265,7 +274,10 @@ async fn a_form_is_put_to_the_person_and_their_answer_sent_back() {
             .send(PromptAnswer::Provided(ActionInput::Form(values)));
     });
 
-    backend.list_events(&week()).await.expect("listed after the form");
+    backend
+        .list_events(&week())
+        .await
+        .expect("listed after the form");
     answering.await.unwrap();
 
     let input = heard(dir.path())

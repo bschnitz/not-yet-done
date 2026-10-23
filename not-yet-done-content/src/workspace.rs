@@ -285,7 +285,10 @@ mod tests {
         std::fs::create_dir(base.join(long)).unwrap();
         // A neighbour whose key merely starts with ours must not count.
         std::fs::create_dir(base.join("PROJ-123-other")).unwrap();
-        assert_eq!(ticket_dir(base, "PROJ-12", "Renamed title"), base.join(long));
+        assert_eq!(
+            ticket_dir(base, "PROJ-12", "Renamed title"),
+            base.join(long)
+        );
         assert_eq!(
             ticket_dir(base, "PROJ-1", "Hello World"),
             base.join("PROJ-1-hello-world")

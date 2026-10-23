@@ -14,9 +14,9 @@
 //! already knows how to act on.
 
 mod adapter;
-mod event_form;
 pub mod config;
 pub mod entity;
+mod event_form;
 mod factory;
 mod fetch;
 mod persist;

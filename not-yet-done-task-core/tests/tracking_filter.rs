@@ -18,9 +18,8 @@ use not_yet_done_task_core::filter::query_filter;
 use not_yet_done_task_core::module::TaskDomainModule;
 use not_yet_done_task_core::repository::{
     ProjectRepositoryImpl, ProjectRepositoryImplParameters, TagRepositoryImpl,
-    TagRepositoryImplParameters, TaskRepository, TaskRepositoryImpl,
-    TaskRepositoryImplParameters, TrackingRepository, TrackingRepositoryImpl,
-    TrackingRepositoryImplParameters,
+    TagRepositoryImplParameters, TaskRepository, TaskRepositoryImpl, TaskRepositoryImplParameters,
+    TrackingRepository, TrackingRepositoryImpl, TrackingRepositoryImplParameters,
 };
 
 struct Fixture {
@@ -163,9 +162,7 @@ async fn has_live_successor_marks_every_tracking_above_a_live_one() {
     let f = setup().await;
     let c = seed(&f).await;
 
-    let got = f
-        .query("query: [has_live_successor, true]\n")
-        .await;
+    let got = f.query("query: [has_live_successor, true]\n").await;
     let want: HashSet<Uuid> = [c.twice[0], c.twice[1], c.split[0]].into();
     assert_eq!(got, want);
 }
@@ -175,11 +172,9 @@ async fn has_live_successor_false_is_the_complement() {
     let f = setup().await;
     let c = seed(&f).await;
 
-    let got = f
-        .query("query: [has_live_successor, false]\n")
-        .await;
-    let mut want: HashSet<Uuid> = [c.plain, c.plain_deleted, c.twice[2], c.split[1], c.split[2]]
-        .into();
+    let got = f.query("query: [has_live_successor, false]\n").await;
+    let mut want: HashSet<Uuid> =
+        [c.plain, c.plain_deleted, c.twice[2], c.split[1], c.split[2]].into();
     want.extend(c.twice_dead);
     want.extend(c.split_dead);
     assert_eq!(got, want);

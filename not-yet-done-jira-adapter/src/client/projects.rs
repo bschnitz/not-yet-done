@@ -259,13 +259,18 @@ mod tests {
     fn keeps_jiras_own_order() {
         let body = r#"[{"id":"1","name":"v14-2026"},{"id":"2","name":"v13-2026"}]"#;
         let raw: Vec<RawVersion> = serde_json::from_str(body).expect("parses");
-        let names: Vec<String> = raw.into_iter().map(version_from_raw).map(|v| v.name).collect();
+        let names: Vec<String> = raw
+            .into_iter()
+            .map(version_from_raw)
+            .map(|v| v.name)
+            .collect();
         assert_eq!(names, vec!["v14-2026", "v13-2026"]);
     }
 
     #[test]
     fn parses_a_project_without_a_name() {
-        let body = r#"[{"id":"10000","key":"PROJ","name":"A Project"},{"id":"10001","key":"BARE"}]"#;
+        let body =
+            r#"[{"id":"10000","key":"PROJ","name":"A Project"},{"id":"10001","key":"BARE"}]"#;
         let raw: Vec<RawProject> = serde_json::from_str(body).expect("parses");
         let projects: Vec<JiraProject> = raw.into_iter().map(project_from_raw).collect();
         assert_eq!(projects[0].name, "A Project");

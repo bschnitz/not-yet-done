@@ -759,7 +759,10 @@ mod tests {
     fn all_day_date_value_spans_one_day() {
         let ics =
             "BEGIN:VEVENT\nUID:d1\nSUMMARY:Holiday\nDTSTART;VALUE=DATE:20240301\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
+        let ev = parse_events(ics)
+            .remove(0)
+            .into_cal_event("c", None)
+            .unwrap();
         assert!(ev.all_day);
         assert_eq!(
             ev.start.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
@@ -775,7 +778,10 @@ mod tests {
     #[test]
     fn derives_end_from_duration() {
         let ics = "BEGIN:VEVENT\nUID:d2\nDTSTART:20240115T090000Z\nDURATION:PT1H30M\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
+        let ev = parse_events(ics)
+            .remove(0)
+            .into_cal_event("c", None)
+            .unwrap();
         assert_eq!(ev.end.format("%H:%M").to_string(), "10:30");
     }
 
@@ -783,7 +789,10 @@ mod tests {
     fn transp_falls_back_when_no_busystatus() {
         let ics =
             "BEGIN:VEVENT\nUID:d3\nDTSTART:20240115T090000Z\nTRANSP:TRANSPARENT\nEND:VEVENT\n";
-        let ev = parse_events(ics).remove(0).into_cal_event("c", None).unwrap();
+        let ev = parse_events(ics)
+            .remove(0)
+            .into_cal_event("c", None)
+            .unwrap();
         assert_eq!(ev.show_as, ShowAs::Free);
     }
 
@@ -796,7 +805,12 @@ mod tests {
     #[test]
     fn event_without_start_is_dropped() {
         let ics = "BEGIN:VEVENT\nUID:no-start\nSUMMARY:x\nEND:VEVENT\n";
-        assert!(parse_events(ics).remove(0).into_cal_event("c", None).is_none());
+        assert!(
+            parse_events(ics)
+                .remove(0)
+                .into_cal_event("c", None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -854,7 +868,10 @@ mod tests {
         assert!(ics.contains("DTSTART;VALUE=DATE:20240301"));
         // End defaults to the following day when not after the start date.
         assert!(ics.contains("DTEND;VALUE=DATE:20240302"));
-        let ev = parse_events(&ics).remove(0).into_cal_event("c", None).unwrap();
+        let ev = parse_events(&ics)
+            .remove(0)
+            .into_cal_event("c", None)
+            .unwrap();
         assert!(ev.all_day);
         assert_eq!(ev.show_as, ShowAs::Free);
     }
@@ -876,7 +893,10 @@ mod tests {
             "every line folds under 75"
         );
         // And it still reads back whole.
-        let ev = parse_events(&ics).remove(0).into_cal_event("c", None).unwrap();
+        let ev = parse_events(&ics)
+            .remove(0)
+            .into_cal_event("c", None)
+            .unwrap();
         assert_eq!(ev.title, "x".repeat(200));
     }
 
@@ -885,7 +905,10 @@ mod tests {
             "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m-1\r\nDTSTART:20240115T090000Z\r\n\
              {extra}END:VEVENT\r\nEND:VCALENDAR\r\n"
         );
-        parse_events(&ics).remove(0).into_cal_event("Work", None).unwrap()
+        parse_events(&ics)
+            .remove(0)
+            .into_cal_event("Work", None)
+            .unwrap()
     }
 
     const INVITED: &str = "ORGANIZER;CN=Jane Doe:mailto:jane@example.invalid\r\n\
@@ -900,7 +923,10 @@ mod tests {
             "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m-1\r\nDTSTART:20240115T090000Z\r\n\
              {INVITED}END:VEVENT\r\nEND:VCALENDAR\r\n"
         );
-        parse_events(&ics).remove(0).into_cal_event("Work", me).unwrap()
+        parse_events(&ics)
+            .remove(0)
+            .into_cal_event("Work", me)
+            .unwrap()
     }
 
     #[test]
@@ -1006,19 +1032,28 @@ mod tests {
         };
         let out = apply_patch(STORED, &patch, utc("2030-01-10T08:00:00Z")).unwrap();
         assert!(!out.contains("TZID=Europe/Berlin:") && !out.contains("DURATION"));
-        let ev = parse_events(&out).remove(0).into_cal_event("cal", None).unwrap();
+        let ev = parse_events(&out)
+            .remove(0)
+            .into_cal_event("cal", None)
+            .unwrap();
         assert_eq!(ev.start, utc("2030-01-16T13:00:00Z"));
         assert_eq!(ev.end, utc("2030-01-16T14:30:00Z"));
         assert_eq!(ev.show_as, ShowAs::Free);
         assert_eq!(ev.body.as_deref(), Some("Bring the card"));
-        assert!(out.contains("DESCRIPTION:Reminder\r\n"), "the alarm keeps its text");
+        assert!(
+            out.contains("DESCRIPTION:Reminder\r\n"),
+            "the alarm keeps its text"
+        );
         // The event's properties come before its alarm.
         assert!(out.find("DTSTART").unwrap() < out.find("BEGIN:VALARM").unwrap());
     }
 
     #[test]
     fn a_series_is_not_patched() {
-        let series = STORED.replace("DURATION:PT1H\r\n", "DURATION:PT1H\r\nRRULE:FREQ=WEEKLY\r\n");
+        let series = STORED.replace(
+            "DURATION:PT1H\r\n",
+            "DURATION:PT1H\r\nRRULE:FREQ=WEEKLY\r\n",
+        );
         let patch = EventPatch {
             title: Some("x".into()),
             ..EventPatch::default()
@@ -1028,9 +1063,12 @@ mod tests {
             Err(PatchRefusal::Recurring)
         );
         assert_eq!(
-            apply_patch("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", &patch, utc("2030-01-10T08:00:00Z")),
+            apply_patch(
+                "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                &patch,
+                utc("2030-01-10T08:00:00Z")
+            ),
             Err(PatchRefusal::NoEvent)
         );
     }
-
 }

@@ -296,9 +296,12 @@ impl EventStore {
     ) -> Result<(), DbErr> {
         calendar_sync::Entity::insert(row)
             .on_conflict(
-                OnConflict::columns([calendar_sync::Column::Scope, calendar_sync::Column::Connection])
-                    .update_columns(update.iter().copied())
-                    .to_owned(),
+                OnConflict::columns([
+                    calendar_sync::Column::Scope,
+                    calendar_sync::Column::Connection,
+                ])
+                .update_columns(update.iter().copied())
+                .to_owned(),
             )
             .exec(txn)
             .await?;
@@ -371,7 +374,13 @@ fn from_row(r: calendar_event::Model) -> MergedEvent {
 pub(crate) fn attendee_lines(attendees: &[Attendee]) -> String {
     attendees
         .iter()
-        .map(|a| format!("{} {}", a.response.as_str(), a.name.replace(['\r', '\n'], " ")))
+        .map(|a| {
+            format!(
+                "{} {}",
+                a.response.as_str(),
+                a.name.replace(['\r', '\n'], " ")
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

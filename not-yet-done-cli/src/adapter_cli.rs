@@ -2593,7 +2593,10 @@ mod tests {
         async fn get_by_id(&self, id: &str) -> not_yet_done_content::Result<Box<dyn Node>> {
             self.complete.get_by_id(id).await
         }
-        fn childs<'a>(&'a self, node: &'a dyn Node) -> Vec<not_yet_done_content::children::Child<'a>> {
+        fn childs<'a>(
+            &'a self,
+            node: &'a dyn Node,
+        ) -> Vec<not_yet_done_content::children::Child<'a>> {
             self.complete.childs(node)
         }
     }
@@ -2634,7 +2637,7 @@ mod tests {
     /// the root's own actions (`find`, `page_by_title`) were then not found.
     #[tokio::test]
     async fn a_root_id_resolving_to_another_type_falls_back_to_the_snapshot() {
-        use not_yet_done_content::mock::{issue_type, MockAdapterBuilder, MockNodeData};
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
         let adapter = DeferringRoot {
             snapshot: root_labelled("snapshot"),
             complete: MockAdapterBuilder::new("deferring")
@@ -2993,13 +2996,25 @@ mod tests {
     async fn field_values_reads_in_order_and_names_the_known_keys() {
         use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData};
         let adapter = MockAdapterBuilder::new("t")
-            .node(MockNodeData::new("root", "Root").meta("status", "Open").meta("points", "3"))
+            .node(
+                MockNodeData::new("root", "Root")
+                    .meta("status", "Open")
+                    .meta("points", "3"),
+            )
             .build();
         let node = adapter.get_by_id("root").await.unwrap();
         let keys = vec!["points".to_string(), "status".to_string()];
-        assert_eq!(field_values(node.as_ref(), &keys).unwrap(), vec!["3", "Open"]);
-        let err = field_values(node.as_ref(), &["nope".to_string()]).unwrap_err().to_string();
-        assert!(err.contains("no field 'nope'") && err.contains("status, points"), "{err}");
+        assert_eq!(
+            field_values(node.as_ref(), &keys).unwrap(),
+            vec!["3", "Open"]
+        );
+        let err = field_values(node.as_ref(), &["nope".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no field 'nope'") && err.contains("status, points"),
+            "{err}"
+        );
     }
 
     #[test]

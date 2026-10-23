@@ -282,7 +282,11 @@ mod tests {
     #[test]
     fn every_scaffold_is_a_runnable_script() {
         let cfg = ScriptConfig::default();
-        for scope in [ScriptScope::Node, ScriptScope::FilteredSet, ScriptScope::Table] {
+        for scope in [
+            ScriptScope::Node,
+            ScriptScope::FilteredSet,
+            ScriptScope::Table,
+        ] {
             let t = cfg.template_for(scope);
             assert!(t.starts_with("#!/usr/bin/env python3"), "{scope:?}");
             assert!(t.contains("# mode: "), "{scope:?}");

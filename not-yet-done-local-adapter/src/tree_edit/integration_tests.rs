@@ -883,14 +883,7 @@ async fn adapter_add_parents_under_the_node_without_frontmatter() {
     use not_yet_done_content::{ActionInput, ActionOutcome};
     let (service, tracking, tag_service, db) = setup().await;
     let grandparent = insert_task(&db, "Grandparent", None, TaskStatus::Todo, 0).await;
-    let parent = insert_task(
-        &db,
-        "Parent",
-        Some(grandparent.id),
-        TaskStatus::Todo,
-        0,
-    )
-    .await;
+    let parent = insert_task(&db, "Parent", Some(grandparent.id), TaskStatus::Todo, 0).await;
 
     let adapter = build_task_adapter(
         service,
@@ -932,14 +925,7 @@ async fn adapter_add_sibling_parents_under_the_nodes_parent() {
     use not_yet_done_content::ActionInput;
     let (service, tracking, tag_service, db) = setup().await;
     let grandparent = insert_task(&db, "Grandparent", None, TaskStatus::Todo, 0).await;
-    let parent = insert_task(
-        &db,
-        "Parent",
-        Some(grandparent.id),
-        TaskStatus::Todo,
-        0,
-    )
-    .await;
+    let parent = insert_task(&db, "Parent", Some(grandparent.id), TaskStatus::Todo, 0).await;
 
     let adapter = build_task_adapter(
         service,
@@ -1264,8 +1250,13 @@ async fn adapter_edit_tree_announces_a_series_that_advanced() {
         bus.clone(),
     );
     let mut node = adapter.get_by_id(&root.id.to_string()).await.unwrap();
-    let prep = node.prepare("edit-tree", &Default::default()).await.unwrap();
-    let text = prep.template.replace("- [ ] Water plants", "- [x] Water plants");
+    let prep = node
+        .prepare("edit-tree", &Default::default())
+        .await
+        .unwrap();
+    let text = prep
+        .template
+        .replace("- [ ] Water plants", "- [x] Water plants");
     assert_ne!(text, prep.template);
     node.execute(
         "edit-tree",

@@ -428,8 +428,9 @@ impl App {
         // reloaded tab loses its `aliases:` and stops publishing
         // `action_invoked` (the decorators), and nothing would run its event
         // hooks (the runner).
-        let adapter = not_yet_done_host::decorate_instance(adapter, &config.adapter, &self.host_ctx)
-            .map_err(|e| format!("adapter init: {e}"))?;
+        let adapter =
+            not_yet_done_host::decorate_instance(adapter, &config.adapter, &self.host_ctx)
+                .map_err(|e| format!("adapter init: {e}"))?;
         let adapter: std::sync::Arc<dyn not_yet_done_content::ContentAdapter> =
             std::sync::Arc::from(adapter);
         // One runner per built adapter; it holds the adapter weakly, so the

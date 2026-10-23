@@ -67,8 +67,8 @@ use not_yet_done_content::*;
 
 use std::collections::HashMap;
 
-use crate::chain::{ChainRow, chain_columns, chain_type};
 use crate::bus::{Bus, JOB_WAIT_SECS, Props, SERVICE_IFACE, TIMER_IFACE, UNIT_IFACE, UnitEntry};
+use crate::chain::{ChainRow, chain_columns, chain_type};
 use crate::config::SystemdConfig;
 use crate::control;
 use crate::create;
@@ -1054,12 +1054,10 @@ impl Node for SystemdRoot {
             )));
         }
         let names = failed::units(&self.shared.bus).await?;
-        Ok(
-            match failed::message(self.shared.bus.manager(), &names) {
-                Some(message) => ActionDispatch::Notify { message },
-                None => ActionDispatch::Noop,
-            },
-        )
+        Ok(match failed::message(self.shared.bus.manager(), &names) {
+            Some(message) => ActionDispatch::Notify { message },
+            None => ActionDispatch::Noop,
+        })
     }
 
     /// The two roads into creating: a form, or a buffer that names itself.

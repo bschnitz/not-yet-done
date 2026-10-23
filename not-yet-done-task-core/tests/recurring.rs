@@ -30,7 +30,9 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let db = Database::connect("sqlite::memory:").await.expect("in-memory SQLite");
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("in-memory SQLite");
     let schema = Schema::new(DbBackend::Sqlite);
     for stmt in [
         schema.create_table_from_entity(task::Entity),
@@ -58,17 +60,31 @@ async fn setup() -> Fixture {
             db: Some(db.clone()),
         })
         .build();
-    Fixture { repo: module.resolve(), service: module.resolve(), db }
+    Fixture {
+        repo: module.resolve(),
+        service: module.resolve(),
+        db,
+    }
 }
 
 impl Fixture {
     async fn recurring(&self, rule: &str) -> task::Model {
-        let t = self.repo.insert("Sport".into(), None, None, Some(3)).await.unwrap();
-        self.service.set_task_recur(t.id, Some(rule.into())).await.unwrap()
+        let t = self
+            .repo
+            .insert("Sport".into(), None, None, Some(3))
+            .await
+            .unwrap();
+        self.service
+            .set_task_recur(t.id, Some(rule.into()))
+            .await
+            .unwrap()
     }
 
     async fn set_status(&self, id: Uuid, status: TaskStatus) -> task::Model {
-        self.repo.update_task(id, None, Some(status), None, None, None).await.unwrap()
+        self.repo
+            .update_task(id, None, Some(status), None, None, None)
+            .await
+            .unwrap()
     }
 
     async fn series(&self, series_id: Uuid) -> Vec<task::Model> {
@@ -97,10 +113,18 @@ async fn set_recur_starts_a_series_and_refuses_a_bad_rule() {
     assert_eq!(t.recur.as_deref(), Some("12h after done"));
     assert_eq!(t.series_id, Some(t.id));
 
-    let err = f.service.set_task_recur(t.id, Some("whenever".into())).await.unwrap_err();
+    let err = f
+        .service
+        .set_task_recur(t.id, Some("whenever".into()))
+        .await
+        .unwrap_err();
     assert!(matches!(err, AppError::InvalidRecurrence(_)), "{err:?}");
 
-    let cleared = f.service.set_task_recur(t.id, Some("  ".into())).await.unwrap();
+    let cleared = f
+        .service
+        .set_task_recur(t.id, Some("  ".into()))
+        .await
+        .unwrap();
     assert_eq!(cleared.recur, None);
     assert_eq!(cleared.series_id, Some(t.id), "history keeps its series");
 }
@@ -109,8 +133,15 @@ async fn set_recur_starts_a_series_and_refuses_a_bad_rule() {
 async fn done_creates_the_successor() {
     let f = setup().await;
     let first = f.recurring("12h after done, due +2h").await;
-    let parent = f.repo.insert("Health".into(), None, None, None).await.unwrap();
-    f.repo.update_task(first.id, None, None, None, Some(Some(parent.id)), None).await.unwrap();
+    let parent = f
+        .repo
+        .insert("Health".into(), None, None, None)
+        .await
+        .unwrap();
+    f.repo
+        .update_task(first.id, None, None, None, Some(Some(parent.id)), None)
+        .await
+        .unwrap();
     let tag = global_tag::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set("todo".into()),
@@ -135,7 +166,12 @@ async fn done_creates_the_successor() {
     assert_eq!(next.series_id, Some(first.id));
     assert_eq!(next.not_before, Some(done.updated_at + Duration::hours(12)));
     assert_eq!(next.due, Some(done.updated_at + Duration::hours(14)));
-    assert!(next.path.as_deref().unwrap().starts_with(parent.path.as_deref().unwrap()));
+    assert!(
+        next.path
+            .as_deref()
+            .unwrap()
+            .starts_with(parent.path.as_deref().unwrap())
+    );
     let tags = f.repo.find_tags_by_task_ids(&[next.id]).await.unwrap();
     assert_eq!(tags.get(&next.id).map(Vec::len), Some(1), "tags are copied");
 }
@@ -155,7 +191,11 @@ async fn cancelled_also_advances_and_the_series_keeps_its_id() {
 #[tokio::test]
 async fn no_successor_without_a_rule_or_a_closing_transition() {
     let f = setup().await;
-    let plain = f.repo.insert("Once".into(), None, None, None).await.unwrap();
+    let plain = f
+        .repo
+        .insert("Once".into(), None, None, None)
+        .await
+        .unwrap();
     f.set_status(plain.id, TaskStatus::Done).await;
     assert_eq!(task::Entity::find().all(&f.db).await.unwrap().len(), 1);
 
@@ -164,7 +204,11 @@ async fn no_successor_without_a_rule_or_a_closing_transition() {
     assert_eq!(f.series(t.id).await.len(), 1, "starting is not completing");
     f.set_status(t.id, TaskStatus::Done).await;
     f.set_status(t.id, TaskStatus::Cancelled).await;
-    assert_eq!(f.series(t.id).await.len(), 2, "done → cancelled spawns nothing new");
+    assert_eq!(
+        f.series(t.id).await.len(),
+        2,
+        "done → cancelled spawns nothing new"
+    );
 }
 
 #[tokio::test]
@@ -178,7 +222,13 @@ async fn reopening_withdraws_an_untouched_successor() {
     let all = f.series(first.id).await;
     assert_eq!(all.len(), 1, "successor removed for good");
     assert_eq!(all[0].id, first.id);
-    assert!(task_global_tag::Entity::find().all(&f.db).await.unwrap().is_empty());
+    assert!(
+        task_global_tag::Entity::find()
+            .all(&f.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -187,7 +237,10 @@ async fn reopening_keeps_a_touched_successor() {
     let first = f.recurring("1d after done").await;
     f.set_status(first.id, TaskStatus::Done).await;
     let next = f.open_in(first.id).await.remove(0);
-    f.repo.update_description(next.id, "Sport (long)".into()).await.unwrap();
+    f.repo
+        .update_description(next.id, "Sport (long)".into())
+        .await
+        .unwrap();
 
     f.set_status(first.id, TaskStatus::Todo).await;
     assert_eq!(f.open_in(first.id).await.len(), 2);
@@ -224,9 +277,15 @@ async fn tree_edit_batch_advances_too() {
         parent_id: None,
         deleted: None,
     };
-    f.repo.apply_batch(vec![update(TaskStatus::Done)]).await.unwrap();
+    f.repo
+        .apply_batch(vec![update(TaskStatus::Done)])
+        .await
+        .unwrap();
     assert_eq!(f.series(first.id).await.len(), 2);
-    f.repo.apply_batch(vec![update(TaskStatus::Todo)]).await.unwrap();
+    f.repo
+        .apply_batch(vec![update(TaskStatus::Todo)])
+        .await
+        .unwrap();
     assert_eq!(f.series(first.id).await.len(), 1);
 }
 
@@ -234,7 +293,10 @@ async fn tree_edit_batch_advances_too() {
 
 impl Fixture {
     async fn child(&self, parent: Uuid, description: &str, status: TaskStatus) -> task::Model {
-        self.repo.insert(description.into(), Some(parent), Some(status), None).await.unwrap()
+        self.repo
+            .insert(description.into(), Some(parent), Some(status), None)
+            .await
+            .unwrap()
     }
 
     /// Live children of `parent`, by description.
@@ -257,7 +319,10 @@ impl Fixture {
 }
 
 fn shape(tasks: &[task::Model]) -> Vec<(&str, TaskStatus)> {
-    tasks.iter().map(|t| (t.description.as_str(), t.status.clone())).collect()
+    tasks
+        .iter()
+        .map(|t| (t.description.as_str(), t.status.clone()))
+        .collect()
 }
 
 #[tokio::test]
@@ -267,7 +332,10 @@ async fn the_successor_gets_a_copy_of_the_subtree() {
     f.child(first.id, "a stretch", TaskStatus::Done).await;
     let run = f.child(first.id, "b run", TaskStatus::Todo).await;
     let lap = f.child(run.id, "lap", TaskStatus::InProgress).await;
-    f.service.set_task_recur(lap.id, Some("daily at 07:00".into())).await.unwrap();
+    f.service
+        .set_task_recur(lap.id, Some("daily at 07:00".into()))
+        .await
+        .unwrap();
     let tag = global_tag::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set("outdoor".into()),
@@ -289,13 +357,31 @@ async fn the_successor_gets_a_copy_of_the_subtree() {
         "a done child stays done, a deleted one is not copied"
     );
     let laps = f.children(kids[1].id).await;
-    assert_eq!(shape(&laps), [("lap", TaskStatus::Todo)], "in_progress starts over");
+    assert_eq!(
+        shape(&laps),
+        [("lap", TaskStatus::Todo)],
+        "in_progress starts over"
+    );
     assert_eq!(laps[0].recur, None);
     assert_eq!(laps[0].series_id, None);
-    assert!(laps[0].path.as_deref().unwrap().starts_with(kids[1].path.as_deref().unwrap()));
+    assert!(
+        laps[0]
+            .path
+            .as_deref()
+            .unwrap()
+            .starts_with(kids[1].path.as_deref().unwrap())
+    );
     let tags = f.repo.find_tags_by_task_ids(&[laps[0].id]).await.unwrap();
-    assert_eq!(tags.get(&laps[0].id).map(Vec::len), Some(1), "tags are copied");
-    assert_eq!(f.children(run.id).await.len(), 1, "the original subtree is left alone");
+    assert_eq!(
+        tags.get(&laps[0].id).map(Vec::len),
+        Some(1),
+        "tags are copied"
+    );
+    assert_eq!(
+        f.children(run.id).await.len(),
+        1,
+        "the original subtree is left alone"
+    );
 }
 
 #[tokio::test]
@@ -312,7 +398,10 @@ async fn subtasks_open_copies_only_open_children() {
 
     let kids = f.children(next.id).await;
     assert_eq!(shape(&kids), [("open", TaskStatus::Todo)]);
-    assert_eq!(shape(&f.children(kids[0].id).await), [("pending", TaskStatus::Todo)]);
+    assert_eq!(
+        shape(&f.children(kids[0].id).await),
+        [("pending", TaskStatus::Todo)]
+    );
 }
 
 #[tokio::test]
@@ -333,7 +422,10 @@ async fn reopen_starts_every_copy_as_todo() {
     let next = f.complete(&first).await;
     let kids = f.children(next.id).await;
     assert_eq!(shape(&kids), [("done", TaskStatus::Todo)]);
-    assert_eq!(shape(&f.children(kids[0].id).await), [("cancelled", TaskStatus::Todo)]);
+    assert_eq!(
+        shape(&f.children(kids[0].id).await),
+        [("cancelled", TaskStatus::Todo)]
+    );
 }
 
 #[tokio::test]
@@ -341,11 +433,18 @@ async fn child_windows_move_with_the_mother() {
     let f = setup().await;
     let first = f.recurring("12h after done").await;
     let opens = first.created_at - Duration::hours(2);
-    f.service.set_task_window(first.id, Some(opens), None).await.unwrap();
+    f.service
+        .set_task_window(first.id, Some(opens), None)
+        .await
+        .unwrap();
     let first = f.repo.find_by_id(first.id).await.unwrap();
     let child = f.child(first.id, "prep", TaskStatus::Todo).await;
     f.service
-        .set_task_window(child.id, Some(opens + Duration::hours(1)), Some(opens + Duration::hours(3)))
+        .set_task_window(
+            child.id,
+            Some(opens + Duration::hours(1)),
+            Some(opens + Duration::hours(3)),
+        )
         .await
         .unwrap();
     let bare = f.child(first.id, "unbounded", TaskStatus::Todo).await;
@@ -357,7 +456,10 @@ async fn child_windows_move_with_the_mother() {
     assert_eq!(kids[0].description, "prep");
     assert_eq!(kids[0].not_before, Some(opens + Duration::hours(1) + shift));
     assert_eq!(kids[0].due, Some(opens + Duration::hours(3) + shift));
-    assert_eq!((kids[1].not_before, kids[1].due), (bare.not_before, bare.due));
+    assert_eq!(
+        (kids[1].not_before, kids[1].due),
+        (bare.not_before, bare.due)
+    );
 }
 
 #[tokio::test]
@@ -367,7 +469,10 @@ async fn child_windows_stay_put_without_a_mother_window() {
     assert_eq!(first.not_before, None);
     let child = f.child(first.id, "prep", TaskStatus::Todo).await;
     let at = first.created_at + Duration::days(2);
-    f.service.set_task_window(child.id, Some(at), None).await.unwrap();
+    f.service
+        .set_task_window(child.id, Some(at), None)
+        .await
+        .unwrap();
 
     let next = f.complete(&first).await;
 
@@ -384,7 +489,11 @@ async fn reopening_withdraws_the_copied_subtree_too() {
     assert_eq!(task::Entity::find().all(&f.db).await.unwrap().len(), 6);
 
     f.set_status(first.id, TaskStatus::Todo).await;
-    assert_eq!(task::Entity::find().all(&f.db).await.unwrap().len(), 3, "copies gone for good");
+    assert_eq!(
+        task::Entity::find().all(&f.db).await.unwrap().len(),
+        3,
+        "copies gone for good"
+    );
 }
 
 #[tokio::test]

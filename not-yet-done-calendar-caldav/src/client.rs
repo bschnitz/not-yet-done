@@ -412,11 +412,9 @@ impl CalDavClient {
         }
         if status == StatusCode::PRECONDITION_FAILED {
             return Err(CalendarError::Other(match precondition {
-                Precondition::Matches(_) => {
-                    "the event was changed on the server in the meantime; \
+                Precondition::Matches(_) => "the event was changed on the server in the meantime; \
                      reload and edit it again"
-                        .to_string()
-                }
+                    .to_string(),
                 _ => format!("{url} already exists"),
             }));
         }
@@ -1078,7 +1076,10 @@ mod tests {
   </d:response>
 </d:multistatus>"#;
         let r = parse_multistatus(xml).unwrap();
-        assert_eq!(r[0].failed_status(), Some("HTTP/1.1 503 Service Unavailable"));
+        assert_eq!(
+            r[0].failed_status(),
+            Some("HTTP/1.1 503 Service Unavailable")
+        );
         assert_eq!(r[1].failed_status(), None);
     }
 

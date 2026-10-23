@@ -266,7 +266,10 @@ impl KeySource {
             Self::ScriptShortcut { scope, name } => {
                 format!("script[{scope}/{name}]")
             }
-            Self::TemplateShortcut { action_id, template } => {
+            Self::TemplateShortcut {
+                action_id,
+                template,
+            } => {
                 format!("template[{action_id}/{template}]")
             }
             Self::YamlMenuKey { view } => format!("views.{view}.query.menu_key"),

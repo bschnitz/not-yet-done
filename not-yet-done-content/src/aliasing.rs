@@ -411,7 +411,11 @@ impl NodeDecorator for AliasingNode {
         template: &str,
     ) -> Result<EditorPrep> {
         match self.resolve(action_id, args)? {
-            None => self.inner.prepare_templated(action_id, args, template).await,
+            None => {
+                self.inner
+                    .prepare_templated(action_id, args, template)
+                    .await
+            }
             Some((target, args)) => self.inner.prepare_templated(&target, &args, template).await,
         }
     }

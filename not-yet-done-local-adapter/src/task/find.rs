@@ -31,30 +31,51 @@ pub(super) fn find_params() -> Vec<ParamSpec> {
             "words that must all occur (case-insensitive); `id:<uuid>` picks one task. \
              Falls back to the action's free text (TUI prompt, CLI --text)",
         ),
-        ParamSpec::text("in", "where `text` is looked for: description (default), notes, both"),
+        ParamSpec::text(
+            "in",
+            "where `text` is looked for: description (default), notes, both",
+        ),
         ParamSpec::list(
             "status",
             "any of todo, in_progress, done, cancelled; `open` = todo + in_progress",
         ),
         ParamSpec::list("tag", "tag names the task must all carry"),
         ParamSpec::list("not_tag", "tag names the task must carry none of"),
-        ParamSpec::text("due", "due within this day (or at this instant), e.g. today, friday"),
-        ParamSpec::text("due_from", "due at or after this date, e.g. today, 2026-10-01"),
+        ParamSpec::text(
+            "due",
+            "due within this day (or at this instant), e.g. today, friday",
+        ),
+        ParamSpec::text(
+            "due_from",
+            "due at or after this date, e.g. today, 2026-10-01",
+        ),
         ParamSpec::text(
             "due_to",
             "due at or before this date; a plain day counts whole, e.g. today, end of next week",
         ),
-        ParamSpec::bool("has_due", "true: only tasks with a due date; false: only without"),
+        ParamSpec::bool(
+            "has_due",
+            "true: only tasks with a due date; false: only without",
+        ),
         ParamSpec::bool("overdue", "true: open tasks whose due date has passed"),
         ParamSpec::text("not_before_from", "not_before at or after this date"),
-        ParamSpec::text("not_before_to", "not_before at or before this date (whole day)"),
-        ParamSpec::bool("actionable", "true: not_before unset or reached; false: not yet startable"),
+        ParamSpec::text(
+            "not_before_to",
+            "not_before at or before this date (whole day)",
+        ),
+        ParamSpec::bool(
+            "actionable",
+            "true: not_before unset or reached; false: not yet startable",
+        ),
         ParamSpec::text("created_from", "created at or after this date"),
         ParamSpec::text("created_to", "created at or before this date (whole day)"),
         ParamSpec::text("updated_from", "updated at or after this date"),
         ParamSpec::text("updated_to", "updated at or before this date (whole day)"),
         ParamSpec::text("tracked_from", "last tracked at or after this date"),
-        ParamSpec::text("tracked_to", "last tracked at or before this date (whole day)"),
+        ParamSpec::text(
+            "tracked_to",
+            "last tracked at or before this date (whole day)",
+        ),
         ParamSpec::text(
             "under",
             "only this subtree: a task id, or a task's description (case-insensitive) — \
@@ -62,8 +83,14 @@ pub(super) fn find_params() -> Vec<ParamSpec> {
         ),
         ParamSpec::int("priority_min", "priority at least this"),
         ParamSpec::int("priority_max", "priority at most this"),
-        ParamSpec::bool("recurring", "true: only recurring tasks; false: only one-off tasks"),
-        ParamSpec::bool("has_notes", "true: only tasks with a notes file; false: only without"),
+        ParamSpec::bool(
+            "recurring",
+            "true: only recurring tasks; false: only one-off tasks",
+        ),
+        ParamSpec::bool(
+            "has_notes",
+            "true: only tasks with a notes file; false: only without",
+        ),
         ParamSpec::bool("include_deleted", "also deleted tasks (default false)"),
         ParamSpec::text(
             "sort",
@@ -181,7 +208,9 @@ impl FindQuery {
             Some("notes") => TextScope::Notes,
             Some("both") => TextScope::Both,
             Some(other) => {
-                return Err(format!("in: expected description, notes or both, got `{other}`"));
+                return Err(format!(
+                    "in: expected description, notes or both, got `{other}`"
+                ));
             }
         };
 
@@ -430,9 +459,11 @@ fn sort_rows(snapshot: &ForestSnapshot, rows: &mut [&TaskRow], key: SortKey, des
             SortKey::Updated => date(Some(a.updated_at), Some(b.updated_at)),
             SortKey::Tracked => date(a.last_tracked_at, b.last_tracked_at),
             SortKey::Priority => plain(a.priority.cmp(&b.priority)),
-            SortKey::Description => {
-                plain(a.description.to_lowercase().cmp(&b.description.to_lowercase()))
-            }
+            SortKey::Description => plain(
+                a.description
+                    .to_lowercase()
+                    .cmp(&b.description.to_lowercase()),
+            ),
         }
     });
 }
@@ -645,7 +676,10 @@ fn status_key(status: &task::TaskStatus) -> &'static str {
 }
 
 fn is_open(status: &task::TaskStatus) -> bool {
-    matches!(status, task::TaskStatus::Todo | task::TaskStatus::InProgress)
+    matches!(
+        status,
+        task::TaskStatus::Todo | task::TaskStatus::InProgress
+    )
 }
 
 /// `2026-10-05 14:00` in local time, or empty.

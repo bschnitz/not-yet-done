@@ -425,8 +425,9 @@ pub fn open_core_handle(
         .unwrap_or_else(not_yet_done_task_core::backup::default_backup_dir);
     let backup_max_count = backup.max_count.unwrap_or(10);
 
-    let tracking_policy = tracking_policy_from_config(cfg.allow_parallel, cfg.group_paths.as_deref())
-        .map_err(|e| ContentError::Other(e.into()))?;
+    let tracking_policy =
+        tracking_policy_from_config(cfg.allow_parallel, cfg.group_paths.as_deref())
+            .map_err(|e| ContentError::Other(e.into()))?;
 
     let mut handle = CoreHandle::new(
         domain.task_service,
@@ -659,7 +660,10 @@ mod tracking_policy_config_tests {
     #[test]
     fn grouping_and_allow_parallel_together_are_refused() {
         let err = tracking_policy_from_config(Some(true), Some(&paths(&["^/Work"]))).unwrap_err();
-        assert!(err.contains("cannot be combined with allow_parallel"), "{err}");
+        assert!(
+            err.contains("cannot be combined with allow_parallel"),
+            "{err}"
+        );
     }
 
     #[test]

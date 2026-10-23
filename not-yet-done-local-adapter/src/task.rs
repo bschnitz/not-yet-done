@@ -56,9 +56,9 @@ use not_yet_done_content::HostEvent;
 use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
     ColumnSchema, ContentAdapter, ContentError, EditorPrep, FsQueryStore, HostContext, InputSpec,
-    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType,
-    ParamSpec, QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode,
-    TypedAdapterFactory, apply_sort,
+    Invalidation, Metadata, MetadataField, Node, NodeAction, NodeSummary, NodeType, ParamSpec,
+    QueryVariable, Result, SavedQueryStore, SortKey, Subtree, SubtreeNode, TypedAdapterFactory,
+    apply_sort,
 };
 use not_yet_done_task_core::entity::task;
 use not_yet_done_task_core::error::AppError;
@@ -664,7 +664,11 @@ fn task_metadata(
             // Hidden twin of `status`: the stored value (`todo`,
             // `in_progress`, `done`, `cancelled`) for scripts and queries,
             // which should not have to match nerd-font glyphs.
-            field("status_key", status_key(&t.status).to_string(), "Status key"),
+            field(
+                "status_key",
+                status_key(&t.status).to_string(),
+                "Status key",
+            ),
             field("priority", t.priority.to_string(), "Priority"),
             // Tag columns mirror the native split: `tag_symbols` (icons only)
             // and `tag_names` (comma-separated). Both precomputed at snapshot
@@ -3291,7 +3295,9 @@ mod tests {
     }
 
     fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
     }
 
     #[test]
@@ -3315,9 +3321,14 @@ mod tests {
         // An unparseable id is an error, not a silent description search.
         assert!(find_labels(&snap, &[], Some("id:not-a-uuid"), None).is_err());
         assert!(
-            find_labels(&snap, &[], Some(&format!("id:{}", Uuid::from_u128(99))), None)
-                .unwrap()
-                .is_empty()
+            find_labels(
+                &snap,
+                &[],
+                Some(&format!("id:{}", Uuid::from_u128(99))),
+                None
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -3331,8 +3342,14 @@ mod tests {
         ]);
         // Free text from the prompt and the `text` argument mean the same.
         let expected = vec!["Frobnicator project", "Fix the Frobnicator"];
-        assert_eq!(find_labels(&snap, &[], Some("frobnicator"), None).unwrap(), expected);
-        assert_eq!(find_labels(&snap, &[("text", "FROB")], None, None).unwrap(), expected);
+        assert_eq!(
+            find_labels(&snap, &[], Some("frobnicator"), None).unwrap(),
+            expected
+        );
+        assert_eq!(
+            find_labels(&snap, &[("text", "FROB")], None, None).unwrap(),
+            expected
+        );
         assert_eq!(
             find_labels(&snap, &[], Some("fix frob"), None).unwrap(),
             vec!["Fix the Frobnicator"]
@@ -3371,7 +3388,12 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(find_labels(&snap, &[], Some("frobnicator"), None).unwrap().len(), 2);
+        assert_eq!(
+            find_labels(&snap, &[], Some("frobnicator"), None)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -3438,7 +3460,10 @@ mod tests {
         ]);
         let f = |args: &[(&str, &str)]| find_labels(&snap, args, Some("report"), None).unwrap();
 
-        assert_eq!(f(&[("status", "open")]), vec!["write report", "report taxes"]);
+        assert_eq!(
+            f(&[("status", "open")]),
+            vec!["write report", "report taxes"]
+        );
         assert_eq!(f(&[("status", "done,cancelled")]), vec!["file report"]);
         assert_eq!(f(&[("tag", "urgent,OFFICE")]), vec!["write report"]);
         assert_eq!(f(&[("not_tag", "office")]), vec!["report taxes"]);
@@ -3449,7 +3474,10 @@ mod tests {
         assert_eq!(f(&[("actionable", "false")]), vec!["report taxes"]);
         assert_eq!(f(&[("priority_min", "1")]), vec!["report taxes"]);
         assert_eq!(f(&[("recurring", "true")]), vec!["file report"]);
-        assert_eq!(f(&[("sort", "-priority"), ("limit", "1")]), vec!["report taxes"]);
+        assert_eq!(
+            f(&[("sort", "-priority"), ("limit", "1")]),
+            vec!["report taxes"]
+        );
         assert!(find_labels(&snap, &[("status", "later")], None, None).is_err());
         assert!(find_labels(&snap, &[("colour", "red")], None, None).is_err());
     }
@@ -3631,7 +3659,8 @@ mod tests {
         assert_eq!(get("last_tracked").as_deref(), Some(""));
         // An open window renders empty; a set bound is RFC 3339.
         assert_eq!(get("not_before").as_deref(), Some(""));
-        let due = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 10, 15, 21, 59, 59).unwrap();
+        let due =
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 10, 15, 21, 59, 59).unwrap();
         r.task.due = Some(due);
         let md_due = task_metadata(&r, true, true, "[]".to_string(), "⏱");
         let due_cell = md_due.fields.iter().find(|f| f.key == "due").unwrap();

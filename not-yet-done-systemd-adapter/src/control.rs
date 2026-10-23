@@ -1019,12 +1019,19 @@ mod tests {
         // A runtime verb has one sentence for both, because it means the same
         // thing on both: this unit stops now.
         let stop = verb("stop").unwrap();
-        assert_eq!(stop.confirm_on(Manager::User), stop.confirm_on(Manager::System));
+        assert_eq!(
+            stop.confirm_on(Manager::User),
+            stop.confirm_on(Manager::System)
+        );
     }
 
     #[test]
     fn the_protection_list_answers_to_what_ends_a_unit_now_and_to_what_ends_it_next_time() {
-        let protected: Vec<&str> = VERBS.iter().filter(|v| v.protected()).map(|v| v.id).collect();
+        let protected: Vec<&str> = VERBS
+            .iter()
+            .filter(|v| v.protected())
+            .map(|v| v.id)
+            .collect();
         assert_eq!(
             protected,
             vec![

@@ -136,7 +136,10 @@ pub(crate) fn select(fetcher: &Fetcher, args: &ActionArgs) -> Result<Vec<usize>,
     Ok(fetcher
         .fetchable(true)
         .into_iter()
-        .filter(|&idx| ids.iter().any(|id| id == fetcher.backends[idx].connection_id()))
+        .filter(|&idx| {
+            ids.iter()
+                .any(|id| id == fetcher.backends[idx].connection_id())
+        })
         .collect())
 }
 
@@ -164,28 +167,26 @@ pub(crate) async fn run(fetcher: &Fetcher, indices: &[usize], limit: Duration) -
         async move {
             let backend = &fetcher.backends[idx];
             let asked_before = backend.sign_in_prompts();
-            let result = match tokio::time::timeout(
-                limit,
-                fetcher.sync_one(idx, range, Staleness::Keep),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    let why = format!(
-                        "{}: no answer within {}s",
-                        backend.connection_label(),
-                        limit.as_secs()
-                    );
-                    persist::note_failure(
-                        fetcher.persisted.as_deref(),
-                        backend.connection_id(),
-                        &why,
-                    )
-                    .await;
-                    Err(why)
-                }
-            };
+            let result =
+                match tokio::time::timeout(limit, fetcher.sync_one(idx, range, Staleness::Keep))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let why = format!(
+                            "{}: no answer within {}s",
+                            backend.connection_label(),
+                            limit.as_secs()
+                        );
+                        persist::note_failure(
+                            fetcher.persisted.as_deref(),
+                            backend.connection_id(),
+                            &why,
+                        )
+                        .await;
+                        Err(why)
+                    }
+                };
             (result, backend.sign_in_prompts() > asked_before)
         }
     }))
@@ -224,17 +225,17 @@ mod tests {
     use super::*;
 
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     use async_trait::async_trait;
     use chrono::Duration;
     use not_yet_done_calendar_core::{CalEvent, CalendarBackend, CalendarError, ShowAs, TimeRange};
-    use tokio::sync::{broadcast, RwLock};
+    use tokio::sync::{RwLock, broadcast};
 
     use crate::config::Window;
     use crate::persist::Persisted;
-    use crate::store::{connect, EventStore};
+    use crate::store::{EventStore, connect};
 
     /// A backend that answers every fetch with the same scripted result.
     struct Scripted {
@@ -296,7 +297,8 @@ mod tests {
             "asking"
         }
         async fn list_events(&self, _range: &TimeRange) -> Result<Vec<CalEvent>, CalendarError> {
-            self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.asked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             std::future::pending().await
         }
         fn sign_in_prompts(&self) -> u64 {
@@ -326,7 +328,12 @@ mod tests {
         let db = Arc::new(connect(&url).await.expect("store opens"));
         Fetcher {
             backends: Arc::new(backends),
-            on_demand: Arc::new(on_demand.iter().map(|s| s.to_string()).collect::<HashSet<_>>()),
+            on_demand: Arc::new(
+                on_demand
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<HashSet<_>>(),
+            ),
             cache: Arc::new(RwLock::new(HashMap::new())),
             persisted: Some(Arc::new(Persisted::new(EventStore::new(db, "cal")))),
             window: Window {
@@ -357,7 +364,11 @@ mod tests {
     async fn a_comma_list_selects_those_in_configuration_order() {
         let f = fetcher(
             "sync_select_some",
-            vec![scripted("a", Ok(1)), scripted("b", Ok(1)), scripted("c", Ok(1))],
+            vec![
+                scripted("a", Ok(1)),
+                scripted("b", Ok(1)),
+                scripted("c", Ok(1)),
+            ],
             &[],
         )
         .await;
@@ -384,7 +395,11 @@ mod tests {
         assert_eq!(report.message(), "a: 2 events; b: 0 events");
         let store = f.persisted.as_ref().unwrap().store();
         let states = store.sync_states().await.unwrap();
-        assert!(states.iter().all(|s| s.synced_at.is_some() && s.last_error.is_none()));
+        assert!(
+            states
+                .iter()
+                .all(|s| s.synced_at.is_some() && s.last_error.is_none())
+        );
         assert_eq!(states.len(), 2);
     }
 
@@ -398,7 +413,10 @@ mod tests {
         .await;
         let report = run(&f, &[0, 1], DEFAULT_TIMEOUT).await;
         assert!(report.failed());
-        assert_eq!(report.message(), "a: failed: network error: down; b: 1 event");
+        assert_eq!(
+            report.message(),
+            "a: failed: network error: down; b: 1 event"
+        );
     }
 
     #[tokio::test]
@@ -428,14 +446,26 @@ mod tests {
             report.message(),
             "silent: failed: no answer within 0s; b: 1 event"
         );
-        let states = f.persisted.as_ref().unwrap().store().sync_states().await.unwrap();
+        let states = f
+            .persisted
+            .as_ref()
+            .unwrap()
+            .store()
+            .sync_states()
+            .await
+            .unwrap();
         let silent = states.iter().find(|s| s.connection == "silent").unwrap();
         assert!(silent.last_error.as_deref().unwrap().contains("no answer"));
     }
 
     #[tokio::test]
     async fn a_sign_in_nobody_answered_defers_rather_than_fails() {
-        let f = fetcher("sync_run_unanswered", vec![asking(), scripted("b", Ok(1))], &[]).await;
+        let f = fetcher(
+            "sync_run_unanswered",
+            vec![asking(), scripted("b", Ok(1))],
+            &[],
+        )
+        .await;
         let report = run(&f, &[0, 1], std::time::Duration::from_millis(50)).await;
         assert!(report.failed());
         assert!(report.deferred());
@@ -482,7 +512,10 @@ mod tests {
         let report = SyncReport {
             lines: vec![
                 ("Work".to_string(), SyncOutcome::Synced { events: 1 }),
-                ("Home".to_string(), SyncOutcome::Unpersisted("disk full".into())),
+                (
+                    "Home".to_string(),
+                    SyncOutcome::Unpersisted("disk full".into()),
+                ),
             ],
         };
         assert_eq!(

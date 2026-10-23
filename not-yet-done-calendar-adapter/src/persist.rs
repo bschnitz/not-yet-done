@@ -116,7 +116,11 @@ pub(crate) async fn ingest(
             return Ingest::EmptyKept;
         }
     }
-    match p.store.save(connection, range, keep_from, events, now).await {
+    match p
+        .store
+        .save(connection, range, keep_from, events, now)
+        .await
+    {
         Ok(revision) => match p.store.load(connection).await {
             Ok(stored) => {
                 replace_connection(cache, connection, &stored).await;
@@ -283,20 +287,43 @@ mod tests {
     async fn a_fetch_lands_in_the_store_and_survives_a_fresh_cache() {
         let (db, p) = persisted("cal_store_survives", "calendar").await;
         let cache = empty_cache();
-        let events = [event("a", "1", 10, 9, "Standup"), event("a", "2", 11, 9, "Review")];
-        let outcome = ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
+        let events = [
+            event("a", "1", 10, 9, "Standup"),
+            event("a", "2", 11, 9, "Review"),
+        ];
+        let outcome = ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(9, 20),
+            at(1, 0),
+            &events,
+            false,
+        )
+        .await;
         assert_eq!(outcome, Ingest::Stored);
 
         // A second process: new cache, same database.
         let other = Persisted::new(EventStore::new(db, "calendar"));
         let fresh = empty_cache();
-        assert!(catch_up(&fresh, Some(&other)).await, "the stored slice loads");
+        assert!(
+            catch_up(&fresh, Some(&other)).await,
+            "the stored slice loads"
+        );
         assert_eq!(titles(&fresh).await, ["Review", "Standup"]);
-        let stored = fresh.read().await.get("calendar:a:1").cloned().expect("by id");
+        let stored = fresh
+            .read()
+            .await
+            .get("calendar:a:1")
+            .cloned()
+            .expect("by id");
         assert_eq!(stored.event.location.as_deref(), Some("Room 1"));
         assert_eq!(stored.event.show_as, ShowAs::Busy);
 
-        assert!(!catch_up(&fresh, Some(&other)).await, "nothing new the second time");
+        assert!(
+            !catch_up(&fresh, Some(&other)).await,
+            "nothing new the second time"
+        );
     }
 
     #[tokio::test]
@@ -316,15 +343,38 @@ mod tests {
         called_off.event.my_response = Some(Response::Tentative);
         called_off.event.cancelled = true;
         let events = [called_off.clone(), event("a", "2", 11, 9, "Review")];
-        ingest(&empty_cache(), Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
+        ingest(
+            &empty_cache(),
+            Some(&p),
+            "a",
+            &range(9, 20),
+            at(1, 0),
+            &events,
+            false,
+        )
+        .await;
 
         let fresh = empty_cache();
-        catch_up(&fresh, Some(&Persisted::new(EventStore::new(db, "calendar")))).await;
-        let stored = fresh.read().await.get("calendar:a:1").cloned().expect("by id");
+        catch_up(
+            &fresh,
+            Some(&Persisted::new(EventStore::new(db, "calendar"))),
+        )
+        .await;
+        let stored = fresh
+            .read()
+            .await
+            .get("calendar:a:1")
+            .cloned()
+            .expect("by id");
         assert_eq!(stored.event.attendees, called_off.event.attendees);
         assert_eq!(stored.event.my_response, Some(Response::Tentative));
         assert!(stored.event.cancelled);
-        let plain = fresh.read().await.get("calendar:a:2").cloned().expect("by id");
+        let plain = fresh
+            .read()
+            .await
+            .get("calendar:a:2")
+            .cloned()
+            .expect("by id");
         assert!(plain.event.attendees.is_empty());
         assert_eq!(plain.event.my_response, None);
         assert!(!plain.event.cancelled);
@@ -337,9 +387,27 @@ mod tests {
         let writer = Persisted::new(EventStore::new(db, "calendar"));
         let writer_cache = empty_cache();
 
-        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "Old")], false).await;
+        ingest(
+            &writer_cache,
+            Some(&writer),
+            "a",
+            &range(9, 20),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "Old")],
+            false,
+        )
+        .await;
         assert!(catch_up(&cache, Some(&reader)).await);
-        ingest(&writer_cache, Some(&writer), "a", &range(9, 20), at(1, 0), &[event("a", "1", 10, 9, "New")], false).await;
+        ingest(
+            &writer_cache,
+            Some(&writer),
+            "a",
+            &range(9, 20),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "New")],
+            false,
+        )
+        .await;
         assert!(catch_up(&cache, Some(&reader)).await);
         assert_eq!(titles(&cache).await, ["New"]);
     }
@@ -354,11 +422,35 @@ mod tests {
             "a",
             &range(1, 28),
             at(1, 0),
-            &[event("a", "early", 3, 9, "Early"), event("a", "gone", 10, 9, "Gone")], false).await;
-        ingest(&cache, Some(&p), "b", &range(1, 28), at(1, 0), &[event("b", "x", 10, 9, "Other")], false).await;
+            &[
+                event("a", "early", 3, 9, "Early"),
+                event("a", "gone", 10, 9, "Gone"),
+            ],
+            false,
+        )
+        .await;
+        ingest(
+            &cache,
+            Some(&p),
+            "b",
+            &range(1, 28),
+            at(1, 0),
+            &[event("b", "x", 10, 9, "Other")],
+            false,
+        )
+        .await;
 
         // A narrower fetch of `a` that no longer has `gone`.
-        ingest(&cache, Some(&p), "a", &range(9, 12), at(1, 0), &[event("a", "new", 11, 9, "New")], false).await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(9, 12),
+            at(1, 0),
+            &[event("a", "new", 11, 9, "New")],
+            false,
+        )
+        .await;
         assert_eq!(titles(&cache).await, ["Early", "New", "Other"]);
     }
 
@@ -366,8 +458,26 @@ mod tests {
     async fn events_before_the_window_are_pruned() {
         let (_db, p) = persisted("cal_store_prune", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "old", 2, 9, "Old")], false).await;
-        ingest(&cache, Some(&p), "a", &range(10, 28), at(10, 0), &[event("a", "n", 11, 9, "Now")], false).await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(1, 28),
+            at(1, 0),
+            &[event("a", "old", 2, 9, "Old")],
+            false,
+        )
+        .await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(10, 28),
+            at(10, 0),
+            &[event("a", "n", 11, 9, "Now")],
+            false,
+        )
+        .await;
         assert_eq!(titles(&cache).await, ["Now"]);
     }
 
@@ -375,25 +485,52 @@ mod tests {
     async fn an_empty_fetch_over_known_events_keeps_them_and_records_why() {
         let (_db, p) = persisted("cal_store_empty_kept", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")], false).await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(1, 28),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "Keep")],
+            false,
+        )
+        .await;
         let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[], false).await;
         assert_eq!(outcome, Ingest::EmptyKept);
         assert_eq!(titles(&cache).await, ["Keep"]);
         let state = p.store().sync_states().await.unwrap().remove(0);
         assert!(state.synced_at.is_some(), "the last success stays recorded");
-        assert!(state.last_error.is_some(), "the attempt is recorded as failed");
+        assert!(
+            state.last_error.is_some(),
+            "the attempt is recorded as failed"
+        );
     }
 
     #[tokio::test]
     async fn a_trusted_empty_fetch_clears_the_known_events() {
         let (_db, p) = persisted("cal_store_empty_trusted", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Gone")], true).await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(1, 28),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "Gone")],
+            true,
+        )
+        .await;
         let outcome = ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[], true).await;
         assert_eq!(outcome, Ingest::EmptyAccepted);
-        assert!(titles(&cache).await.is_empty(), "an empty calendar is empty");
+        assert!(
+            titles(&cache).await.is_empty(),
+            "an empty calendar is empty"
+        );
         let state = p.store().sync_states().await.unwrap().remove(0);
-        assert!(state.last_error.is_none(), "and that is a success, not a failure");
+        assert!(
+            state.last_error.is_none(),
+            "and that is a success, not a failure"
+        );
     }
 
     #[tokio::test]
@@ -412,7 +549,16 @@ mod tests {
     async fn a_failure_keeps_the_last_success() {
         let (_db, p) = persisted("cal_store_failure", "calendar").await;
         let cache = empty_cache();
-        ingest(&cache, Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Keep")], false).await;
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(1, 28),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "Keep")],
+            false,
+        )
+        .await;
         note_failure(Some(&p), "a", "session expired").await;
         let state = p.store().sync_states().await.unwrap().remove(0);
         assert_eq!(state.revision, 1, "a failure is no new data");
@@ -423,7 +569,16 @@ mod tests {
     #[tokio::test]
     async fn scopes_do_not_see_each_other() {
         let (db, p) = persisted("cal_store_scopes", "one").await;
-        ingest(&empty_cache(), Some(&p), "a", &range(1, 28), at(1, 0), &[event("a", "1", 10, 9, "Mine")], false).await;
+        ingest(
+            &empty_cache(),
+            Some(&p),
+            "a",
+            &range(1, 28),
+            at(1, 0),
+            &[event("a", "1", 10, 9, "Mine")],
+            false,
+        )
+        .await;
         let other = Persisted::new(EventStore::new(db, "two"));
         let cache = empty_cache();
         assert!(!catch_up(&cache, Some(&other)).await);
@@ -434,15 +589,30 @@ mod tests {
     async fn a_forgotten_event_is_gone_for_every_process_even_the_last_one() {
         let (db, p) = persisted("cal_store_forget", "calendar").await;
         let cache = empty_cache();
-        let events = [event("a", "1", 10, 9, "Standup"), event("a", "2", 11, 9, "Review")];
-        ingest(&cache, Some(&p), "a", &range(9, 20), at(1, 0), &events, false).await;
+        let events = [
+            event("a", "1", 10, 9, "Standup"),
+            event("a", "2", 11, 9, "Review"),
+        ];
+        ingest(
+            &cache,
+            Some(&p),
+            "a",
+            &range(9, 20),
+            at(1, 0),
+            &events,
+            false,
+        )
+        .await;
         let other = Persisted::new(EventStore::new(db, "calendar"));
         let other_cache = empty_cache();
         catch_up(&other_cache, Some(&other)).await;
 
         forget(&cache, Some(&p), "a", "calendar:a:1").await;
         assert_eq!(titles(&cache).await, ["Review"]);
-        assert!(!catch_up(&cache, Some(&p)).await, "its own cache is current");
+        assert!(
+            !catch_up(&cache, Some(&p)).await,
+            "its own cache is current"
+        );
         assert!(catch_up(&other_cache, Some(&other)).await);
         assert_eq!(titles(&other_cache).await, ["Review"]);
 

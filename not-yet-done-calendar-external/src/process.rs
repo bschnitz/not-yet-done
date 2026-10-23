@@ -355,7 +355,10 @@ impl Reader {
         if loading {
             let _ = self.progress.send(LoadProgress::complete());
         }
-        if tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await.is_err() {
+        if tokio::time::timeout(SHUTDOWN_GRACE, child.wait())
+            .await
+            .is_err()
+        {
             let _ = child.start_kill();
         }
     }
@@ -438,7 +441,9 @@ async fn next_said(
             Ok(Ok(Some(line))) => line,
             Ok(Ok(None)) => return Ok(None),
             Ok(Err(e)) => {
-                return Err(CalendarError::Other(format!("{who}: reading its output: {e}")));
+                return Err(CalendarError::Other(format!(
+                    "{who}: reading its output: {e}"
+                )));
             }
             Err(_) => {
                 return Err(CalendarError::Network(format!(
@@ -450,9 +455,9 @@ async fn next_said(
         if line.trim().is_empty() {
             continue;
         }
-        return serde_json::from_str(&line)
-            .map(Some)
-            .map_err(|e| CalendarError::Other(format!("{who}: this is not a protocol line ({e})")));
+        return serde_json::from_str(&line).map(Some).map_err(|e| {
+            CalendarError::Other(format!("{who}: this is not a protocol line ({e})"))
+        });
     }
 }
 

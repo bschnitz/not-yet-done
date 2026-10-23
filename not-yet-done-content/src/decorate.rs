@@ -464,7 +464,9 @@ pub trait NodeDecorator: Send + Sync {
         args: &ActionArgs,
         template: &str,
     ) -> Result<EditorPrep> {
-        self.inner().prepare_templated(action_id, args, template).await
+        self.inner()
+            .prepare_templated(action_id, args, template)
+            .await
     }
     async fn picker_options(&self, action_id: &str) -> Result<Vec<ActionOption>> {
         self.inner().picker_options(action_id).await

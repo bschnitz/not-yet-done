@@ -2293,7 +2293,10 @@ a title-less panel whose sole attribute makes its opener marker long enough
         assert_roundtrip("a {{c:\\tmp}} path", "a `c:\\tmp` path");
         // A bare brace in the source comes back escaped: same rendering in
         // Jira, so the guard must let it through.
-        assert_roundtrip("call {{strpos($s, '{')}} here", "call `strpos($s, '{')` here");
+        assert_roundtrip(
+            "call {{strpos($s, '{')}} here",
+            "call `strpos($s, '{')` here",
+        );
         assert_eq!(
             md_to_wiki("call `strpos($s, '{')` here"),
             "call {{strpos($s, '\\{')}} here"

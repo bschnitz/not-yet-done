@@ -220,7 +220,11 @@ db:
         let cfg: CalendarConfig = serde_yaml::from_str(yaml).expect("example parses");
         let web = cfg.connections.iter().find(|c| c.id == "web").expect("web");
         assert_eq!(web.fetch, FetchMode::OnDemand);
-        let mailde = cfg.connections.iter().find(|c| c.id == "mailde").expect("mailde");
+        let mailde = cfg
+            .connections
+            .iter()
+            .find(|c| c.id == "mailde")
+            .expect("mailde");
         assert_eq!(mailde.fetch, FetchMode::Live);
     }
 

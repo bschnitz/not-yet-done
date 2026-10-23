@@ -124,8 +124,17 @@ impl FromStr for Rule {
             };
             Schedule::Fixed { pattern, at }
         };
-        let Options { due, subtasks, reopen } = options;
-        Ok(Rule { schedule, due, subtasks: subtasks.unwrap_or_default(), reopen })
+        let Options {
+            due,
+            subtasks,
+            reopen,
+        } = options;
+        Ok(Rule {
+            schedule,
+            due,
+            subtasks: subtasks.unwrap_or_default(),
+            reopen,
+        })
     }
 }
 
@@ -144,12 +153,16 @@ fn split_options(text: &str) -> Result<(&str, Options), RecurError> {
     let mut head = text;
     while let Some(pos) = head.rfind(',') {
         let clause = head[pos + 1..].trim();
-        let (word, arg) = clause.split_once(char::is_whitespace).unwrap_or((clause, ""));
+        let (word, arg) = clause
+            .split_once(char::is_whitespace)
+            .unwrap_or((clause, ""));
         let arg = arg.trim();
         match word {
             "due" => {
                 let Some(offset) = arg.strip_prefix('+') else {
-                    return err(format!("due offset '{arg}' must start with '+', e.g. 'due +4h'"));
+                    return err(format!(
+                        "due offset '{arg}' must start with '+', e.g. 'due +4h'"
+                    ));
                 };
                 if options.due.replace(parse_offset(offset)?).is_some() {
                     return err("'due' is given twice");
@@ -176,8 +189,13 @@ fn split_options(text: &str) -> Result<(&str, Options), RecurError> {
         head = head[..pos].trim_end();
     }
     for word in ["due", "subtasks", "reopen"] {
-        if head.split(|c: char| c == ',' || c.is_whitespace()).any(|w| w == word) {
-            return err(format!("'{word}' must follow the schedule after a comma: '…, {word} …'"));
+        if head
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .any(|w| w == word)
+        {
+            return err(format!(
+                "'{word}' must follow the schedule after a comma: '…, {word} …'"
+            ));
         }
     }
     Ok((head, options))
@@ -185,7 +203,11 @@ fn split_options(text: &str) -> Result<(&str, Options), RecurError> {
 
 /// `4h`, `30m`, `1d`, `2d12h`, `1w` — a sum of `<N><unit>` terms.
 fn parse_offset(s: &str) -> Result<Duration, RecurError> {
-    let bad = || err(format!("bad offset '+{s}' (expected e.g. +4h, +30m, +2d12h)"));
+    let bad = || {
+        err(format!(
+            "bad offset '+{s}' (expected e.g. +4h, +30m, +2d12h)"
+        ))
+    };
     let mut total = Duration::zero();
     let mut digits = String::new();
     for c in s.chars().filter(|c| !c.is_whitespace()) {
@@ -247,7 +269,9 @@ fn parse_after_done(s: &str, at: Option<NaiveTime>) -> Result<Schedule, RecurErr
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
     if num.is_empty() {
-        return err(format!("'{s} after done' needs an amount, e.g. '3d after done'"));
+        return err(format!(
+            "'{s} after done' needs an amount, e.g. '3d after done'"
+        ));
     }
     let amount = parse_amount(num)?;
     let unit = parse_unit(unit.trim())?;
@@ -263,7 +287,13 @@ fn parse_pattern(s: &str) -> Result<Pattern, RecurError> {
         "weekly" => return Ok(Pattern::EveryDays(7)),
         "weekdays" => {
             return Ok(Pattern::Weekdays {
-                days: vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri],
+                days: vec![
+                    Weekday::Mon,
+                    Weekday::Tue,
+                    Weekday::Wed,
+                    Weekday::Thu,
+                    Weekday::Fri,
+                ],
                 every: 1,
             });
         }
@@ -362,7 +392,10 @@ impl Rule {
     }
 
     fn window(&self, not_before: DateTime<Utc>) -> Window {
-        Window { not_before, due: self.due.map(|d| not_before + d) }
+        Window {
+            not_before,
+            due: self.due.map(|d| not_before + d),
+        }
     }
 }
 
@@ -394,7 +427,8 @@ fn matches(pattern: &Pattern, anchor: NaiveDate, date: NaiveDate) -> bool {
     match pattern {
         Pattern::EveryDays(n) => (date - anchor).num_days().rem_euclid(i64::from(*n)) == 0,
         Pattern::Weekdays { days, every } => {
-            let monday = |d: NaiveDate| d - Duration::days(i64::from(d.weekday().num_days_from_monday()));
+            let monday =
+                |d: NaiveDate| d - Duration::days(i64::from(d.weekday().num_days_from_monday()));
             let weeks = (monday(date) - monday(anchor)).num_days() / 7;
             days.contains(&date.weekday()) && weeks.rem_euclid(i64::from(*every)) == 0
         }
@@ -456,11 +490,17 @@ mod tests {
     /// Wall-clock time in Berlin, as UTC.
     fn berlin(s: &str) -> DateTime<Utc> {
         let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
-        Berlin.from_local_datetime(&naive).earliest().unwrap().with_timezone(&Utc)
+        Berlin
+            .from_local_datetime(&naive)
+            .earliest()
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn show(at: DateTime<Utc>) -> String {
-        at.with_timezone(&Berlin).format("%Y-%m-%d %a %H:%M").to_string()
+        at.with_timezone(&Berlin)
+            .format("%Y-%m-%d %a %H:%M")
+            .to_string()
     }
 
     fn next(rule_text: &str, done: &str, not_before: Option<&str>) -> String {
@@ -475,7 +515,10 @@ mod tests {
         assert_eq!(
             rule("daily at 08:00, due +4h"),
             Rule {
-                schedule: Schedule::Fixed { pattern: Pattern::EveryDays(1), at: t(8, 0) },
+                schedule: Schedule::Fixed {
+                    pattern: Pattern::EveryDays(1),
+                    at: t(8, 0)
+                },
                 due: Some(Duration::hours(4)),
                 subtasks: Subtasks::All,
                 reopen: false,
@@ -494,18 +537,28 @@ mod tests {
         assert_eq!(
             rule("every 2 weeks on sat at 10:00").schedule,
             Schedule::Fixed {
-                pattern: Pattern::Weekdays { days: vec![Weekday::Sat], every: 2 },
+                pattern: Pattern::Weekdays {
+                    days: vec![Weekday::Sat],
+                    every: 2
+                },
                 at: t(10, 0),
             }
         );
         assert_eq!(
             rule("monthly on 1 at 09:00").schedule,
-            Schedule::Fixed { pattern: Pattern::MonthDay(1), at: t(9, 0) }
+            Schedule::Fixed {
+                pattern: Pattern::MonthDay(1),
+                at: t(9, 0)
+            }
         );
         assert_eq!(
             rule("3d after done"),
             Rule {
-                schedule: Schedule::AfterDone { amount: 3, unit: Unit::Days, at: None },
+                schedule: Schedule::AfterDone {
+                    amount: 3,
+                    unit: Unit::Days,
+                    at: None
+                },
                 due: None,
                 subtasks: Subtasks::All,
                 reopen: false,
@@ -514,7 +567,11 @@ mod tests {
         assert_eq!(
             rule("3 days after done at 07:00, due +12h"),
             Rule {
-                schedule: Schedule::AfterDone { amount: 3, unit: Unit::Days, at: Some(t(7, 0)) },
+                schedule: Schedule::AfterDone {
+                    amount: 3,
+                    unit: Unit::Days,
+                    at: Some(t(7, 0))
+                },
                 due: Some(Duration::hours(12)),
                 subtasks: Subtasks::All,
                 reopen: false,
@@ -528,7 +585,13 @@ mod tests {
             rule("  Weekdays AT 07:30 ").schedule,
             Schedule::Fixed {
                 pattern: Pattern::Weekdays {
-                    days: vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri],
+                    days: vec![
+                        Weekday::Mon,
+                        Weekday::Tue,
+                        Weekday::Wed,
+                        Weekday::Thu,
+                        Weekday::Fri
+                    ],
                     every: 1,
                 },
                 at: t(7, 30),
@@ -536,25 +599,44 @@ mod tests {
         );
         assert_eq!(
             rule("every 2 weeks at 10:00").schedule,
-            Schedule::Fixed { pattern: Pattern::EveryDays(14), at: t(10, 0) }
+            Schedule::Fixed {
+                pattern: Pattern::EveryDays(14),
+                at: t(10, 0)
+            }
         );
         assert_eq!(
             rule("every day at 10:00").schedule,
-            Schedule::Fixed { pattern: Pattern::EveryDays(1), at: t(10, 0) }
+            Schedule::Fixed {
+                pattern: Pattern::EveryDays(1),
+                at: t(10, 0)
+            }
         );
         assert_eq!(
             rule("monday, thursday at 06:00").schedule,
             Schedule::Fixed {
-                pattern: Pattern::Weekdays { days: vec![Weekday::Mon, Weekday::Thu], every: 1 },
+                pattern: Pattern::Weekdays {
+                    days: vec![Weekday::Mon, Weekday::Thu],
+                    every: 1
+                },
                 at: t(6, 0),
             }
         );
         assert_eq!(
             rule("12 h after done").schedule,
-            Schedule::AfterDone { amount: 12, unit: Unit::Hours, at: None }
+            Schedule::AfterDone {
+                amount: 12,
+                unit: Unit::Hours,
+                at: None
+            }
         );
-        assert_eq!(rule("1w after done, due +2d12h").due, Some(Duration::hours(60)));
-        assert_eq!(rule("1w after done, due +30m").due, Some(Duration::minutes(30)));
+        assert_eq!(
+            rule("1w after done, due +2d12h").due,
+            Some(Duration::hours(60))
+        );
+        assert_eq!(
+            rule("1w after done, due +30m").due,
+            Some(Duration::minutes(30))
+        );
     }
 
     #[test]
@@ -562,11 +644,17 @@ mod tests {
         let r = rule("weekly at 09:00, subtasks open, reopen");
         assert_eq!((r.subtasks, r.reopen, r.due), (Subtasks::Open, true, None));
         let r = rule("mon,thu at 09:00, reopen, due +1h, subtasks none");
-        assert_eq!((r.subtasks, r.reopen, r.due), (Subtasks::None, true, Some(Duration::hours(1))));
+        assert_eq!(
+            (r.subtasks, r.reopen, r.due),
+            (Subtasks::None, true, Some(Duration::hours(1)))
+        );
         assert_eq!(
             r.schedule,
             Schedule::Fixed {
-                pattern: Pattern::Weekdays { days: vec![Weekday::Mon, Weekday::Thu], every: 1 },
+                pattern: Pattern::Weekdays {
+                    days: vec![Weekday::Mon, Weekday::Thu],
+                    every: 1
+                },
                 at: t(9, 0),
             }
         );
@@ -578,8 +666,8 @@ mod tests {
     fn rejects_bad_rules() {
         for bad in [
             "",
-            "daily",                         // a fixed rhythm needs a time
-            "daily at 8",                    // HH:MM
+            "daily",      // a fixed rhythm needs a time
+            "daily at 8", // HH:MM
             "daily at 25:00",
             "fortnightly at 08:00",
             "mon,funday at 08:00",
@@ -590,17 +678,17 @@ mod tests {
             "every 2 days on mon at 08:00",
             "after done",
             "3 fortnights after done",
-            "12h after done at 07:00",       // `at` needs days or weeks
-            "daily at 08:00, due 4h",        // offset needs '+'
+            "12h after done at 07:00", // `at` needs days or weeks
+            "daily at 08:00, due 4h",  // offset needs '+'
             "daily at 08:00, due +4",
             "daily at 08:00, due +4x",
-            "daily at 08:00 due +4h",        // comma before due
+            "daily at 08:00 due +4h", // comma before due
             "daily at 08:00, subtasks some",
             "daily at 08:00, subtasks",
             "daily at 08:00, reopen, reopen",
             "daily at 08:00, subtasks open, subtasks all",
             "daily at 08:00, due +1h, due +2h",
-            "daily at 08:00 reopen",         // comma before reopen
+            "daily at 08:00 reopen", // comma before reopen
             "daily at 08:00, reopen now",
             "every 1000 days at 08:00",
         ] {
@@ -613,7 +701,11 @@ mod tests {
     #[test]
     fn daily_opens_the_next_day() {
         assert_eq!(
-            next("daily at 08:00", "2026-10-05 08:10", Some("2026-10-05 08:00")),
+            next(
+                "daily at 08:00",
+                "2026-10-05 08:10",
+                Some("2026-10-05 08:00")
+            ),
             "2026-10-06 Tue 08:00"
         );
     }
@@ -622,7 +714,11 @@ mod tests {
     fn done_early_does_not_hand_over_its_own_slot() {
         // Completed 07:50 for the 08:00 slot: the successor is tomorrow's.
         assert_eq!(
-            next("daily at 08:00", "2026-10-05 07:50", Some("2026-10-05 08:00")),
+            next(
+                "daily at 08:00",
+                "2026-10-05 07:50",
+                Some("2026-10-05 08:00")
+            ),
             "2026-10-06 Tue 08:00"
         );
     }
@@ -630,7 +726,11 @@ mod tests {
     #[test]
     fn missed_slots_are_skipped_not_made_up() {
         assert_eq!(
-            next("daily at 08:00", "2026-10-09 21:00", Some("2026-10-05 08:00")),
+            next(
+                "daily at 08:00",
+                "2026-10-09 21:00",
+                Some("2026-10-05 08:00")
+            ),
             "2026-10-10 Sat 08:00"
         );
     }
@@ -638,26 +738,47 @@ mod tests {
     #[test]
     fn weekday_list_picks_the_next_listed_day() {
         // Wednesday evening, after the 18:00 slot → Friday.
-        assert_eq!(next("mon,wed,fri at 18:00", "2026-10-07 18:30", None), "2026-10-09 Fri 18:00");
+        assert_eq!(
+            next("mon,wed,fri at 18:00", "2026-10-07 18:30", None),
+            "2026-10-09 Fri 18:00"
+        );
         // Friday → Monday.
-        assert_eq!(next("mon,wed,fri at 18:00", "2026-10-09 19:00", None), "2026-10-12 Mon 18:00");
-        assert_eq!(next("weekdays at 07:30", "2026-10-09 08:00", None), "2026-10-12 Mon 07:30");
+        assert_eq!(
+            next("mon,wed,fri at 18:00", "2026-10-09 19:00", None),
+            "2026-10-12 Mon 18:00"
+        );
+        assert_eq!(
+            next("weekdays at 07:30", "2026-10-09 08:00", None),
+            "2026-10-12 Mon 07:30"
+        );
     }
 
     #[test]
     fn every_n_counts_from_the_tasks_own_window() {
         // Anchored on Sat 3 Oct: the next is Sat 17 Oct, not Sat 10 Oct.
         assert_eq!(
-            next("every 2 weeks on sat at 10:00", "2026-10-03 11:00", Some("2026-10-03 10:00")),
+            next(
+                "every 2 weeks on sat at 10:00",
+                "2026-10-03 11:00",
+                Some("2026-10-03 10:00")
+            ),
             "2026-10-17 Sat 10:00"
         );
         // Done late, during the off week: still the rhythm's next Saturday.
         assert_eq!(
-            next("every 2 weeks on sat at 10:00", "2026-10-11 09:00", Some("2026-10-03 10:00")),
+            next(
+                "every 2 weeks on sat at 10:00",
+                "2026-10-11 09:00",
+                Some("2026-10-03 10:00")
+            ),
             "2026-10-17 Sat 10:00"
         );
         assert_eq!(
-            next("every 3 days at 08:00", "2026-10-06 12:00", Some("2026-10-05 08:00")),
+            next(
+                "every 3 days at 08:00",
+                "2026-10-06 12:00",
+                Some("2026-10-05 08:00")
+            ),
             "2026-10-08 Thu 08:00"
         );
     }
@@ -665,11 +786,19 @@ mod tests {
     #[test]
     fn monthly_clamps_to_the_last_day() {
         assert_eq!(
-            next("monthly on 31 at 09:00", "2026-10-31 10:00", Some("2026-10-31 09:00")),
+            next(
+                "monthly on 31 at 09:00",
+                "2026-10-31 10:00",
+                Some("2026-10-31 09:00")
+            ),
             "2026-11-30 Mon 09:00"
         );
         assert_eq!(
-            next("monthly on 1 at 09:00", "2026-10-01 09:30", Some("2026-10-01 09:00")),
+            next(
+                "monthly on 1 at 09:00",
+                "2026-10-01 09:30",
+                Some("2026-10-01 09:00")
+            ),
             "2026-11-01 Sun 09:00"
         );
     }
@@ -689,8 +818,14 @@ mod tests {
 
     #[test]
     fn after_done_without_at_is_exact() {
-        assert_eq!(next("3d after done", "2026-10-05 19:20", None), "2026-10-08 Thu 19:20");
-        assert_eq!(next("12h after done", "2026-10-05 19:20", None), "2026-10-06 Tue 07:20");
+        assert_eq!(
+            next("3d after done", "2026-10-05 19:20", None),
+            "2026-10-08 Thu 19:20"
+        );
+        assert_eq!(
+            next("12h after done", "2026-10-05 19:20", None),
+            "2026-10-06 Tue 07:20"
+        );
     }
 
     #[test]
@@ -699,13 +834,20 @@ mod tests {
             next("3 days after done at 07:00", "2026-10-05 19:20", None),
             "2026-10-08 Thu 07:00"
         );
-        assert_eq!(next("1w after done at 07:00", "2026-10-05 19:20", None), "2026-10-12 Mon 07:00");
+        assert_eq!(
+            next("1w after done at 07:00", "2026-10-05 19:20", None),
+            "2026-10-12 Mon 07:00"
+        );
     }
 
     #[test]
     fn after_done_ignores_the_tasks_own_window() {
         assert_eq!(
-            next("3d after done", "2026-10-05 19:20", Some("2026-10-20 08:00")),
+            next(
+                "3d after done",
+                "2026-10-05 19:20",
+                Some("2026-10-20 08:00")
+            ),
             "2026-10-08 Thu 19:20"
         );
     }
@@ -716,17 +858,28 @@ mod tests {
     fn wall_clock_survives_dst() {
         // Berlin falls back on Sun 25 Oct 2026.
         assert_eq!(
-            next("daily at 08:00", "2026-10-24 09:00", Some("2026-10-24 08:00")),
+            next(
+                "daily at 08:00",
+                "2026-10-24 09:00",
+                Some("2026-10-24 08:00")
+            ),
             "2026-10-25 Sun 08:00"
         );
-        assert_eq!(next("3d after done", "2026-10-23 19:20", None), "2026-10-26 Mon 19:20");
+        assert_eq!(
+            next("3d after done", "2026-10-23 19:20", None),
+            "2026-10-26 Mon 19:20"
+        );
     }
 
     #[test]
     fn a_missing_hour_opens_when_the_clock_resumes() {
         // Berlin springs forward on Sun 28 Mar 2027: 02:30 does not exist.
         assert_eq!(
-            next("daily at 02:30", "2027-03-27 03:00", Some("2027-03-27 02:30")),
+            next(
+                "daily at 02:30",
+                "2027-03-27 03:00",
+                Some("2027-03-27 02:30")
+            ),
             "2027-03-28 Sun 03:00"
         );
     }
@@ -739,7 +892,10 @@ mod tests {
             Some(berlin("2026-10-24 02:30")),
             &Berlin,
         );
-        assert_eq!(w.not_before, "2026-10-25T00:30:00Z".parse::<DateTime<Utc>>().unwrap());
+        assert_eq!(
+            w.not_before,
+            "2026-10-25T00:30:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
     }
 
     #[test]
@@ -748,7 +904,10 @@ mod tests {
         let plus2 = FixedOffset::east_opt(2 * 3600).unwrap();
         let done = "2026-10-05T22:30:00Z".parse::<DateTime<Utc>>().unwrap();
         let w = rule("3 days after done at 07:00").successor(done, None, &plus2);
-        assert_eq!(w.not_before, "2026-10-09T05:00:00Z".parse::<DateTime<Utc>>().unwrap());
+        assert_eq!(
+            w.not_before,
+            "2026-10-09T05:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
     }
 
     // ── first window ────────────────────────────────────────────────────
@@ -756,8 +915,14 @@ mod tests {
     #[test]
     fn first_window() {
         let now = berlin("2026-10-05 09:00");
-        assert_eq!(show(rule("daily at 08:00").first(now, &Berlin).not_before), "2026-10-06 Tue 08:00");
-        assert_eq!(show(rule("daily at 10:00").first(now, &Berlin).not_before), "2026-10-05 Mon 10:00");
+        assert_eq!(
+            show(rule("daily at 08:00").first(now, &Berlin).not_before),
+            "2026-10-06 Tue 08:00"
+        );
+        assert_eq!(
+            show(rule("daily at 10:00").first(now, &Berlin).not_before),
+            "2026-10-05 Mon 10:00"
+        );
         let w = rule("3d after done, due +1d").first(now, &Berlin);
         assert_eq!(w.not_before, now);
         assert_eq!(w.due, Some(now + Duration::days(1)));

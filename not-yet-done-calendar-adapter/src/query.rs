@@ -187,7 +187,11 @@ impl RowFields for EventRow<'_> {
                 Some(m) => Field::Text(Cow::Borrowed(m.provider.as_str())),
                 None => Field::Null,
             },
-            "join_url" => match event.online_meeting.as_ref().and_then(|m| m.join_url.as_deref()) {
+            "join_url" => match event
+                .online_meeting
+                .as_ref()
+                .and_then(|m| m.join_url.as_deref())
+            {
                 Some(url) => Field::Text(Cow::Borrowed(url)),
                 None => Field::Null,
             },

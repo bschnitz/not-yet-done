@@ -613,11 +613,11 @@ mod filter_persist;
 mod link;
 pub mod node_actions;
 pub mod option_menu;
+mod partial_load_hook;
 pub mod row_change;
 pub mod script;
 pub mod script_form;
 pub mod script_hook;
-mod partial_load_hook;
 
 pub use editor::EditorRequest;
 
@@ -4626,19 +4626,18 @@ impl App {
                     // few lines to the pane instead of being applied here.
                     // An eager tree re-delivers these rows with the whole
                     // subtree, and the hook runs there over all of them.
-                    let script_highlights = if load_ok
-                        && !self.eager_subtree_follows(view_index, pane_id)
-                    {
-                        self.run_load_hooks(
-                            view_index,
-                            pane_id,
-                            hook_depth,
-                            script_hook::LoadSeam::Flat,
-                            &mut items,
-                        )
-                    } else {
-                        Default::default()
-                    };
+                    let script_highlights =
+                        if load_ok && !self.eager_subtree_follows(view_index, pane_id) {
+                            self.run_load_hooks(
+                                view_index,
+                                pane_id,
+                                hook_depth,
+                                script_hook::LoadSeam::Flat,
+                                &mut items,
+                            )
+                        } else {
+                            Default::default()
+                        };
                     let item_count = items.len();
                     // Distinct node types present, captured before `items` is
                     // moved — used to fetch the backend-described column schema
@@ -8524,8 +8523,7 @@ impl App {
         let existing = match self.existing_query_kind(view_index, name) {
             Ok(kind) => kind,
             Err(e) => {
-                self.modal_message =
-                    Some(format!(":query delete — could not check names: {e}"));
+                self.modal_message = Some(format!(":query delete — could not check names: {e}"));
                 return;
             }
         };
@@ -10137,12 +10135,16 @@ impl App {
                         let template = match template {
                             None => None,
                             Some(name) => {
-                                let store = adapter.template_store(&action_id).ok_or_else(
-                                    || "this adapter stores no editor templates".to_string(),
-                                )?;
-                                Some(store.load(&name).await.map_err(|e| {
-                                    format!("template '{name}': {e}")
-                                })?)
+                                let store =
+                                    adapter.template_store(&action_id).ok_or_else(|| {
+                                        "this adapter stores no editor templates".to_string()
+                                    })?;
+                                Some(
+                                    store
+                                        .load(&name)
+                                        .await
+                                        .map_err(|e| format!("template '{name}': {e}"))?,
+                                )
                             }
                         };
                         crate::edit_session::NodeActionEditSession::new_templated(
@@ -10175,7 +10177,9 @@ impl App {
                 action_name,
                 action_id,
                 parent_node_id,
-            } => self.open_editor_templates_menu(view_index, action_name, action_id, parent_node_id),
+            } => {
+                self.open_editor_templates_menu(view_index, action_name, action_id, parent_node_id)
+            }
             ViewRequest::EditEditorTemplate {
                 view_index,
                 action_id,

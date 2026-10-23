@@ -194,7 +194,12 @@ impl VersionFilter {
     /// that silently listed everything would read as "nothing matched the
     /// other way round".
     pub(super) fn parse(query: Option<&str>) -> Result<Self> {
-        match query.map(str::trim).unwrap_or("").to_ascii_lowercase().as_str() {
+        match query
+            .map(str::trim)
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "" | "all" => Ok(Self::All),
             "released" => Ok(Self::Released),
             "unreleased" | "open" => Ok(Self::Unreleased),
@@ -556,7 +561,10 @@ mod tests {
     #[test]
     fn the_version_filter_reads_the_words_a_caller_would_write() {
         assert_eq!(VersionFilter::parse(None).unwrap(), VersionFilter::All);
-        assert_eq!(VersionFilter::parse(Some("  ")).unwrap(), VersionFilter::All);
+        assert_eq!(
+            VersionFilter::parse(Some("  ")).unwrap(),
+            VersionFilter::All
+        );
         assert_eq!(
             VersionFilter::parse(Some("Unreleased")).unwrap(),
             VersionFilter::Unreleased

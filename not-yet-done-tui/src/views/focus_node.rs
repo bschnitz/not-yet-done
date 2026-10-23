@@ -80,14 +80,27 @@ pub struct FocusSegment {
 pub enum FocusError {
     MissingLeadingSlash,
     EmptyPath,
-    BadRegex { seg: String, msg: String },
-    NotFound { seg: String },
-    Ambiguous { seg: String, preview: Vec<String> },
-    UnknownColumn { col: String, available: Vec<String> },
+    BadRegex {
+        seg: String,
+        msg: String,
+    },
+    NotFound {
+        seg: String,
+    },
+    Ambiguous {
+        seg: String,
+        preview: Vec<String>,
+    },
+    UnknownColumn {
+        col: String,
+        available: Vec<String>,
+    },
     /// The row matched, but no *visible* table row carries it — it sits
     /// under a collapsed parent, or a fuzzy filter hides it. Parking the
     /// cursor is impossible and saying nothing would look like a no-op.
-    NotVisible { id: String },
+    NotVisible {
+        id: String,
+    },
     MultiSegmentUnsupported,
 }
 

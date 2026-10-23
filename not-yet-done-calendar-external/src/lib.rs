@@ -327,14 +327,20 @@ impl CalendarBackendFactory for ExternalBackendFactory {
     ) -> Result<Box<dyn CalendarBackend>, CalendarError> {
         let cfg: ExternalConfig = serde_yaml::from_str(config)
             .map_err(|e| CalendarError::Config(format!("invalid external backend config: {e}")))?;
-        let label = cfg.name.clone().unwrap_or_else(|| connection_id.to_string());
+        let label = cfg
+            .name
+            .clone()
+            .unwrap_or_else(|| connection_id.to_string());
         let (prompt_tx, prompt_rx) = mpsc::channel(8);
         let credential_prompts = CredentialPrompts::new(label.clone(), prompt_tx.clone());
         let secret_resolvers = cfg
             .build_secret_resolvers(&credential_prompts)
             .map_err(|e| CalendarError::Config(format!("external backend secrets: {e}")))?;
         let backend_config = cfg.backend_config().map_err(CalendarError::Config)?;
-        let share = cfg.share.clone().unwrap_or_else(|| connection_id.to_string());
+        let share = cfg
+            .share
+            .clone()
+            .unwrap_or_else(|| connection_id.to_string());
         let (ready_tx, _) = broadcast::channel(16);
         let (attention_tx, _) = watch::channel(None);
         Ok(Box::new(ExternalBackend {

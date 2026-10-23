@@ -621,7 +621,10 @@ mod tests {
             ..EventPatch::default()
         };
         let json = serde_json::to_value(&patch).expect("serialises");
-        assert_eq!(json, serde_json::json!({ "title": "Retro", "location": null }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "title": "Retro", "location": null })
+        );
         let back: EventPatch = serde_json::from_value(json).expect("reads back");
         assert_eq!(back, patch, "null clears, absent leaves alone");
     }
@@ -639,7 +642,10 @@ mod tests {
         assert_eq!(event.show_as, ShowAs::OutOfOffice);
         assert_eq!(event.my_response, Some(Response::Pending));
         assert_eq!(event.attendees[0].response, Response::Pending);
-        assert_eq!(event.online_meeting.unwrap().provider, MeetingProvider::Teams);
+        assert_eq!(
+            event.online_meeting.unwrap().provider,
+            MeetingProvider::Teams
+        );
         assert!(!event.all_day && !event.cancelled && event.calendar.is_empty());
         assert_eq!(
             serde_json::to_value(ShowAs::WorkingElsewhere).unwrap(),

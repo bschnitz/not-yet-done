@@ -4486,11 +4486,7 @@ views: []
         assert!(notify.key.is_none());
         assert!(notify.message.as_deref().unwrap().contains("{message}"));
         assert_eq!(
-            notify
-                .on_event
-                .as_ref()
-                .unwrap()
-                .get("acme:mfa:resolved"),
+            notify.on_event.as_ref().unwrap().get("acme:mfa:resolved"),
             Some(&OnEventReaction::Close)
         );
 

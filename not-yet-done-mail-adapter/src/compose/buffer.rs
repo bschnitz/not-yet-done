@@ -232,7 +232,11 @@ mod tests {
     fn an_edit_inside_the_quote_is_kept() {
         let text = render(&headers(), "Hallo", Some("> alt\n\nja, gern!\n\n> mehr\n"));
         let draft = parse(&text).expect("parses");
-        assert!(draft.body.contains("> alt\n\nja, gern!\n\n> mehr"), "{}", draft.body);
+        assert!(
+            draft.body.contains("> alt\n\nja, gern!\n\n> mehr"),
+            "{}",
+            draft.body
+        );
     }
 
     /// A draft saved while buffers still carried a marker line sends without

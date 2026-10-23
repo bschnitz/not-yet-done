@@ -291,7 +291,10 @@ pub async fn level(bus: &Bus, root: &str) -> Result<Vec<ChainRow>> {
             description: crate::model::as_str(&props, "Description"),
             // An offset only where there is a window to offset from; a unit
             // that came up before the manager's startup began has none.
-            at: times.start().filter(|s| *s >= userspace).map(|s| s - userspace),
+            at: times
+                .start()
+                .filter(|s| *s >= userspace)
+                .map(|s| s - userspace),
             took: times.took(),
             origin: origin(times.activated(), userspace, finish),
         });
@@ -429,7 +432,12 @@ mod tests {
     fn a_oneshot_that_never_becomes_active_still_has_a_duration() {
         let mut props = Props::new();
         let put = |props: &mut Props, key: &str, value: u64| {
-            props.insert(key.into(), zbus_systemd::zvariant::Value::U64(value).try_into().unwrap());
+            props.insert(
+                key.into(),
+                zbus_systemd::zvariant::Value::U64(value)
+                    .try_into()
+                    .unwrap(),
+            );
         };
         put(&mut props, "InactiveExitTimestampMonotonic", 1_000_000);
         put(&mut props, "ActiveEnterTimestampMonotonic", 0);
@@ -448,7 +456,9 @@ mod tests {
         let mut props = Props::new();
         props.insert(
             "InactiveExitTimestampMonotonic".into(),
-            zbus_systemd::zvariant::Value::U64(2_000_000).try_into().unwrap(),
+            zbus_systemd::zvariant::Value::U64(2_000_000)
+                .try_into()
+                .unwrap(),
         );
         let times = Times::read(&props);
         assert_eq!(times.activated(), Some(2_000_000));

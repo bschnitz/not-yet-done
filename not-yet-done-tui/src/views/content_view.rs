@@ -8017,11 +8017,10 @@ impl ContentPane {
                         let row = self.table.selected_row();
                         let selected = match self.tree_entry_at_row(row) {
                             Some(entry) => Some((entry.node.id.clone(), entry.node.label.clone())),
-                            None => {
-                                self.item_index_for_row(row)
-                                    .and_then(|idx| self.items.get(idx))
-                                    .map(|i| (i.id.clone(), i.label.clone()))
-                            }
+                            None => self
+                                .item_index_for_row(row)
+                                .and_then(|idx| self.items.get(idx))
+                                .map(|i| (i.id.clone(), i.label.clone())),
                         };
                         if let Some((item_id, item_label)) = selected {
                             return SubViewMessage::ContentDrill {
@@ -8833,7 +8832,8 @@ impl ContentView {
     /// that owns the scripts can no longer answer for itself.
     fn tab_declares_node_scripts(&self) -> bool {
         fn any_child(defs: &[ChildDef]) -> bool {
-            defs.iter().any(|c| c.node_scripts || any_child(&c.children))
+            defs.iter()
+                .any(|c| c.node_scripts || any_child(&c.children))
         }
         self.view_defs
             .iter()
@@ -13373,8 +13373,12 @@ impl Component for ContentView {
 
         // Render breadcrumbs.
         if let Some(bc_area) = breadcrumb_area {
-            self.active_pane()
-                .render_breadcrumbs(frame, bc_area, &self.view_defs, &self.content_kb);
+            self.active_pane().render_breadcrumbs(
+                frame,
+                bc_area,
+                &self.view_defs,
+                &self.content_kb,
+            );
         }
 
         // Reserve one line at the bottom for the pagination footer when set.
@@ -22256,8 +22260,7 @@ mod tests {
         // the scripts for as long as its result is on screen.
         let mut config = test_config_with_query();
         config.views[0].node_scripts = true;
-        let mut view =
-            ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
         let pane_id = view.active_pane_id();
         view.apply_custom_query_result(
             pane_id,

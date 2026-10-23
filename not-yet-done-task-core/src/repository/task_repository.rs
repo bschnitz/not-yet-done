@@ -230,7 +230,9 @@ impl TaskRepository for TaskRepositoryImpl {
         if let Some(p) = priority {
             model.priority = Set(p);
         }
-        model.path = Set(Some(child_path(db, model.id.clone().unwrap(), parent_id).await?));
+        model.path = Set(Some(
+            child_path(db, model.id.clone().unwrap(), parent_id).await?,
+        ));
         Ok(model.insert(db).await?)
     }
 
@@ -978,27 +980,36 @@ impl TaskRepositoryImpl {
             .all(db)
             .await?
         {
-            task_global_tag::ActiveModel { task_id: Set(id), global_tag_id: Set(link.global_tag_id) }
-                .insert(db)
-                .await?;
+            task_global_tag::ActiveModel {
+                task_id: Set(id),
+                global_tag_id: Set(link.global_tag_id),
+            }
+            .insert(db)
+            .await?;
         }
         for link in task_project_tag::Entity::find()
             .filter(task_project_tag::Column::TaskId.eq(source))
             .all(db)
             .await?
         {
-            task_project_tag::ActiveModel { task_id: Set(id), project_tag_id: Set(link.project_tag_id) }
-                .insert(db)
-                .await?;
+            task_project_tag::ActiveModel {
+                task_id: Set(id),
+                project_tag_id: Set(link.project_tag_id),
+            }
+            .insert(db)
+            .await?;
         }
         for link in task_project::Entity::find()
             .filter(task_project::Column::TaskId.eq(source))
             .all(db)
             .await?
         {
-            task_project::ActiveModel { task_id: Set(id), project_id: Set(link.project_id) }
-                .insert(db)
-                .await?;
+            task_project::ActiveModel {
+                task_id: Set(id),
+                project_id: Set(link.project_id),
+            }
+            .insert(db)
+            .await?;
         }
         Ok(id)
     }
@@ -1039,8 +1050,10 @@ impl TaskRepositoryImpl {
         let mut subtree = vec![successor.clone()];
         let mut next = 0;
         while next < subtree.len() {
-            let children =
-                task::Entity::find().filter(Column::ParentId.eq(subtree[next].id)).all(db).await?;
+            let children = task::Entity::find()
+                .filter(Column::ParentId.eq(subtree[next].id))
+                .all(db)
+                .await?;
             subtree.extend(children);
             next += 1;
         }

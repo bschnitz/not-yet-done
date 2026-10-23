@@ -75,7 +75,12 @@ pub fn is_failed(unit: &UnitEntry) -> bool {
 
 /// The listing entries that are in a failed state, in name order.
 pub async fn entries(bus: &Bus) -> Result<Vec<UnitEntry>> {
-    let mut failed: Vec<UnitEntry> = bus.list_units().await?.into_iter().filter(is_failed).collect();
+    let mut failed: Vec<UnitEntry> = bus
+        .list_units()
+        .await?
+        .into_iter()
+        .filter(is_failed)
+        .collect();
     failed.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(failed)
 }

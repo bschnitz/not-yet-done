@@ -25,18 +25,17 @@ use tokio::sync::{RwLock, broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 
 use not_yet_done_calendar_core::{
-    CalEvent, CalendarBackend, CalendarError, EventDraft, EventTimes, LoadProgress,
-    TimeRange,
+    CalEvent, CalendarBackend, CalendarError, EventDraft, EventTimes, LoadProgress, TimeRange,
 };
 use not_yet_done_content::*;
 
 use crate::config::{
-    CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_STORE_POLL_SECS, DEFAULT_WINDOW_FUTURE_DAYS,
-    DEFAULT_WINDOW_PAST_DAYS, FetchMode, Window, default_reminder_leads,
+    CalendarConfig, DEFAULT_POLL_INTERVAL_SECS, DEFAULT_STORE_POLL_SECS,
+    DEFAULT_WINDOW_FUTURE_DAYS, DEFAULT_WINDOW_PAST_DAYS, FetchMode, Window,
+    default_reminder_leads,
 };
 use crate::event_form::{
-    self,
-    event_fields, form_opt, form_required, form_show_as, form_times, show_as_label,
+    self, event_fields, form_opt, form_required, form_show_as, form_times, show_as_label,
 };
 use crate::fetch::{Fetcher, Staleness};
 use crate::persist::Persisted;
@@ -261,16 +260,13 @@ async fn execute_create(
     // chosen label; without one (a single writable calendar) fall back to it.
     // No writable calendar at all → nothing to create against.
     let target = match form_opt(values, "calendar") {
-        Some(label) => calendars
-            .iter()
-            .find(|c| c.label == label)
-            .ok_or_else(|| {
-                let known: Vec<&str> = calendars.iter().map(|c| c.label.as_str()).collect();
-                other_err(format!(
-                    "unknown calendar: '{label}'; known: {}",
-                    known.join(", ")
-                ))
-            })?,
+        Some(label) => calendars.iter().find(|c| c.label == label).ok_or_else(|| {
+            let known: Vec<&str> = calendars.iter().map(|c| c.label.as_str()).collect();
+            other_err(format!(
+                "unknown calendar: '{label}'; known: {}",
+                known.join(", ")
+            ))
+        })?,
         None => calendars
             .first()
             .ok_or_else(|| other_err("no writable calendar available to create the event in"))?,
@@ -588,7 +584,9 @@ impl CalendarAdapter {
                 .max(1),
         );
         let store_poll = Duration::from_secs(
-            cfg.store_poll_secs.unwrap_or(DEFAULT_STORE_POLL_SECS).max(1),
+            cfg.store_poll_secs
+                .unwrap_or(DEFAULT_STORE_POLL_SECS)
+                .max(1),
         );
         let (inv_tx, _) = broadcast::channel(16);
         let (rem_tx, _) = broadcast::channel(64);
@@ -759,15 +757,16 @@ impl CalendarAdapter {
                 };
                 let was_empty = fetcher.cache.read().await.is_empty();
                 if live {
-                    let range = effective_range(&*current_query.read().await, &fetcher.window, Utc::now());
+                    let range =
+                        effective_range(&*current_query.read().await, &fetcher.window, Utc::now());
                     // Bound the fetches at half the poll window: a connection
                     // that can't answer within that budget is abandoned and
                     // retried next tick, so a wedged backend never stalls the
                     // loop for a whole interval. The initial interactive login
                     // is *not* subject to this — it runs on `list()`/the
                     // ready-watch, not the poll.
-                    let round = futures::future::join_all(fetcher.fetchable(false).into_iter().map(
-                        |idx| {
+                    let round = futures::future::join_all(
+                        fetcher.fetchable(false).into_iter().map(|idx| {
                             let fetcher = fetcher.clone();
                             async move {
                                 let _ = tokio::time::timeout(
@@ -776,8 +775,8 @@ impl CalendarAdapter {
                                 )
                                 .await;
                             }
-                        },
-                    ));
+                        }),
+                    );
                     round.await;
                 }
                 fetcher.catch_up().await;
@@ -1785,7 +1784,10 @@ impl EventNode {
             .fetcher
             .index_of(&self.connection)
             .ok_or_else(|| other_err(format!("no connection for event '{}'", self.label)))?;
-        match self.fetcher.backends[idx].update_event(&self.uid, &patch).await {
+        match self.fetcher.backends[idx]
+            .update_event(&self.uid, &patch)
+            .await
+        {
             Ok(()) => {}
             Err(CalendarError::NotFound(_)) => {
                 self.fetcher.forget(&self.connection, &self.id).await;
@@ -2012,7 +2014,10 @@ mod tests {
             DateTime::parse_from_rfc3339(&value.value).unwrap()
         };
         // Whatever the zone the test runs in: the date stays, the clock is 00:00.
-        assert_eq!(get("start").naive_local().to_string(), "2030-01-15 00:00:00");
+        assert_eq!(
+            get("start").naive_local().to_string(),
+            "2030-01-15 00:00:00"
+        );
         assert_eq!(get("end").naive_local().to_string(), "2030-01-16 00:00:00");
         assert!(render_body(&m).contains("2030-01-15 – 2030-01-16"));
 
@@ -2408,7 +2413,10 @@ mod tests {
             matches!(&s, AdapterStatus::Connecting { step, .. } if step.as_deref() == Some("Team: Approve 17")),
             "{s:?}"
         );
-        assert!(matches!(st.attend("b", "Team", None, 2_500), AdapterStatus::Ready));
+        assert!(matches!(
+            st.attend("b", "Team", None, 2_500),
+            AdapterStatus::Ready
+        ));
     }
 
     #[test]
@@ -2715,12 +2723,7 @@ mod tests {
     /// Run `execute_create` with no backends and no calendars — enough to
     /// exercise the pure validation guards that run before target resolution.
     async fn exec_create_bare(values: HashMap<String, String>) -> Result<ActionOutcome> {
-        execute_create(
-            &test_fetcher(Vec::new()),
-            &[],
-            &values,
-        )
-        .await
+        execute_create(&test_fetcher(Vec::new()), &[], &values).await
     }
 
     #[tokio::test]
@@ -2900,17 +2903,25 @@ mod tests {
         let mut node = EventNode::new(event, fetcher.clone());
 
         let ctx = ActionContext::default();
-        let ActionDispatch::DeleteSelf { confirm } = node.invoke_action("delete", &ctx).await.unwrap()
+        let ActionDispatch::DeleteSelf { confirm } =
+            node.invoke_action("delete", &ctx).await.unwrap()
         else {
             panic!("delete goes through the confirm flow");
         };
         assert!(confirm.unwrap().contains("Dentist"));
-        assert!(deleted.lock().unwrap().is_empty(), "nothing deleted before the confirm");
+        assert!(
+            deleted.lock().unwrap().is_empty(),
+            "nothing deleted before the confirm"
+        );
 
         node.execute("delete", ActionInput::None, &ActionArgs::default())
             .await
             .unwrap();
-        assert_eq!(*deleted.lock().unwrap(), ["u:1"], "the uid, not the global id");
+        assert_eq!(
+            *deleted.lock().unwrap(),
+            ["u:1"],
+            "the uid, not the global id"
+        );
         assert!(fetcher.cache.read().await.is_empty());
         assert!(inv_rx.try_recv().is_ok(), "the view reloads");
     }
@@ -2957,7 +2968,11 @@ mod tests {
         assert_eq!(values["location"], "Room 1");
 
         let outcome = node
-            .execute("edit", ActionInput::Form(values.clone()), &ActionArgs::default())
+            .execute(
+                "edit",
+                ActionInput::Form(values.clone()),
+                &ActionArgs::default(),
+            )
             .await
             .unwrap();
         let ActionOutcome::Done { message } = outcome else {
@@ -2997,7 +3012,9 @@ mod tests {
             Ok(Vec::new())
         }
         async fn delete_event(&self, uid: &str) -> std::result::Result<(), CalendarError> {
-            Err(CalendarError::NotFound(format!("no event with UID '{uid}' on the server")))
+            Err(CalendarError::NotFound(format!(
+                "no event with UID '{uid}' on the server"
+            )))
         }
     }
 

@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use not_yet_done_content::*;
 
 use super::super::util::other_err;
-use super::slugs::{build_slug_tables, USER_PREFIX};
 use super::JiraIssueNode;
+use super::slugs::{USER_PREFIX, build_slug_tables};
 
 /// The value that means "empty this field" rather than "leave it alone".
 const CLEAR: &str = "-";
@@ -108,7 +108,7 @@ impl JiraIssueNode {
                     None => {
                         return Err(other_err(format!(
                             "unknown user slug `{who}` -- see the CACHE legend"
-                        )))
+                        )));
                     }
                 }
             }

@@ -299,7 +299,9 @@ impl TaskService for TaskServiceImpl {
         id: Uuid,
         recur: Option<String>,
     ) -> Result<task::Model, AppError> {
-        let recur = recur.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+        let recur = recur
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
         if let Some(rule) = &recur {
             rule.parse::<crate::recur::Rule>()
                 .map_err(|e| AppError::InvalidRecurrence(e.to_string()))?;

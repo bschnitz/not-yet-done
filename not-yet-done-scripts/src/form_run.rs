@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use not_yet_done_content::script_form::{
-    CHATTY_ROUND_COUNT, FormState, ScriptFormError, ScriptRound, advance, build_request,
-    parse_round,
+    advance, build_request, parse_round, FormState, ScriptFormError, ScriptRound,
+    CHATTY_ROUND_COUNT,
 };
 use serde_json::Value;
 use thiserror::Error;

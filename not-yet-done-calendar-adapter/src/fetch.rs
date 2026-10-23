@@ -10,7 +10,7 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 use tokio::task::AbortHandle;
 
-use not_yet_done_calendar_core::{meeting, CalEvent, CalendarBackend, TimeRange};
+use not_yet_done_calendar_core::{CalEvent, CalendarBackend, TimeRange, meeting};
 use not_yet_done_content::Invalidation;
 
 use crate::adapter::{Cache, MergedEvent};
@@ -122,7 +122,13 @@ impl Fetcher {
     /// Drop an event deleted at the source from the cache and the store, and
     /// invalidate the view.
     pub(crate) async fn forget(&self, connection: &str, global_id: &str) {
-        persist::forget(&self.cache, self.persisted.as_deref(), connection, global_id).await;
+        persist::forget(
+            &self.cache,
+            self.persisted.as_deref(),
+            connection,
+            global_id,
+        )
+        .await;
         let _ = self.inv_tx.send(Invalidation::All);
     }
 

@@ -303,10 +303,16 @@ impl Bus {
     pub async fn startup_window(&self) -> Result<(u64, Option<u64>)> {
         let proxy = self.manager_proxy().await?;
         let began = self
-            .deadline("reading the startup time", proxy.userspace_timestamp_monotonic())
+            .deadline(
+                "reading the startup time",
+                proxy.userspace_timestamp_monotonic(),
+            )
             .await?;
         let ended = self
-            .deadline("reading the startup time", proxy.finish_timestamp_monotonic())
+            .deadline(
+                "reading the startup time",
+                proxy.finish_timestamp_monotonic(),
+            )
             .await?;
         Ok((began, (ended > 0).then_some(ended)))
     }
@@ -540,8 +546,9 @@ impl Bus {
                     FileChange::Enable => "EnableUnitFiles",
                     _ => "PresetUnitFiles",
                 };
-                let (carries_install_info, changes) =
-                    self.write(&proxy, &what, method, &(files, false, false)).await?;
+                let (carries_install_info, changes) = self
+                    .write(&proxy, &what, method, &(files, false, false))
+                    .await?;
                 FileResult {
                     carries_install_info,
                     changes,
@@ -721,9 +728,15 @@ mod tests {
                 Some("Method call timed out"),
             )
             .to_string();
-            assert!(said.starts_with("Restarting man-db.timer was dropped"), "{said}");
+            assert!(
+                said.starts_with("Restarting man-db.timer was dropped"),
+                "{said}"
+            );
             assert!(said.contains("25 seconds"), "{said}");
-            assert!(!said.contains("Method call"), "transport wording leaked: {said}");
+            assert!(
+                !said.contains("Method call"),
+                "transport wording leaked: {said}"
+            );
         }
     }
 
