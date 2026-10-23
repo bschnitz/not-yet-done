@@ -9,3 +9,6 @@
 
 # style: format the whole workspace with cargo fmt
 9a0018ac471f0956296176f583cc4048dccda05b
+
+# style: rustfmt the files that drifted since the workspace format
+2c4969a90c0dd462bf8f9cba3a211f03e37d61d6
