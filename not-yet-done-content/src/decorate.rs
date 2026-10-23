@@ -54,6 +54,9 @@ pub trait AdapterDecorator: Send + Sync {
     fn instance_data_dir(&self) -> PathBuf {
         self.inner().instance_data_dir()
     }
+    fn root_type(&self) -> Option<NodeType> {
+        self.inner().root_type()
+    }
     async fn root(&self) -> Result<Box<dyn Node>> {
         self.inner().root().await
     }
@@ -244,6 +247,9 @@ impl<T: AdapterDecorator> ContentAdapter for T {
     }
     fn instance_data_dir(&self) -> PathBuf {
         <T as AdapterDecorator>::instance_data_dir(self)
+    }
+    fn root_type(&self) -> Option<NodeType> {
+        <T as AdapterDecorator>::root_type(self)
     }
     async fn root(&self) -> Result<Box<dyn Node>> {
         <T as AdapterDecorator>::root(self).await

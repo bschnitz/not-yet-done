@@ -4,6 +4,16 @@
 
 use not_yet_done_content::NodeType;
 
+pub(super) fn root_node_type() -> NodeType {
+    NodeType {
+        type_id: "jira:root".into(),
+        mime_type: "".into(),
+        syntax: None,
+        file_extension: "".into(),
+        display_name: "Jira Root".into(),
+    }
+}
+
 pub(super) fn issue_node_type() -> NodeType {
     NodeType {
         type_id: "jira:issue".into(),

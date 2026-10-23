@@ -41,7 +41,8 @@ use issue::JiraIssueNode;
 use link::JiraLinkNode;
 use project::{JiraProjectNode, JiraVersionNode};
 use types::{
-    bookmark_node_type, issue_node_type, label_node_type, project_node_type, user_node_type,
+    bookmark_node_type, issue_node_type, label_node_type, project_node_type, root_node_type,
+    user_node_type,
 };
 use util::other_err;
 
@@ -151,6 +152,12 @@ impl ContentAdapter for JiraAdapter {
 
     fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    // Known without the client: the type walk behind `help` and the local
+    // custom-column writes (`set-cells`) must not log into Jira.
+    fn root_type(&self) -> Option<NodeType> {
+        Some(root_node_type())
     }
 
     async fn root(&self) -> Result<Box<dyn Node>> {
@@ -525,13 +532,7 @@ impl Node for JiraRoot {
     }
 
     fn node_type(&self) -> &NodeType {
-        static ROOT_TYPE: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(|| NodeType {
-            type_id: "jira:root".into(),
-            mime_type: "".into(),
-            syntax: None,
-            file_extension: "".into(),
-            display_name: "Jira Root".into(),
-        });
+        static ROOT_TYPE: std::sync::LazyLock<NodeType> = std::sync::LazyLock::new(root_node_type);
         &ROOT_TYPE
     }
 

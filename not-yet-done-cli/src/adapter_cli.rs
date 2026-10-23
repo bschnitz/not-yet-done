@@ -852,12 +852,17 @@ fn action_flag_hint(a: &NodeAction) -> &'static str {
 /// Walk the child-type path from the adapter root, resolving each segment
 /// against the child types of the current level (by local name or full type
 /// id). Returns the resolved [`NodeType`] and whether it is the root level.
+///
+/// The root's type comes from [`ContentAdapter::root_type`] where the adapter
+/// knows it, so the walk builds no root node — and connects to nothing.
 async fn resolve_type_level(
     adapter: &dyn ContentAdapter,
     child_path: &[String],
 ) -> Result<(NodeType, bool)> {
-    let root = adapter.root().await?;
-    let mut nt = root.node_type().clone();
+    let mut nt = match adapter.root_type() {
+        Some(nt) => nt,
+        None => adapter.root().await?.node_type().clone(),
+    };
     for seg in child_path {
         let kids = not_yet_done_content::child_types_of_type(adapter, &nt);
         match kids
@@ -2645,6 +2650,56 @@ mod tests {
                 .build(),
         };
         assert_eq!(action_root(&adapter).await.unwrap().label(), "snapshot");
+    }
+
+    /// An adapter that can describe its types but has no backend: `root()`
+    /// fails the way an unreachable Jira does, the root's type is known anyway.
+    struct Offline {
+        types: not_yet_done_content::mock::MockAdapter,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentAdapter for Offline {
+        fn adapter_type(&self) -> &str {
+            "offline"
+        }
+        fn root_type(&self) -> Option<NodeType> {
+            Some(not_yet_done_content::mock::default_node_type())
+        }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn Node>> {
+            Err(not_yet_done_content::ContentError::Other(
+                "no connection".into(),
+            ))
+        }
+        async fn get_by_id(&self, _id: &str) -> not_yet_done_content::Result<Box<dyn Node>> {
+            Err(not_yet_done_content::ContentError::Other(
+                "no connection".into(),
+            ))
+        }
+        fn childs<'a>(
+            &'a self,
+            node: &'a dyn Node,
+        ) -> Vec<not_yet_done_content::children::Child<'a>> {
+            self.types.childs(node)
+        }
+    }
+
+    /// Walking to a level is the adapter's static description: `set-cells`
+    /// and the other local actions stand on it, and they must not wait for a
+    /// backend — `jira:issue set-cells` logged into Jira and hung on a 503.
+    #[tokio::test]
+    async fn a_level_resolves_without_the_root_node() {
+        use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
+        let adapter = Offline {
+            types: MockAdapterBuilder::new("offline")
+                .node(MockNodeData::new("root", "Root").child_type(issue_type()))
+                .build(),
+        };
+        let (nt, is_root) = resolve_type_level(&adapter, &["issue".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(nt.type_id, issue_type().type_id);
+        assert!(!is_root);
     }
 
     #[test]

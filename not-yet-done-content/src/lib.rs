@@ -2366,6 +2366,15 @@ pub trait ContentAdapter: Send + Sync {
             .join(self.instance_id())
     }
 
+    /// The root node's type, when the adapter knows it without building the
+    /// root. Walking the type tree (`help`, local actions such as `set-cells`)
+    /// starts here, so an adapter whose `root()` connects to a backend should
+    /// answer this — otherwise a purely local write waits for, and fails with,
+    /// the backend. `None` (the default) falls back to `root()`.
+    fn root_type(&self) -> Option<NodeType> {
+        None
+    }
+
     /// Navigate to the root node of the content tree.
     async fn root(&self) -> Result<Box<dyn Node>>;
 
