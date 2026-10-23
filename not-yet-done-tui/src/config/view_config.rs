@@ -712,11 +712,16 @@ fn collect_input_actions(
     tree_find_levels: &mut Vec<String>,
 ) {
     for a in actions {
-        match a.action_type.as_str() {
-            "fuzzy_filter" => fuzzy_levels.push(scope.to_string()),
-            "search" => search_levels.push(scope.to_string()),
-            "tree_find" => tree_find_levels.push(scope.to_string()),
-            _ => {}
+        let levels = match a.action_type.as_str() {
+            "fuzzy_filter" => &mut *fuzzy_levels,
+            "search" => &mut *search_levels,
+            "tree_find" => &mut *tree_find_levels,
+            _ => continue,
+        };
+        // Several actions of one kind at the same level (e.g. a canned
+        // `tree_find` next to the free-text one) still count as one level.
+        if levels.last().map(String::as_str) != Some(scope) {
+            levels.push(scope.to_string());
         }
     }
 }
@@ -6382,6 +6387,40 @@ views:
                 .any(|e| e.contains("tree_find is defined at multiple tree levels")),
             "got: {errs:?}"
         );
+    }
+
+    /// A canned `tree_find` next to the free-text one sits on the same
+    /// level, so it is not "multiple tree levels".
+    #[test]
+    fn validate_tree_accepts_two_tree_finds_on_one_level() {
+        let yaml = r#"
+tab: { name: T }
+adapter: { type: x }
+views:
+  - name: v
+    node_type: db
+    tree_label: name
+    columns: [{ key: name }]
+    actions:
+      - { name: tf1, key: '/', type: tree_find }
+      - { name: tf2, key: 'D', type: tree_find }
+    children:
+      - name: schema
+        node_type: schema
+        tree_label: name
+        columns: [{ key: name }]
+"#;
+        let cfg: ViewFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = cfg.validate(
+            &KeyBindingConfig::default(),
+            &crate::config::editor::EditorsConfig::default(),
+        );
+        if let Err(errs) = result {
+            assert!(
+                !errs.iter().any(|e| e.contains("multiple tree levels")),
+                "got: {errs:?}"
+            );
+        }
     }
 
     #[test]
