@@ -360,9 +360,15 @@ async fn run_verb(adapter: &Arc<dyn ContentAdapter>, inv: &Invocation) -> Result
     // TUI's `r` does the same thing). Cheap and side-effect free for the
     // adapters that are already connected.
     let a = Arc::clone(adapter);
-    sup.guard(async move { a.root().await.map_err(|e| anyhow!("{e}")) })
+    let root = sup
+        .guard(async move { a.root().await.map_err(|e| anyhow!("{e}")) })
         .await
         .with_context(|| format!("connecting to '{}'", inv.instance))?;
+    // A root built on a connection that was already up is the root the verb
+    // needs; building it again costs the trackings adapter a second load of
+    // its whole store. One built while the connection was still coming up
+    // may be a snapshot of nothing, so the verb asks again.
+    let root = adapter_connect::is_connected(&adapter.subscribe_status().borrow()).then_some(root);
     // Only then run the verb: an adapter that builds its connection in the
     // background would otherwise serve an empty snapshot, and an empty
     // list is indistinguishable from "there is nothing there".
@@ -372,7 +378,7 @@ async fn run_verb(adapter: &Arc<dyn ContentAdapter>, inv: &Invocation) -> Result
 
     let verb = async {
         match inv.verb.as_str() {
-            "ls" | "list" => cmd_ls(adapter.as_ref(), inv).await,
+            "ls" | "list" => cmd_ls(adapter.as_ref(), inv, root).await,
             "show" | "get" => cmd_show(adapter.as_ref(), inv).await,
             "cat" | "read" => cmd_cat(adapter.as_ref(), inv).await,
             "actions" => cmd_actions(adapter.as_ref(), inv).await,
@@ -986,11 +992,19 @@ fn parse_group_by(spec: &str) -> Result<GroupSpec> {
 // Verbs
 // ---------------------------------------------------------------------------
 
-async fn cmd_ls(adapter: &dyn ContentAdapter, inv: &Invocation) -> Result<()> {
+/// `root` is the root the connection was made with, when it still holds.
+async fn cmd_ls(
+    adapter: &dyn ContentAdapter,
+    inv: &Invocation,
+    root: Option<Box<dyn Node>>,
+) -> Result<()> {
     let parent: Box<dyn Node> =
         match resolve_target(adapter, inv, inv.positionals.first().map(String::as_str)).await? {
             Some(node) => node,
-            None => adapter.root().await?,
+            None => match root {
+                Some(root) => root,
+                None => adapter.root().await?,
+            },
         };
 
     let child_types = children::child_types(adapter, parent.as_ref());
@@ -2700,6 +2714,111 @@ mod tests {
             .unwrap();
         assert_eq!(nt.type_id, issue_type().type_id);
         assert!(!is_root);
+    }
+
+    /// Counts its roots. The first one is built while the adapter is still
+    /// `connecting` when `connect_late` is set — the way Jira connects in the
+    /// background — and labelled so a listing shows which root it stood on.
+    struct CountingRoots {
+        nodes: not_yet_done_content::mock::MockAdapter,
+        roots: std::sync::atomic::AtomicUsize,
+        status: tokio::sync::watch::Sender<not_yet_done_content::AdapterStatus>,
+        connect_late: bool,
+    }
+
+    impl CountingRoots {
+        fn new(connect_late: bool) -> Self {
+            use not_yet_done_content::AdapterStatus;
+            use not_yet_done_content::mock::{MockAdapterBuilder, MockNodeData, issue_type};
+            let initial = if connect_late {
+                AdapterStatus::Connecting {
+                    retry: 0,
+                    max_retries: 0,
+                    timeout_secs: 0,
+                    started_at_unix_ms: 0,
+                    step: None,
+                    attention: false,
+                }
+            } else {
+                AdapterStatus::Ready
+            };
+            CountingRoots {
+                nodes: MockAdapterBuilder::new("counting")
+                    .node(
+                        MockNodeData::new("root", "Root")
+                            .child_type(issue_type())
+                            .child(MockNodeData::new("a", "A").node_type(issue_type())),
+                    )
+                    .build(),
+                roots: Default::default(),
+                status: tokio::sync::watch::channel(initial).0,
+                connect_late,
+            }
+        }
+
+        fn roots(&self) -> usize {
+            self.roots.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContentAdapter for CountingRoots {
+        fn adapter_type(&self) -> &str {
+            "counting"
+        }
+        fn subscribe_status(
+            &self,
+        ) -> tokio::sync::watch::Receiver<not_yet_done_content::AdapterStatus> {
+            self.status.subscribe()
+        }
+        async fn root(&self) -> not_yet_done_content::Result<Box<dyn Node>> {
+            let n = self.roots.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 && self.connect_late {
+                let status = self.status.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    status.send_replace(not_yet_done_content::AdapterStatus::Ready);
+                });
+            }
+            self.nodes.root().await
+        }
+        async fn get_by_id(&self, id: &str) -> not_yet_done_content::Result<Box<dyn Node>> {
+            self.nodes.get_by_id(id).await
+        }
+        fn childs<'a>(
+            &'a self,
+            node: &'a dyn Node,
+        ) -> Vec<not_yet_done_content::children::Child<'a>> {
+            self.nodes.childs(node)
+        }
+    }
+
+    /// The root that connected the adapter is the root the listing stands on:
+    /// the trackings adapter loads its whole store per root, twice per `ls`.
+    #[tokio::test]
+    async fn ls_on_a_connected_adapter_builds_the_root_once() {
+        let counting = Arc::new(CountingRoots::new(false));
+        let adapter: Arc<dyn ContentAdapter> = counting.clone();
+
+        run_verb(&adapter, &inv_from(&["nyd", "adapter", "counting", "ls"]))
+            .await
+            .unwrap();
+
+        assert_eq!(counting.roots(), 1);
+    }
+
+    /// An adapter that was still connecting when its first root was built
+    /// served a snapshot of nothing; the listing asks again once it is up.
+    #[tokio::test]
+    async fn ls_on_an_adapter_connecting_in_the_background_asks_for_the_root_again() {
+        let counting = Arc::new(CountingRoots::new(true));
+        let adapter: Arc<dyn ContentAdapter> = counting.clone();
+
+        run_verb(&adapter, &inv_from(&["nyd", "adapter", "counting", "ls"]))
+            .await
+            .unwrap();
+
+        assert_eq!(counting.roots(), 2);
     }
 
     #[test]

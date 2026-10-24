@@ -252,6 +252,14 @@ async fn watch_status(adapter: Arc<dyn ContentAdapter>, prompter: Arc<dyn Prompt
     }
 }
 
+/// Whether `status` says the connection is up: the states a verb may run in.
+pub fn is_connected(status: &AdapterStatus) -> bool {
+    matches!(
+        status,
+        AdapterStatus::Ready | AdapterStatus::Idle | AdapterStatus::Busy { .. }
+    )
+}
+
 /// Wait until the adapter has finished connecting.
 ///
 /// `Idle` returns immediately: it means no connection attempt is running, so
@@ -263,12 +271,12 @@ pub async fn wait_until_connected(adapter: &dyn ContentAdapter) -> Result<()> {
     let mut rx = adapter.subscribe_status();
     loop {
         let status = rx.borrow_and_update().clone();
+        if is_connected(&status) {
+            return Ok(());
+        }
         match &status {
-            AdapterStatus::Ready | AdapterStatus::Idle | AdapterStatus::Busy { .. } => {
-                return Ok(());
-            }
             AdapterStatus::Failed { reason } => bail!("connection failed: {reason}"),
-            AdapterStatus::Connecting { .. } | AdapterStatus::NeedsCreds { .. } => {}
+            _ => {}
         }
         // The deadline is against *silence*, not against the login: a login
         // that keeps naming its steps is working, however long it takes, and
