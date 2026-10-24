@@ -43,4 +43,5 @@ not-yet-done-workflow           = { path = "../not-yet-done-workflow" }
 not-yet-done-systemd-adapter    = { path = "../not-yet-done-systemd-adapter" }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -456,50 +456,128 @@ impl fmt::Display for SkippedView {
 }
 
 /// [`discover_instances`], plus the instance-shaped view files it had to skip.
+///
+/// Served from a process-wide [`ViewDiscovery`]: one `nyd` call asks several
+/// times (resolving the adapter, loading its hooks, the CLI's own lookup), and
+/// a long-lived front-end asks on every hook it fires.
 pub fn discover_instances_reporting() -> (Vec<DiscoveredInstance>, Vec<SkippedView>) {
-    let dir = views_dir();
-    let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "yaml" || ext == "yml")
-        })
-        .collect();
-    yaml_files.sort();
+    static DISCOVERY: std::sync::LazyLock<ViewDiscovery> =
+        std::sync::LazyLock::new(ViewDiscovery::default);
+    DISCOVERY.discover(&views_dir())
+}
 
-    let mut out = Vec::new();
-    let mut skipped = Vec::new();
-    for path in yaml_files {
-        let Ok(yaml) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        // Same heuristic as the TUI loader: top-level `tab` AND `adapter`.
-        let Ok(raw) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
-            continue;
-        };
-        if raw.get("tab").is_none() || raw.get("adapter").is_none() {
-            continue;
-        }
-        let head = match serde_yaml::from_str::<ViewFileHead>(&yaml) {
-            Ok(head) => head,
-            Err(err) => {
-                skipped.push(SkippedView {
-                    view_path: path,
-                    reason: err.to_string(),
-                });
+/// What one view file said, as of the stamp it was parsed at.
+#[derive(Debug, Clone)]
+enum ViewFile {
+    /// Not an instance: no top-level `tab` and `adapter`, or not YAML at all.
+    Other,
+    Instance {
+        adapter: AdapterInstance,
+        hooks: Option<hooks::HookConfig>,
+    },
+    Skipped(String),
+}
+
+/// Size and modification time: what has to move for a file to be read again.
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+/// The views directory, parsed file by file and remembered per file until the
+/// file's size or modification time moves.
+///
+/// The view files are YAML of a few hundred kilobytes all told, and parsing
+/// them was a third of every `nyd adapter … ls`. The listing itself is taken
+/// fresh on each call, so an added or removed file is seen at once, and a
+/// changed one costs its own parse only — the TUI's config reload keeps
+/// working unchanged.
+#[derive(Debug, Default)]
+pub struct ViewDiscovery {
+    files: std::sync::Mutex<HashMap<PathBuf, (FileStamp, ViewFile)>>,
+    parses: std::sync::atomic::AtomicUsize,
+}
+
+impl ViewDiscovery {
+    /// Every instance declared in `dir`, sorted by file path, and the
+    /// instance-shaped files whose head did not parse.
+    pub fn discover(&self, dir: &Path) -> (Vec<DiscoveredInstance>, Vec<SkippedView>) {
+        let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|ext| ext == "yaml" || ext == "yml")
+            })
+            .collect();
+        yaml_files.sort();
+
+        let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        files.retain(|path, _| yaml_files.contains(path));
+        let mut out = Vec::new();
+        let mut skipped = Vec::new();
+        for path in yaml_files {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                files.remove(&path);
                 continue;
+            };
+            let stamp = (meta.len(), meta.modified().ok());
+            let file = match files.get(&path) {
+                Some((seen, file)) if *seen == stamp => file.clone(),
+                _ => {
+                    let Ok(yaml) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    self.parses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let file = parse_view_file(&yaml);
+                    files.insert(path.clone(), (stamp, file.clone()));
+                    file
+                }
+            };
+            match file {
+                ViewFile::Other => {}
+                ViewFile::Instance { adapter, hooks } => out.push(DiscoveredInstance {
+                    adapter,
+                    hooks,
+                    view_path: path,
+                }),
+                ViewFile::Skipped(reason) => skipped.push(SkippedView {
+                    view_path: path,
+                    reason,
+                }),
             }
-        };
-        out.push(DiscoveredInstance {
+        }
+        (out, skipped)
+    }
+
+    /// How many files this discovery has parsed so far.
+    pub fn parses(&self) -> usize {
+        self.parses.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// One view file, parsed once. Same heuristic as the TUI loader: a view
+/// config has a top-level `tab` AND `adapter`.
+fn parse_view_file(yaml: &str) -> ViewFile {
+    let Ok(raw) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
+        return ViewFile::Other;
+    };
+    if raw.get("tab").is_none() || raw.get("adapter").is_none() {
+        return ViewFile::Other;
+    }
+    match serde_yaml::from_value::<ViewFileHead>(raw) {
+        Ok(head) => ViewFile::Instance {
             adapter: head.adapter,
             hooks: head.hooks,
-            view_path: path,
-        });
+        },
+        // Only a broken head pays for the second parse: from the text, the
+        // error carries the line and column the reader has to go to.
+        Err(err) => ViewFile::Skipped(
+            serde_yaml::from_str::<ViewFileHead>(yaml)
+                .err()
+                .map_or_else(|| err.to_string(), |e| e.to_string()),
+        ),
     }
-    (out, skipped)
 }
 
 /// The `hooks:` config for one instance, parsed from its view file. `None` if
@@ -898,5 +976,104 @@ adapter:
             aliases: Default::default(),
         };
         assert!(read_config_string(&inst, Path::new("/tmp/view.yaml")).is_err());
+    }
+
+    const TASKS_VIEW: &str =
+        "tab:\n  name: Tasks\nadapter:\n  type: tasks\n  config_inline: \"x\"\n";
+
+    fn write(dir: &Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn ids(found: &[DiscoveredInstance]) -> Vec<&str> {
+        found.iter().map(DiscoveredInstance::instance_id).collect()
+    }
+
+    #[test]
+    fn discovery_keeps_view_files_and_reports_a_broken_head() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "b-tasks.yaml", TASKS_VIEW);
+        write(
+            dir.path(),
+            "a-jira.yaml",
+            "tab:\n  name: Jira\nadapter:\n  type: jira\n  id: work\n  config: jira-adapter.yaml\n",
+        );
+        // Credentials, not a view: no `tab:`.
+        write(
+            dir.path(),
+            "jira-adapter.yaml",
+            "url: https://example.invalid\n",
+        );
+        write(dir.path(), "notes.txt", TASKS_VIEW);
+        write(
+            dir.path(),
+            "c-broken.yaml",
+            "tab: {}\nadapter:\n  id: nameless\n",
+        );
+
+        let (found, skipped) = ViewDiscovery::default().discover(dir.path());
+
+        assert_eq!(ids(&found), ["work", "tasks"], "sorted by file path");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].view_path.ends_with("c-broken.yaml"));
+        assert!(
+            skipped[0].reason.contains("type"),
+            "the reason names what is missing: {}",
+            skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn discovery_reads_hooks_from_the_view_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "tasks.yaml",
+            &format!("{TASKS_VIEW}hooks:\n  action_invoked:\n    - script: a.py\n"),
+        );
+
+        let (found, _) = ViewDiscovery::default().discover(dir.path());
+
+        let hooks = found[0].hooks.as_ref().expect("hooks parsed");
+        assert!(format!("{hooks:?}").contains("a.py"), "{hooks:?}");
+    }
+
+    #[test]
+    fn an_unchanged_views_directory_is_parsed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tasks.yaml", TASKS_VIEW);
+        write(dir.path(), "jira-adapter.yaml", "url: x\n");
+        let discovery = ViewDiscovery::default();
+
+        let first = discovery.discover(dir.path());
+        let parsed = discovery.parses();
+        let second = discovery.discover(dir.path());
+
+        assert_eq!(parsed, 2, "one parse per file");
+        assert_eq!(
+            discovery.parses(),
+            parsed,
+            "nothing changed, nothing parsed"
+        );
+        assert_eq!(ids(&first.0), ids(&second.0));
+    }
+
+    #[test]
+    fn a_changed_added_or_removed_view_file_is_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "tasks.yaml", TASKS_VIEW);
+        let discovery = ViewDiscovery::default();
+        discovery.discover(dir.path());
+
+        write(
+            dir.path(),
+            "tasks.yaml",
+            "tab:\n  name: Tasks\nadapter:\n  type: tasks\n  id: renamed\n  config_inline: \"x\"\n",
+        );
+        write(dir.path(), "z-more.yaml", TASKS_VIEW);
+        assert_eq!(ids(&discovery.discover(dir.path()).0), ["renamed", "tasks"]);
+
+        std::fs::remove_file(dir.path().join("tasks.yaml")).unwrap();
+        assert_eq!(ids(&discovery.discover(dir.path()).0), ["tasks"]);
     }
 }
