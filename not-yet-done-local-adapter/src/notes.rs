@@ -174,8 +174,19 @@ pub fn write_notes(task: &Task, all_tasks: &[Task], content: &str) {
 /// `old_tasks` reflects the hierarchy before the change,
 /// `new_tasks` reflects the hierarchy after the change.
 pub fn move_notes(task: &Task, old_tasks: &[Task], new_tasks: &[Task]) {
-    let old_dir = task_notes_parent_dir(task, old_tasks);
-    let new_dir = task_notes_parent_dir(task, new_tasks);
+    move_notes_under(&notes_dir(), task, old_tasks, new_tasks);
+}
+
+/// [`move_notes`] below `base`.
+///
+/// Callers hand over the task as it is after the move, so its own
+/// `parent_id` already names the new parent: where the notes are now is read
+/// from the task as `old_tasks` has it, or both directories would be the new
+/// one and nothing would ever move.
+fn move_notes_under(base: &Path, task: &Task, old_tasks: &[Task], new_tasks: &[Task]) {
+    let before = old_tasks.iter().find(|t| t.id == task.id).unwrap_or(task);
+    let old_dir = parent_dir_under(base, before, old_tasks);
+    let new_dir = parent_dir_under(base, task, new_tasks);
     if old_dir == new_dir {
         return;
     }
@@ -381,6 +392,39 @@ mod tests {
             parent_dir_under(&base, &ticket, &all),
             base.join("aaaaaaaa_work")
         );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn moving_a_task_moves_its_notes_with_it() {
+        // The callers pass the task as it is after the move; the notes must
+        // still be found where they were before it.
+        let base = scratch_dir("moved");
+        let from = task("aaaaaaaa-0000-0000-0000-000000000000", "From", None);
+        let to = task("bbbbbbbb-0000-0000-0000-000000000000", "To", None);
+        let before = task(
+            "cccccccc-0000-0000-0000-000000000000",
+            "Ticket 1",
+            Some(from.id),
+        );
+        let mut after = before.clone();
+        after.parent_id = Some(to.id);
+        let old_tasks = vec![from.clone(), to.clone(), before];
+        let new_tasks = vec![from, to, after.clone()];
+
+        let old_dir = base.join("aaaaaaaa_from");
+        std::fs::create_dir_all(old_dir.join("cccccccc_ticket-1")).unwrap();
+        std::fs::write(old_dir.join("cccccccc_ticket-1.md"), "note").unwrap();
+
+        move_notes_under(&base, &after, &old_tasks, &new_tasks);
+
+        let new_dir = base.join("bbbbbbbb_to");
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("cccccccc_ticket-1.md")).unwrap(),
+            "note"
+        );
+        assert!(new_dir.join("cccccccc_ticket-1").is_dir());
+        assert!(!old_dir.join("cccccccc_ticket-1.md").exists());
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
