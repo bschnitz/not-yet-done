@@ -84,6 +84,10 @@ pub(super) fn issue_actions() -> Vec<NodeAction> {
         // to what `from_markdown` takes back, so the reading form is its own
         // action rather than a flag on that one.
         NodeAction::new("show_markdown", "show markdown", InputSpec::None),
+        // The description `from_markdown` would write for the same buffer,
+        // as wiki markup, for a human to check or paste by hand. Pure
+        // conversion: nothing is fetched and nothing is written.
+        NodeAction::new("preview_wiki", "preview wiki markup", InputSpec::Editor),
         NodeAction::new("edit_with_comments", "edit + comments", InputSpec::Editor),
         // The header fields on their own, for a caller that wants to move a
         // label or an assignee without putting the description at risk (see
@@ -590,6 +594,17 @@ impl Node for JiraIssueNode {
                     args: Default::default(),
                 })
             }
+            // No template: the buffer always comes from `-m`/`--file`/stdin,
+            // and a guarded `to_markdown` render would cost a fetch and could
+            // refuse a ticket the preview has no reason to read.
+            "preview_wiki" => Ok(EditorPrep {
+                cursor_line: None,
+                template: String::new(),
+                version: String::new(),
+                suffix: ".md".into(),
+                file_path: None,
+                args: Default::default(),
+            }),
             "edit_with_comments" => {
                 let detail = self.detail().await?;
                 let comments = fetch_comments(&self.client, &self.cache, &self.key)
@@ -778,6 +793,7 @@ impl Node for JiraIssueNode {
                 self.execute_edit_markdown(&text, &version, Some(&original))
                     .await
             }
+            ("preview_wiki", ActionInput::Edited { text, .. }) => self.preview_wiki(&text),
             (
                 "edit_with_comments",
                 ActionInput::Edited {
@@ -1512,6 +1528,30 @@ mod tests {
         assert_eq!(body, "New description with more details.");
     }
 
+    #[test]
+    fn preview_wiki_returns_the_description_as_wiki() {
+        let node = test_node(sample_detail());
+        let md = "| Field | Value |\n\
+                  | --- | --- |\n\
+                  | summary | Fix login bug |\n\
+                  \n\
+                  ===\n\
+                  \n\
+                  ## Goal\n\
+                  \n\
+                  - **first** point with `code`\n\
+                  \n\
+                  ## Comments <!-- jira comments section -->\n\
+                  \n\
+                  ### Add Comment <!-- jira comment add -->\n";
+        match node.preview_wiki(md).unwrap() {
+            ActionOutcome::Done { message: Some(wiki) } => {
+                assert_eq!(wiki, "h2. Goal\n\n* *first* point with {{code}}");
+            }
+            _ => panic!("expected Done with text"),
+        }
+    }
+
     /// With a populated status table the editable `status` field renders as an
     /// `ss_…` slug and the CACHE legend lists the reachable statuses — the same
     /// slug treatment labels and users already get.
@@ -1843,6 +1883,7 @@ mod tests {
                 "to_markdown",
                 "from_markdown",
                 "show_markdown",
+                "preview_wiki",
                 "edit_with_comments",
                 "set_fields",
                 "transition",
@@ -1870,6 +1911,7 @@ mod tests {
         assert!(matches!(input("to_markdown"), InputSpec::None));
         assert!(matches!(input("from_markdown"), InputSpec::Editor));
         assert!(matches!(input("show_markdown"), InputSpec::None));
+        assert!(matches!(input("preview_wiki"), InputSpec::Editor));
         assert!(matches!(input("edit_with_comments"), InputSpec::Editor));
         assert!(matches!(input("set_fields"), InputSpec::Form { .. }));
         assert!(matches!(input("transition"), InputSpec::Picker));

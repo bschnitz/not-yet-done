@@ -9,6 +9,21 @@ use super::slugs::{canonicalize_labels_via_jira, resolve_slugs_inplace};
 use super::template::{FieldError, edit_full_fields};
 
 impl JiraIssueNode {
+    /// `preview_wiki`: the description `from_markdown` would write for this
+    /// Markdown buffer, as Jira wiki markup. Same conversion and parse as the
+    /// write path, then stop — no fetch, no write. Parse errors come back as
+    /// an error rather than a `Reopen`, since there is no editor to reopen.
+    pub(super) fn preview_wiki(&self, text: &str) -> Result<ActionOutcome> {
+        let canonical = comments_md_to_canonical(text);
+        let parsed = self.parse_with_comments(&canonical).map_err(|errs| {
+            let lines: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+            ContentError::Other(lines.join("\n").into())
+        })?;
+        Ok(ActionOutcome::Done {
+            message: Some(parsed.header.body),
+        })
+    }
+
     /// `edit_markdown` flow: the buffer carries the header as two GFM tables,
     /// the body as Markdown, and every comment below a `## Comments` divider.
     /// Convert it back to the canonical `edit_with_comments` buffer and reuse
