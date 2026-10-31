@@ -1955,9 +1955,11 @@ fn shield(sh: &mut Vec<String>, value: String) -> String {
 }
 
 /// Placeholder for a shielded inline span. Uses control characters that never
-/// occur in issue text so it can't be re-matched by later passes.
+/// occur in issue text so it can't be re-matched by later passes. Opener and
+/// closer differ: with one character for both, the closer of one token, a digit
+/// of the text and the opener of the next read as a token of their own.
 fn shield_token(idx: usize) -> String {
-    format!("\u{0}{idx}\u{0}")
+    format!("\u{0}{idx}\u{1}")
 }
 
 fn unshield(s: &str, shields: &[String]) -> String {
@@ -2756,6 +2758,14 @@ a title-less panel whose sole attribute makes its opener marker long enough
         // emphasis passes; they round-trip verbatim.
         assert!(roundtrip_diff("text {*}with{*} escapes and {_}more{_}").is_none());
         assert_roundtrip("a {*}b{*} c", "a {*}b{*} c");
+    }
+
+    #[test]
+    fn a_digit_after_a_shielded_span_does_not_merge_into_its_placeholder() {
+        // Placeholder tokens are numbered; a digit right after one must not be
+        // read as part of the next token (`{*}1{*}2` once came back mangled).
+        assert_roundtrip("year 20{*}1{*}2 here", "year 20{*}1{*}2 here");
+        assert_roundtrip("v {{a}}1{{b}}0 w", "v `a`1`b`0 w");
     }
 
     /// A backtick is plain text in Jira. Left as it is, `md_to_wiki` would read
