@@ -4550,6 +4550,7 @@ dependencies = [
  "chrono",
  "dirs",
  "fieldsmith",
+ "futures",
  "natural-date",
  "not-yet-done-content",
  "not-yet-done-filter",
@@ -4557,6 +4558,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
 ]
 

@@ -10,6 +10,7 @@
 //!
 //! Endpoints used: `/api/version` (session validation), `/api/timesheets`
 //! (paged list `GET`, single `GET`, `PATCH` edit, `POST` create),
+//! `/api/users/me` (the own user id, for scanning the index),
 //! `/api/projects` + `/api/activities` (id → name lookups — the timesheet
 //! list carries only numeric ids), `/api/customers` (resolving a query's
 //! customer names).
@@ -38,12 +39,16 @@ pub struct KimaiSession {
 
 /// One timesheet record as returned by `GET /api/timesheets`. `project`,
 /// `activity` and `user` come as numeric ids only — resolve names via
-/// [`KimaiClient::projects`] / [`KimaiClient::activities`].
-#[derive(Deserialize, Clone, Debug)]
+/// [`KimaiClient::projects`] / [`KimaiClient::activities`]. Serializable
+/// because the adapter keeps the user's own records in its timesheet index.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct KimaiTimesheet {
     pub id: u64,
     pub project: u64,
     pub activity: u64,
+    /// The owner's id.
+    #[serde(default)]
+    pub user: Option<u64>,
     pub begin: String,
     /// `None` while the timesheet is still running.
     #[serde(default)]
@@ -55,6 +60,20 @@ pub struct KimaiTimesheet {
     pub description: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub billable: Option<bool>,
+    #[serde(default)]
+    pub exported: Option<bool>,
+}
+
+/// What `GET /api/timesheets/{id}` said about an id.
+#[derive(Debug)]
+pub enum TimesheetProbe {
+    Found(KimaiTimesheet),
+    /// The record exists, but the user may not read it — someone else's.
+    Forbidden,
+    /// No record with this id (deleted, or not created yet).
+    Missing,
 }
 
 /// One entry of `GET /api/projects`. `parent_title` is the customer name.
@@ -93,6 +112,11 @@ pub struct KimaiCustomer {
 #[derive(Deserialize)]
 struct VersionResponse {
     version: String,
+}
+
+#[derive(Deserialize)]
+struct UserResponse {
+    id: u64,
 }
 
 /// HTTP timeouts, resolved by the factory from the adapter config.
@@ -253,6 +277,35 @@ impl KimaiClient {
     pub async fn timesheet(&self, id: u64) -> Result<KimaiTimesheet, String> {
         let url = format!("{}/api/timesheets/{id}", self.base_url);
         self.get_json(&url, &[]).await
+    }
+
+    /// One timesheet by id, telling "not yours" and "gone" apart from a
+    /// failed request. The single `GET` answers for the user's own records
+    /// even when the listing leaves them out (a project the user's teams no
+    /// longer reach), which is what the timesheet index relies on.
+    pub async fn probe_timesheet(&self, id: u64) -> Result<TimesheetProbe, String> {
+        let url = format!("{}/api/timesheets/{id}", self.base_url);
+        let resp = self.send("GET", &url, self.http.get(&url)).await?;
+        match resp.status() {
+            StatusCode::FORBIDDEN => return Ok(TimesheetProbe::Forbidden),
+            StatusCode::NOT_FOUND => return Ok(TimesheetProbe::Missing),
+            _ => {}
+        }
+        let resp = http_log::check_status("GET", &url, resp).await?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read response: {e}"))?;
+        serde_json::from_str(&body)
+            .map(TimesheetProbe::Found)
+            .map_err(|e| format!("failed to parse {url}: {e}"))
+    }
+
+    /// The authenticated user's id.
+    pub async fn me(&self) -> Result<u64, String> {
+        let url = format!("{}/api/users/me", self.base_url);
+        let me: UserResponse = self.get_json(&url, &[]).await?;
+        Ok(me.id)
     }
 
     /// Partial update of one timesheet. `body` carries only the changed

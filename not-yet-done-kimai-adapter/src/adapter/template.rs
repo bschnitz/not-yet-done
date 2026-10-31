@@ -783,6 +783,7 @@ mod tests {
             duration: Some(5400),
             description: Some("Refactor login form\nsecond line".into()),
             tags: vec!["backend".into()],
+            ..Default::default()
         }
     }
 

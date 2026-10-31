@@ -8573,6 +8573,27 @@ Kimai tab with the `query:` block of `docs/examples/views/kimai.yaml`.
       list is not silently empty.
 - [ ] `begin: ${from}` → applying asks for `from`.
 
+## Kimai — own timesheets the listing leaves out
+
+Needs own timesheets on a project the API refuses (403, e.g. a closed one
+the user's teams no longer reach) and its id/name under `names:` in
+`kimai-adapter.yaml` (see `docs/examples/views/kimai-adapter.yaml`).
+
+- [x] `nyd adapter kimai scan-hidden --field from=<start of year>` → after a
+      few minutes `fetched N ids one by one: K own timesheets since … are
+      left out of the listing (h:mm h)`; a second run fetches only ids that
+      are new or went unanswered.
+- [x] `nyd adapter kimai ls -q 'begin: …'` over a week with such entries →
+      they are listed with the configured project name; the week's total
+      matches Kimai's weekly view.
+- [ ] Kimai tab, same week → the entries appear, day and week totals include
+      them.
+- [ ] Remove the `names:` entry → the rows show `#<id>` instead of the name.
+- [ ] A saved query `project: <the configured name>` → only those entries,
+      no 403 from the server; `project: [<it>, <a visible one>]` → both.
+- [ ] Delete a visible entry in the Kimai web UI, reload the tab → it is gone
+      (re-fetched once, dropped from the index), not kept from the index.
+
 ## Notes — a renamed ancestor keeps its directory
 
 Tasks tab. Pick a task with notes (`n` opens the file) whose parent has

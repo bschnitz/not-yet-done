@@ -222,6 +222,53 @@ impl KimaiQuery {
             .as_ref()
             .is_none_or(|expr| eval::matches(expr, row))
     }
+
+    /// Whether a record that did not come through the listing — one out of
+    /// the timesheet index — passes the server filters, judged locally the
+    /// way Kimai would: `begin`/`end` bound the entry's begin, the names
+    /// resolve against the same lookups. `begin` is the effective lower
+    /// bound (the query's, or the lookback default).
+    pub(super) fn passes_server_filters(
+        &self,
+        row: &TimesheetRow<'_>,
+        begin: &str,
+        projects: &HashMap<u64, KimaiProject>,
+        activities: &HashMap<u64, KimaiActivity>,
+    ) -> bool {
+        let ts = row.ts;
+        let local_begin = ts.begin.get(..KIMAI_LOCAL_LEN).unwrap_or(&ts.begin);
+        let any = |names: &[String], hit: &dyn Fn(&str) -> bool| {
+            names.is_empty() || names.iter().any(|n| hit(n))
+        };
+        local_begin >= begin
+            && self.end.as_deref().is_none_or(|end| local_begin <= end)
+            && any(&self.customers, &|n| same_name(n, row.customer))
+            && any(&self.projects, &|n| {
+                resolve_project(n, projects).is_ok_and(|ids| ids.contains(&ts.project))
+            })
+            && any(&self.activities, &|n| {
+                resolve_activity(n, activities).is_ok_and(|ids| ids.contains(&ts.activity))
+            })
+            && any(&self.tags, &|t| ts.tags.iter().any(|have| same_name(have, t)))
+            && self.billable.is_none_or(|b| ts.billable.is_none_or(|v| v == b))
+            && self.exported.is_none_or(|b| ts.exported.is_none_or(|v| v == b))
+            && self.running.is_none_or(|b| ts.end.is_none() == b)
+            && self.term.as_deref().is_none_or(|term| term_matches(term, ts))
+    }
+}
+
+/// Length of a local `YYYY-MM-DDTHH:MM:SS` — the prefix of a Kimai timestamp
+/// before its offset.
+const KIMAI_LOCAL_LEN: usize = 19;
+
+/// Kimai's `term` judged locally: every word occurs in the description,
+/// every `!word` does not, case-insensitively.
+fn term_matches(term: &str, ts: &KimaiTimesheet) -> bool {
+    let text = ts.description.as_deref().unwrap_or("").to_lowercase();
+    term.split_whitespace().all(|word| match word.strip_prefix('!') {
+        Some(excluded) => !text.contains(&excluded.to_lowercase()),
+        None => text.contains(&word.to_lowercase()),
+    })
 }
 
 /// Resolve a `begin`/`end` value to Kimai's local format. A phrase without a
@@ -531,6 +578,7 @@ mod tests {
             duration: Some(duration),
             description: Some("Review the login form".into()),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -561,5 +609,50 @@ mod tests {
     fn where_rejects_unknown_columns() {
         let err = parse("where: [colour, '=', red]\n").unwrap_err();
         assert!(err.contains("colour"), "{err}");
+    }
+
+    /// `passes_server_filters` for the sample entry (project 7 "Website" of
+    /// Acme Corp, activity 3, begins 2030-01-15 09:00) with the query's own
+    /// begin, or the start of 2030.
+    fn passes(raw: &str, ts: &KimaiTimesheet) -> bool {
+        let (_, projects, activities) = lookups();
+        let q = parse(raw).unwrap();
+        let begin = q.begin.clone().unwrap_or_else(|| "2030-01-01T00:00:00".into());
+        let row = TimesheetRow {
+            ts,
+            project: "Website",
+            customer: "Acme Corp",
+            activity: "Development",
+        };
+        q.passes_server_filters(&row, &begin, &projects, &activities)
+    }
+
+    #[test]
+    fn server_filters_judged_locally_bound_the_begin() {
+        let ts = timesheet(600, &[], Some("2030-01-15T09:10:00+0100"));
+        assert!(passes("", &ts));
+        assert!(passes("begin: 2030-01-15\nend: 2030-01-15\n", &ts));
+        assert!(!passes("begin: 2030-01-16\n", &ts));
+        assert!(!passes("begin: 2030-01-01\nend: 2030-01-14\n", &ts));
+    }
+
+    #[test]
+    fn server_filters_judged_locally_match_names_flags_and_term() {
+        let ts = KimaiTimesheet {
+            billable: Some(true),
+            ..timesheet(600, &["backend"], Some("2030-01-15T09:10:00+0100"))
+        };
+        assert!(passes("project: Acme Corp/Website\nactivity: Development\n", &ts));
+        assert!(!passes("project: Intranet\n", &ts));
+        assert!(!passes("activity: Meeting\n", &ts));
+        assert!(passes("customer: acme corp\n", &ts));
+        assert!(!passes("customer: Globex\n", &ts));
+        assert!(passes("tags: [frontend, backend]\n", &ts));
+        assert!(!passes("tags: frontend\n", &ts));
+        assert!(passes("billable: true\n", &ts));
+        assert!(!passes("billable: false\n", &ts));
+        assert!(!passes("running: true\n", &ts));
+        assert!(passes("term: \"LOGIN !deploy\"\n", &ts));
+        assert!(!passes("term: \"login !review\"\n", &ts));
     }
 }

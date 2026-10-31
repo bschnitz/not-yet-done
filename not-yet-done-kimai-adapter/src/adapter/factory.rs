@@ -73,6 +73,7 @@ impl TypedAdapterFactory for KimaiAdapterFactory {
             name,
             instance_id.to_string(),
             lookback_days,
+            cfg.names,
         )))
     }
 }

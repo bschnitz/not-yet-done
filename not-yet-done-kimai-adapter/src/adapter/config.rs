@@ -51,6 +51,46 @@ pub struct KimaiConfig {
     /// `not_yet_done_content::http_send`).
     #[serde(default)]
     pub(super) retry: not_yet_done_content::RetryConfig,
+    /// Names for projects and activities the API refuses to show (403) —
+    /// typically closed ones the user's teams no longer reach, whose own
+    /// timesheets still come out of the timesheet index.
+    #[serde(default)]
+    pub(super) names: KnownNames,
+}
+
+/// Names the lookups cannot provide, by id.
+#[derive(Deserialize, Buildable, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct KnownNames {
+    /// Projects, e.g. `{ id: 4711, name: Migration, customer: Acme }`.
+    #[serde(default)]
+    pub(super) projects: Vec<KnownProject>,
+    /// Activities, e.g. `{ id: 42, name: Consulting }`.
+    #[serde(default)]
+    pub(super) activities: Vec<KnownActivity>,
+}
+
+/// A project the lookups cannot provide.
+#[derive(Deserialize, Buildable, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct KnownProject {
+    /// The project's Kimai id.
+    pub(super) id: u64,
+    /// Its name.
+    pub(super) name: String,
+    /// Its customer's name.
+    #[serde(default)]
+    pub(super) customer: Option<String>,
+}
+
+/// An activity the lookups cannot provide.
+#[derive(Deserialize, Buildable, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct KnownActivity {
+    /// The activity's Kimai id.
+    pub(super) id: u64,
+    /// Its name.
+    pub(super) name: String,
 }
 
 #[cfg(test)]
@@ -83,8 +123,15 @@ auth:
     - field: token
       provider: { type: command, script: get-token.sh }
 lookback_days: 30
+names:
+  projects:
+    - { id: 4711, name: Migration, customer: Acme }
+  activities:
+    - { id: 42, name: Consulting }
 "#;
         let cfg: KimaiConfig = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(cfg.names.projects[0].name, "Migration");
+        assert_eq!(cfg.names.activities[0].id, 42);
         cfg.auth
             .validate_against(MECHANISMS)
             .expect("valid mechanism+bindings");

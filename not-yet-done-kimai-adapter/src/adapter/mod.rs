@@ -12,12 +12,17 @@
 //! Saved queries (`<data>/not_yet_done/kimai/<id>/queries/*.yaml`) narrow
 //! the listing: server filters go to `/api/timesheets`, a `where:` clause
 //! runs on the fetched rows — see [`query`].
+//!
+//! The listing leaves out own records on projects the user's teams no longer
+//! reach; the timesheet index (`<data>/…/timesheet_index.json`) brings them
+//! back — see [`hidden`]. Their project and activity names come from the
+//! config's `names:`, since the lookups refuse them too.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{Days, Local};
+use chrono::{Days, Local, NaiveDateTime};
 
 use not_yet_done_content::*;
 
@@ -26,13 +31,25 @@ use crate::client::{KimaiActivity, KimaiClient, KimaiProject, KimaiTimesheet};
 mod auth_bridge;
 pub mod config;
 mod factory;
+mod hidden;
+mod index;
 pub mod query;
 mod template;
 
 pub use factory::KimaiAdapterFactory;
 
 use auth_bridge::AuthBridge;
+use config::KnownNames;
+use hidden::Reach;
+use index::IndexStore;
 use query::{KimaiQuery, TimesheetRow};
+
+/// File name of the timesheet index inside the instance's data directory.
+const INDEX_FILE: &str = "timesheet_index.json";
+
+/// How far before a scan's `from` the listing that bounds its ids reaches —
+/// far enough to hold the last record listed before `from`.
+const SCAN_LEAD_IN_DAYS: u64 = 31;
 
 /// Action set for a timesheet row. Shared between [`Node::actions`] and
 /// the adapter's instance-free [`ContentAdapter::actions_for_type`].
@@ -53,16 +70,32 @@ fn create_form_fields() -> Vec<FormFieldSpec> {
     ]
 }
 
-/// Action set for the root: create a new timesheet. Shared between
-/// [`KimaiRoot::actions`] and [`ContentAdapter::actions_for_type`].
+/// Action set for the root: create a new timesheet, and scan for own
+/// timesheets the listing leaves out. Shared between [`KimaiRoot::actions`]
+/// and [`ContentAdapter::actions_for_type`].
 fn root_actions() -> Vec<NodeAction> {
-    vec![NodeAction::new(
-        "create",
-        "create",
-        InputSpec::Form {
-            fields: create_form_fields(),
-        },
-    )]
+    vec![
+        NodeAction::new(
+            "create",
+            "create",
+            InputSpec::Form {
+                fields: create_form_fields(),
+            },
+        ),
+        NodeAction::new(
+            "scan-hidden",
+            "scan for hidden timesheets",
+            InputSpec::Form {
+                fields: vec![
+                    FormFieldSpec::text(
+                        "from",
+                        "From (date or phrase like 'start of year'; default: the lookback window)",
+                    )
+                    .optional(),
+                ],
+            },
+        ),
+    ]
 }
 
 fn timesheet_node_type() -> NodeType {
@@ -83,10 +116,30 @@ pub struct KimaiAdapter {
     auth: Arc<AuthBridge>,
     connection_name: String,
     instance_id: String,
-    lookback_days: u32,
+    /// What a listing needs besides the client.
+    listing: ListingCtx,
     /// Saved queries, one `<name>.yaml` per query under the instance's data
     /// directory; the bodies are [`KimaiQuery`] documents.
     saved_queries: FsQueryStore,
+}
+
+/// The adapter state a listing (and the root's actions) works with.
+#[derive(Clone)]
+struct ListingCtx {
+    lookback_days: u32,
+    index: IndexStore,
+    names: KnownNames,
+}
+
+impl ListingCtx {
+    /// The listing's lower bound when the query names none.
+    fn default_begin(&self) -> String {
+        Local::now()
+            .checked_sub_days(Days::new(self.lookback_days as u64))
+            .unwrap_or_else(Local::now)
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    }
 }
 
 impl KimaiAdapter {
@@ -96,19 +149,23 @@ impl KimaiAdapter {
         connection_name: String,
         instance_id: String,
         lookback_days: u32,
+        names: KnownNames,
     ) -> Self {
-        let queries_root = dirs::data_local_dir()
+        let data_dir = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("not_yet_done")
             .join("kimai")
-            .join(&instance_id)
-            .join("queries");
+            .join(&instance_id);
         Self {
             auth,
             connection_name,
             instance_id,
-            lookback_days,
-            saved_queries: FsQueryStore::new(queries_root, ".yaml"),
+            listing: ListingCtx {
+                lookback_days,
+                index: IndexStore::new(data_dir.join(INDEX_FILE)),
+                names,
+            },
+            saved_queries: FsQueryStore::new(data_dir.join("queries"), ".yaml"),
         }
     }
 }
@@ -128,12 +185,13 @@ impl ContentAdapter for KimaiAdapter {
         Ok(Box::new(KimaiRoot {
             client,
             connection_name: self.connection_name.clone(),
+            listing: self.listing.clone(),
         }))
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Box<dyn Node>> {
         let client = self.auth.get_client().await.map_err(other_err)?;
-        fetch_timesheet_node(&client, id).await
+        fetch_timesheet_node(&client, &self.listing.names, id).await
     }
 
     /// The single source of truth about what lives under a Kimai node: the
@@ -149,7 +207,7 @@ impl ContentAdapter for KimaiAdapter {
                 list: Box::new(move |params| {
                     Box::pin(async move {
                         let client = self.auth.get_client().await.map_err(other_err)?;
-                        list_timesheets(&client, self.lookback_days, params).await
+                        list_timesheets(&client, &self.listing, params).await
                     })
                 }),
             }],
@@ -246,22 +304,63 @@ impl ContentAdapter for KimaiAdapter {
     }
 }
 
+/// The project and activity lookups by id, with the configured `names:`
+/// filling in the ids the API refuses, plus the ids the API itself reaches.
+struct Lookups {
+    projects: HashMap<u64, KimaiProject>,
+    activities: HashMap<u64, KimaiActivity>,
+    reach: Reach,
+}
+
+async fn fetch_lookups(client: &KimaiClient, names: &KnownNames) -> Result<Lookups> {
+    let (projects, activities) =
+        tokio::try_join!(client.projects(), client.activities()).map_err(other_err)?;
+    let mut projects: HashMap<u64, KimaiProject> =
+        projects.into_iter().map(|p| (p.id, p)).collect();
+    let mut activities: HashMap<u64, KimaiActivity> =
+        activities.into_iter().map(|a| (a.id, a)).collect();
+    let reach = Reach::new(projects.keys().copied(), activities.keys().copied());
+    for p in &names.projects {
+        projects.entry(p.id).or_insert_with(|| KimaiProject {
+            id: p.id,
+            name: p.name.clone(),
+            parent_title: p.customer.clone(),
+        });
+    }
+    for a in &names.activities {
+        activities.entry(a.id).or_insert_with(|| KimaiActivity {
+            id: a.id,
+            name: a.name.clone(),
+            project: None,
+            parent_title: None,
+        });
+    }
+    Ok(Lookups {
+        projects,
+        activities,
+        reach,
+    })
+}
+
 /// Fetch one timesheet plus the lookup tables and build a leaf node.
 /// Only used for the rare `get_by_id`/`get_child` path — the listing
 /// resolves names in bulk instead.
-async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box<dyn Node>> {
+async fn fetch_timesheet_node(
+    client: &Arc<KimaiClient>,
+    names: &KnownNames,
+    id: &str,
+) -> Result<Box<dyn Node>> {
     let numeric: u64 = id
         .parse()
         .map_err(|_| other_err(format!("invalid timesheet id: {id}")))?;
-    let (ts, projects, activities) = tokio::try_join!(
-        client.timesheet(numeric),
-        client.projects(),
-        client.activities()
-    )
-    .map_err(other_err)?;
-    let projects: HashMap<u64, KimaiProject> = projects.into_iter().map(|p| (p.id, p)).collect();
-    let activities: HashMap<u64, KimaiActivity> =
-        activities.into_iter().map(|a| (a.id, a)).collect();
+    let (ts, Lookups {
+        projects,
+        activities,
+        ..
+    }) = tokio::try_join!(
+        async { client.timesheet(numeric).await.map_err(other_err) },
+        fetch_lookups(client, names)
+    )?;
     Ok(Box::new(KimaiTimesheetNode::new(
         client.clone(),
         ts,
@@ -273,6 +372,7 @@ async fn fetch_timesheet_node(client: &Arc<KimaiClient>, id: &str) -> Result<Box
 struct KimaiRoot {
     client: Arc<KimaiClient>,
     connection_name: String,
+    listing: ListingCtx,
 }
 
 #[async_trait]
@@ -302,7 +402,7 @@ impl Node for KimaiRoot {
     }
 
     async fn get_child(&self, id: &str) -> Result<Box<dyn Node>> {
-        fetch_timesheet_node(&self.client, id).await
+        fetch_timesheet_node(&self.client, &self.listing.names, id).await
     }
     async fn execute(
         &mut self,
@@ -312,6 +412,7 @@ impl Node for KimaiRoot {
     ) -> Result<ActionOutcome> {
         match (action_id, input) {
             ("create", ActionInput::Form(fields)) => self.execute_create(fields).await,
+            ("scan-hidden", ActionInput::Form(fields)) => self.execute_scan_hidden(fields).await,
             (other, _) => Err(ContentError::NotSupported(format!(
                 "execute: unknown action {other}"
             ))),
@@ -320,6 +421,67 @@ impl Node for KimaiRoot {
 }
 
 impl KimaiRoot {
+    /// Look for own timesheets the listing leaves out, from `from` on (a
+    /// date or phrase; the lookback window when empty), and record them in
+    /// the index — see [`hidden::scan`]. Takes minutes for months of ids:
+    /// every id between the listed records is fetched on its own.
+    async fn execute_scan_hidden(
+        &self,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<ActionOutcome> {
+        let from = match fields.get("from").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(phrase) => KimaiQuery::parse(&format!("begin: {phrase}"))
+                .map_err(other_err)?
+                .begin
+                .unwrap_or_else(|| self.listing.default_begin()),
+            None => self.listing.default_begin(),
+        };
+        let lead_in = NaiveDateTime::parse_from_str(&from, "%Y-%m-%dT%H:%M:%S")
+            .ok()
+            .and_then(|t| t.checked_sub_days(Days::new(SCAN_LEAD_IN_DAYS)))
+            .map(|t| t.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_else(|| from.clone());
+
+        let (listing, lookups) = tokio::try_join!(
+            async {
+                self.client
+                    .timesheets_since(&lead_in, &[])
+                    .await
+                    .map_err(other_err)
+            },
+            fetch_lookups(&self.client, &self.listing.names)
+        )?;
+        let report = hidden::scan(
+            &self.client,
+            &self.listing.index,
+            &lookups.reach,
+            &from,
+            listing,
+        )
+        .await
+        .map_err(other_err)?;
+
+        let secs = report.hidden_secs;
+        let mut message = format!(
+            "fetched {} ids one by one: {} own timesheets since {} are left out of the listing \
+             ({}:{:02} h)",
+            report.probed,
+            report.hidden,
+            &from[..10.min(from.len())],
+            secs / 3600,
+            secs % 3600 / 60
+        );
+        if report.failed > 0 {
+            message.push_str(&format!(
+                "; {} ids went unanswered — run the scan again to retry them",
+                report.failed
+            ));
+        }
+        Ok(ActionOutcome::Done {
+            message: Some(message),
+        })
+    }
+
     /// Resolve the create form, POST a new timesheet, and navigate to it.
     /// Fetches the project/activity lookups (needed to resolve the `entry`
     /// token) then delegates to [`template::build_create_body`]; field errors
@@ -368,42 +530,55 @@ impl KimaiRoot {
 /// declaration. Without a query, or one without `begin`, the window starts
 /// `lookback_days` ago. Sorting is always local; Kimai's server order (begin
 /// desc) is just the input order.
+///
+/// The listing goes into the timesheet index, and the index adds the own
+/// records the listing leaves out (see [`hidden::complete_listing`]).
 async fn list_timesheets(
     client: &Arc<KimaiClient>,
-    lookback_days: u32,
+    ctx: &ListingCtx,
     params: ListParams,
 ) -> Result<ListResult> {
     let query = KimaiQuery::parse(params.query.as_deref().unwrap_or("")).map_err(other_err)?;
-    let begin_local = query.begin.clone().unwrap_or_else(|| {
-        Local::now()
-            .checked_sub_days(Days::new(lookback_days as u64))
-            .unwrap_or_else(Local::now)
-            .format("%Y-%m-%dT%H:%M:%S")
-            .to_string()
-    });
+    let begin_local = query.begin.clone().unwrap_or_else(|| ctx.default_begin());
 
     // The names in the query resolve against the lookups, so they come first.
-    let (projects, activities) =
-        tokio::try_join!(client.projects(), client.activities()).map_err(other_err)?;
+    let Lookups {
+        projects,
+        activities,
+        reach,
+    } = fetch_lookups(client, &ctx.names).await?;
     let customers = if query.needs_customers() {
         client.customers().await.map_err(other_err)?
     } else {
         Vec::new()
     };
-    let projects: HashMap<u64, KimaiProject> = projects.into_iter().map(|p| (p.id, p)).collect();
-    let activities: HashMap<u64, KimaiActivity> =
-        activities.into_iter().map(|a| (a.id, a)).collect();
 
     let filters = query
         .server_params(&customers, &projects, &activities)
         .map_err(other_err)?;
-    let timesheets = client
-        .timesheets_since(&begin_local, &filters)
-        .await
-        .map_err(other_err)?;
+    let visible = match reachable_params(filters, &reach) {
+        Some(filters) => client
+            .timesheets_since(&begin_local, &filters)
+            .await
+            .map_err(other_err)?,
+        None => Vec::new(),
+    };
+    let left_out = hidden::complete_listing(client, &ctx.index, &visible, &reach, |ts| {
+        let names = entry_names(ts, &projects, &activities);
+        let row = TimesheetRow {
+            ts,
+            project: &names.project,
+            customer: &names.customer,
+            activity: &names.activity,
+        };
+        query.passes_server_filters(&row, &begin_local, &projects, &activities)
+    })
+    .await
+    .map_err(other_err)?;
 
-    let mut items: Vec<NodeSummary> = timesheets
+    let mut items: Vec<NodeSummary> = visible
         .into_iter()
+        .chain(left_out)
         .filter(|ts| {
             let names = entry_names(ts, &projects, &activities);
             query.keeps(&TimesheetRow {
@@ -425,6 +600,36 @@ async fn list_timesheets(
         batch_download_available: false,
         downloaded: vec![],
     })
+}
+
+/// The server filters without the project and activity ids the API refuses
+/// (asking for one is a 403) — `None` when a filter named only such ids, so
+/// nothing the server could list would pass it.
+fn reachable_params(params: Vec<(String, String)>, reach: &Reach) -> Option<Vec<(String, String)>> {
+    let mut asked = (false, false);
+    let mut kept = (false, false);
+    let params: Vec<(String, String)> = params
+        .into_iter()
+        .filter(|(key, value)| {
+            let id = value.parse().unwrap_or(0);
+            match key.as_str() {
+                "projects[]" => {
+                    asked.0 = true;
+                    let ok = reach.has_project(id);
+                    kept.0 |= ok;
+                    ok
+                }
+                "activities[]" => {
+                    asked.1 = true;
+                    let ok = reach.has_activity(id);
+                    kept.1 |= ok;
+                    ok
+                }
+                _ => true,
+            }
+        })
+        .collect();
+    (asked.0 == kept.0 && asked.1 == kept.1).then_some(params)
 }
 
 fn timesheet_columns() -> Vec<ColumnSchema> {
@@ -692,7 +897,8 @@ mod tests {
     #[test]
     fn root_create_action_is_a_four_field_form() {
         let actions = root_actions();
-        assert_eq!(actions.len(), 1);
+        let ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["create", "scan-hidden"]);
         let create = &actions[0];
         assert_eq!(create.id, "create");
         match &create.input {
@@ -746,6 +952,7 @@ mod tests {
             duration: Some(5400),
             description: Some("\n  \nRefactor login form\nsecond line".into()),
             tags: vec!["backend".into(), "sprint-9".into()],
+            ..Default::default()
         }
     }
 
@@ -820,5 +1027,32 @@ mod tests {
         assert_eq!(get("end").as_deref(), Some(""));
         // Empty description → activity name (fallback chain) as the label.
         assert_eq!(row.label, "#3");
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn refused_ids_leave_the_server_filters() {
+        let reach = Reach::new([7, 8], [3]);
+        assert_eq!(
+            reachable_params(
+                pairs(&[("projects[]", "7"), ("projects[]", "4711"), ("term", "x")]),
+                &reach
+            ),
+            Some(pairs(&[("projects[]", "7"), ("term", "x")]))
+        );
+        // Only refused ids asked for: the server could list nothing that passes.
+        assert_eq!(
+            reachable_params(pairs(&[("activities[]", "42")]), &reach),
+            None
+        );
+        assert_eq!(
+            reachable_params(pairs(&[("begin", "x")]), &reach),
+            Some(pairs(&[("begin", "x")]))
+        );
     }
 }

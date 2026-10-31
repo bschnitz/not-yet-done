@@ -77,3 +77,15 @@ auth:
 # retry:
 #   attempts: 2
 #   backoff_ms: 250
+
+# Names for projects and activities the API refuses to show (403). Kimai
+# leaves the user's own timesheets on such a project out of the listing — a
+# closed project the user's teams no longer reach, say. The adapter still
+# finds them through its timesheet index (see `scan-hidden` on the root),
+# but cannot read the project's or activity's name; without an entry here
+# they render as `#<id>`. With one, saved queries can name them too.
+# names:
+#   projects:
+#     - { id: 4711, name: Migration, customer: Acme }
+#   activities:
+#     - { id: 42, name: Consulting }
