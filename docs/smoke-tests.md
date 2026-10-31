@@ -8581,7 +8581,7 @@ the user's teams no longer reach) and its id/name under `names:` in
 
 - [x] `nyd adapter kimai scan-hidden --field from=<start of year>` → after a
       few minutes `fetched N ids one by one: K own timesheets since … are
-      left out of the listing (h:mm h)`; a second run fetches only ids that
+    left out of the listing (h:mm h)`; a second run fetches only ids that
       are new or went unanswered.
 - [x] `nyd adapter kimai ls -q 'begin: …'` over a week with such entries →
       they are listed with the configured project name; the week's total
@@ -9957,7 +9957,7 @@ four rounds.
       `No` reopens round one with every value in place — `visible_when`
       re-evaluated from the prefilled toggle, so `Approved by` is there and
       filled — and the general message `⚠ nothing was submitted — change what
-  you like` under the fields.
+you like` under the fields.
 - [x] **A round-tripped value comes back normalised, not as typed.** Round two
       reopens with `90` in the duration field, which is what was submitted, and
       the hint under it reads it back as `1 h 30 min`.
@@ -9993,7 +9993,7 @@ events you created for the purpose.
 - [ ] **An `external` event purged elsewhere is still removed.**
       Delete a test event at the source (and empty its trash, if it has one), then
       `nyd adapter calendar <event id> delete --yes` prints `“<title>” was
-    already gone from the calendar; removed it here`. (An event that only
+  already gone from the calendar; removed it here`. (An event that only
       sits in a trash may still have its id: deleting it again then succeeds
       and prints `Deleted`.) The backend half is verified: an id the service
       does not know comes back as not found, not as a failed run.
