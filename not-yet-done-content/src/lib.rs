@@ -854,6 +854,18 @@ pub struct QueryVariable {
     pub default: Option<String>,
 }
 
+/// One stretch of time a query admits, as reported by
+/// [`ContentAdapter::query_periods`]. Measured on the adapter's own notion of
+/// an item's time (a Kimai timesheet's begin, for instance).
+///
+/// Both bounds are inclusive. `None` leaves that side open: no `begin` means
+/// "since ever", no `end` means "up to now and beyond".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryPeriod {
+    pub begin: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub end: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
+
 // ---------------------------------------------------------------------------
 // AdapterCapabilities
 // ---------------------------------------------------------------------------
@@ -2872,6 +2884,20 @@ pub trait ContentAdapter: Send + Sync {
     /// as having no variables and skips the popup.
     fn query_variables(&self, _query: &str) -> Vec<QueryVariable> {
         Vec::new()
+    }
+
+    /// The stretches of time a rendered query admits, so a consumer of the
+    /// rows can tell an empty day from one the query left out (a script that
+    /// must only ever see complete weeks, for instance).
+    ///
+    /// `Some(periods)` is a promise: every item the query can select lies in
+    /// one of them, and the query keeps every item in them its other filters
+    /// let through. An empty vec means the query selects no time at all.
+    /// `None` means the adapter cannot say — no time filter in its language,
+    /// or one it cannot pin down (a local filter on a date column) — and is
+    /// the default.
+    fn query_periods(&self, _query: &str) -> Option<Vec<QueryPeriod>> {
+        None
     }
 
     /// Substitute variable bindings into a raw saved-query string and

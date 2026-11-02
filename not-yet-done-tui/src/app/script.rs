@@ -119,7 +119,8 @@ pub enum ScriptContext {
     /// Content-view **table** script (action `scope: table`). Carries the
     /// whole currently-displayed table with cursor context. JSON shape:
     /// `{"rows": [{"id":..,"label":..,"fields":{..}}, …], "query": <str|null>,
-    /// "selected_index": <n>, "selected_field": <key|null>}`. Works on any
+    /// "periods": [{"begin":..,"end":..}, …]|null, "selected_index": <n>,
+    /// "selected_field": <key|null>}`. Works on any
     /// content table, including the transposed record-detail split. Scripts
     /// live in the same per-view directory as [`ContentNode`].
     ContentTable {
@@ -132,6 +133,12 @@ pub enum ScriptContext {
         /// The active query text (`None` when the pane has none, e.g. a
         /// detail split).
         query: Option<String>,
+        /// The stretches of time the query admits, as the adapter reports
+        /// them ([`ContentAdapter::query_periods`]); `None` when it cannot
+        /// say or there is no query.
+        ///
+        /// [`ContentAdapter::query_periods`]: not_yet_done_content::ContentAdapter::query_periods
+        periods: Option<Vec<not_yet_done_content::QueryPeriod>>,
         /// Cursor row index into `rows`.
         selected_index: usize,
         /// Field key under the column cursor, already defaulted (the action's
@@ -256,6 +263,7 @@ impl ScriptContext {
             ScriptContext::ContentTable {
                 rows,
                 query,
+                periods,
                 selected_index,
                 selected_field,
                 ..
@@ -286,8 +294,12 @@ impl ScriptContext {
                     .as_ref()
                     .map(|f| json_string(f))
                     .unwrap_or_else(|| "null".to_string());
+                let periods_q = periods
+                    .as_deref()
+                    .map(periods_json)
+                    .unwrap_or_else(|| "null".to_string());
                 format!(
-                    "{{\n  \"rows\": [\n{rows}\n  ],\n  \"query\": {query_q},\n  \"selected_index\": {idx},\n  \"selected_field\": {field_q}\n}}",
+                    "{{\n  \"rows\": [\n{rows}\n  ],\n  \"query\": {query_q},\n  \"periods\": {periods_q},\n  \"selected_index\": {idx},\n  \"selected_field\": {field_q}\n}}",
                     rows = rows_inner,
                     idx = selected_index,
                 )
@@ -374,6 +386,21 @@ pub(super) fn splice_top_level(json: String, key: &str, value: &str) -> String {
         key = json_string(key),
         tail = &json[close..],
     )
+}
+
+/// `[{"begin": <rfc3339|null>, "end": <rfc3339|null>}, …]` for the table
+/// payload's `periods`.
+fn periods_json(periods: &[not_yet_done_content::QueryPeriod]) -> String {
+    let instant = |t: &Option<chrono::DateTime<chrono::FixedOffset>>| {
+        t.map(|t| json_string(&t.to_rfc3339()))
+            .unwrap_or_else(|| "null".to_string())
+    };
+    let inner = periods
+        .iter()
+        .map(|p| format!("{{\"begin\": {}, \"end\": {}}}", instant(&p.begin), instant(&p.end)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{inner}]")
 }
 
 /// JSON-escape `s` and wrap it in double-quotes. Hand-rolled to avoid
@@ -628,6 +655,7 @@ impl App {
         } else {
             Some(query_text)
         };
+        let periods = query.as_deref().and_then(|q| adapter.query_periods(q));
         let view_def_idx = pane.view_def_index();
         let view_path = pane.script_scope_path(&cv.view_defs);
         let per_view_template = cv
@@ -648,6 +676,7 @@ impl App {
             view_path,
             rows,
             query,
+            periods,
             selected_index,
             selected_field,
             new_script_template,
@@ -681,7 +710,8 @@ impl App {
         let ContentSlot::Working(cv) = self.content_views.get(view_index)? else {
             return None;
         };
-        let kind = cv.adapter.as_ref()?.adapter_type().to_string();
+        let adapter = cv.adapter.as_ref()?;
+        let kind = adapter.adapter_type().to_string();
         let pane = cv.find_pane(pane_id)?;
         let view_path = pane.script_scope_path(&cv.view_defs);
         let query_text = pane.current_query_text(&cv.view_defs);
@@ -690,6 +720,7 @@ impl App {
         } else {
             Some(query_text)
         };
+        let periods = query.as_deref().and_then(|q| adapter.query_periods(q));
         let per_view_template = cv
             .view_defs
             .get(pane.view_def_index())
@@ -711,6 +742,7 @@ impl App {
             view_path,
             rows: script_rows(items.to_vec()),
             query,
+            periods,
             selected_index: 0,
             selected_field: None,
             new_script_template,
@@ -1669,13 +1701,17 @@ mod tests {
                 },
             ],
             query: Some("SELECT * FROM people".into()),
+            periods: Some(vec![not_yet_done_content::QueryPeriod {
+                begin: Some("2030-01-07T00:00:00+01:00".parse().unwrap()),
+                end: None,
+            }]),
             selected_index: 1,
             selected_field: Some("age".into()),
             new_script_template: String::new(),
         };
         assert_eq!(
             table.build_json(),
-            "{\n  \"rows\": [\n    {\"id\": \"1\", \"label\": \"Alpha\", \"fields\": {\"name\": \"Alpha\", \"age\": \"30\"}},\n    {\"id\": \"2\", \"label\": \"Beta\", \"fields\": {\"name\": \"Beta\", \"age\": \"25\"}}\n  ],\n  \"query\": \"SELECT * FROM people\",\n  \"selected_index\": 1,\n  \"selected_field\": \"age\"\n}"
+            "{\n  \"rows\": [\n    {\"id\": \"1\", \"label\": \"Alpha\", \"fields\": {\"name\": \"Alpha\", \"age\": \"30\"}},\n    {\"id\": \"2\", \"label\": \"Beta\", \"fields\": {\"name\": \"Beta\", \"age\": \"25\"}}\n  ],\n  \"query\": \"SELECT * FROM people\",\n  \"periods\": [{\"begin\": \"2030-01-07T00:00:00+01:00\", \"end\": null}],\n  \"selected_index\": 1,\n  \"selected_field\": \"age\"\n}"
         );
     }
 
@@ -1688,13 +1724,14 @@ mod tests {
             view_path: vec![],
             rows: vec![],
             query: None,
+            periods: None,
             selected_index: 0,
             selected_field: None,
             new_script_template: String::new(),
         };
         assert_eq!(
             table.build_json(),
-            "{\n  \"rows\": [\n\n  ],\n  \"query\": null,\n  \"selected_index\": 0,\n  \"selected_field\": null\n}"
+            "{\n  \"rows\": [\n\n  ],\n  \"query\": null,\n  \"periods\": null,\n  \"selected_index\": 0,\n  \"selected_field\": null\n}"
         );
     }
 
@@ -1707,6 +1744,7 @@ mod tests {
             view_path: vec!["postgres:row".into()],
             rows: vec![],
             query: None,
+            periods: None,
             selected_index: 0,
             selected_field: None,
             new_script_template: String::new(),

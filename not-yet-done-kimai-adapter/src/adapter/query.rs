@@ -32,9 +32,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use not_yet_done_filter::eval::{self, Field, RowFields};
-use not_yet_done_filter::{FilterExpr, resolve_dates};
+use not_yet_done_content::QueryPeriod;
+use not_yet_done_filter::{FilterExpr, Rhs, resolve_dates};
 use serde::Deserialize;
 
 use crate::client::{KimaiActivity, KimaiCustomer, KimaiProject, KimaiTimesheet};
@@ -223,6 +224,28 @@ impl KimaiQuery {
             .is_none_or(|expr| eval::matches(expr, row))
     }
 
+    /// The stretch of time the query admits, from `begin` (or `default_begin`,
+    /// the listing's lower bound without one) to `end`. `None` when `where:`
+    /// compares a date column too: that cuts into the period in ways a
+    /// begin/end pair cannot describe.
+    pub(super) fn period(&self, default_begin: &str) -> Option<QueryPeriod> {
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|expr| names_column(expr, DATETIME_COLUMNS))
+        {
+            return None;
+        }
+        let begin = self.begin.as_deref().unwrap_or(default_begin);
+        Some(QueryPeriod {
+            begin: Some(local_instant(begin)?),
+            end: match &self.end {
+                Some(end) => Some(local_instant(end)?),
+                None => None,
+            },
+        })
+    }
+
     /// Whether a record that did not come through the listing — one out of
     /// the timesheet index — passes the server filters, judged locally the
     /// way Kimai would: `begin`/`end` bound the entry's begin, the names
@@ -291,6 +314,29 @@ fn resolve_bound(s: &str, is_end: bool, now: DateTime<Local>) -> Result<String, 
             .expect("23:59:59 is a valid time"),
     };
     Ok(local.format(KIMAI_LOCAL).to_string())
+}
+
+/// A local `YYYY-MM-DDTHH:MM:SS` as an instant; `None` for a time the clock
+/// skipped.
+fn local_instant(s: &str) -> Option<DateTime<FixedOffset>> {
+    let naive = NaiveDateTime::parse_from_str(s, KIMAI_LOCAL).ok()?;
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|t| t.fixed_offset())
+}
+
+/// Whether any leaf of `expr` compares one of `columns`, on either side.
+fn names_column(expr: &FilterExpr, columns: &[&str]) -> bool {
+    match expr {
+        FilterExpr::And(all) | FilterExpr::Or(all) => all.iter().any(|e| names_column(e, columns)),
+        FilterExpr::Not(inner) => names_column(inner, columns),
+        FilterExpr::Leaf(leaf) => {
+            columns.contains(&leaf.lhs.column.as_str())
+                || matches!(&leaf.rhs, Rhs::Col(col) if columns.contains(&col.column.as_str()))
+        }
+        FilterExpr::Custom { .. } => false,
+    }
 }
 
 /// Parse the `where:` value: natural dates resolved, columns checked.
@@ -428,7 +474,6 @@ impl RowFields for TimesheetRow<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn now() -> DateTime<Local> {
         Local.with_ymd_and_hms(2030, 3, 13, 15, 30, 0).unwrap()
@@ -507,6 +552,35 @@ mod tests {
         let q = parse("begin: 2030-01-01\nend: today\n").unwrap();
         assert_eq!(q.begin.as_deref(), Some("2030-01-01T00:00:00"));
         assert_eq!(q.end.as_deref(), Some("2030-03-13T23:59:59"));
+    }
+
+    #[test]
+    fn period_spans_begin_to_end() {
+        let p = parse("begin: 2030-01-07\nend: 2030-01-09\n")
+            .unwrap()
+            .period("2029-12-01T00:00:00")
+            .unwrap();
+        let local = |s: &str| s.parse::<NaiveDateTime>().unwrap();
+        assert_eq!(p.begin.unwrap().naive_local(), local("2030-01-07T00:00:00"));
+        assert_eq!(p.end.unwrap().naive_local(), local("2030-01-09T23:59:59"));
+    }
+
+    #[test]
+    fn period_without_bounds_starts_at_the_lookback_and_stays_open() {
+        let p = parse("").unwrap().period("2029-12-01T08:15:00").unwrap();
+        assert_eq!(
+            p.begin.unwrap().naive_local(),
+            "2029-12-01T08:15:00".parse::<NaiveDateTime>().unwrap()
+        );
+        assert!(p.end.is_none());
+    }
+
+    #[test]
+    fn period_is_unknown_when_where_compares_a_date() {
+        let q = parse("begin: 2030-01-07\nwhere: [begin, '>=', 2030-01-08]\n").unwrap();
+        assert!(q.period("2029-12-01T00:00:00").is_none());
+        let q = parse("begin: 2030-01-07\nwhere: [duration, '>=', 600]\n").unwrap();
+        assert!(q.period("2029-12-01T00:00:00").is_some());
     }
 
     #[test]

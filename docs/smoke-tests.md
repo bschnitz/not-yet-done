@@ -8594,6 +8594,24 @@ the user's teams no longer reach) and its id/name under `names:` in
 - [ ] Delete a visible entry in the Kimai web UI, reload the tab → it is gone
       (re-fetched once, dropped from the index), not kept from the index.
 
+## Kimai — the query's periods in the table payload
+
+Kimai tab, a `scope: table` script that dumps its payload (or
+`sync_hours_to_sqlite.py` from `~/.local`).
+
+- [ ] Query `begin: 2026-10-26` → the payload carries
+      `"periods": [{"begin": "2026-10-26T00:00:00+01:00", "end": null}]`.
+- [ ] `begin: monday` plus `end: today` → `begin` is this week's Monday at
+      00:00, `end` today at 23:59:59.
+- [ ] No `begin:` → `begin` is `lookback_days` ago, at the current time of day.
+- [ ] `where: [begin, '>=', …]` → `"periods": null`;
+      `where: [duration, '>=', 600]` → the periods stay.
+- [ ] `sync_hours_to_sqlite.py` with a query starting on a Thursday → opens
+      in the split, stops with "not on a Monday at 00:00", nothing written.
+- [ ] Query from a Monday two weeks back, no `end:` → the split shows only
+      complete past weeks plus the left-out week, asks `[y/N]`; `n` → the
+      editor report says "Aborted", the database is unchanged; `y` → written.
+
 ## Notes — a renamed ancestor keeps its directory
 
 Tasks tab. Pick a task with notes (`n` opens the file) whose parent has

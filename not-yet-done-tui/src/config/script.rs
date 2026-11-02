@@ -190,6 +190,8 @@ Reads the displayed table from a JSON file (first argument):
              "label": "<display label>",
              "fields": {"<key>": "<value>", ...}}, ...],
    "query": "<active query text>" or null,
+   "periods": [{"begin": "<RFC 3339>" or null,
+                "end": "<RFC 3339>" or null}, ...] or null,
    "selected_index": <index of the cursor row in rows>,
    "selected_field": "<column key under the column cursor>" or null}
 

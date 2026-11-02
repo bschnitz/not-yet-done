@@ -2015,7 +2015,7 @@ fn default_ratio() -> u16 {
 /// unchanged; the mechanism itself is adapter-agnostic.
 /// [`ScriptScope::Table`] passes the **whole currently-displayed table** as a
 /// richer payload — `{"rows": [{id, label, fields}…], "query": …,
-/// "selected_index": …, "selected_field": …}` — so a script can act on the
+/// "periods": …, "selected_index": …, "selected_field": …}` — so a script can act on the
 /// visible rows *with their cursor context* (which row, which column). It works
 /// on any content table, including the transposed record-detail split (where
 /// each "row" is a field/value pair). `selected_field` is the key under the

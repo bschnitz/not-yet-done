@@ -186,6 +186,9 @@ pub trait AdapterDecorator: Send + Sync {
     fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
         self.inner().query_variables(query)
     }
+    fn query_periods(&self, query: &str) -> Option<Vec<QueryPeriod>> {
+        self.inner().query_periods(query)
+    }
     fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
         self.inner().render_query(query, vars)
     }
@@ -375,6 +378,9 @@ impl<T: AdapterDecorator> ContentAdapter for T {
     }
     fn query_variables(&self, query: &str) -> Vec<QueryVariable> {
         <T as AdapterDecorator>::query_variables(self, query)
+    }
+    fn query_periods(&self, query: &str) -> Option<Vec<QueryPeriod>> {
+        <T as AdapterDecorator>::query_periods(self, query)
     }
     fn render_query(&self, query: &str, vars: &HashMap<String, String>) -> String {
         <T as AdapterDecorator>::render_query(self, query, vars)

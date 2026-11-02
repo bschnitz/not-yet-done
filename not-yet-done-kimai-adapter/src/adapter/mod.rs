@@ -272,6 +272,14 @@ impl ContentAdapter for KimaiAdapter {
         not_yet_done_content::query_vars::render(query, vars)
     }
 
+    /// One period, `begin` (or the lookback start) to `end` — the same bounds
+    /// [`list_timesheets`] fetches with. `None` for a body that does not parse
+    /// or whose `where:` narrows `begin`/`end` as well.
+    fn query_periods(&self, query: &str) -> Option<Vec<QueryPeriod>> {
+        let query = KimaiQuery::parse(query).ok()?;
+        Some(vec![query.period(&self.listing.default_begin())?])
+    }
+
     fn subscribe_status(&self) -> tokio::sync::watch::Receiver<AdapterStatus> {
         self.auth.subscribe_status()
     }

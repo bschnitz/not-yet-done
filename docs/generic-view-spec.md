@@ -3117,11 +3117,11 @@ way.
 - { name: script, key: "x m", type: script } # scope: node (default)
 ```
 
-| `scope`        | payload JSON                                                                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — the **one** selected node                                                                        |
-| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **all** currently filtered row ids + the date bounds of the active query         |
-| `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "selected_index": …, "selected_field": …}` — the **whole displayed table** with the cursor context |
+| `scope`        | payload JSON                                                                                                                                                         |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node`         | `{"node": {id, label, node_type, tab, fields:{…}}}` — the **one** selected node                                                                                      |
+| `filtered_set` | `{"tracking_ids": […], "filter_min_date": …, "filter_max_date": …}` — **all** currently filtered row ids + the date bounds of the active query                       |
+| `table`        | `{"rows": [{id, label, fields:{…}}, …], "query": …, "periods": …, "selected_index": …, "selected_field": …}` — the **whole displayed table** with the cursor context |
 
 ```yaml
 - { name: script, key: "x m", type: script, scope: filtered_set }
@@ -3163,6 +3163,15 @@ collects:
   hit set.
 - **`query`** — the pane's active query text (`null` if there is none, e.g. in
   the detail split).
+- **`periods`** — the stretches of time the query admits, as the adapter
+  reports them: `[{"begin": …, "end": …}, …]`, both RFC 3339 instants and
+  inclusive, `null` for an open side (`end: null` = up to now). Rows alone
+  cannot tell a day without entries from a day the query left out; a script
+  that must only act on complete periods (whole weeks, say) reads this
+  instead. `null` when there is no query or the adapter cannot say — an
+  adapter opts in through `ContentAdapter::query_periods`. Kimai reports one
+  period from `begin:` (or the lookback start) to `end:`, and `null` when
+  `where:` compares `begin`/`end` as well.
 - **`selected_index`** — the index of the cursor row in `rows`.
 - **`selected_field`** — the column key under the column cursor; if the column
   cursor is off, the action's configured **`default_field`** applies (otherwise
