@@ -67,6 +67,17 @@ pub enum AppError {
     #[error("Tracking would overlap with existing trackings — use --allow-overlap to override")]
     OverlapOtherTask,
 
+    /// An edit of a tracking's start/end that cannot be applied as given:
+    /// end not after start, a time in the future, an end on a running
+    /// tracking, a missing end on a completed one, or a deleted tracking.
+    #[error("Cannot edit tracking: {0}")]
+    InvalidTrackingEdit(String),
+
+    /// An edit of a tracking's start/end would overlap the listed trackings,
+    /// which share its tracking group.
+    #[error("Edited tracking would overlap {0}")]
+    TrackingEditOverlap(String),
+
     #[error("No free slot found to place the tracking")]
     NoFreeSlot,
 

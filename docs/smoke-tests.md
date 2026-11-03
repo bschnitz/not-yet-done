@@ -4391,6 +4391,29 @@ native trackings tab (until C1).
 - [ ] `x` opens the `:script` menu; a script run against the selected row is
       handed that row's JSON (`{json_file}`).
 
+### Editing start/end (`a e`, action `edit`)
+
+Prerequisite: `views/trackings.yaml` binds `{ key: 'a e', id: edit }` and the
+adapter has `group_paths: ["^/Work", "^/Autotrack"]`.
+
+- [ ] `a e` on a completed row → the editor opens with a comment naming the
+      task path and `start:` / `end:` lines in local time
+      (`YYYY-MM-DD HH:MM:SS`), cursor on `start:`.
+- [ ] Change both times (also try short forms like `9:15`), save → "Tracking
+      edited"; the row shows the new times, and `R` on the now dimmed original
+      (query showing deleted ones) brings back the old interval.
+- [ ] Save without a change → nothing is written (the editor reports cancel or
+      "Tracking unchanged").
+- [ ] Widen a `/Work/…` tracking over another `/Work/…` tracking → refused
+      with "Edited tracking would overlap /Work/… (start – end)"; the row stays
+      as it was.
+- [ ] Widen it over an `/Autotrack/…` tracking only → accepted (another group).
+- [ ] End before start, or a time in the future → refused, row unchanged.
+- [ ] `a e` on the **running** row → `end:` is empty; a new start is accepted
+      (the row keeps running); filling in `end:` refuses the whole edit.
+- [ ] CLI: `nyd adapter trackings <id> edit` opens `$EDITOR` with the same
+      buffer; `-m $'start: …\nend: …'` applies it without an editor.
+
 ### A2c — condensed (adapter-side condensing, `tracking:condensed-row`)
 
 - [ ] `v` switches to the **condensed** subtab; `a` switches back to the flat

@@ -116,6 +116,15 @@ pub struct MovedTracking {
     pub task_description: String,
 }
 
+/// What an [`TrackingService::edit_tracking`] did. `changed` is false when
+/// the requested start/end equal the current ones: nothing was written and
+/// `tracking` is the untouched original.
+pub struct EditedTracking {
+    pub old_id: Uuid,
+    pub tracking: tracking::Model,
+    pub changed: bool,
+}
+
 #[async_trait]
 pub trait TrackingService: shaku::Interface {
     /// Start tracking a task.
@@ -155,6 +164,25 @@ pub trait TrackingService: shaku::Interface {
         new_start: LocalContext,
         options: MoveOptions,
     ) -> Result<MovedTracking, AppError>;
+
+    /// Set a tracking's start and end.
+    ///
+    /// A running tracking only takes a new start: `end` must be `None`, and
+    /// any end refuses the whole edit. A completed one needs both. Neither
+    /// time may lie in the future, and the end must come after the start.
+    /// The new interval may not overlap a tracking the `policy` puts in the
+    /// same group (a running one reaches up to now), nor — whatever the
+    /// policy — another tracking of the same task.
+    ///
+    /// Like a move, the original is soft-deleted and a successor carrying the
+    /// new times references it, so restoring the original undoes the edit.
+    async fn edit_tracking(
+        &self,
+        entry_id: Uuid,
+        start: chrono::DateTime<chrono::Utc>,
+        end: Option<chrono::DateTime<chrono::Utc>>,
+        policy: &TrackingPolicy,
+    ) -> Result<EditedTracking, AppError>;
 
     /// Export trackings with their associated tasks.
     async fn export_trackings(
@@ -479,6 +507,83 @@ impl TrackingService for TrackingServiceImpl {
         })
     }
 
+    async fn edit_tracking(
+        &self,
+        entry_id: Uuid,
+        start: chrono::DateTime<chrono::Utc>,
+        end: Option<chrono::DateTime<chrono::Utc>>,
+        policy: &TrackingPolicy,
+    ) -> Result<EditedTracking, AppError> {
+        let now = chrono::Utc::now();
+        let invalid = |msg: &str| Err(AppError::InvalidTrackingEdit(msg.to_string()));
+
+        let tracking = self
+            .tracking_repository
+            .find_by_id(entry_id)
+            .await?
+            .ok_or(AppError::TrackingNotFound(entry_id))?;
+        if tracking.deleted {
+            return invalid("the tracking is deleted");
+        }
+        match (tracking.ended_at, end) {
+            (None, Some(_)) => return invalid("a running tracking has no end to edit"),
+            (Some(_), None) => return invalid("a completed tracking needs an end"),
+            _ => {}
+        }
+        if start > now || end.is_some_and(|e| e > now) {
+            return invalid("start and end may not lie in the future");
+        }
+        if end.is_some_and(|e| e <= start) {
+            return invalid("the end must come after the start");
+        }
+        if start == tracking.started_at && end == tracking.ended_at {
+            return Ok(EditedTracking {
+                old_id: entry_id,
+                tracking,
+                changed: false,
+            });
+        }
+
+        let overlapping = self
+            .tracking_repository
+            .find_overlapping(start, end.unwrap_or(now), entry_id)
+            .await?;
+        let (same_task, others): (Vec<_>, Vec<_>) = overlapping
+            .into_iter()
+            .partition(|t| t.task_id == tracking.task_id);
+        let mut blocking = same_task;
+        blocking.extend(
+            self.blocking_overlaps(policy, tracking.task_id, others)
+                .await?,
+        );
+        if !blocking.is_empty() {
+            return Err(AppError::TrackingEditOverlap(
+                self.describe_trackings(&blocking).await?,
+            ));
+        }
+
+        self.tracking_repository
+            .soft_delete_keeping_times(entry_id)
+            .await?;
+        let new_tracking = match end {
+            Some(end) => {
+                self.tracking_repository
+                    .insert_with_end(tracking.task_id, start, end, Some(entry_id))
+                    .await?
+            }
+            None => {
+                self.tracking_repository
+                    .insert(tracking.task_id, start, Some(entry_id))
+                    .await?
+            }
+        };
+        Ok(EditedTracking {
+            old_id: entry_id,
+            tracking: new_tracking,
+            changed: true,
+        })
+    }
+
     async fn export_trackings(
         &self,
         options: ExportOptions,
@@ -773,6 +878,25 @@ impl TrackingServiceImpl {
                 }
             }
         }
+    }
+
+    /// A user-facing list of trackings for an error message: each one's task
+    /// path and local start–end, oldest first (a running one ends in `now`).
+    async fn describe_trackings(&self, trackings: &[tracking::Model]) -> Result<String, AppError> {
+        let fmt = |t: chrono::DateTime<chrono::Utc>| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        };
+        let mut sorted: Vec<&tracking::Model> = trackings.iter().collect();
+        sorted.sort_by_key(|t| t.started_at);
+        let mut parts = Vec::with_capacity(sorted.len());
+        for t in sorted {
+            let end = t.ended_at.map(fmt).unwrap_or_else(|| "now".to_string());
+            let path = self.label_path(t.task_id).await?;
+            parts.push(format!("{path} ({} – {end})", fmt(t.started_at)));
+        }
+        Ok(parts.join(", "))
     }
 
     /// Narrow the trackings overlapping a candidate slot down to the ones

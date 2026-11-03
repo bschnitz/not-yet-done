@@ -82,7 +82,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use not_yet_done_content::{
     ActionArgs, ActionContext, ActionDispatch, ActionInput, ActionOutcome, AdapterCapabilities,
-    ColumnSchema, ContentAdapter, ContentError, FormFieldSpec, FsQueryStore, GroupBucket,
+    ColumnSchema, ContentAdapter, ContentError, EditorPrep, FormFieldSpec, FsQueryStore, GroupBucket,
     GroupSpec, HostContext, HostEvent, InputSpec, Invalidation, MarkedNode, Metadata,
     MetadataField, Node, NodeAction, NodeSummary, NodeType, QueryVariable, Result, SavedQueryStore,
     SortDirection, SortKey, Subtree, SubtreeNode, TypedAdapterFactory, apply_sort, grouping,
@@ -100,6 +100,8 @@ use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use crate::{CoreHandle, as_domain_event, publish_row_patches};
+
+mod edit;
 
 /// Stable id of the synthetic list-root node.
 const ROOT_ID: &str = "tracking:root";
@@ -1416,6 +1418,7 @@ fn tracking_entry_actions() -> Vec<NodeAction> {
         crate::task::toggle_tracking_action(),
         NodeAction::new("split", "Split", split_input_spec()),
         NodeAction::new("move", "Move", move_input_spec()),
+        edit::edit_action(),
         // Repack (mark/paste): `mark-move` records the row as the move source
         // via the frontend's generic move clipboard (returns `Noop`; the App
         // does the marking). `paste-move` slots the marked interval — keeping
@@ -2326,8 +2329,19 @@ impl Node for TrackingEntryNode {
             ("move", ActionInput::Form(values)) => {
                 execute_move(&self.handle, self.tracking_id()?, &values, args).await
             }
+            ("edit", ActionInput::Edited { text, version, .. }) => {
+                edit::execute_edit(&self.handle, self.tracking_id()?, &text, &version, args).await
+            }
             (other, _) => Err(ContentError::NotSupported(format!(
                 "action `{other}` not supported on a tracking"
+            ))),
+        }
+    }
+    async fn prepare(&self, action_id: &str, _args: &ActionArgs) -> Result<EditorPrep> {
+        match action_id {
+            "edit" => edit::prepare_edit(&self.handle, self.tracking_id()?).await,
+            other => Err(ContentError::NotSupported(format!(
+                "prepare not supported for `{other}` on a tracking"
             ))),
         }
     }
@@ -5512,6 +5526,140 @@ mod restore_scope_tests {
             .err()
             .expect("same group still collides");
         assert!(format!("{err}").contains("overlap"), "{err}");
+    }
+
+    /// The tracking `id` currently points to after an edit: its one successor.
+    async fn edit_successor(handle: &CoreHandle, id: Uuid) -> tracking::Model {
+        let mut successors = handle
+            .tracking_repo
+            .find_by_predecessor(id)
+            .await
+            .expect("find successors");
+        assert_eq!(successors.len(), 1, "edit produced one successor");
+        successors.remove(0)
+    }
+
+    fn edit_buffer(start: &str, end: &str) -> String {
+        format!("# comment\nstart: {start}\nend: {end}\n")
+    }
+
+    #[tokio::test]
+    async fn execute_edit_sets_start_and_end_and_soft_deletes_original() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Edit project").await;
+        let original = insert_tracking_hours(&db, task, 14, 15).await;
+
+        let buffer = edit_buffer("2026-03-22T13:30:00Z", "2026-03-22T16:00:00Z");
+        let outcome = edit::execute_edit(&handle, original, &buffer, "", &ActionArgs::new())
+            .await
+            .expect("edit succeeds");
+        assert!(matches!(outcome, ActionOutcome::Done { .. }));
+
+        assert!(is_deleted(&handle, original).await, "original soft-deleted");
+        let edited = edit_successor(&handle, original).await;
+        assert_eq!(edited.started_at.to_rfc3339(), "2026-03-22T13:30:00+00:00");
+        assert_eq!(
+            edited.ended_at.map(|t| t.to_rfc3339()).as_deref(),
+            Some("2026-03-22T16:00:00+00:00")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_edit_refuses_an_overlap_inside_the_group() {
+        let (mut handle, db) = setup().await;
+        handle.tracking_policy = TrackingPolicy::grouped(&["^/Work", "^/Autotrack"]).unwrap();
+        let work = insert_task(&db, "Work").await;
+        let doku = insert_child_task(&db, "Dokumentation", work).await;
+        let meeting = insert_child_task(&db, "Meeting", work).await;
+        insert_tracking_hours(&db, meeting, 8, 10).await;
+        let editing = insert_tracking_hours(&db, doku, 10, 11).await;
+
+        let buffer = edit_buffer("2026-03-22T09:30:00Z", "2026-03-22T11:00:00Z");
+        let err = edit::execute_edit(&handle, editing, &buffer, "", &ActionArgs::new())
+            .await
+            .err()
+            .expect("same group collides");
+        assert!(format!("{err}").contains("/Work/Meeting"), "{err}");
+        assert!(!is_deleted(&handle, editing).await, "original untouched");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_may_overlap_another_group() {
+        let (mut handle, db) = setup().await;
+        handle.tracking_policy = TrackingPolicy::grouped(&["^/Work", "^/Autotrack"]).unwrap();
+        let work = insert_task(&db, "Work").await;
+        let doku = insert_child_task(&db, "Dokumentation", work).await;
+        let autotrack = insert_task(&db, "Autotrack").await;
+        let mirrored = insert_child_task(&db, "Mirrored ticket", autotrack).await;
+        insert_tracking_hours(&db, mirrored, 8, 10).await;
+        let editing = insert_tracking_hours(&db, doku, 10, 11).await;
+
+        let buffer = edit_buffer("2026-03-22T08:00:00Z", "2026-03-22T11:00:00Z");
+        edit::execute_edit(&handle, editing, &buffer, "", &ActionArgs::new())
+            .await
+            .expect("another group is not in the way");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_refuses_end_before_start_and_the_future() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Edit project").await;
+        let original = insert_tracking_hours(&db, task, 14, 15).await;
+
+        for (start, end, expected) in [
+            ("2026-03-22T15:00:00Z", "2026-03-22T14:00:00Z", "after the start"),
+            ("2026-03-22T14:00:00Z", "2999-01-01T00:00:00Z", "future"),
+        ] {
+            let buffer = edit_buffer(start, end);
+            let err = edit::execute_edit(&handle, original, &buffer, "", &ActionArgs::new())
+                .await
+                .err()
+                .expect("refused");
+            assert!(format!("{err}").contains(expected), "{err}");
+        }
+        assert!(!is_deleted(&handle, original).await, "original untouched");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_moves_the_start_of_a_running_tracking_but_refuses_an_end() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Running project").await;
+        let running = handle
+            .tracking_repo
+            .insert(task, Utc::now() - chrono::Duration::minutes(30), None)
+            .await
+            .expect("insert running")
+            .id;
+
+        let with_end = edit_buffer("2026-03-22T08:00:00Z", "2026-03-22T09:00:00Z");
+        let err = edit::execute_edit(&handle, running, &with_end, "", &ActionArgs::new())
+            .await
+            .err()
+            .expect("an end on a running tracking is refused");
+        assert!(format!("{err}").contains("running"), "{err}");
+        assert!(!is_deleted(&handle, running).await, "original untouched");
+
+        let start_only = edit_buffer("2026-03-22T08:00:00Z", "");
+        edit::execute_edit(&handle, running, &start_only, "", &ActionArgs::new())
+            .await
+            .expect("start of a running tracking is editable");
+        let edited = edit_successor(&handle, running).await;
+        assert_eq!(edited.started_at.to_rfc3339(), "2026-03-22T08:00:00+00:00");
+        assert!(edited.ended_at.is_none(), "still running");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_refuses_a_stale_version() {
+        let (handle, db) = setup().await;
+        let task = insert_task(&db, "Edit project").await;
+        let original = insert_tracking_hours(&db, task, 14, 15).await;
+
+        let buffer = edit_buffer("2026-03-22T13:00:00Z", "2026-03-22T15:00:00Z");
+        let err = edit::execute_edit(&handle, original, &buffer, "stale", &ActionArgs::new())
+            .await
+            .err()
+            .expect("stale version refused");
+        assert!(format!("{err}").contains("changed while"), "{err}");
     }
 
     #[tokio::test]

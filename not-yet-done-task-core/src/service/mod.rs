@@ -14,7 +14,7 @@ pub use tag_service::{TagItem, TagService, TagServiceImpl};
 pub use task_service::{TaskService, TaskServiceImpl, check_window};
 pub use tracking_policy::{TrackingPolicy, label_path};
 pub use tracking_service::{
-    DaySummary, ExportOptions, ExportedTracking, GravityDirection, MoveOptions, MovedTracking,
-    SortDirection, SplitTracking, StartedTracking, StoppedTracking, Summary, TaskSummary,
+    DaySummary, EditedTracking, ExportOptions, ExportedTracking, GravityDirection, MoveOptions,
+    MovedTracking, SortDirection, SplitTracking, StartedTracking, StoppedTracking, Summary, TaskSummary,
     TrackingService, TrackingServiceImpl,
 };
