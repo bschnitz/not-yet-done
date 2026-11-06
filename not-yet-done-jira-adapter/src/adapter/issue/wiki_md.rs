@@ -1816,8 +1816,10 @@ fn image_m2w(alt: &str, params: Option<&str>) -> String {
 /// Characters Jira still reads as markup inside a `{{…}}` span: the phrase
 /// delimiters (`*bold*`, `_italic_`, `-strike-`, `+ins+`, `^sup^`, `~sub~`,
 /// `??cite??`, and `--`/`---` as dashes), link and image brackets (`[…]`,
-/// `!…!`) and macro braces (`{…}`).
-const MONO_ESCAPED: &[char] = &['-', '*', '_', '+', '^', '~', '?', '[', ']', '!', '{', '}'];
+/// `!…!`), macro braces (`{…}`) and the parentheses of emoticons (`(/)`,
+/// `:)`).
+const MONO_ESCAPED: &[char] =
+    &['-', '*', '_', '+', '^', '~', '?', '[', ']', '!', '{', '}', '(', ')'];
 
 /// Escape the markup characters of an inline-code span on its way into Jira
 /// monospace.
@@ -2312,7 +2314,7 @@ a title-less panel whose sole attribute makes its opener marker long enough
         );
         assert_eq!(
             md_to_wiki("call `strpos($s, '{')` here"),
-            "call {{strpos($s, '\\{')}} here"
+            "call {{strpos\\($s, '\\{'\\)}} here"
         );
     }
 
@@ -2335,6 +2337,8 @@ a title-less panel whose sole attribute makes its opener marker long enough
             md_to_wiki("run `rebuild-cache --force`"),
             "run {{rebuild\\-cache \\-\\-force}}"
         );
+        // Emoticon parentheses: `(/)` would render as a tick icon.
+        assert_eq!(md_to_wiki("`(/)` `:)`"), "{{\\(/\\)}} {{:\\)}}");
         // A backslash in front of anything else is content and stays.
         assert_roundtrip("a {{c:\\tmp\\x-y}} path", "a `c:\\tmp\\x-y` path");
     }
