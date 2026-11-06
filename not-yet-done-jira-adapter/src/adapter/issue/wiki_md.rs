@@ -29,7 +29,7 @@
 //! | `_italic_`                    | `_italic_` (already valid MD)     |
 //! | `-strike-`                    | `~~strike~~`                      |
 //! | `{{mono}}`, `{{{}mono{}}}`    | `` `mono` `` (padding dropped)    |
-//! | `{{\{x\}}}`                   | `` `{x}` `` (braces escaped, not a macro) |
+//! | `{{\{x\}}}`, `{{\-\-x}}`    | `` `{x}` ``, `` `--x` `` (markup chars escaped) |
 //! | literal `` ` ``               | `` \` `` (a backtick is plain text in Jira) |
 //! | `[text\|url]`                 | `[text](url)`                     |
 //! | `{color:c}…{color}`           | `<span style="color:c">…</span>`  |
@@ -908,14 +908,14 @@ pub(super) fn normalize_ws(s: &str) -> String {
     // put it back, so — like the cosmetic table and panel padding below — it
     // has to be insignificant to the guard.
     //
-    // A brace inside the span is canonicalized to its escaped form. Jira
-    // renders `{{'{'}}` and `{{'\{'}}` alike, but Markdown has no way to
-    // tell them apart, and the way back always escapes (see
-    // [`escape_braces`]) — so a bare brace from the source must not read as
-    // a divergence.
+    // A markup character inside the span is canonicalized to its escaped
+    // form. Jira renders `{{'{'}}` and `{{'\{'}}` (or `{{a-b}}` and
+    // `{{a\-b}}`) alike, but Markdown has no way to tell them apart, and the
+    // way back always escapes (see [`escape_mono`]) — so a bare character
+    // from the source must not read as a divergence.
     let s = W_MONO
         .replace_all(&s, |c: &Captures| {
-            format!("{{{{{}}}}}", escape_braces(&unescape_braces(&c[1])))
+            format!("{{{{{}}}}}", escape_mono(&unescape_mono(&c[1])))
         })
         .into_owned();
     let lines: Vec<&str> = s.split('\n').collect();
@@ -1813,21 +1813,32 @@ fn image_m2w(alt: &str, params: Option<&str>) -> String {
     }
 }
 
-/// Escape the braces of an inline-code span on its way into Jira monospace.
+/// Characters Jira still reads as markup inside a `{{…}}` span: the phrase
+/// delimiters (`*bold*`, `_italic_`, `-strike-`, `+ins+`, `^sup^`, `~sub~`,
+/// `??cite??`, and `--`/`---` as dashes), link and image brackets (`[…]`,
+/// `!…!`) and macro braces (`{…}`).
+const MONO_ESCAPED: &[char] = &['-', '*', '_', '+', '^', '~', '?', '[', ']', '!', '{', '}'];
+
+/// Escape the markup characters of an inline-code span on its way into Jira
+/// monospace.
 ///
-/// `{{…}}` is not a verbatim span: Jira still reads macros inside it, so
-/// `` `{meta:x}` `` shows up as "Unknown macro" instead of the literal text it
-/// was. A backslash in front of the brace takes that reading away and renders
-/// the character itself.
+/// `{{…}}` is not a verbatim span: Jira still reads markup inside it, so
+/// `` `{meta:x}` `` shows up as "Unknown macro" and `` `--name` `` as a
+/// struck-through `-name`. A backslash in front of the character takes that
+/// reading away and renders the character itself. Every such character is
+/// escaped, not only where Jira would happen to read it — Jira's rules for
+/// when a delimiter counts depend on the whole line, and an escape it didn't
+/// need renders the same.
 ///
 /// A backslash already in the content is left as it is. Jira spells an escaped
 /// backslash `\\`, and that is its line break — doubling here would trade a
 /// wrong macro for a wrong line break. The round-trip survives it either way:
-/// [`unescape_braces`] only undoes a backslash that stands in front of a brace.
-fn escape_braces(text: &str) -> String {
+/// [`unescape_mono`] only undoes a backslash that stands in front of one of
+/// [`MONO_ESCAPED`].
+fn escape_mono(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c == '{' || c == '}' {
+        if MONO_ESCAPED.contains(&c) {
             out.push('\\');
         }
         out.push(c);
@@ -1835,13 +1846,13 @@ fn escape_braces(text: &str) -> String {
     out
 }
 
-/// Reverse of [`escape_braces`]: `\{` and `\}` come back as the bare brace,
-/// every other backslash stays where it stands.
-fn unescape_braces(text: &str) -> String {
+/// Reverse of [`escape_mono`]: a backslash in front of one of
+/// [`MONO_ESCAPED`] is dropped, every other backslash stays where it stands.
+fn unescape_mono(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' && matches!(chars.peek(), Some('{') | Some('}')) {
+        if c == '\\' && chars.peek().is_some_and(|n| MONO_ESCAPED.contains(n)) {
             continue;
         }
         out.push(c);
@@ -1865,7 +1876,7 @@ fn convert_inline_w2m(text: &str) -> String {
     });
     let s = W_COLOR_CLOSE.replace_all(&s, |_: &Captures| shield(&mut sh, "</span>".to_string()));
     let s = W_MONO.replace_all(&s, |c: &Captures| {
-        shield(&mut sh, format!("`{}`", unescape_braces(&c[1])))
+        shield(&mut sh, format!("`{}`", unescape_mono(&c[1])))
     });
     // A backtick is plain text in Jira but an inline-code delimiter in
     // Markdown, so `md_to_wiki` would turn a literal pair into `{{…}}`. Every
@@ -1937,7 +1948,7 @@ fn convert_inline_m2w(text: &str) -> String {
     // escape). Shielding it first keeps the code pass below from pairing it.
     let s = M_ESCAPED_TICK.replace_all(&s, |_: &Captures| shield(&mut sh, "`".to_string()));
     let s = M_MONO.replace_all(&s, |c: &Captures| {
-        shield(&mut sh, format!("{{{{{}}}}}", escape_braces(&c[1])))
+        shield(&mut sh, format!("{{{{{}}}}}", escape_mono(&c[1])))
     });
     let s = M_LINK.replace_all(&s, |c: &Captures| {
         shield(&mut sh, format!("[{}|{}]", &c[1], &c[2]))
@@ -2303,6 +2314,29 @@ a title-less panel whose sole attribute makes its opener marker long enough
             md_to_wiki("call `strpos($s, '{')` here"),
             "call {{strpos($s, '\\{')}} here"
         );
+    }
+
+    /// Phrase delimiters inside `{{…}}` are read by Jira too: `{{--name}}`
+    /// rendered as a struck-through `-name`. Every markup character in an
+    /// inline-code span goes out escaped and comes back bare.
+    #[test]
+    fn mono_with_markup_chars_is_escaped() {
+        assert_eq!(md_to_wiki("pass `--name` here"), "pass {{\\-\\-name}} here");
+        assert_roundtrip("pass {{\\-\\-name}} here", "pass `--name` here");
+        assert_eq!(
+            md_to_wiki("`*a*` `_b_` `+c+` `^d^` `~e~` `??f??` `[g]` `!h.png!`"),
+            "{{\\*a\\*}} {{\\_b\\_}} {{\\+c\\+}} {{\\^d\\^}} {{\\~e\\~}} \
+             {{\\?\\?f\\?\\?}} {{\\[g\\]}} {{\\!h.png\\!}}"
+        );
+        // An unescaped source span renders the same and must pass the guard,
+        // even though the way back now escapes it.
+        assert_roundtrip("run {{rebuild-cache --force}}", "run `rebuild-cache --force`");
+        assert_eq!(
+            md_to_wiki("run `rebuild-cache --force`"),
+            "run {{rebuild\\-cache \\-\\-force}}"
+        );
+        // A backslash in front of anything else is content and stays.
+        assert_roundtrip("a {{c:\\tmp\\x-y}} path", "a `c:\\tmp\\x-y` path");
     }
 
     #[test]
