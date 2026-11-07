@@ -110,6 +110,14 @@ views:
       # in the editor; leaving the editor unchanged keeps the copy.
       # Shortcut and ★ stay with the source.
       #
+      # Rename: in the q menu, `ctrl+n` (keybinding `query_menu.rename`)
+      # asks for the new name in the same small form, prefilled with the
+      # selected entry's name. A name the menu already lists is refused
+      # inside that form; submitting the name unchanged returns to the
+      # menu. Enter moves the body to the new name in its store (saved or
+      # extended); the shortcut and the ★ follow it, and panes showing the
+      # query show the new name.
+      #
       # `inherit_default: true` (default false) additionally stamps the
       # user default query (★) onto *this* subtab at start — the plain
       # start-apply only hits the tab's default view. Why opt-in: sibling
@@ -3020,7 +3028,8 @@ buffer differs. `templates:` is only valid on `type: create`.
   the selection — a `parent:` in the template is ignored).
 - **Menu keys** as in the query menu: typing a new name creates a template
   (seeded from the adapter's plain buffer) and opens it in the editor, `ctrl+e`
-  edits, `ctrl+d` deletes, `ctrl+u` duplicates, `ctrl+s` binds a chord,
+  edits, `ctrl+d` deletes, `ctrl+u` duplicates, `ctrl+n` renames (the chord
+  follows), `ctrl+s` binds a chord,
   `ctrl+x` clears it. There is no ★ default (`ctrl+t` does nothing).
 - **Shortcuts:** a chord is stored in `query_shortcut` under the scope
   `template:<adapter>/<instance>/<action id>` with the template name. While
@@ -3690,7 +3699,8 @@ appear in the menu as a `[chord]` suffix.
 
 `ctrl+u` duplicates a script as in the query menu: name prompt prefilled with
 the script's name, the file is copied under the new name (its shortcut is not)
-and opened in the editor.
+and opened in the editor. `ctrl+n` renames it with the same prompt: the file is
+moved to the new name and its shortcut follows it.
 
 ### Tag management (`type: tag`)
 

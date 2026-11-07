@@ -787,6 +787,71 @@ impl App {
         }
     }
 
+    /// Rename the node script `script` to `new_name`; its shortcut follows
+    /// it. An existing `new_name` is never overwritten.
+    pub fn rename_node_script(
+        &mut self,
+        view_index: usize,
+        node_id: String,
+        script: String,
+        new_name: String,
+    ) {
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .map(Arc::clone)
+        else {
+            self.notify("No adapter for this view".to_string());
+            return;
+        };
+        let scope = crate::app::node_actions::node_script_scope(
+            adapter.adapter_type(),
+            adapter.instance_id(),
+            &node_id,
+        );
+        let renamed = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match adapter.script_store() {
+                    Some(store) => store.rename_node_script(&node_id, &script, &new_name).await,
+                    None => Err(not_yet_done_content::ContentError::NotSupported(
+                        "scripts".to_string(),
+                    )),
+                }
+            })
+        });
+        match renamed {
+            Ok(true) => {
+                self.move_db_shortcut(&scope, &script, &new_name, "script");
+                // Drop the cached chord-claim entry so the next keypress on
+                // this node refetches from `query_shortcut` (SQ-8d).
+                if let Some(cv) = self.content_view_mut(view_index) {
+                    cv.node_script_shortcuts.remove(&node_id);
+                }
+            }
+            Ok(false) => {
+                self.modal_message = Some(format!("A script named '{new_name}' already exists."));
+            }
+            Err(e) => self.notify_error(format!("Could not rename '{script}': {e}")),
+        }
+    }
+
+    /// Point the `query_shortcut` row of `old_name` in `scope` at
+    /// `new_name` after the entry itself was renamed, and report the
+    /// rename. `what` names the entry in the message ("script", …).
+    fn move_db_shortcut(&mut self, scope: &str, old_name: &str, new_name: &str, what: &str) {
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let moved = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { shortcut_repo.rename(scope, old_name, new_name).await })
+        });
+        match moved {
+            Ok(()) => self.notify(format!("Renamed {what} '{old_name}' to '{new_name}'")),
+            Err(e) => self.notify_error(format!(
+                "Renamed {what} '{old_name}' to '{new_name}', but its shortcut was lost: {e}"
+            )),
+        }
+    }
+
     /// Open the editor-template menu of the create action `action_name`
     /// (its `templates.menu_key`). Refuses when the adapter does not declare
     /// the action templated on the node it would create under — the menu
@@ -996,6 +1061,48 @@ impl App {
                 self.notify_error(format!("Could not duplicate '{template}': {e}"));
                 EditorRequest::None
             }
+        }
+    }
+
+    /// Rename the stored editor template `template` of `action_id` to
+    /// `new_name`; its shortcut follows it. An existing `new_name` is never
+    /// overwritten.
+    pub fn rename_editor_template(
+        &mut self,
+        view_index: usize,
+        action_id: String,
+        template: String,
+        new_name: String,
+    ) {
+        let Some(store) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.as_ref())
+            .and_then(|a| a.template_store(&action_id))
+        else {
+            self.notify("No template store for this view".to_string());
+            return;
+        };
+        let renamed = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { store.rename(&template, &new_name).await })
+        });
+        match renamed {
+            Ok(true) => {
+                let scope = self
+                    .content_view(view_index)
+                    .and_then(|cv| cv.template_shortcut_scope(&action_id));
+                match scope {
+                    Some(scope) => self.move_db_shortcut(&scope, &template, &new_name, "template"),
+                    None => self.notify(format!("Renamed template '{template}' to '{new_name}'")),
+                }
+                if let Some(cv) = self.content_view_mut(view_index) {
+                    cv.template_shortcuts.remove(&action_id);
+                }
+            }
+            Ok(false) => {
+                self.modal_message = Some(format!("A template named '{new_name}' already exists."));
+            }
+            Err(e) => self.notify_error(format!("Could not rename '{template}': {e}")),
         }
     }
 

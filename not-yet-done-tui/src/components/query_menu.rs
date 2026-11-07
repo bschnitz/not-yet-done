@@ -2,16 +2,17 @@
 //!
 //! Wraps a `SearchablePopup` with a uniform set of actions:
 //! Apply (Enter), Edit (ctrl+e), Delete (ctrl+d), EditShortcut (ctrl+s),
-//! Duplicate (ctrl+u), Close.
+//! Duplicate (ctrl+u), Rename (ctrl+n), Close.
 //! When the user types a name with no match and presses Enter, a
 //! `CreateNew` message is emitted so the embedder can open the editor for a
 //! brand-new entry. Prefixing the typed name with `+` forces that even when
 //! something is fuzzy-selected, and `++` asks for an extended document
 //! instead of an adapter-native query body.
 //!
-//! Duplicate asks for the copy's name in a one-field form over the menu,
-//! prefilled with the source's name. A name the menu already lists is
-//! refused inside that form, so the user can fix it in place.
+//! Duplicate and Rename ask for the new name in a one-field form over the
+//! menu, prefilled with the source's name. A name the menu already lists is
+//! refused inside that form, so the user can fix it in place; submitting a
+//! rename unchanged just returns to the menu.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,6 +77,10 @@ pub enum QueryMenuMessage {
         query: String,
         new_name: String,
     },
+    /// Rename the entry `name` to `new_name`. `new_name` is non-empty,
+    /// differs from `name` and is not listed in the menu; shortcut and
+    /// default mark follow the entry.
+    Rename { name: String, new_name: String },
     /// User typed a name (optionally `+name` / `++name`) — create a
     /// brand-new entry under that name. `kind` says which store the body
     /// belongs in; embedders that repurpose this menu for files ignore it.
@@ -99,21 +104,48 @@ pub struct QueryMenuComponent {
     /// pinned when the recording starts so the emitted message can't drift
     /// with the selection.
     recording_target: Option<(String, String)>,
-    /// Every name the menu lists, for refusing a duplicate's name.
+    /// Every name the menu lists, for refusing a taken new name.
     names: Vec<String>,
-    /// The open name prompt of a running duplicate.
-    duplicate_prompt: Option<DuplicatePrompt>,
+    /// The open name prompt of a running duplicate or rename.
+    name_prompt: Option<NamePrompt>,
 }
 
-/// Name prompt of a duplicate, pinned to its source like `recording_target`.
-struct DuplicatePrompt {
+/// Name prompt of a duplicate or rename, pinned to its source like
+/// `recording_target`.
+struct NamePrompt {
     form: ContentFormPopup,
+    purpose: NamePurpose,
     name: String,
     query: String,
 }
 
-/// Field key of the duplicate prompt's only field.
-const DUPLICATE_NAME_FIELD: &str = "name";
+/// What the name a [`NamePrompt`] asks for is used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamePurpose {
+    Duplicate,
+    Rename,
+}
+
+impl NamePurpose {
+    /// Verb on the prompt's title and submit button.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Duplicate => "Duplicate",
+            Self::Rename => "Rename",
+        }
+    }
+
+    /// Complaint about a blank name.
+    fn empty_complaint(self) -> &'static str {
+        match self {
+            Self::Duplicate => "Enter a name for the copy",
+            Self::Rename => "Enter the new name",
+        }
+    }
+}
+
+/// Field key of the name prompt's only field.
+const NAME_FIELD: &str = "name";
 
 impl QueryMenuComponent {
     pub fn new(theme: Arc<Theme>, title: impl Into<String>) -> Self {
@@ -126,7 +158,7 @@ impl QueryMenuComponent {
             set_default_enabled: false,
             recording_target: None,
             names: Vec::new(),
-            duplicate_prompt: None,
+            name_prompt: None,
         }
     }
 
@@ -152,7 +184,7 @@ impl QueryMenuComponent {
     pub fn close(&mut self) {
         self.popup = None;
         self.recording_target = None;
-        self.duplicate_prompt = None;
+        self.name_prompt = None;
     }
 
     /// Open the menu for saved queries — supports marking a default
@@ -179,7 +211,7 @@ impl QueryMenuComponent {
     ) {
         self.set_default_enabled = set_default_enabled;
         self.recording_target = None;
-        self.duplicate_prompt = None;
+        self.name_prompt = None;
         self.names = entries.iter().map(|e| e.name.clone()).collect();
         let items: Vec<PopupItem> = entries
             .iter()
@@ -205,6 +237,7 @@ impl QueryMenuComponent {
                 "clear key".into(),
             ),
             (kb.label(&QueryMenuAction::Duplicate), "duplicate".into()),
+            (kb.label(&QueryMenuAction::Rename), "rename".into()),
             (kb.label(&QueryMenuAction::Delete), "delete".into()),
         ];
         if set_default_enabled {
@@ -226,8 +259,8 @@ impl QueryMenuComponent {
 
         // An open name prompt owns every key until it is submitted or
         // cancelled; cancelling returns to the menu.
-        if self.duplicate_prompt.is_some() {
-            return self.handle_duplicate_prompt_key(key);
+        if self.name_prompt.is_some() {
+            return self.handle_name_prompt_key(key);
         }
 
         // A running shortcut recording owns every key — including Esc and
@@ -378,7 +411,17 @@ impl QueryMenuComponent {
         {
             if let Some(item) = self.popup.as_ref().unwrap().selected_item() {
                 let (name, query) = (item.label.clone(), item.value.clone());
-                self.open_duplicate_prompt(name, query);
+                self.open_name_prompt(NamePurpose::Duplicate, name, query);
+            }
+            return QueryMenuMessage::Handled;
+        }
+        if kb
+            .get(&QueryMenuAction::Rename)
+            .is_some_and(|b| b.matches(key))
+        {
+            if let Some(item) = self.popup.as_ref().unwrap().selected_item() {
+                let (name, query) = (item.label.clone(), item.value.clone());
+                self.open_name_prompt(NamePurpose::Rename, name, query);
             }
             return QueryMenuMessage::Handled;
         }
@@ -404,43 +447,53 @@ impl QueryMenuComponent {
         QueryMenuMessage::Handled
     }
 
-    /// Open the name prompt for a copy of `name`, prefilled with `name`
-    /// itself: the user edits it into something new rather than typing it
-    /// from scratch.
-    fn open_duplicate_prompt(&mut self, name: String, query: String) {
-        let field = FormFieldSpec::text(DUPLICATE_NAME_FIELD, "Name");
-        let prefill = HashMap::from([(DUPLICATE_NAME_FIELD.to_string(), name.clone())]);
+    /// Open the name prompt for a copy or a rename of `name`, prefilled
+    /// with `name` itself: the user edits it into something new rather than
+    /// typing it from scratch.
+    fn open_name_prompt(&mut self, purpose: NamePurpose, name: String, query: String) {
+        let field = FormFieldSpec::text(NAME_FIELD, "Name");
+        let prefill = HashMap::from([(NAME_FIELD.to_string(), name.clone())]);
         let options = FormOptions {
-            submit_label: Some("Duplicate".to_string()),
+            submit_label: Some(purpose.verb().to_string()),
             field_bar: true,
             ..FormOptions::default()
         };
         let form = ContentFormPopup::overlay(
-            format!("Duplicate '{name}'"),
+            format!("{} '{name}'", purpose.verb()),
             vec![field],
             &prefill,
             &self.theme,
             &options,
         );
-        self.duplicate_prompt = Some(DuplicatePrompt { form, name, query });
+        self.name_prompt = Some(NamePrompt {
+            form,
+            purpose,
+            name,
+            query,
+        });
     }
 
-    fn handle_duplicate_prompt_key(&mut self, key: &str) -> QueryMenuMessage {
-        let prompt = self.duplicate_prompt.as_mut().unwrap();
+    fn handle_name_prompt_key(&mut self, key: &str) -> QueryMenuMessage {
+        let prompt = self.name_prompt.as_mut().unwrap();
         let values = match prompt.form.handle_key(key) {
             ContentFormEvent::Consumed => return QueryMenuMessage::Handled,
             ContentFormEvent::Cancelled => {
-                self.duplicate_prompt = None;
+                self.name_prompt = None;
                 return QueryMenuMessage::Handled;
             }
             ContentFormEvent::Submitted(values) => values,
         };
         let new_name = values
-            .get(DUPLICATE_NAME_FIELD)
+            .get(NAME_FIELD)
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
+        // An unchanged name renames nothing: back to the menu, like Esc.
+        if prompt.purpose == NamePurpose::Rename && new_name == prompt.name {
+            self.name_prompt = None;
+            return QueryMenuMessage::Handled;
+        }
         let complaint = if new_name.is_empty() {
-            Some("Enter a name for the copy".to_string())
+            Some(prompt.purpose.empty_complaint().to_string())
         } else if self.names.contains(&new_name) {
             Some(format!("'{new_name}' already exists"))
         } else {
@@ -449,15 +502,23 @@ impl QueryMenuComponent {
         if let Some(message) = complaint {
             prompt
                 .form
-                .show_errors(&[FieldError::field(DUPLICATE_NAME_FIELD, message)]);
+                .show_errors(&[FieldError::field(NAME_FIELD, message)]);
             return QueryMenuMessage::Handled;
         }
-        let DuplicatePrompt { name, query, .. } = self.duplicate_prompt.take().unwrap();
-        self.close();
-        QueryMenuMessage::Duplicate {
+        let NamePrompt {
+            purpose,
             name,
             query,
-            new_name,
+            ..
+        } = self.name_prompt.take().unwrap();
+        self.close();
+        match purpose {
+            NamePurpose::Duplicate => QueryMenuMessage::Duplicate {
+                name,
+                query,
+                new_name,
+            },
+            NamePurpose::Rename => QueryMenuMessage::Rename { name, new_name },
         }
     }
 
@@ -466,17 +527,17 @@ impl QueryMenuComponent {
             popup.view(frame, area);
         }
         let menu = self.popup.as_ref().and_then(|p| p.panel_rect());
-        if let (Some(prompt), Some(menu)) = (&mut self.duplicate_prompt, menu) {
+        if let (Some(prompt), Some(menu)) = (&mut self.name_prompt, menu) {
             prompt.form.render(frame, prompt_area(area, menu));
         }
     }
 }
 
-/// Narrowest the duplicate prompt gets, so the name field stays usable over
-/// a slim menu.
+/// Narrowest the name prompt gets, so the name field stays usable over a
+/// slim menu.
 const PROMPT_MIN_WIDTH: u16 = 40;
 
-/// Where the duplicate prompt goes: over the menu, as wide as the menu (at
+/// Where the name prompt goes: over the menu, as wide as the menu (at
 /// least [`PROMPT_MIN_WIDTH`]). The form centres its panel in what it gets,
 /// and the menu is centred in `area` too, so the full height keeps the two
 /// on one centre without clipping the prompt to a short menu.
@@ -505,6 +566,7 @@ mod tests {
         m.insert(QueryMenuAction::EditShortcut, KeyBinding::new("ctrl+s"));
         m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
         m.insert(QueryMenuAction::Duplicate, KeyBinding::new("ctrl+u"));
+        m.insert(QueryMenuAction::Rename, KeyBinding::new("ctrl+n"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         KeyBindingSection { bindings: m }
     }
@@ -757,6 +819,58 @@ mod tests {
         menu.handle_key("ctrl+u", &kb);
         assert_eq!(menu.handle_key("esc", &kb), QueryMenuMessage::Handled);
         assert!(menu.is_open());
+        assert!(matches!(
+            menu.handle_key("enter", &kb),
+            QueryMenuMessage::Apply { ref name, .. } if name == "alpha"
+        ));
+    }
+
+    #[test]
+    fn rename_asks_for_a_name_and_emits_the_rename() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        assert_eq!(menu.handle_key("ctrl+n", &kb), QueryMenuMessage::Handled);
+        assert!(menu.is_open());
+        retype(&mut menu, &kb, "gamma");
+        assert_eq!(
+            menu.handle_key("enter", &kb),
+            QueryMenuMessage::Rename {
+                name: "alpha".into(),
+                new_name: "gamma".into(),
+            }
+        );
+        assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn rename_refuses_a_blank_or_listed_name_in_the_prompt() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("ctrl+n", &kb);
+        retype(&mut menu, &kb, "beta");
+        assert_eq!(menu.handle_key("enter", &kb), QueryMenuMessage::Handled);
+        retype(&mut menu, &kb, "  ");
+        assert_eq!(menu.handle_key("enter", &kb), QueryMenuMessage::Handled);
+        assert!(menu.is_open());
+        retype(&mut menu, &kb, "alpha 2");
+        assert!(matches!(
+            menu.handle_key("enter", &kb),
+            QueryMenuMessage::Rename { ref new_name, .. } if new_name == "alpha 2"
+        ));
+    }
+
+    #[test]
+    fn an_unchanged_rename_returns_to_the_menu() {
+        let mut menu = QueryMenuComponent::new(theme(), "T");
+        let kb = make_kb();
+        menu.open(&entries(), &kb);
+        menu.handle_key("ctrl+n", &kb);
+        // The prefilled name submitted as is renames nothing.
+        assert_eq!(menu.handle_key("enter", &kb), QueryMenuMessage::Handled);
+        assert!(menu.is_open());
+        // The prompt is gone: Enter applies the selection again.
         assert!(matches!(
             menu.handle_key("enter", &kb),
             QueryMenuMessage::Apply { ref name, .. } if name == "alpha"

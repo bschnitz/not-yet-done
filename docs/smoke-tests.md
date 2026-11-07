@@ -8541,6 +8541,35 @@ extended query (`++name`), and a node-scripts level with a script.
       `[key]`.
 - [ ] Hint bar of both menus shows `duplicate`.
 
+## Query menu — rename (`ctrl+n`)
+
+Needs a content tab with saved queries (one with a shortcut and ★), one
+extended query (`++name`), a node-scripts level with a script that has a
+shortcut, and a create action with editor templates (`a t`) where one
+template has a chord.
+
+- [ ] `q`, select the ★ query, `ctrl+n` → a small panel "Rename '<name>'"
+      over the menu, prefilled with the name, submit button "Rename".
+      Enter right away → back in the menu, nothing renamed.
+- [ ] `ctrl+n` again, type a name another entry has → "'<name>' already
+      exists" under the field; clear the field, Enter → "Enter the new
+      name"; `esc` → back in the menu, nothing renamed.
+- [ ] Type a new name, Enter → notification "Renamed '<old>' to '<new>'";
+      `q` again → the entry carries the new name, still with `[key]` and
+      ★, the old name is gone; the shortcut applies the query.
+- [ ] Apply a query, then rename it → the status bar shows the new name
+      without a reload.
+- [ ] Restart the TUI → the renamed ★ query is applied at start.
+- [ ] Rename the extended query → it keeps running as an extended query
+      (the file moves inside `extended_queries/`).
+- [ ] Scripts menu (`q` on the script level), `ctrl+n`, new name → the
+      script file is renamed on disk, the menu shows `[key]` on the new
+      name and the chord runs the renamed script.
+- [ ] Template menu (`a t`), `ctrl+n` on the template with a chord → the
+      file under `templates/<action>/` is renamed, the chord creates with
+      the renamed template.
+- [ ] Hint bar of all three menus shows `rename`.
+
 ## CLI — a view file that does not parse is named, not dropped
 
 Put a `views/broken.yaml` with `tab:` + `adapter:` and a bad head, e.g.

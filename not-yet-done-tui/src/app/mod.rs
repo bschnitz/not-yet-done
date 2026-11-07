@@ -10017,6 +10017,15 @@ impl App {
                 script,
                 new_name,
             } => self.duplicate_node_script(view_index, pane_id, node_id, script, new_name),
+            ViewRequest::RenameNodeScript {
+                view_index,
+                node_id,
+                script,
+                new_name,
+            } => {
+                self.rename_node_script(view_index, node_id, script, new_name);
+                EditorRequest::None
+            }
             ViewRequest::DeleteNodeScript {
                 view_index,
                 pane_id,
@@ -10200,6 +10209,15 @@ impl App {
                 template,
                 new_name,
             } => self.duplicate_editor_template(view_index, action_id, template, new_name),
+            ViewRequest::RenameEditorTemplate {
+                view_index,
+                action_id,
+                template,
+                new_name,
+            } => {
+                self.rename_editor_template(view_index, action_id, template, new_name);
+                EditorRequest::None
+            }
             ViewRequest::BindEditorTemplateShortcut {
                 view_index,
                 action_id,
@@ -10306,7 +10324,6 @@ impl App {
                 new_name,
             } => {
                 self.rename_content_query(view_index, &scope, &old_name, &new_name);
-                self.reload_content_saved_queries(view_index);
                 EditorRequest::None
             }
             ViewRequest::OpenScriptMenuForNode {
@@ -12952,31 +12969,92 @@ impl App {
         });
     }
 
-    fn rename_content_query(&self, view_index: usize, scope: &str, old_name: &str, new_name: &str) {
-        let Some(cv) = self.content_view(view_index) else {
+    /// Rename the content query `old_name` to `new_name` in the store it
+    /// lives in, then let everything that refers to it by name follow: its
+    /// shortcut row, the default mark and the panes showing it. A name
+    /// either store already holds is refused — the two share one namespace.
+    fn rename_content_query(
+        &mut self,
+        view_index: usize,
+        scope: &str,
+        old_name: &str,
+        new_name: &str,
+    ) {
+        // The menu refused names it lists; the store may have learned one
+        // since (another process).
+        match self.existing_query_kind(view_index, new_name) {
+            Ok(Some(existing)) => {
+                self.modal_message = Some(format!(
+                    "A query named '{new_name}' already exists ({existing})."
+                ));
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.notify_error(format!("Could not check query names: {e}"));
+                return;
+            }
+        }
+        let Some(adapter) = self
+            .content_view(view_index)
+            .and_then(|cv| cv.adapter.clone())
+        else {
+            self.notify("No adapter for this view".to_string());
             return;
         };
-        let adapter = cv.adapter.clone();
-        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
-        let scope_owned = scope.to_string();
-        let old_owned = old_name.to_string();
-        let new_owned = new_name.to_string();
-        tokio::task::block_in_place(|| {
+        let kind = self.content_query_kind(view_index, old_name);
+        let renamed: Result<bool, String> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                if let Some(adapter) = adapter.as_ref() {
-                    if let Some(store) = adapter.saved_query_store() {
-                        if let Ok(body) = store.load(&old_owned).await {
-                            if store.save(&new_owned, &body).await.is_ok() {
-                                let _ = store.delete(&old_owned).await;
-                            }
-                        }
-                    }
-                }
-                let _ = shortcut_repo
-                    .rename(&scope_owned, &old_owned, &new_owned)
-                    .await;
+                let renamed = match kind {
+                    QueryKind::Saved => match adapter.saved_query_store() {
+                        Some(store) => store.rename(old_name, new_name).await,
+                        None => return Err("the adapter stores no queries".to_string()),
+                    },
+                    QueryKind::Extended => match adapter.extended_query_store() {
+                        Some(store) => store.rename(old_name, new_name).await,
+                        None => return Err("the adapter stores no extended queries".to_string()),
+                    },
+                };
+                renamed.map_err(|e| e.to_string())
             })
         });
+        match renamed {
+            Ok(true) => {}
+            Ok(false) => {
+                self.modal_message = Some(format!("A query named '{new_name}' already exists."));
+                return;
+            }
+            Err(e) => {
+                self.notify_error(format!("Could not rename '{old_name}': {e}"));
+                return;
+            }
+        }
+
+        let shortcut_repo = Arc::clone(&self.query_shortcut_repo);
+        let shortcut_moved = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { shortcut_repo.rename(scope, old_name, new_name).await })
+        });
+        let was_default = self
+            .content_view(view_index)
+            .is_some_and(|cv| cv.default_saved_query.as_deref() == Some(old_name));
+        if was_default {
+            let default = DefaultQuery {
+                kind,
+                name: new_name.to_string(),
+            };
+            self.persist_default_query(scope, Some(&default));
+        }
+        if let Some(cv) = self.content_view_mut(view_index) {
+            cv.rename_query_references(old_name, new_name);
+        }
+        self.reload_content_saved_queries(view_index);
+        match shortcut_moved {
+            Ok(()) => self.notify(format!("Renamed '{old_name}' to '{new_name}'")),
+            Err(e) => self.notify_error(format!(
+                "Renamed '{old_name}' to '{new_name}', but its shortcut was lost: {e}"
+            )),
+        }
     }
 
     // ── DB-stored shortcut editing (query_shortcut table) ─────────────

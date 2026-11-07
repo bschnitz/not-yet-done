@@ -497,6 +497,14 @@ pub enum ViewRequest {
         script: String,
         new_name: String,
     },
+    /// Rename the node script `script` to `new_name`; its shortcut
+    /// follows it.
+    RenameNodeScript {
+        view_index: usize,
+        node_id: String,
+        script: String,
+        new_name: String,
+    },
     /// Bind a key chord to a node script. The chord was recorded in the
     /// script menu itself (so it may be a sequence like `"f f"`); the App
     /// only checks it for conflicts and writes it to the `query_shortcut`
@@ -619,6 +627,14 @@ pub enum ViewRequest {
         template: String,
         new_name: String,
     },
+    /// Rename a stored editor template to `new_name`; its shortcut
+    /// follows it.
+    RenameEditorTemplate {
+        view_index: usize,
+        action_id: String,
+        template: String,
+        new_name: String,
+    },
     /// Bind a key chord to a stored editor template. The chord was recorded
     /// in the template menu; the App checks it for conflicts and writes it
     /// to `query_shortcut` under the action's template scope.
@@ -673,7 +689,9 @@ pub enum ViewRequest {
         query: String,
         new_name: String,
     },
-    /// Rename a content query in the DB.
+    /// Rename the content query `old_name` to `new_name` in the store it
+    /// lives in. Its shortcut and default mark follow it, and panes showing
+    /// it keep showing it under the new name.
     RenameContentQuery {
         view_index: usize,
         scope: String,

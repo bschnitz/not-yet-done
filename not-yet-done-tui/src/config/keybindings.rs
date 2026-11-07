@@ -877,6 +877,9 @@ pub enum QueryMenuAction {
     /// Copy the selected entry under a new name (asked in a small prompt)
     /// and open the copy in the editor.
     Duplicate,
+    /// Give the selected entry a new name (asked in a small prompt); its
+    /// shortcut and default mark follow it.
+    Rename,
     Close,
 }
 
@@ -892,6 +895,7 @@ impl QueryMenuAction {
             Self::ClearShortcut => "clear_shortcut",
             Self::SetDefault => "set_default",
             Self::Duplicate => "duplicate",
+            Self::Rename => "rename",
             Self::Close => "close",
         }
     }
@@ -916,6 +920,7 @@ impl FromStr for QueryMenuAction {
             "clear_shortcut" => Ok(Self::ClearShortcut),
             "set_default" => Ok(Self::SetDefault),
             "duplicate" => Ok(Self::Duplicate),
+            "rename" => Ok(Self::Rename),
             "close" => Ok(Self::Close),
             other => Err(format!("unknown query_menu action: {}", other)),
         }
@@ -1346,6 +1351,7 @@ impl Default for KeyBindingSection<QueryMenuAction> {
         m.insert(QueryMenuAction::ClearShortcut, KeyBinding::new("ctrl+x"));
         m.insert(QueryMenuAction::SetDefault, KeyBinding::new("ctrl+t"));
         m.insert(QueryMenuAction::Duplicate, KeyBinding::new("ctrl+u"));
+        m.insert(QueryMenuAction::Rename, KeyBinding::new("ctrl+n"));
         m.insert(QueryMenuAction::Close, KeyBinding::new("esc"));
         Self { bindings: m }
     }
@@ -1542,7 +1548,7 @@ mod tests {
         check!(CommonAction, 20);
         check!(ContentAction, 19);
         check!(WindowAction, 5);
-        check!(QueryMenuAction, 10);
+        check!(QueryMenuAction, 11);
         check!(TagMenuAction, 7);
         check!(ScriptMenuAction, 8);
         check!(PopupAction, 5);

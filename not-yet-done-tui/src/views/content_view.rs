@@ -5093,6 +5093,19 @@ impl ContentPane {
         self.nav_stack.is_empty() && self.active_child.is_none()
     }
 
+    /// Show the saved query `old_name` as `new_name` on every level of this
+    /// pane that has it active — the live one and those stashed on the
+    /// drill-down stack. The body is untouched: a rename changes no query.
+    pub fn rename_active_query(&mut self, old_name: &str, new_name: &str) {
+        let levels = std::iter::once(&mut self.active_query_name)
+            .chain(self.nav_stack.iter_mut().map(|f| &mut f.level.active_query_name));
+        for name in levels {
+            if name.as_deref() == Some(old_name) {
+                *name = Some(new_name.to_string());
+            }
+        }
+    }
+
     /// Lift the level-owned state off the pane, leaving it cleared. Paired
     /// with [`Self::set_level_state`] around every level change.
     fn take_level_state(&mut self) -> LevelState {
@@ -10217,6 +10230,15 @@ impl ContentView {
                     new_name,
                 },
             )),
+            (QueryMenuMode::SavedQueries, QueryMenuMessage::Rename { name, new_name }) => {
+                let scope = self.query_scope.clone();
+                Some(SubViewMessage::Request(ViewRequest::RenameContentQuery {
+                    view_index,
+                    scope,
+                    old_name: name,
+                    new_name,
+                }))
+            }
             (QueryMenuMode::SavedQueries, QueryMenuMessage::SetDefault { name }) => Some(
                 SubViewMessage::Request(ViewRequest::SetDefaultContentQuery { view_index, name }),
             ),
@@ -10278,6 +10300,15 @@ impl ContentView {
                 script: name,
                 new_name,
             })),
+            (
+                QueryMenuMode::NodeScripts { node_id },
+                QueryMenuMessage::Rename { name, new_name },
+            ) => Some(SubViewMessage::Request(ViewRequest::RenameNodeScript {
+                view_index,
+                node_id,
+                script: name,
+                new_name,
+            })),
             // Scripts are files in one store; the kind the menu offers for
             // query bodies means nothing here, but a typed `+` prefix is
             // still stripped, which is what the script menu does too.
@@ -10329,6 +10360,17 @@ impl ContentView {
                 QueryMenuMessage::Duplicate { name, new_name, .. },
             ) => Some(SubViewMessage::Request(
                 ViewRequest::DuplicateEditorTemplate {
+                    view_index,
+                    action_id,
+                    template: name,
+                    new_name,
+                },
+            )),
+            (
+                QueryMenuMode::EditorTemplates { action_id, .. },
+                QueryMenuMessage::Rename { name, new_name },
+            ) => Some(SubViewMessage::Request(
+                ViewRequest::RenameEditorTemplate {
                     view_index,
                     action_id,
                     template: name,
@@ -10564,6 +10606,20 @@ impl ContentView {
             pane.active_query = Some(query);
             pane.active_query_name = Some(name);
             pane.active_query_kind = kind;
+        }
+    }
+
+    /// Follow a renamed saved query: every pane level showing `old_name` —
+    /// live or stashed on a drill-down stack — shows `new_name` from now
+    /// on, and so does the default mark.
+    pub fn rename_query_references(&mut self, old_name: &str, new_name: &str) {
+        for tree in &mut self.pane_trees {
+            tree.root.for_each_leaf_mut(&mut |leaf| {
+                leaf.pane.rename_active_query(old_name, new_name);
+            });
+        }
+        if self.default_saved_query.as_deref() == Some(old_name) {
+            self.default_saved_query = Some(new_name.to_string());
         }
     }
 
@@ -22575,6 +22631,71 @@ mod tests {
             other => panic!("Expected SetDefaultContentQuery, got {other:?}"),
         }
         assert!(!view.has_query_popup());
+    }
+
+    #[test]
+    fn query_menu_rename_dispatches_request() {
+        // ctrl+n asks for the new name over the menu; submitting it
+        // surfaces RenameContentQuery so the App moves body, shortcut and
+        // default mark.
+        let config = test_config_with_query();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.merge_saved_queries(vec![merged_query("My Bugs", "type = Bug", None)]);
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.open_query_popup();
+        view.handle_query_popup_key("ctrl+n");
+        for _ in 0.."My Bugs".len() {
+            view.handle_query_popup_key("backspace");
+        }
+        for c in "Bugs".chars() {
+            view.handle_query_popup_key(&c.to_string());
+        }
+        match view.handle_query_popup_key("enter") {
+            Some(SubViewMessage::Request(ViewRequest::RenameContentQuery {
+                old_name,
+                new_name,
+                ..
+            })) => {
+                assert_eq!(old_name, "My Bugs");
+                assert_eq!(new_name, "Bugs");
+            }
+            other => panic!("Expected RenameContentQuery, got {other:?}"),
+        }
+        assert!(!view.has_query_popup());
+    }
+
+    #[test]
+    fn a_renamed_query_keeps_its_place_in_panes_and_as_default() {
+        // The live level and the one stashed by a drill-down both show the
+        // new name; another query's name is left alone.
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_issues(), Vec::new(), None, Vec::new(), None);
+        view.active_pane_mut()
+            .set_query("type = Bug".into(), Some("My Bugs".into()));
+        let child_def = config.views[0].children[0].clone();
+        let view_defs = view.view_defs.clone();
+        view.active_pane_mut()
+            .drill_down_prepare("ISS-1", "First issue", &child_def, &view_defs);
+        view.active_pane_mut()
+            .set_query("kind = note".into(), Some("Notes".into()));
+        view.default_saved_query = Some("My Bugs".into());
+
+        view.rename_query_references("My Bugs", "Bugs");
+
+        let pane = view.active_pane();
+        assert_eq!(pane.active_query_name.as_deref(), Some("Notes"));
+        assert_eq!(
+            pane.nav_stack[0].level.active_query_name.as_deref(),
+            Some("Bugs")
+        );
+        assert_eq!(view.default_saved_query.as_deref(), Some("Bugs"));
+
+        view.rename_query_references("Notes", "All notes");
+        assert_eq!(
+            view.active_pane().active_query_name.as_deref(),
+            Some("All notes")
+        );
     }
 
     #[test]

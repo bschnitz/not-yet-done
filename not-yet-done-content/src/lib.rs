@@ -3347,6 +3347,11 @@ pub trait SavedQueryStore: Send + Sync {
     /// delete).
     async fn delete(&self, name: &str) -> Result<()>;
 
+    /// Move the entry `name` to `new_name`. Returns `Ok(true)` when
+    /// renamed, `Ok(false)` when `new_name` already exists (both left
+    /// untouched). A missing `name` is [`ContentError::NotFound`].
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool>;
+
     /// Optional: the on-disk path of the entry, for adapters that
     /// expose one. Used by `:query edit` to launch a `FileEditSession`
     /// against the file. Adapters without a filesystem-backed store
@@ -3385,6 +3390,10 @@ pub trait ExtendedQueryStore: Send + Sync {
     /// delete).
     async fn delete(&self, name: &str) -> Result<()>;
 
+    /// Move the entry `name` to `new_name`. See
+    /// [`SavedQueryStore::rename`].
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool>;
+
     /// Optional: the on-disk path of the entry, so the frontend can edit
     /// the document as a file (with Markdown highlighting) instead of a
     /// text buffer. See [`SavedQueryStore::path`].
@@ -3414,6 +3423,10 @@ pub trait TemplateStore: Send + Sync {
 
     /// Remove the entry. Missing entries are not an error.
     async fn delete(&self, name: &str) -> Result<()>;
+
+    /// Move the entry `name` to `new_name`. See
+    /// [`SavedQueryStore::rename`].
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool>;
 
     /// Optional: the on-disk path of the entry, so the frontend can edit
     /// it as a file. See [`SavedQueryStore::path`].
@@ -3541,6 +3554,21 @@ impl FsQueryStore {
             Err(e) => Err(ContentError::Other(Box::new(e))),
         }
     }
+
+    /// Shared body of the trait impls — see [`SavedQueryStore::rename`].
+    async fn move_entry(&self, name: &str, new_name: &str) -> Result<bool> {
+        let target = self.file_path(new_name);
+        if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+            return Ok(false);
+        }
+        match tokio::fs::rename(self.file_path(name), &target).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(ContentError::NotFound(name.to_string()))
+            }
+            Err(e) => Err(ContentError::Other(Box::new(e))),
+        }
+    }
 }
 
 #[async_trait]
@@ -3559,6 +3587,10 @@ impl SavedQueryStore for FsQueryStore {
 
     async fn delete(&self, name: &str) -> Result<()> {
         self.remove(name).await
+    }
+
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool> {
+        self.move_entry(name, new_name).await
     }
 
     fn path(&self, name: &str) -> Option<std::path::PathBuf> {
@@ -3584,6 +3616,10 @@ impl ExtendedQueryStore for FsQueryStore {
         self.remove(name).await
     }
 
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool> {
+        self.move_entry(name, new_name).await
+    }
+
     fn path(&self, name: &str) -> Option<std::path::PathBuf> {
         Some(self.file_path(name))
     }
@@ -3605,6 +3641,10 @@ impl TemplateStore for FsQueryStore {
 
     async fn delete(&self, name: &str) -> Result<()> {
         self.remove(name).await
+    }
+
+    async fn rename(&self, name: &str, new_name: &str) -> Result<bool> {
+        self.move_entry(name, new_name).await
     }
 
     fn path(&self, name: &str) -> Option<std::path::PathBuf> {
@@ -3958,6 +3998,12 @@ pub trait ScriptStore: Send + Sync {
     /// `dst` already exists (left untouched). A missing `src` is
     /// [`ContentError::NotFound`].
     async fn copy_node_script(&self, node_id: &str, src: &str, dst: &str) -> Result<bool>;
+
+    /// Rename the script `src` attached to `node_id` to `dst`. Returns
+    /// `Ok(true)` when renamed, `Ok(false)` when `dst` already exists
+    /// (both left untouched). A missing `src` is
+    /// [`ContentError::NotFound`].
+    async fn rename_node_script(&self, node_id: &str, src: &str, dst: &str) -> Result<bool>;
 }
 
 // ---------------------------------------------------------------------------
@@ -5095,5 +5141,30 @@ mod fs_query_store_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn rename_moves_the_body_but_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FsQueryStore::new(dir.path().join("queries"), ".jql");
+        SavedQueryStore::save(&store, "old", "a = 1").await.unwrap();
+        SavedQueryStore::save(&store, "taken", "b = 2").await.unwrap();
+
+        assert!(SavedQueryStore::rename(&store, "old", "new").await.unwrap());
+        assert_eq!(
+            SavedQueryStore::list(&store).await.unwrap(),
+            vec!["new", "taken"]
+        );
+        assert_eq!(SavedQueryStore::load(&store, "new").await.unwrap(), "a = 1");
+
+        // An existing target stays as it is, and so does the source.
+        assert!(!SavedQueryStore::rename(&store, "new", "taken").await.unwrap());
+        assert_eq!(SavedQueryStore::load(&store, "new").await.unwrap(), "a = 1");
+        assert_eq!(SavedQueryStore::load(&store, "taken").await.unwrap(), "b = 2");
+
+        assert!(matches!(
+            SavedQueryStore::rename(&store, "missing", "other").await,
+            Err(ContentError::NotFound(_))
+        ));
     }
 }
