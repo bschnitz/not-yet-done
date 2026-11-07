@@ -638,13 +638,21 @@ mod tests {
         assert_eq!(format_span_precise(-63.0), "-1min 3s");
     }
 
+    /// 2026-06-09 08:15 local time as RFC 3339, with the offset in force on
+    /// that date — today's offset would be an hour off across a DST change.
+    fn local_wall_clock_rfc3339() -> String {
+        use chrono::TimeZone;
+        Local
+            .with_ymd_and_hms(2026, 6, 9, 8, 15, 0)
+            .single()
+            .expect("08:15 is no DST gap")
+            .to_rfc3339()
+    }
+
     #[test]
     fn datetime_rfc3339_renders_with_default_pattern() {
-        // Pin to a fixed UTC offset so the assertion is timezone-stable:
-        // an instant given in local time renders back to that wall clock.
-        let local_now = Local::now();
-        let offset = local_now.offset().to_string();
-        let raw = format!("2026-06-09T08:15:00{offset}");
+        // An instant given in local time renders back to that wall clock.
+        let raw = local_wall_clock_rfc3339();
         let (text, align) = format_typed_value(&raw, ColumnKind::Datetime, None, "/");
         assert_eq!(text, "2026-06-09 08:15");
         assert_eq!(align, CellAlignment::Left);
@@ -652,9 +660,7 @@ mod tests {
 
     #[test]
     fn datetime_honors_custom_format() {
-        let local_now = Local::now();
-        let offset = local_now.offset().to_string();
-        let raw = format!("2026-06-09T08:15:00{offset}");
+        let raw = local_wall_clock_rfc3339();
         let (text, _) = format_typed_value(&raw, ColumnKind::Datetime, Some("%H:%M"), "/");
         assert_eq!(text, "08:15");
     }
