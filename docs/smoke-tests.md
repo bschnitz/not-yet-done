@@ -10163,3 +10163,20 @@ the trackings query (`q e`).
 - [ ] `[started_at, gt, letzten Montag]` in the trackings query matches the
       same rows as `last monday`.
 - [ ] English is unchanged: `tomorrow morning`, `next friday 8pm`, `eod`.
+
+## Holding `j` on a long list stops when the key does
+
+Trackings tab (`2`) with a query reaching back far enough for several
+thousand rows, e.g. `[started_at, gt, 2020-01-01]` in the `trackings t t`
+level.
+
+- [x] Hold `j` for a few seconds, release → the cursor stops at once; no
+      rows keep scrolling past after the key is up.
+- [x] Same in `tree t r`: the cursor highlight follows every step and stops
+      with the key.
+- [ ] In `tree t r`, hold `j` from a group row onto a task row → the header
+      and columns switch to the task level as the cursor arrives.
+- [ ] Hold `j` while a tracking is running → its elapsed cell keeps ticking
+      while the cursor moves.
+- [ ] Half-page/page scroll and column left/right on the long list respond
+      at once; an edit right after a held `j` shows the edited row on save.

@@ -9451,7 +9451,7 @@ impl App {
         {
             let Tab::Content(idx) = self.active_tab;
             if let Some(cv) = self.content_view_mut(idx) {
-                cv.rebuild_table();
+                cv.refresh_table_for_frame();
             }
         }
 
@@ -13704,6 +13704,26 @@ impl App {
     /// re-fitted layout is shown. Handles first paint, terminal resize, and
     /// preview open/close uniformly. Native (non-adapter) tabs lay their
     /// columns out at render time already, so they need no re-fit here.
+    /// The render loop is about to handle the next event (a key, a load
+    /// result, a timer): every content table counts as stale again until
+    /// the event proves to have only moved the cursor. Paired with
+    /// [`Self::certify_frame_tables`]; without either call — as in tests —
+    /// `sync_components` rebuilds on every call, as it always did.
+    pub fn begin_frame_event(&mut self) {
+        for cv in self.content_views_iter_mut() {
+            cv.begin_frame_event();
+        }
+    }
+
+    /// The render loop just painted from the tables `sync_components`
+    /// synced: the active tab's focused table matches its state.
+    pub fn certify_frame_tables(&mut self) {
+        let Tab::Content(idx) = self.active_tab;
+        if let Some(cv) = self.content_view_mut(idx) {
+            cv.certify_focused_table();
+        }
+    }
+
     pub fn refit_visible_tables(&mut self) -> bool {
         let Tab::Content(idx) = self.active_tab;
         if let Some(cv) = self.content_view_mut(idx) {

@@ -314,6 +314,7 @@ async fn run_loop(
         if dirty {
             app.sync_components();
             terminal.draw(|frame| render::render(frame, app))?;
+            app.certify_frame_tables();
             dirty = false;
 
             // Tables fit their columns to the pane width recorded during the
@@ -327,6 +328,10 @@ async fn run_loop(
                 continue;
             }
         }
+
+        // What follows handles the next event. Until it turns out to have
+        // only moved the cursor, the tables just painted count as stale.
+        app.begin_frame_event();
 
         // Editor requests deferred from an async `LoadMsg` drain — e.g. a
         // `NodeActionDispatched` carrying `ActionDispatch::OpenEditor` (the
@@ -437,51 +442,102 @@ async fn run_loop(
             // Terminal input. A key resolving to an `EditorRequest`
             // suspends the terminal (tear the reader down for it); a resize
             // just forces a repaint.
+            //
+            // Events already waiting behind this one are handled in the same
+            // turn, before the next paint: a held key repeats faster than a
+            // long list can be synced and drawn per keystroke, and painting
+            // each one would let the queue grow while the key is down — the
+            // list then keeps scrolling after it is released. Anything that
+            // hands the terminal or an editor over ends the batch.
             maybe_event = reader.next() => {
-                match maybe_event {
-                    Some(Ok(event)) => {
-                        if let Some(key_str) = events::event_to_key_string(&event) {
-                            let req = app.handle_key(&key_str);
-                            // Sync the which-key preview to the (possibly
-                            // changed) pending chord: close, arm the reveal
-                            // timer, or narrow it live.
-                            app.reconcile_which_key();
-                            if req.suspends_terminal() {
-                                drop(reader);
-                                dispatch_editor_request(terminal, app, req).await?;
-                                reader = EventStream::new();
-                            } else if !matches!(req, EditorRequest::None) {
-                                dispatch_editor_request(terminal, app, req).await?;
+                let mut next = maybe_event;
+                for _ in 0..MAX_INPUT_BATCH {
+                    let mut handed_over = false;
+                    match next {
+                        Some(Ok(event)) => {
+                            if let Some(key_str) = events::event_to_key_string(&event) {
+                                let req = app.handle_key(&key_str);
+                                // Sync the which-key preview to the (possibly
+                                // changed) pending chord: close, arm the reveal
+                                // timer, or narrow it live.
+                                app.reconcile_which_key();
+                                if req.suspends_terminal() {
+                                    drop(reader);
+                                    dispatch_editor_request(terminal, app, req).await?;
+                                    reader = EventStream::new();
+                                    handed_over = true;
+                                } else if !matches!(req, EditorRequest::None) {
+                                    dispatch_editor_request(terminal, app, req).await?;
+                                    handed_over = true;
+                                }
+                                dirty = true;
+                            } else if let Event::Mouse(mouse_event) = event {
+                                // Same shape as the key branch above: a click can
+                                // reach an `EditorRequest` too, so it runs through
+                                // the identical dispatch. Every mouse event we ask
+                                // for (press, drag, release, wheel) changes
+                                // something visible, so the frame is always dirty.
+                                let req = app.handle_mouse(mouse_event);
+                                if req.suspends_terminal() {
+                                    drop(reader);
+                                    dispatch_editor_request(terminal, app, req).await?;
+                                    reader = EventStream::new();
+                                    handed_over = true;
+                                } else if !matches!(req, EditorRequest::None) {
+                                    dispatch_editor_request(terminal, app, req).await?;
+                                    handed_over = true;
+                                }
+                                dirty = true;
+                            } else if matches!(event, Event::Resize(_, _)) {
+                                dirty = true;
                             }
-                            dirty = true;
-                        } else if let Event::Mouse(mouse_event) = event {
-                            // Same shape as the key branch above: a click can
-                            // reach an `EditorRequest` too, so it runs through
-                            // the identical dispatch. Every mouse event we ask
-                            // for (press, drag, release, wheel) changes
-                            // something visible, so the frame is always dirty.
-                            let req = app.handle_mouse(mouse_event);
-                            if req.suspends_terminal() {
-                                drop(reader);
-                                dispatch_editor_request(terminal, app, req).await?;
-                                reader = EventStream::new();
-                            } else if !matches!(req, EditorRequest::None) {
-                                dispatch_editor_request(terminal, app, req).await?;
-                            }
-                            dirty = true;
-                        } else if matches!(event, Event::Resize(_, _)) {
-                            dirty = true;
+                        }
+                        // Transient decode error: ignore, keep the reader.
+                        Some(Err(_)) => {}
+                        // Stream ended (stdin closed): rebuild and carry on.
+                        None => {
+                            reader = EventStream::new();
+                            break;
                         }
                     }
-                    // Transient decode error: ignore, keep the reader.
-                    Some(Err(_)) => {}
-                    // Stream ended (stdin closed): rebuild and carry on.
-                    None => { reader = EventStream::new(); }
+                    if handed_over || app.should_quit {
+                        break;
+                    }
+                    match ready_event(&mut reader).await {
+                        Some(event) => {
+                            app.begin_frame_event();
+                            next = event;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// How many already-waiting terminal events one turn of the main loop
+/// handles before it paints. Bounds the time between frames should input
+/// arrive faster than it is handled.
+const MAX_INPUT_BATCH: usize = 64;
+
+/// The next terminal event if one is already waiting, without parking.
+///
+/// Polls with the running task's own waker rather than a no-op one:
+/// crossterm arms its wake-up only on the first pending poll, so a no-op
+/// waker here would leave the main loop's later `reader.next()` unwoken.
+async fn ready_event(
+    reader: &mut crossterm::event::EventStream,
+) -> Option<Option<io::Result<crossterm::event::Event>>> {
+    use tokio_stream::Stream;
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match std::pin::Pin::new(&mut *reader).poll_next(cx) {
+            std::task::Poll::Ready(event) => Some(event),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
 }
 
 /// Dispatch a single [`EditorRequest`]. Shared by the keypress branch

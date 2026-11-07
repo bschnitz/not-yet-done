@@ -582,6 +582,16 @@ pub struct ContentPane {
     /// paint, terminal resize, preview open/close — triggers a one-frame
     /// re-fit so columns always span exactly the current pane.
     built_table_width: u16,
+    /// The built table still matches this pane's state, as certified by the
+    /// render loop after its last paint. Cleared at the start of every
+    /// render-loop event and restored only by an event that just moved the
+    /// cursor, so the per-frame [`ContentView::refresh_table_for_frame`] can
+    /// skip a rebuild that would produce the same rows. See
+    /// [`Self::begin_frame_event`].
+    table_current: bool,
+    /// `table_current` as it stood when the running event began — what a
+    /// cursor-only event hands back.
+    table_current_before_event: bool,
     /// Column keys in display order from the most recent rebuild_table.
     last_column_keys: Vec<String>,
     /// Index of the tree-label column in the most recent rebuild; `None`
@@ -1611,6 +1621,8 @@ impl ContentPane {
             active_custom_query: None,
             last_col_widths: Vec::new(),
             built_table_width: 0,
+            table_current: false,
+            table_current_before_event: false,
             last_column_keys: Vec::new(),
             last_tree_label_col: None,
             last_fold_zones: Vec::new(),
@@ -4148,14 +4160,54 @@ impl ContentPane {
     }
 
     /// Move the row cursor and, when in tree mode, refresh the table
-    /// if the active depth changed (header / column set switches with
-    /// cursor level). Flat-list panes skip the rebuild.
+    /// if the cursor landed on another level (header / column set switches
+    /// with cursor level). Otherwise the move is cursor-only and the built
+    /// rows stay; see [`Self::move_cursor`].
     fn nav_and_refresh(&mut self, cmd: Cmd, view_defs: &[ViewDef]) {
-        let before = self.tree_active_depth();
-        self.table.handle_nav(cmd);
-        if self.tree.is_some() && self.tree_active_depth() != before {
+        self.move_cursor(view_defs, |table| {
+            table.handle_nav(cmd);
+        });
+    }
+
+    /// Run a cursor move. In tree mode the column set hangs on the cursor
+    /// row's level, so landing on another one rebuilds the table; any other
+    /// move leaves the rows as built and tells the render loop so
+    /// ([`Self::keep_table_for_cursor_move`]).
+    fn move_cursor(&mut self, view_defs: &[ViewDef], nav: impl FnOnce(&mut DataTable)) {
+        let before = self.cursor_level_marker();
+        nav(&mut self.table);
+        if self.cursor_level_marker() != before {
             self.rebuild_table(view_defs);
+        } else {
+            self.keep_table_for_cursor_move();
         }
+    }
+
+    /// What the tree-mode column set is resolved from: the cursor row's
+    /// depth and node-type chain. `None` outside tree mode, where moving
+    /// the cursor never changes the columns.
+    fn cursor_level_marker(&self) -> Option<(usize, Vec<String>)> {
+        self.tree.as_ref()?;
+        Some((self.tree_active_depth(), self.cursor_node_type_chain()))
+    }
+
+    /// Render-loop bookkeeping for [`Self::table_current`]: a new event
+    /// begins, and until it proves cursor-only the built table counts as
+    /// stale.
+    fn begin_frame_event(&mut self) {
+        self.table_current_before_event = self.table_current;
+        self.table_current = false;
+    }
+
+    /// The render loop just painted this pane from a freshly synced table.
+    fn certify_table(&mut self) {
+        self.table_current = true;
+    }
+
+    /// The running event only moved the cursor, which the table widget
+    /// tracks itself: the rows built before it still hold.
+    fn keep_table_for_cursor_move(&mut self) {
+        self.table_current = self.table_current_before_event;
     }
 
     /// Build the table rows for the tree-mode pane. The column set comes
@@ -7532,20 +7584,22 @@ impl ContentPane {
             }
             KeySource::Common(CommonAction::ColumnLeft) => {
                 self.table.move_column_left();
+                self.keep_table_for_cursor_move();
                 Some(SubViewMessage::SelectionChanged(None))
             }
             KeySource::Common(CommonAction::ColumnRight) => {
                 self.table.move_column_right();
+                self.keep_table_for_cursor_move();
                 Some(SubViewMessage::SelectionChanged(None))
             }
             KeySource::Common(CommonAction::ScrollHalfUp)
             | KeySource::Common(CommonAction::ScrollPageUp) => {
-                self.table.scroll_half_page(false);
+                self.move_cursor(view_defs, |table| table.scroll_half_page(false));
                 Some(SubViewMessage::SelectionChanged(None))
             }
             KeySource::Common(CommonAction::ScrollHalfDown)
             | KeySource::Common(CommonAction::ScrollPageDown) => {
-                self.table.scroll_half_page(true);
+                self.move_cursor(view_defs, |table| table.scroll_half_page(true));
                 Some(SubViewMessage::SelectionChanged(None))
             }
             KeySource::PaneSearchJump { direction, .. } => {
@@ -11406,6 +11460,41 @@ impl ContentView {
         // source's current selection before the focused pane redraws, so a
         // cursor move in the source is reflected in the same frame.
         self.sync_detail_panes();
+        self.rebuild_focused_table();
+    }
+
+    /// The per-frame table refresh `App::sync_components` runs before every
+    /// paint. Same as [`Self::rebuild_table`], except that it keeps the
+    /// focused pane's rows when the render loop certified them and every
+    /// event since only moved the cursor — on a long list the rebuild costs
+    /// far more than the key repeat rate allows, and it would produce the
+    /// very same rows.
+    pub fn refresh_table_for_frame(&mut self) {
+        self.sync_detail_panes();
+        if !self.pane_trees[self.active_subtab].focused_leaf().pane.table_current {
+            self.rebuild_focused_table();
+        }
+    }
+
+    /// A render-loop event begins: every pane's built table counts as stale
+    /// until the event turns out to have only moved the cursor.
+    pub fn begin_frame_event(&mut self) {
+        for tree in self.pane_trees.iter_mut() {
+            tree.root
+                .for_each_leaf_mut(&mut |leaf| leaf.pane.begin_frame_event());
+        }
+    }
+
+    /// The render loop painted the focused pane from the table
+    /// [`Self::refresh_table_for_frame`] just synced.
+    pub fn certify_focused_table(&mut self) {
+        self.pane_trees[self.active_subtab]
+            .focused_leaf_mut()
+            .pane
+            .certify_table();
+    }
+
+    fn rebuild_focused_table(&mut self) {
         // Forward the live header overlay (column / direction picker)
         // so the active pane's table reflects it.
         let view_defs = &self.view_defs;
@@ -16956,6 +17045,105 @@ mod tests {
             "`j` must move the focus to the next message even when nothing scrolls"
         );
         assert_ne!(before, after, "the moved highlight must be visible");
+    }
+
+    /// A flat pane with `n` rows whose per-frame rebuild has been painted and
+    /// certified, as the render loop leaves it after a draw.
+    fn certified_flat_view(n: usize) -> ContentView {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let items: Vec<_> = (0..n)
+            .map(|i| tnode(&format!("i{i}"), &format!("issue {i}"), "mock:issue"))
+            .collect();
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+        view.refresh_table_for_frame();
+        view.certify_focused_table();
+        view
+    }
+
+    /// Adds a row behind the table's back: only a rebuild can show it, so
+    /// the row count tells whether the per-frame refresh rebuilt.
+    fn sneak_in_item(view: &mut ContentView) {
+        view.active_pane_mut()
+            .items
+            .push(tnode("extra", "extra issue", "mock:issue"));
+    }
+
+    /// Holding `j` on a long list: a render-loop event that only moves the
+    /// cursor keeps the certified rows instead of rebuilding all of them.
+    #[test]
+    fn cursor_only_event_skips_the_frame_rebuild() {
+        let mut view = certified_flat_view(3);
+        view.begin_frame_event();
+        view.handle_key("j");
+        sneak_in_item(&mut view);
+        view.refresh_table_for_frame();
+        assert_eq!(view.active_pane().table.row_count(), 3, "a cursor move must not rebuild");
+        assert_eq!(view.active_pane().table.selected_row(), 1);
+    }
+
+    /// Any event that is not a cursor move leaves the table stale, so the
+    /// next frame rebuilds as it always did.
+    #[test]
+    fn other_event_rebuilds_on_the_next_frame() {
+        let mut view = certified_flat_view(3);
+        view.begin_frame_event();
+        sneak_in_item(&mut view);
+        view.refresh_table_for_frame();
+        assert_eq!(view.active_pane().table.row_count(), 4);
+    }
+
+    /// A cursor move only hands back what the table was before the event:
+    /// two events without a paint in between rebuild on the second one.
+    #[test]
+    fn cursor_move_after_an_unpainted_event_rebuilds() {
+        let mut view = certified_flat_view(3);
+        view.begin_frame_event();
+        view.begin_frame_event();
+        view.handle_key("j");
+        sneak_in_item(&mut view);
+        view.refresh_table_for_frame();
+        assert_eq!(view.active_pane().table.row_count(), 4);
+    }
+
+    /// Outside the render loop (no begin/certify calls) every refresh
+    /// rebuilds, so callers that never bracket events keep the old behaviour.
+    #[test]
+    fn unbracketed_refresh_always_rebuilds() {
+        let config = test_config_with_children();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        let items: Vec<_> = (0..3)
+            .map(|i| tnode(&format!("i{i}"), &format!("issue {i}"), "mock:issue"))
+            .collect();
+        view.set_items(items, Vec::new(), None, Vec::new(), None);
+        view.refresh_table_for_frame();
+        view.handle_key("j");
+        sneak_in_item(&mut view);
+        view.refresh_table_for_frame();
+        assert_eq!(view.active_pane().table.row_count(), 4);
+    }
+
+    /// In a tree the columns follow the cursor's level: a move onto another
+    /// level must rebuild, a move within one level may keep the rows.
+    #[test]
+    fn tree_cursor_move_keeps_the_table_only_within_a_level() {
+        let config = test_config_with_tree();
+        let mut view = ContentView::new(test_theme(), &config, None, &KeyBindingConfig::default());
+        view.set_items(mock_dbs(), Vec::new(), None, Vec::new(), None);
+        // Rows: db1, public, private, db2.
+        expand_db1_and_select(&mut view, 0);
+        view.certify_focused_table();
+
+        view.begin_frame_event();
+        view.handle_key("j");
+        assert_eq!(view.active_pane().table.selected_row(), 1);
+        assert!(!view.active_pane().table_current, "db → schema changes the level");
+
+        view.certify_focused_table();
+        view.begin_frame_event();
+        view.handle_key("j");
+        assert_eq!(view.active_pane().table.selected_row(), 2);
+        assert!(view.active_pane().table_current, "schema → schema stays on the level");
     }
 
     /// Regression: pressing `r` on a not-yet-loaded `manual_connect` pane
