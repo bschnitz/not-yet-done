@@ -91,7 +91,7 @@ use not_yet_done_task_core::entity::granularity::Granularity;
 use not_yet_done_task_core::entity::tracking;
 use not_yet_done_task_core::error::AppError;
 use not_yet_done_task_core::events::DomainEvent;
-use not_yet_done_task_core::local_context::LocalContext;
+use not_yet_done_task_core::local_context::{LocalContext, LocalZone, start_of_local_day};
 use not_yet_done_task_core::service::{GravityDirection, MoveOptions};
 
 use crate::datetime::{LocalDateTime, LocalOffset};
@@ -1560,22 +1560,6 @@ struct PasteSlot {
     fits: bool,
 }
 
-/// The instant `day` begins in `tz`. Where a zone skips midnight itself, the
-/// day begins at the first local time that exists.
-fn local_midnight<Tz: chrono::TimeZone>(
-    tz: &Tz,
-    day: chrono::NaiveDate,
-) -> chrono::DateTime<chrono::Utc> {
-    let midnight = day.and_hms_opt(0, 0, 0).unwrap();
-    (0..=2)
-        .find_map(|h| {
-            tz.from_local_datetime(&(midnight + chrono::Duration::hours(h)))
-                .earliest()
-        })
-        .map(|t| t.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| midnight.and_utc())
-}
-
 /// The three placements `paste-move` considers, all on the target row's local
 /// day and all preserving the marked interval's duration `d`:
 ///
@@ -1607,8 +1591,8 @@ fn paste_slots<Tz: chrono::TimeZone>(
     // Both bounds are the local midnight of their own date, in the offset in
     // force on that date: a day across a DST change is 23 or 25 hours long.
     let day = target_start.with_timezone(tz).date_naive();
-    let day_start = local_midnight(tz, day);
-    let day_end = local_midnight(tz, day.succ_opt().unwrap_or(day));
+    let day_start = start_of_local_day(tz, day);
+    let day_end = start_of_local_day(tz, day.succ_opt().unwrap_or(day));
 
     // Occupied [start, end) intervals overlapping this local day, excluding
     // the marked interval, sorted by start.
@@ -1817,7 +1801,7 @@ async fn invoke_paste_move(
         .tracking_service
         .move_tracking(
             marked,
-            LocalContext::new(start, *start.with_timezone(&chrono::Local).offset()),
+            LocalContext::new(start, LocalZone::System),
             options,
         )
         .await

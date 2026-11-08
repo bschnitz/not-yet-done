@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use chrono::TimeZone;
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use shaku::Component;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -8,7 +7,7 @@ use uuid::Uuid;
 use crate::entity::granularity::Granularity;
 use crate::entity::tracking;
 use crate::error::AppError;
-use crate::local_context::LocalContext;
+use crate::local_context::{LocalContext, start_of_local_day};
 use crate::repository::{TaskRepository, TrackingRepository};
 use crate::service::tracking_policy::{TrackingPolicy, label_path};
 
@@ -352,18 +351,12 @@ impl TrackingService for TrackingServiceImpl {
                 let local_cursor = cursor.with_timezone(&tz);
                 let local_date = local_cursor.date_naive();
 
-                // End of the current local day in UTC
-                let day_end_local = tz
-                    .with_ymd_and_hms(
-                        local_date.year(),
-                        local_date.month(),
-                        local_date.day(),
-                        23,
-                        59,
-                        59,
-                    )
-                    .unwrap();
-                let day_end_utc = day_end_local.to_utc() + chrono::Duration::seconds(1);
+                // End of the current local day in UTC: the next local
+                // midnight, so a 23- or 25-hour DST day keeps its length.
+                let day_end_utc = start_of_local_day(
+                    &tz,
+                    local_date.succ_opt().expect("date in range"),
+                );
 
                 let slice_end = end_utc.min(day_end_utc);
                 let duration = slice_end - cursor;
@@ -815,11 +808,11 @@ impl TrackingServiceImpl {
 
         match gravity {
             GravityDirection::Start => {
-                let snapped = granularity.snap_start(new_start.utc, new_start.timezone);
+                let snapped = granularity.snap_start(new_start.utc, &new_start.timezone);
                 Ok(snapped + offset)
             }
             GravityDirection::End => {
-                let snapped = granularity.snap_end(new_start.utc, new_start.timezone);
+                let snapped = granularity.snap_end(new_start.utc, &new_start.timezone);
                 Ok(snapped + offset - duration)
             }
         }

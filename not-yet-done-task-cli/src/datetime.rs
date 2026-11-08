@@ -1,28 +1,19 @@
-use chrono::{DateTime, FixedOffset, Local, Utc};
-use not_yet_done_task_core::local_context::LocalContext;
+use chrono::{DateTime, Local, Utc};
+use not_yet_done_task_core::local_context::{LocalContext, LocalZone};
 
 /// A parsed datetime, always stored as UTC internally.
 /// User input without explicit timezone is interpreted as local time.
-/// Carries the user's local UTC offset so services can compute day boundaries
-/// correctly.
+/// Day boundaries are computed in the system time zone.
 #[derive(Clone)]
 pub struct LocalDateTime {
     pub utc: DateTime<Utc>,
-    /// The user's local UTC offset at parse time.
-    pub timezone: FixedOffset,
     /// The original input string, used for Granularity::from_original().
     pub original: String,
 }
 
-impl LocalDateTime {
-    fn current_offset() -> FixedOffset {
-        *Local::now().offset()
-    }
-}
-
 impl From<LocalDateTime> for LocalContext {
     fn from(dt: LocalDateTime) -> Self {
-        LocalContext::new(dt.utc, dt.timezone)
+        LocalContext::new(dt.utc, LocalZone::System)
     }
 }
 
@@ -30,12 +21,10 @@ impl std::str::FromStr for LocalDateTime {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let timezone = Self::current_offset();
         // The grammar lives in the shared, app-agnostic `natural-date` crate.
         natural_date::resolve_datetime(s, Local::now())
             .map(|utc| LocalDateTime {
                 utc,
-                timezone,
                 original: s.to_string(),
             })
             .ok_or_else(|| {

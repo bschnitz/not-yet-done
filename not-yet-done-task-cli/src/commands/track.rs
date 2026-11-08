@@ -132,7 +132,7 @@ pub mod cli {
         use chrono::{Local, TimeZone};
 
         let now = Local::now();
-        let tz = *now.offset();
+        let tz = not_yet_done_task_core::local_context::LocalZone::System;
 
         let from_ctx = from.map(|d| d.into()).unwrap_or_else(|| {
             let utc = Local

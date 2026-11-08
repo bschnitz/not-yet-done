@@ -11,39 +11,30 @@
 //! The parsing grammar itself lives in the shared, app-agnostic [`natural_date`]
 //! crate (period boundaries, `in X`, part-of-day, abbreviations, chrono-english,
 //! dateparser fallback, the signed-offset grammar); this module only keeps the
-//! app-specific wrapper (`original` for `Granularity`, the local UTC offset for
-//! day-boundary math, the `LocalContext` conversion).
+//! app-specific wrapper (`original` for `Granularity`, the system time zone
+//! for day-boundary math, the `LocalContext` conversion).
 
-use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use not_yet_done_task_core::entity::granularity::Granularity;
-use not_yet_done_task_core::local_context::LocalContext;
+use not_yet_done_task_core::local_context::{LocalContext, LocalZone};
 
 /// A parsed datetime, always stored as UTC internally.
 ///
-/// User input without an explicit timezone is interpreted as local time. The
-/// user's local UTC offset at parse time is carried so the service can compute
-/// day boundaries correctly, and the [`original`](LocalDateTime::original)
-/// string is kept so the `move` action can derive a
+/// User input without an explicit timezone is interpreted as local time. Day
+/// boundaries are computed in the system time zone, and the
+/// [`original`](LocalDateTime::original) string is kept so the `move` action can derive a
 /// [`Granularity`](not_yet_done_task_core::entity::granularity::Granularity)
 /// from how precisely the user expressed the time.
 #[derive(Clone)]
 pub struct LocalDateTime {
     pub utc: DateTime<Utc>,
-    /// The user's local UTC offset at parse time.
-    pub timezone: FixedOffset,
     /// The original input string, used for `Granularity::from_original()`.
     pub original: String,
 }
 
-impl LocalDateTime {
-    fn current_offset() -> FixedOffset {
-        *Local::now().offset()
-    }
-}
-
 impl From<LocalDateTime> for LocalContext {
     fn from(dt: LocalDateTime) -> Self {
-        LocalContext::new(dt.utc, dt.timezone)
+        LocalContext::new(dt.utc, LocalZone::System)
     }
 }
 
@@ -51,11 +42,9 @@ impl std::str::FromStr for LocalDateTime {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let timezone = Self::current_offset();
         natural_date::resolve_datetime(s, Local::now())
             .map(|utc| LocalDateTime {
                 utc,
-                timezone,
                 original: s.to_string(),
             })
             .ok_or_else(|| {
