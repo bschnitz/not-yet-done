@@ -1560,6 +1560,22 @@ struct PasteSlot {
     fits: bool,
 }
 
+/// The instant `day` begins in `tz`. Where a zone skips midnight itself, the
+/// day begins at the first local time that exists.
+fn local_midnight<Tz: chrono::TimeZone>(
+    tz: &Tz,
+    day: chrono::NaiveDate,
+) -> chrono::DateTime<chrono::Utc> {
+    let midnight = day.and_hms_opt(0, 0, 0).unwrap();
+    (0..=2)
+        .find_map(|h| {
+            tz.from_local_datetime(&(midnight + chrono::Duration::hours(h)))
+                .earliest()
+        })
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|| midnight.and_utc())
+}
+
 /// The three placements `paste-move` considers, all on the target row's local
 /// day and all preserving the marked interval's duration `d`:
 ///
@@ -1580,21 +1596,19 @@ struct PasteSlot {
 /// A slot that reaches outside the day — `before` when something spills in
 /// from the previous day, `end` when something spills into the next one —
 /// comes back as `fits: false` rather than as a negative gap.
-fn paste_slots(
+fn paste_slots<Tz: chrono::TimeZone>(
     snapshot: &TrackingSnapshot,
-    tz: chrono::FixedOffset,
+    tz: &Tz,
     marked: Uuid,
     target_start: chrono::DateTime<chrono::Utc>,
     target_end: chrono::DateTime<chrono::Utc>,
     d: chrono::Duration,
 ) -> (PasteSlot, PasteSlot, PasteSlot) {
-    use chrono::TimeZone;
-    let day = target_start.with_timezone(&tz).date_naive();
-    let day_start = tz
-        .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let day_end = day_start + chrono::Duration::days(1);
+    // Both bounds are the local midnight of their own date, in the offset in
+    // force on that date: a day across a DST change is 23 or 25 hours long.
+    let day = target_start.with_timezone(tz).date_naive();
+    let day_start = local_midnight(tz, day);
+    let day_end = local_midnight(tz, day.succ_opt().unwrap_or(day));
 
     // Occupied [start, end) intervals overlapping this local day, excluding
     // the marked interval, sorted by start.
@@ -1708,9 +1722,14 @@ async fn invoke_paste_move(
         return ActionDispatch::Error("Can't paste after a running tracking".to_string());
     };
     let d = m_end - m_start;
-    let tz = *chrono::Local::now().offset();
-    let (after, end, before) =
-        paste_slots(snapshot, tz, marked, t_row.tracking.started_at, t_end, d);
+    let (after, end, before) = paste_slots(
+        snapshot,
+        &chrono::Local,
+        marked,
+        t_row.tracking.started_at,
+        t_end,
+        d,
+    );
 
     // Resolve which slot to move into, driven by the confirm stage.
     let (start, clear) = if !ctx.confirmed {
@@ -1796,7 +1815,11 @@ async fn invoke_paste_move(
     };
     match handle
         .tracking_service
-        .move_tracking(marked, LocalContext::new(start, tz), options)
+        .move_tracking(
+            marked,
+            LocalContext::new(start, *start.with_timezone(&chrono::Local).offset()),
+            options,
+        )
         .await
     {
         Ok(_) => {
@@ -3432,7 +3455,7 @@ mod tests {
         // 1h fits directly after the target (11:00 → next interval at 12:00).
         let (after, _end, _before) = paste_slots(
             &snap,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3445,7 +3468,7 @@ mod tests {
         // flush after the last interval (b ends 13:00).
         let (after, end, _before) = paste_slots(
             &snap,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3474,7 +3497,7 @@ mod tests {
         // the first interval — flush against it, so it starts `d` earlier.
         let (after, end, before) = paste_slots(
             &packed,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3489,7 +3512,7 @@ mod tests {
         // all three report no room.
         let (after, end, before) = paste_slots(
             &packed,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3529,7 +3552,7 @@ mod tests {
         // count as free, so a 2h paste fits directly after the target.
         let (after, _end, _before) = paste_slots(
             &snap,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3577,7 +3600,7 @@ mod tests {
 
         let (_after, _end, before) = paste_slots(
             &snap,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
@@ -3621,13 +3644,45 @@ mod tests {
 
         let (after, _end, _before) = paste_slots(
             &snap,
-            tz,
+            &tz,
             marked,
             at(10, 0),
             at(11, 0),
             chrono::Duration::hours(1),
         );
         assert!(!after.fits);
+    }
+
+    /// The day's end is the next local midnight, in that date's own offset:
+    /// a target on a DST-change day must not borrow today's offset or assume
+    /// 24 hours.
+    #[test]
+    fn paste_slots_end_the_day_at_local_midnight_across_dst() {
+        use chrono::TimeZone;
+        let tz = chrono_tz::Europe::Berlin;
+        let at = |d: u32, mo: u32, h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, mo, d, h, m, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let t = Uuid::from_u128(11);
+        let marked = Uuid::from_u128(99);
+        let end_slot = |start, end, d| {
+            let snap = snapshot_from(vec![(
+                t,
+                row(fixed_tracking(t, start, end), "t", vec!["t"]),
+            )]);
+            paste_slots(&snap, &tz, marked, start, end, d).1
+        };
+
+        // 25-hour day (back to CET): 23:00–24:00 is still free.
+        let end = end_slot(at(25, 10, 22, 0), at(25, 10, 23, 0), chrono::Duration::hours(1));
+        assert!(end.fits);
+        assert_eq!(end.start, at(25, 10, 23, 0));
+
+        // 23-hour day (on to CEST): only 30 minutes are left after 23:30.
+        let end = end_slot(at(29, 3, 23, 0), at(29, 3, 23, 30), chrono::Duration::hours(1));
+        assert!(!end.fits);
     }
 
     #[test]
