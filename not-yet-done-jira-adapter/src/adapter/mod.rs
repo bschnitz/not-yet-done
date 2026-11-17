@@ -679,6 +679,13 @@ fn issue_summary(
             allowed_values: None,
         },
         MetadataField {
+            key: "created".into(),
+            value: t.created,
+            display_label: "Created".into(),
+            editable: false,
+            allowed_values: None,
+        },
+        MetadataField {
             key: "attachments".into(),
             value: t.attachments_count.to_string(),
             display_label: "Attachm.".into(),
@@ -980,6 +987,7 @@ mod bookmark_marker_tests {
             story_points: "5".into(),
             issue_type: "Bug".into(),
             updated: "2026-06-30".into(),
+            created: "2026-06-01".into(),
             attachments_count: 0,
         }
     }

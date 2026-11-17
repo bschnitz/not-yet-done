@@ -24,6 +24,7 @@ pub(super) fn jql_field_for_column(column: &str) -> Option<&'static str> {
         "fix_versions" => Some("fixVersion"),
         "summary" => Some("summary"),
         "updated" => Some("updated"),
+        "created" => Some("created"),
         // `story_points` is deliberately absent: it is a custom field, so
         // its JQL clause (`cf[<id>]`) is only known once the client has
         // discovered the instance's field id. See [`STORY_POINTS`].
@@ -60,6 +61,7 @@ fn issue_row_columns() -> Vec<ColumnSchema> {
         ColumnSchema::new("fix_versions", "Fix Versions"),
         ColumnSchema::new(STORY_POINTS, "Story Points").typed("number"),
         ColumnSchema::new("updated", "Updated").typed("datetime"),
+        ColumnSchema::new("created", "Created").typed("datetime"),
         ColumnSchema::new("attachments", "Attachm.").typed("number"),
     ]
 }

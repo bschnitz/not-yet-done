@@ -60,6 +60,7 @@ pub struct JiraTicket {
     pub story_points: String,
     pub issue_type: String,
     pub updated: String,
+    pub created: String,
     pub attachments_count: u64,
 }
 
@@ -138,6 +139,8 @@ struct IssueFields {
     #[serde(default)]
     updated: Option<String>,
     #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
     attachment: Option<Vec<serde_json::Value>>,
     /// Whatever else was requested — today the story-points custom field,
     /// whose key (`customfield_10006`) is only known at runtime and so
@@ -198,6 +201,7 @@ impl JiraClient {
             "labels",
             "fixVersions",
             "updated",
+            "created",
             "attachment",
         ];
         if let Some(id) = &story_points_id {
@@ -261,6 +265,7 @@ impl JiraClient {
                     .map(|id| number_cell(issue.fields.custom.get(id)))
                     .unwrap_or_default(),
                 updated: issue.fields.updated.unwrap_or_default(),
+                created: issue.fields.created.unwrap_or_default(),
                 attachments_count: issue.fields.attachment.map(|v| v.len() as u64).unwrap_or(0),
             })
             .collect();
