@@ -67,9 +67,13 @@
 //! A Jira table with a `||` header row becomes a GFM table. A cell may span
 //! several physical lines in Jira; since GFM has no literal newline inside a
 //! cell, the wrapped text is joined with `<br>` (and split back on the return
-//! trip). Cosmetic cell spacing — casual padding (`Owner |`) and blank cells
-//! filled with a bare space (`| |`) — is normalized by the round-trip guard, so
-//! prettifying the table into GFM never registers as a divergence. The same
+//! trip). Casual cell padding (`Owner |`) is normalized by the round-trip
+//! guard, so prettifying the table into GFM never registers as a divergence.
+//! An empty cell is written back as `| |`: inside a data row `||` opens a
+//! header cell, which Jira draws in that column. Such a cell is read as one
+//! cell and carries a `<!-- jira th -->` marker, which renders as nothing and
+//! makes `md_to_wiki` write the `||` back; the guard keeps `| |` and `||`
+//! apart. The same
 //! applies to a `{panel:...}` opener: padding around its `|`/`=` attribute
 //! separators (a stray `title=T |k=v` space) is cosmetic — the title becomes a
 //! heading whose trailing whitespace can't be restored — so `normalize_ws`
@@ -125,6 +129,14 @@ const PANEL_CLOSE: &str = "<!-- /panel -->";
 /// round-trip is lossless. Invisible in rendered Markdown, like the panel and
 /// comment markers.
 const DATA_TABLE_MARK: &str = "<!-- jira data-table -->";
+
+/// Marker opening a GFM body cell that was a *header* cell in Jira. Inside a
+/// data row Jira reads `||` as the start of a header cell, not as an empty
+/// cell (that one is `| |`), so `|a||b|` is two cells, the second a header.
+/// GFM has no header cell outside the header row; the marker keeps the cell
+/// where Jira draws it, renders as nothing, and tells `md_to_wiki` to write the
+/// `||` back.
+const HEADER_CELL_MARK: &str = "<!-- jira th -->";
 
 /// Apply `f` to only the *body* region of a 3b template buffer — the text
 /// between the `===` marker and the trailing CACHE section (or EOF) — leaving
@@ -981,9 +993,26 @@ fn collapse_ascii_spaces(line: &str) -> String {
 /// stray double spaces in table cells (typically before an `!image!` macro),
 /// and an editor that rewrites the buffer may collapse them, which would
 /// otherwise read as an edit of an untouched foreign comment.
+///
+/// In a data row the padding is not cosmetic everywhere: `| |` is an empty
+/// cell, while `||` opens a header cell and shifts every later cell. A blank
+/// cell between two pipes therefore keeps one space, so the guard tells the
+/// two apart.
 fn normalize_table_line(line: &str) -> String {
-    line.split('|')
-        .map(|cell| collapse_ascii_spaces(trim_cell(cell)))
+    let line = trim_ascii_edges(line);
+    let data_row = !line.starts_with("||");
+    let pieces: Vec<&str> = line.split('|').collect();
+    let last = pieces.len().saturating_sub(1);
+    pieces
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            let inner = i > 0 && i < last;
+            match collapse_ascii_spaces(trim_cell(cell)) {
+                c if c.is_empty() && data_row && inner && !cell.is_empty() => " ".to_string(),
+                c => c,
+            }
+        })
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -1606,12 +1635,25 @@ fn table_to_md(rows: &[&str]) -> Vec<String> {
 /// Jira cell is reconstructed exactly.
 fn table_to_wiki(rows: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
-    let header = split_md_cells(rows[0]);
+    let header: Vec<String> = row_md_cells(rows[0]).into_iter().map(|(_, c)| c).collect();
     out.push(format!("||{}||", header.join("||")));
     for r in &rows[2..] {
-        let cells = split_md_cells(r);
-        out.push(format!("|{}|", cells.join("|")));
+        out.push(data_row_to_wiki(r));
     }
+    out
+}
+
+/// One GFM body row as a Jira data row. A cell carrying [`HEADER_CELL_MARK`]
+/// is opened with `||`, every other one with `|`; an empty cell is written as
+/// `| |`, because a bare `||` would open a header cell in Jira and pull every
+/// cell after it one column to the left.
+fn data_row_to_wiki(row: &str) -> String {
+    let mut out = String::new();
+    for (header, cell) in row_md_cells(row) {
+        out.push_str(if header { "||" } else { "|" });
+        out.push_str(if cell.is_empty() { " " } else { &cell });
+    }
+    out.push('|');
     out
 }
 
@@ -1620,9 +1662,9 @@ fn table_to_wiki(rows: &[&str]) -> Vec<String> {
 /// first row, so it is emitted as an ordinary data row; the `---` separator
 /// (`rows[1]`) is dropped. Reverse of the data-only branch in [`table_to_md`].
 fn data_table_to_wiki(rows: &[&str]) -> Vec<String> {
-    let mut out = vec![format!("|{}|", split_md_cells(rows[0]).join("|"))];
+    let mut out = vec![data_row_to_wiki(rows[0])];
     for r in &rows[2..] {
-        out.push(format!("|{}|", split_md_cells(r).join("|")));
+        out.push(data_row_to_wiki(r));
     }
     out
 }
@@ -1705,18 +1747,70 @@ fn split_outside_macros<'a>(row: &'a str, sep: &str) -> Vec<&'a str> {
 /// space and leaves the opening pipe in place, which then reads as an empty
 /// first cell and again makes the table irregular.
 fn split_table_cells(row: &str, header: bool) -> Vec<String> {
-    let sep = if header { "||" } else { "|" };
-    split_outside_macros(trim_ascii_edges(row).trim_matches('|'), sep)
+    if header {
+        return split_outside_macros(trim_ascii_edges(row).trim_matches('|'), "||")
+            .into_iter()
+            .map(cell_to_md)
+            .collect();
+    }
+    data_cells(row)
         .into_iter()
-        .map(cell_to_md)
+        .map(|(th, raw)| {
+            let cell = cell_to_md(raw);
+            if th {
+                format!("{HEADER_CELL_MARK}{cell}")
+            } else {
+                cell
+            }
+        })
         .collect()
 }
 
-fn split_md_cells(row: &str) -> Vec<String> {
+/// The cells of a Jira data row as Jira reads them: each opened by `|`, or by
+/// `||` for a header cell, with the pipes inside a link or an image embed
+/// left to the macro. What follows the last separator is a cell only if it
+/// holds more than padding -- a row may leave its last cell open (`|a|b`).
+fn data_cells(row: &str) -> Vec<(bool, &str)> {
+    let row = trim_ascii_edges(row);
+    let spans = macro_pipe_spans(row);
+    let bytes = row.as_bytes();
+    let mut cells = Vec::new();
+    let mut open: Option<(bool, usize)> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'|' || spans.iter().any(|&(s, e)| i >= s && i < e) {
+            i += 1;
+            continue;
+        }
+        if let Some((th, start)) = open {
+            cells.push((th, &row[start..i]));
+        }
+        let th = bytes.get(i + 1) == Some(&b'|');
+        i += if th { 2 } else { 1 };
+        open = Some((th, i));
+    }
+    match open {
+        Some((th, start)) if !trim_ascii_edges(&row[start..]).is_empty() => {
+            cells.push((th, &row[start..]));
+        }
+        // A row that does not start with a pipe has no separator before its
+        // first cell; it is read as a plain cell, as before.
+        None if !row.is_empty() => cells.push((false, row)),
+        _ => {}
+    }
+    cells
+}
+
+/// The cells of a GFM row in Jira markup, each with whether it carries
+/// [`HEADER_CELL_MARK`].
+fn row_md_cells(row: &str) -> Vec<(bool, String)> {
     row.trim()
         .trim_matches('|')
         .split('|')
-        .map(cell_to_wiki)
+        .map(|raw| match trim_cell(raw).strip_prefix(HEADER_CELL_MARK) {
+            Some(rest) => (true, cell_to_wiki(rest)),
+            None => (false, cell_to_wiki(raw)),
+        })
         .collect()
 }
 
@@ -1818,8 +1912,9 @@ fn image_m2w(alt: &str, params: Option<&str>) -> String {
 /// `??cite??`, and `--`/`---` as dashes), link and image brackets (`[…]`,
 /// `!…!`), macro braces (`{…}`) and the parentheses of emoticons (`(/)`,
 /// `:)`).
-const MONO_ESCAPED: &[char] =
-    &['-', '*', '_', '+', '^', '~', '?', '[', ']', '!', '{', '}', '(', ')'];
+const MONO_ESCAPED: &[char] = &[
+    '-', '*', '_', '+', '^', '~', '?', '[', ']', '!', '{', '}', '(', ')',
+];
 
 /// Escape the markup characters of an inline-code span on its way into Jira
 /// monospace.
@@ -2332,7 +2427,10 @@ a title-less panel whose sole attribute makes its opener marker long enough
         );
         // An unescaped source span renders the same and must pass the guard,
         // even though the way back now escapes it.
-        assert_roundtrip("run {{rebuild-cache --force}}", "run `rebuild-cache --force`");
+        assert_roundtrip(
+            "run {{rebuild-cache --force}}",
+            "run `rebuild-cache --force`",
+        );
         assert_eq!(
             md_to_wiki("run `rebuild-cache --force`"),
             "run {{rebuild\\-cache \\-\\-force}}"
@@ -3039,6 +3137,50 @@ a title-less panel whose sole attribute makes its opener marker long enough
                     |Prioritised|Product Owner\u{a0}|\u{a0}|\n\
                     {panel}";
         assert!(roundtrip_diff(wiki).is_none(), "{:?}", roundtrip_diff(wiki));
+    }
+
+    #[test]
+    fn header_cell_in_data_row_stays_in_its_column() {
+        // `||` inside a data row opens a header cell. Jira's editor pads such a
+        // row with nbsp cells up to the header width, so it counts as many
+        // cells as the header and must render as a table, the header cell in
+        // the column Jira draws it in.
+        let wiki = "||Topic||Owner||Due||State||\n\
+                    |Budget|Ops| |(/)|\n\
+                    |Rollout||(x)|\u{a0}|\u{a0}|";
+        let md = wiki_to_md(wiki);
+        assert!(
+            md.contains(&format!("| Rollout | {HEADER_CELL_MARK}(x) |")),
+            "header cell not kept in its column: {md:?}"
+        );
+        assert_eq!(md_to_wiki(&md), wiki);
+        assert!(roundtrip_diff(wiki).is_none(), "{:?}", roundtrip_diff(wiki));
+    }
+
+    #[test]
+    fn header_cell_in_data_only_table_roundtrips() {
+        let wiki = "|Topic|Budget|\n|Owner||Ops|";
+        let md = wiki_to_md(wiki);
+        assert!(md.contains(HEADER_CELL_MARK), "{md:?}");
+        assert_eq!(md_to_wiki(&md), wiki);
+    }
+
+    #[test]
+    fn empty_markdown_cell_is_written_as_blank_cell() {
+        // A bare `||` would open a header cell in Jira and shift the row.
+        let md =
+            "| Topic | Owner | Due | State |\n| --- | --- | --- | --- |\n| Budget |  |  | (-) |";
+        assert_eq!(
+            md_to_wiki(md),
+            "||Topic||Owner||Due||State||\n|Budget| | |(-)|"
+        );
+    }
+
+    #[test]
+    fn guard_tells_blank_cell_from_header_cell() {
+        let blank = "||A||B||C||\n|x| |y|";
+        let header = "||A||B||C||\n|x||y|";
+        assert_ne!(normalize_ws(blank), normalize_ws(header));
     }
 
     #[test]
